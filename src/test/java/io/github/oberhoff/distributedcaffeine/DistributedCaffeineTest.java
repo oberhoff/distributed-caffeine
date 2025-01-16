@@ -137,6 +137,7 @@ final class DistributedCaffeineTest {
     @DisplayName("MongoDB 4.latest")
     @Nested
     @Tag("mongo:4")
+    @DisabledIfSystemProperty(named = LATEST_ONLY, matches = "true")
     final class Mongo_4_latest extends AbstractDistributedCaffeineTest {
     }
 
@@ -150,6 +151,7 @@ final class DistributedCaffeineTest {
     @DisplayName("MongoDB 5.latest")
     @Nested
     @Tag("mongo:5")
+    @DisabledIfSystemProperty(named = LATEST_ONLY, matches = "true")
     final class Mongo_5_latest extends AbstractDistributedCaffeineTest {
     }
 
@@ -163,6 +165,7 @@ final class DistributedCaffeineTest {
     @DisplayName("MongoDB 6.latest")
     @Nested
     @Tag("mongo:6")
+    @DisabledIfSystemProperty(named = LATEST_ONLY, matches = "true")
     final class Mongo_6_latest extends AbstractDistributedCaffeineTest {
     }
 
@@ -176,6 +179,7 @@ final class DistributedCaffeineTest {
     @DisplayName("MongoDB 7.latest")
     @Nested
     @Tag("mongo:7")
+    @DisabledIfSystemProperty(named = LATEST_ONLY, matches = "true")
     final class Mongo_7_latest extends AbstractDistributedCaffeineTest {
     }
 
