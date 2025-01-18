@@ -25,7 +25,8 @@ import java.util.List;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.EVICTED;
 
 /**
- * Interface representing an access point for inspecting and performing low-level operations on the cache instance.
+ * Interface representing an access point for inspecting and performing low-level operations on the cache instance
+ * (similar to {@link com.github.benmanes.caffeine.cache.Policy}).
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache

@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 /**
- * This package contains the main classes and interfaces for configuring, building and using Distributed Caffeine cache
- * instances.
+ * This package contains the main classes and interfaces for configuring, constructing and using Distributed Caffeine
+ * cache instances.
  * <p>
  * Distributed Caffeine is a {@link com.github.benmanes.caffeine.cache.Caffeine}-based distributed cache using MongoDB
  * change streams for near real-time synchronization between multiple cache instances, especially across different
