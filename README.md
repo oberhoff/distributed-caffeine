@@ -1,3 +1,7 @@
+[![github](https://img.shields.io/maven-central/v/io.github.oberhoff.distributed-caffeine/distributed-caffeine?logo=github&logoColor=ffffff&label=github&style=for-the-badge&color=009539)](https://github.com/oberhoff/distributed-caffeine/actions)
+[![maven central](https://img.shields.io/maven-central/v/io.github.oberhoff.distributed-caffeine/distributed-caffeine?logo=sonatype&logoColor=ffffff&label=maven%20central&style=for-the-badge&color=009539)](https://central.sonatype.com/artifact/io.github.oberhoff.distributed-caffeine/distributed-caffeine)
+[![javadoc](https://img.shields.io/maven-central/v/io.github.oberhoff.distributed-caffeine/distributed-caffeine?logo=mocha&logoColor=ffffff&label=javadoc&style=for-the-badge&color=009539)](https://javadoc.io/doc/io.github.oberhoff.distributed-caffeine/distributed-caffeine)
+
 # Distributed Caffeine
 
 Distributed Caffeine is a [Caffeine](https://github.com/ben-manes/caffeine)-based distributed cache
@@ -24,20 +28,19 @@ especially when cache entries are
 [invalidated](https://github.com/ben-manes/caffeine/wiki/Removal#explicit-removals) (explicit removal) or
 [evicted](https://github.com/ben-manes/caffeine/wiki/Eviction) (size- or time-based removal). Therefore, different
 distribution modes are supported to configure
-which types of cache operations are considered for synchronization and which are explicitly not.
+which types of cache operations are considered for distributed synchronization and which are explicitly not.
 
 <!--
-Furthermore, mainly
-depending on the configured distribution mode, persistence of cache entries is provided as well as an adjustable mix
-between in-memory (also known as first-level, L1 or client-side) caching and database (also known as second-level, L2 or
-server-side) caching.
+Furthermore, essentially depending on the configured distribution mode, persistence of cache entries is provided as well
+as an adjustable mix between in-memory (also known as first-level, L1 or client-side) caching and database (also known
+as second-level, L2 or server-side) caching.
 -->
 
-The synchronization of the cache instances is based on MongoDB change streams, which make it possible to access data
-changes in [near real-time](https://www.mongodb.com/docs/manual/changeStreams/#change-streams) and react to them
-immediately. Therefore, related cache instances share a MongoDB collection in order to distribute cache entries or
-mentioned cache operations accordingly as well as to provide persistence. To distribute or persist various contents (for
-keys and values) within cache entries, several types of serialization formats are available.
+The distributed synchronization between cache instances is based on MongoDB change streams, which make it possible to
+access data changes in [near real-time](https://www.mongodb.com/docs/manual/changeStreams/#change-streams) and react to
+them immediately. Therefore, related cache instances share a MongoDB collection for distributed synchronization of cache
+entries (or the mentioned cache operations) as well as to provide persistence. To enable this for different types of
+content (for keys and values) within cache entries, several types of serialization formats are available.
 
 To summarize some of the advantages: Distributed Caffeine combines two established and widely used technologies that
 many developers are already familiar with or that are already in the tech stack of many applications. This combination
@@ -53,8 +56,8 @@ nearly the same usage. Please refer to the official
 
 The configuration of a cache always begins with a builder returned by invoking the `newBuilder(mongoCollection)` method
 and ends with finalizing the builder by invoking one of the `build(...)` methods to construct the cache instance. The
-`mongoCollection` parameter refers to the MongoDB collection used for synchronization and persistence. Please note the
-additional generic type parameters for key and value directly before the`newBuilder(...)` method.
+`mongoCollection` parameter refers to the MongoDB collection used for distributed synchronization and persistence.
+Please note the additional generic type parameters for key and value directly before the`newBuilder(...)` method.
 
 ##### Minimal configuration of a distributed cache
 
@@ -145,7 +148,7 @@ interfaces.
   [synchronous variants](https://github.com/ben-manes/caffeine/wiki/Population#manual) of Caffeine, the
   [asynchronous variants](https://github.com/ben-manes/caffeine/wiki/Population#asynchronous-manual) are not supported.
 * Reference-based eviction using Caffeine's
-  [weak or soft references](https://github.com/ben-manes/caffeine/wiki/Eviction#reference-based) for keys or values is
+  [weak or soft references for keys or values](https://github.com/ben-manes/caffeine/wiki/Eviction#reference-based) is
   not supported. Even for the use of Caffeine (stand-alone), it is advised to use the more predictable size- or
   time-based eviction instead.
 * Manipulating cache entries or their metadata directly in the MongoDB collection should be done with caution.
@@ -170,5 +173,5 @@ interfaces.
 ## Installation
 
 Go to
-[Distributed Caffeine on Maven Central](https://central.sonatype.com/artifact/io.github.oberhoff.distributed-caffeine/distributed-caffeine/overview),
+[Distributed Caffeine on Maven Central](https://central.sonatype.com/artifact/io.github.oberhoff.distributed-caffeine/distributed-caffeine),
 select your preferred build tool, copy the snippet provided and paste it into your project at the appropriate location.
