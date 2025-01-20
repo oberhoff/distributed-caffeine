@@ -16,7 +16,7 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import org.bson.types.ObjectId;
-import org.checkerframework.checker.nullness.qual.NonNull;
+import org.jspecify.annotations.NonNull;
 
 import java.lang.ref.WeakReference;
 import java.util.Comparator;

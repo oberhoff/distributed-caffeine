@@ -18,7 +18,8 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 class InternalEvictionListener<K, V> implements RemovalListener<K, V>, LazyInitializer<K, V> {
 
@@ -37,7 +38,7 @@ class InternalEvictionListener<K, V> implements RemovalListener<K, V>, LazyIniti
     }
 
     @Override
-    public void onRemoval(@Nullable K key, @Nullable V value, RemovalCause removalCause) {
+    public void onRemoval(@Nullable K key, @Nullable V value, @NonNull RemovalCause removalCause) {
         if (removalCause.wasEvicted()) {
             // special handling, no lock required
             distributedCaffeine.evictDistributed(key, value, removalCause);

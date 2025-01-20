@@ -18,7 +18,8 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 class InternalRemovalListener<K, V> implements RemovalListener<K, V>, LazyInitializer<K, V> {
 
@@ -34,7 +35,7 @@ class InternalRemovalListener<K, V> implements RemovalListener<K, V>, LazyInitia
     }
 
     @Override
-    public void onRemoval(@Nullable K key, @Nullable V value, RemovalCause removalCause) {
+    public void onRemoval(@Nullable K key, @Nullable V value, @NonNull RemovalCause removalCause) {
         removalListener.onRemoval(key, value, removalCause);
     }
 }
