@@ -17,9 +17,8 @@ package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.Policy;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
-import org.checkerframework.checker.index.qual.NonNegative;
-import org.checkerframework.checker.nullness.qual.Nullable;
-import org.checkerframework.checker.nullness.qual.PolyNull;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
 import java.util.Map;
@@ -54,43 +53,43 @@ class InternalPolicy<K, V> implements Policy<K, V>, LazyInitializer<K, V> {
     }
 
     @Override
-    public @Nullable V getIfPresentQuietly(K key) {
+    public @Nullable V getIfPresentQuietly(@NonNull K key) {
         return policy.getIfPresentQuietly(key);
     }
 
     @Override
-    public CacheEntry<K, V> getEntryIfPresentQuietly(K key) {
+    public CacheEntry<K, V> getEntryIfPresentQuietly(@NonNull K key) {
         return policy.getEntryIfPresentQuietly(key);
     }
 
     @Override
-    public Map<K, CompletableFuture<V>> refreshes() {
+    public @NonNull Map<K, CompletableFuture<V>> refreshes() {
         return policy.refreshes();
     }
 
     @Override
-    public Optional<Eviction<K, V>> eviction() {
+    public @NonNull Optional<Eviction<K, V>> eviction() {
         return policy.eviction();
     }
 
     @Override
-    public Optional<FixedExpiration<K, V>> expireAfterAccess() {
+    public @NonNull Optional<FixedExpiration<K, V>> expireAfterAccess() {
         return policy.expireAfterAccess();
     }
 
     @Override
-    public Optional<FixedExpiration<K, V>> expireAfterWrite() {
+    public @NonNull Optional<FixedExpiration<K, V>> expireAfterWrite() {
         return policy.expireAfterWrite();
     }
 
     @Override
-    public Optional<VarExpiration<K, V>> expireVariably() {
+    public @NonNull Optional<VarExpiration<K, V>> expireVariably() {
         return policy.expireVariably()
                 .map(varExpiration -> new InternalExpiration<>(distributedCaffeine, policy, varExpiration));
     }
 
     @Override
-    public Optional<FixedRefresh<K, V>> refreshAfterWrite() {
+    public @NonNull Optional<FixedRefresh<K, V>> refreshAfterWrite() {
         return policy.refreshAfterWrite();
     }
 
@@ -111,17 +110,17 @@ class InternalPolicy<K, V> implements Policy<K, V>, LazyInitializer<K, V> {
         }
 
         @Override
-        public OptionalLong getExpiresAfter(K key, TimeUnit unit) {
+        public @NonNull OptionalLong getExpiresAfter(@NonNull K key, @NonNull TimeUnit unit) {
             return varExpiration.getExpiresAfter(key, unit);
         }
 
         @Override
-        public void setExpiresAfter(K key, @NonNegative long duration, TimeUnit unit) {
+        public void setExpiresAfter(@NonNull K key, long duration, @NonNull TimeUnit unit) {
             varExpiration.setExpiresAfter(key, duration, unit);
         }
 
         @Override
-        public @Nullable V putIfAbsent(K key, V value, @NonNegative long duration, TimeUnit unit) {
+        public @Nullable V putIfAbsent(@NonNull K key, @NonNull V value, long duration, @NonNull TimeUnit unit) {
             synchronizationLock.lock();
             try {
                 V presentValue = policy.getIfPresentQuietly(key);
@@ -136,7 +135,7 @@ class InternalPolicy<K, V> implements Policy<K, V>, LazyInitializer<K, V> {
         }
 
         @Override
-        public V put(K key, V value, @NonNegative long duration, TimeUnit unit) {
+        public V put(@NonNull K key, @NonNull V value, long duration, @NonNull TimeUnit unit) {
             synchronizationLock.lock();
             try {
                 return varExpiration.put(key, distributedCaffeine.putDistributed(key, value), duration, unit);
@@ -146,9 +145,9 @@ class InternalPolicy<K, V> implements Policy<K, V>, LazyInitializer<K, V> {
         }
 
         @Override
-        public @PolyNull V compute(K key,
-                                   BiFunction<? super K, ? super V, ? extends @PolyNull V> remappingFunction,
-                                   Duration duration) {
+        public @Nullable V compute(@NonNull K key,
+                                   @NonNull BiFunction<? super K, ? super V, ? extends @Nullable V> remappingFunction,
+                                   @NonNull Duration duration) {
             synchronizationLock.lock();
             try {
                 BiFunction<? super K, ? super V, ? extends V> distributedRemappingFunction = (k, v) -> {
@@ -167,22 +166,22 @@ class InternalPolicy<K, V> implements Policy<K, V>, LazyInitializer<K, V> {
         }
 
         @Override
-        public Map<K, V> oldest(@NonNegative int limit) {
+        public @NonNull Map<K, V> oldest( int limit) {
             return varExpiration.oldest(limit);
         }
 
         @Override
-        public <T> T oldest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
+        public <T> @NonNull T oldest(@NonNull Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
             return varExpiration.oldest(mappingFunction);
         }
 
         @Override
-        public Map<K, V> youngest(@NonNegative int limit) {
+        public @NonNull Map<K, V> youngest( int limit) {
             return varExpiration.youngest(limit);
         }
 
         @Override
-        public <T> T youngest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
+        public <T> @NonNull T youngest(@NonNull Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
             return varExpiration.youngest(mappingFunction);
         }
     }

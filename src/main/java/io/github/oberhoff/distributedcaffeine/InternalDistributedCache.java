@@ -20,9 +20,8 @@ import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
-import org.checkerframework.checker.index.qual.NonNegative;
-import org.checkerframework.checker.nullness.qual.Nullable;
-import org.checkerframework.checker.nullness.qual.PolyNull;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 import java.util.Map;
 import java.util.Objects;
@@ -57,12 +56,12 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, LazyInit
     }
 
     @Override
-    public @Nullable V getIfPresent(K key) {
+    public @Nullable V getIfPresent(@NonNull K key) {
         return cache.getIfPresent(key);
     }
 
     @Override
-    public @PolyNull V get(K key, Function<? super K, ? extends @PolyNull V> mappingFunction) {
+    public V get(@NonNull K key, @NonNull Function<? super K, ? extends V> mappingFunction) {
         synchronizationLock.lock();
         try {
             return cache.get(key, mappedKey ->
@@ -73,14 +72,13 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, LazyInit
     }
 
     @Override
-    public Map<K, V> getAllPresent(Iterable<? extends K> keys) {
+    public @NonNull Map<K, V> getAllPresent(@NonNull Iterable<? extends K> keys) {
         return cache.getAllPresent(keys);
     }
 
     @Override
-    public Map<K, V> getAll(
-            Iterable<? extends K> keys,
-            Function<? super Set<? extends K>, ? extends Map<? extends K, ? extends V>> mappingFunction) {
+    public @NonNull Map<K, V> getAll(@NonNull Iterable<? extends K> keys,
+                                     @NonNull Function<? super Set<? extends K>, ? extends Map<? extends K, ? extends V>> mappingFunction) {
         synchronizationLock.lock();
         try {
             return cache.getAll(keys, mappedKeys ->
@@ -91,7 +89,7 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, LazyInit
     }
 
     @Override
-    public void put(K key, V value) {
+    public void put(@NonNull K key, @NonNull V value) {
         synchronizationLock.lock();
         try {
             cache.put(key, distributedCaffeine.putDistributed(key, value));
@@ -101,7 +99,7 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, LazyInit
     }
 
     @Override
-    public void putAll(Map<? extends K, ? extends V> map) {
+    public void putAll(@NonNull Map<? extends K, ? extends V> map) {
         synchronizationLock.lock();
         try {
             cache.putAll(distributedCaffeine.putAllDistributed(map));
@@ -111,7 +109,7 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, LazyInit
     }
 
     @Override
-    public void invalidate(K key) {
+    public void invalidate(@NonNull K key) {
         synchronizationLock.lock();
         try {
             cache.invalidate(distributedCaffeine.invalidateDistributed(key));
@@ -121,7 +119,7 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, LazyInit
     }
 
     @Override
-    public void invalidateAll(Iterable<? extends K> keys) {
+    public void invalidateAll(@NonNull Iterable<? extends K> keys) {
         synchronizationLock.lock();
         try {
             Set<K> keySet = StreamSupport.stream(keys.spliterator(), false)
@@ -144,12 +142,12 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, LazyInit
     }
 
     @Override
-    public @NonNegative long estimatedSize() {
+    public long estimatedSize() {
         return cache.estimatedSize();
     }
 
     @Override
-    public CacheStats stats() {
+    public @NonNull CacheStats stats() {
         return cache.stats();
     }
 
@@ -159,14 +157,14 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, LazyInit
     }
 
     @Override
-    public ConcurrentMap<K, V> asMap() {
+    public @NonNull ConcurrentMap<K, V> asMap() {
         InternalConcurrentMap<K, V> concurrentMap = new InternalConcurrentMap<>();
         concurrentMap.initialize(distributedCaffeine);
         return concurrentMap;
     }
 
     @Override
-    public Policy<K, V> policy() {
+    public @NonNull Policy<K, V> policy() {
         InternalPolicy<K, V> policy = new InternalPolicy<>();
         policy.initialize(distributedCaffeine);
         return policy;

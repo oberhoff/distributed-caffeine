@@ -18,7 +18,8 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.CacheLoader;
 import com.github.benmanes.caffeine.cache.Policy;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 import java.lang.reflect.Method;
 import java.util.Map;
@@ -56,7 +57,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, LazyInitializer<K,
     }
 
     @Override
-    public @Nullable V load(K key) throws Exception {
+    public @Nullable V load(@NonNull K key) throws Exception {
         synchronizationLock.lock();
         try {
             return Optional.ofNullable(cacheLoader.load(key))
@@ -68,7 +69,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, LazyInitializer<K,
     }
 
     @Override
-    public Map<? extends K, ? extends V> loadAll(Set<? extends K> keys) throws Exception {
+    public @NonNull Map<? extends K, ? extends V> loadAll(@NonNull Set<? extends K> keys) throws Exception {
         if (hasLoadAll(cacheLoader)) {
             synchronizationLock.lock();
             try {
@@ -93,7 +94,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, LazyInitializer<K,
     }
 
     @Override
-    public @Nullable V reload(K key, V oldValue) throws Exception {
+    public @Nullable V reload(@NonNull K key, @NonNull V oldValue) throws Exception {
         synchronizationLock.lock();
         try {
             V value = cacheLoader.reload(key, oldValue);
@@ -114,7 +115,8 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, LazyInitializer<K,
      * Of course this only applies as long as AsyncCache and AsyncLoadingCache are not supported.
      */
     @Override
-    public CompletableFuture<? extends V> asyncLoad(K key, Executor executor) throws Exception {
+    public @NonNull CompletableFuture<? extends V> asyncLoad(@NonNull K key, @NonNull Executor executor)
+            throws Exception {
         return cacheLoader.asyncLoad(key, executor)
                 .thenApply(newValue -> {
                     if (nonNull(newValue)) {
@@ -128,8 +130,8 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, LazyInitializer<K,
     }
 
     @Override
-    public CompletableFuture<? extends Map<? extends K, ? extends V>> asyncLoadAll(Set<? extends K> keys,
-                                                                                   Executor executor) {
+    public @NonNull CompletableFuture<? extends Map<? extends K, ? extends V>> asyncLoadAll(
+            @NonNull Set<? extends K> keys, @NonNull Executor executor) {
         throw new UnsupportedOperationException();
         /*
          *  AsyncCache and AsyncLoadingCache are not supported (yet).
@@ -152,7 +154,8 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, LazyInitializer<K,
      * This method is only used by refresh operations (if value found) so special handling works as expected.
      */
     @Override
-    public CompletableFuture<? extends V> asyncReload(K key, V oldValue, Executor executor) throws Exception {
+    public @NonNull CompletableFuture<? extends V> asyncReload(@NonNull K key, @NonNull V oldValue,
+                                                               @NonNull Executor executor) throws Exception {
         return cacheLoader.asyncReload(key, oldValue, executor)
                 .thenApply(newValue -> {
                     // retain the original 'remove if null' semantic

@@ -16,7 +16,7 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
-import org.checkerframework.checker.nullness.qual.NonNull;
+import org.jspecify.annotations.NonNull;
 
 import java.util.AbstractCollection;
 import java.util.AbstractMap.SimpleEntry;

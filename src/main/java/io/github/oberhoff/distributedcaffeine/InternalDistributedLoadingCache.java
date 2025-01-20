@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.LoadingCache;
+import org.jspecify.annotations.NonNull;
 
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -24,7 +25,7 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
         implements DistributedLoadingCache<K, V> {
 
     @Override
-    public V get(K key) {
+    public V get(@NonNull K key) {
         // locking is required here because strange deadlocks can occur if the cache is populated concurrently
         synchronizationLock.lock();
         try {
@@ -35,7 +36,7 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
     }
 
     @Override
-    public Map<K, V> getAll(Iterable<? extends K> keys) {
+    public @NonNull Map<K, V> getAll(@NonNull Iterable<? extends K> keys) {
         // locking is required here because strange deadlocks can occur if the cache is populated concurrently
         synchronizationLock.lock();
         try {
@@ -46,7 +47,7 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
     }
 
     @Override
-    public CompletableFuture<V> refresh(K key) {
+    public @NonNull CompletableFuture<V> refresh(@NonNull K key) {
         // locking is required here because strange deadlocks can occur if the cache is populated concurrently
         synchronizationLock.lock();
         try {
@@ -57,7 +58,7 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
     }
 
     @Override
-    public CompletableFuture<Map<K, V>> refreshAll(Iterable<? extends K> keys) {
+    public @NonNull CompletableFuture<Map<K, V>> refreshAll(@NonNull Iterable<? extends K> keys) {
         // locking is required here because strange deadlocks can occur if the cache is populated concurrently
         synchronizationLock.lock();
         try {

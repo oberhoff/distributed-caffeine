@@ -44,6 +44,7 @@ import org.bson.BsonTimestamp;
 import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.bson.types.ObjectId;
+import org.jspecify.annotations.NonNull;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -1559,17 +1560,17 @@ final class DistributedCaffeineTest {
             Expiry<Key, Value> expiry = new Expiry<>() {
 
                 @Override
-                public long expireAfterCreate(Key key, Value value, long currentTime) {
+                public long expireAfterCreate(@NonNull Key key, @NonNull Value value, long currentTime) {
                     return Long.MAX_VALUE;
                 }
 
                 @Override
-                public long expireAfterUpdate(Key key, Value value, long currentTime, long currentDuration) {
+                public long expireAfterUpdate(@NonNull Key key, @NonNull Value value, long currentTime, long currentDuration) {
                     return Long.MAX_VALUE;
                 }
 
                 @Override
-                public long expireAfterRead(Key key, Value value, long currentTime, long currentDuration) {
+                public long expireAfterRead(@NonNull Key key, @NonNull Value value, long currentTime, long currentDuration) {
                     return Long.MAX_VALUE;
                 }
             };
@@ -1634,17 +1635,17 @@ final class DistributedCaffeineTest {
             Expiry<Key, Value> expiry = new Expiry<>() {
 
                 @Override
-                public long expireAfterCreate(Key key, Value value, long currentTime) {
+                public long expireAfterCreate(@NonNull Key key, @NonNull Value value, long currentTime) {
                     return Long.MAX_VALUE;
                 }
 
                 @Override
-                public long expireAfterUpdate(Key key, Value value, long currentTime, long currentDuration) {
+                public long expireAfterUpdate(@NonNull Key key, @NonNull Value value, long currentTime, long currentDuration) {
                     return Long.MAX_VALUE;
                 }
 
                 @Override
-                public long expireAfterRead(Key key, Value value, long currentTime, long currentDuration) {
+                public long expireAfterRead(@NonNull Key key, @NonNull Value value, long currentTime, long currentDuration) {
                     return Long.MAX_VALUE;
                 }
             };
@@ -1841,13 +1842,13 @@ final class DistributedCaffeineTest {
                 }
 
                 @Override
-                public CompletableFuture<? extends Value> asyncLoad(Key key, Executor executor) {
+                public @NonNull CompletableFuture<? extends Value> asyncLoad(@NonNull Key key, @NonNull Executor executor) {
                     asyncLoadInvocations.incrementAndGet();
                     return CompletableFuture.completedFuture(load(key));
                 }
 
                 @Override
-                public CompletableFuture<? extends Value> asyncReload(Key key, Value oldValue, Executor executor) {
+                public@NonNull  CompletableFuture<? extends Value> asyncReload(@NonNull Key key, @NonNull Value oldValue, @NonNull Executor executor) {
                     asyncReloadInvocations.incrementAndGet();
                     return CompletableFuture.completedFuture(oldValue);
                 }
