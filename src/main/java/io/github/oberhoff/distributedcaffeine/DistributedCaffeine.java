@@ -526,7 +526,7 @@ public final class DistributedCaffeine<K, V> {
     }
 
     void processOutboundInsert(Map<? extends K, ? extends V> map, String status,
-                               boolean manage,  boolean originConscious) {
+                               boolean manage, boolean originConscious) {
         if (isSupportedByDistributionMode(status)) {
             manage = manage && isSupportedByDistributionMode(CACHED);
             cacheManager.manageOutboundInsert(map, status, manage, originConscious);

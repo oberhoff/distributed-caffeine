@@ -135,6 +135,23 @@ class InternalCacheDocument<K, V> implements DistributedPolicy.CacheEntry<K, V>,
         return this;
     }
 
+    boolean isCached() {
+        return CACHED.equals(status);
+    }
+
+    boolean isInvalidated() {
+        return INVALIDATED.equals(status);
+    }
+
+    @Override
+    public boolean isEvicted() {
+        return EVICTED.equals(status);
+    }
+
+    boolean isOrphaned() {
+        return ORPHANED.equals(status);
+    }
+
     boolean isNewer(InternalCacheDocument<K, V> cacheDocument) {
         return isNull(cacheDocument) || compareTo(cacheDocument) > 0;
     }

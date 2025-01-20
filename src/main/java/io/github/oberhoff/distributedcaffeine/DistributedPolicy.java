@@ -22,8 +22,6 @@ import org.bson.types.ObjectId;
 import java.util.Date;
 import java.util.List;
 
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.EVICTED;
-
 /**
  * Interface representing an access point for inspecting and performing low-level operations on the cache instance
  * (similar to {@link com.github.benmanes.caffeine.cache.Policy}).
@@ -122,12 +120,10 @@ public interface DistributedPolicy<K, V> {
         Date getTouched();
 
         /**
-         * Indicates whether the cache entry was evicted or not.
+         * Indicates whether the cache entry is already evicted or not.
          *
-         * @return {@code true} if the cache entry was evicted, otherwise {@code false}
+         * @return {@code true} if the cache entry is already evicted, otherwise {@code false}
          */
-        default boolean wasEvicted() {
-            return EVICTED.equals(getStatus());
-        }
+        boolean isEvicted();
     }
 }
