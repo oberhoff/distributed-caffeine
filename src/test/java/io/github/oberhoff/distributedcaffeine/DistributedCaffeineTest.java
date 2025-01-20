@@ -1675,7 +1675,7 @@ final class DistributedCaffeineTest {
             varExpiration.put(key1, value1, Duration.ofHours(1));
             distributedCache.invalidate(key1);
             varExpiration.put(key1, value1, Duration.ofHours(1));
-            varExpiration.put(key2, value2, Duration.ZERO); // evict fast
+            varExpiration.put(key2, value2, Duration.ZERO); // fast eviction
 
             await("eviction")
                     .atMost(WAITING_DURATION)

@@ -31,8 +31,6 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.CACHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.EVICTED;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.HASH;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.KEY;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.STATUS;
@@ -106,8 +104,7 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, LazyIn
                     .forEach((key, cacheDocuments) -> cacheDocuments.stream()
                             .max(Comparator.naturalOrder())
                             .filter(cacheDocument ->
-                                    CACHED.equals(cacheDocument.getStatus())
-                                            || (includeEvicted && EVICTED.equals(cacheDocument.getStatus())))
+                                    cacheDocument.isCached() || (includeEvicted && cacheDocument.isEvicted()))
                             .ifPresent(result::add));
         }
         return result;

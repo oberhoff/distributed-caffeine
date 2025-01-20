@@ -37,9 +37,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.CACHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.EVICTED;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.INVALIDATED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.ORPHANED;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 
@@ -162,8 +160,8 @@ class InternalCacheManager<K, V> implements LazyInitializer<K, V> {
             synchronizationLock.ensure();
             Optional.ofNullable(latest.get(inboundCacheDocument.getKey()))
                     .filter(inboundCacheDocument::equals)
-                    .filter(latestCacheDocument -> CACHED.equals(latestCacheDocument.getStatus()))
-                    .filter(latestCacheDocument -> CACHED.equals(inboundCacheDocument.getStatus()))
+                    .filter(InternalCacheDocument::isCached)
+                    .filter(latestCacheDocument -> inboundCacheDocument.isCached())
                     .filter(latestCacheDocument -> !latestCacheDocument.isNewer(inboundCacheDocument))
                     .ifPresent(latestCacheDocument -> {
                         cache.put(inboundCacheDocument.getKey(), inboundCacheDocument.getValue());
@@ -182,7 +180,7 @@ class InternalCacheManager<K, V> implements LazyInitializer<K, V> {
                     // map and add missing data (weakened on purpose)
                     .map(entry -> entry.getValue().setKey(entry.getKey()))
                     .ifPresent(latestCacheDocument -> {
-                        if (CACHED.equals(latestCacheDocument.getStatus())) {
+                        if (latestCacheDocument.isCached()) {
                             cache.invalidate(latestCacheDocument.getKey());
                         }
                         latest.remove(latestCacheDocument.getKey(), latestCacheDocument);
@@ -208,8 +206,8 @@ class InternalCacheManager<K, V> implements LazyInitializer<K, V> {
         if (isActivated()) {
             synchronizationLock.ensure();
             Set<K> keys = latest.entrySet().stream()
-                    .filter(entry -> CACHED.equals(entry.getValue().getStatus())
-                            || ORPHANED.equals(entry.getValue().getStatus()))
+                    .filter(entry -> entry.getValue().isCached()
+                            || entry.getValue().isOrphaned())
                     .map(Map.Entry::getKey)
                     .collect(Collectors.toSet());
             cache.asMap().keySet().removeIf(key -> !keys.contains(key));
@@ -272,9 +270,9 @@ class InternalCacheManager<K, V> implements LazyInitializer<K, V> {
     }
 
     private void commitCacheInbound(InternalCacheDocument<K, V> cacheDocument) {
-        if ((CACHED.equals(cacheDocument.getStatus()) || ORPHANED.equals(cacheDocument.getStatus()))) {
+        if (cacheDocument.isCached() || cacheDocument.isOrphaned()) {
             cache.put(cacheDocument.getKey(), cacheDocument.getValue());
-        } else if ((INVALIDATED.equals(cacheDocument.getStatus()) || EVICTED.equals(cacheDocument.getStatus()))
+        } else if ((cacheDocument.isInvalidated() || cacheDocument.isEvicted())
                 // only invalidate cache if value is present
                 && nonNull(policy.getIfPresentQuietly(cacheDocument.getKey()))) {
             cache.invalidate(cacheDocument.getKey());
