@@ -1,7 +1,7 @@
 name: Verify with Maven
 
 on:
-  push:
+  pull_request:
     branches:
       - '**'
 
