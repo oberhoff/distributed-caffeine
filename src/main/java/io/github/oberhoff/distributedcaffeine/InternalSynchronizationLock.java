@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 
 class InternalSynchronizationLock {
 
@@ -29,23 +30,31 @@ class InternalSynchronizationLock {
         lock.lock();
     }
 
-    boolean tryLock() {
-        return lock.tryLock();
-    }
-
     void unlock() {
         lock.unlock();
     }
 
-    void tryUnlock(boolean locked) {
-        if (locked) {
-            lock.unlock();
+    void runLocked(Runnable runnable) {
+        lock();
+        try {
+            runnable.run();
+        } finally {
+            unlock();
         }
     }
 
-    void ensure() {
+    <T> T getLocked(Supplier<T> supplier) {
+        lock();
+        try {
+            return supplier.get();
+        } finally {
+            unlock();
+        }
+    }
+
+    void ensureLock() {
         if (!lock.isLocked()) {
-            throw new DistributedCaffeineException("No synchronization lock found");
+            throw new IllegalStateException("No synchronization lock found");
         }
     }
 }

@@ -17,30 +17,31 @@ package io.github.oberhoff.distributedcaffeine;
 
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.model.Filters;
-import com.mongodb.client.model.Projections;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
+import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import org.bson.Document;
 import org.bson.conversions.Bson;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
-import java.util.stream.StreamSupport;
 
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.HASH;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.KEY;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.STATUS;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.TOUCHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.VALUE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.HASH;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullIterable;
+import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.groupingBy;
+import static java.util.stream.Collectors.toList;
 
-class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, LazyInitializer<K, V> {
+class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, InternalLazyInitializer<K, V> {
 
     private DistributedCaffeine<K, V> distributedCaffeine;
+    private Serializer<K, ?> keySerializer;
+    private Serializer<V, ?> valueSerializer;
     private InternalMongoRepository<K, V> mongoRepository;
 
     InternalDistributedPolicy() {
@@ -50,11 +51,13 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, LazyIn
     @Override
     public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
         this.distributedCaffeine = distributedCaffeine;
+        this.keySerializer = distributedCaffeine.getKeySerializer();
+        this.valueSerializer = distributedCaffeine.getValueSerializer();
         this.mongoRepository = distributedCaffeine.getMongoRepository();
     }
 
     @Override
-    public MongoCollection<Document> getMongoCollection() {
+    public @NonNull MongoCollection<Document> getMongoCollection() {
         return distributedCaffeine.getMongoCollection();
     }
 
@@ -69,14 +72,25 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, LazyIn
     }
 
     @Override
-    public CacheEntry<K, V> getFromMongo(K key, boolean includeEvicted) {
+    public @NonNull Serializer<K, ?> getKeySerializer() {
+        return keySerializer;
+    }
+
+    @Override
+    public @NonNull Serializer<V, ?> getValueSerializer() {
+        return valueSerializer;
+    }
+
+    @Override
+    public @Nullable CacheEntry<K, V> getFromMongo(@NonNull K key, boolean includeEvicted) {
+        requireNonNull(key);
         return getDistributed(key, includeEvicted);
     }
 
     @Override
-    public List<CacheEntry<K, V>> getAllFromMongo(Iterable<? extends K> keys, boolean includeEvicted) {
-        Set<K> keySet = StreamSupport.stream(keys.spliterator(), false)
-                .collect(Collectors.toSet());
+    public @NonNull List<CacheEntry<K, V>> getAllFromMongo(@NonNull Iterable<? extends K> keys,
+                                                           boolean includeEvicted) {
+        Set<K> keySet = requireNonNullIterable(keys);
         return getAllDistributed(keySet, includeEvicted);
     }
 
@@ -89,24 +103,67 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, LazyIn
 
     private List<CacheEntry<K, V>> getAllDistributed(Set<? extends K> keys, boolean includeEvicted) {
         List<Integer> hashes = keys.stream()
-                .map(key -> requireNonNull(key, "key cannot be null"))
                 .map(Objects::hashCode)
-                .collect(Collectors.toList());
-        Bson filter = Filters.in(HASH, hashes);
-        Bson projection = Projections.include(KEY, VALUE, STATUS, TOUCHED);
-        List<CacheEntry<K, V>> result = new ArrayList<>();
+                .collect(toList());
+        Bson filter = Filters.in(HASH.toString(), hashes);
+        List<CacheEntry<K, V>> cacheEntries = new ArrayList<>();
         try (Stream<InternalCacheDocument<K, V>> cacheDocumentStream =
-                     mongoRepository.streamCacheDocuments(filter, projection)) {
-            // retain "hashCode -> bucket -> equals" semantic
+                     mongoRepository.streamCacheDocuments(filter)) {
             cacheDocumentStream
                     .filter(cacheDocument -> keys.contains(cacheDocument.getKey()))
-                    .collect(Collectors.groupingBy(InternalCacheDocument::getKey))
+                    // retain "hashCode -> bucket -> equals" semantics
+                    .collect(groupingBy(InternalCacheDocument::getKey))
                     .forEach((key, cacheDocuments) -> cacheDocuments.stream()
                             .max(Comparator.naturalOrder())
-                            .filter(cacheDocument ->
-                                    cacheDocument.isCached() || (includeEvicted && cacheDocument.isEvicted()))
-                            .ifPresent(result::add));
+                            .filter(cacheDocument -> cacheDocument.isCached()
+                                    || (includeEvicted && cacheDocument.isEvictedExtended()))
+                            .map(this::toCacheEntry)
+                            .ifPresent(cacheEntries::add));
         }
-        return result;
+        return cacheEntries;
+    }
+
+    private CacheEntry<K, V> toCacheEntry(InternalCacheDocument<K, V> cacheDocument) {
+        return new CacheEntry<>() {
+            @Override
+            public String getId() {
+                return cacheDocument.getId().toString();
+            }
+
+            @Override
+            public K getKey() {
+                return cacheDocument.getKey();
+            }
+
+            @Override
+            public V getValue() {
+                return cacheDocument.getValue();
+            }
+
+            @Override
+            public boolean isEvicted() {
+                return cacheDocument.isEvicted();
+            }
+
+            @Override
+            public boolean equals(Object object) {
+                if (this == object) return true;
+                if (object == null || getClass() != object.getClass()) return false;
+                CacheEntry<?, ?> that = (CacheEntry<?, ?>) object;
+                return Objects.equals(this.getKey(), that.getKey())
+                        && Objects.equals(this.getValue(), that.getValue());
+            }
+
+            @Override
+            public int hashCode() {
+                return Objects.hash(getKey(), getValue());
+            }
+
+            @Override
+            public String toString() {
+                return format("CacheEntry{id=%s, key=%s, value=%s, isEvicted=%s}",
+                        getId(), getKey(), getValue(), isEvicted());
+            }
+        };
     }
 }

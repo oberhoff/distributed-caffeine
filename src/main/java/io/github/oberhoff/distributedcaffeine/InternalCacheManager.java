@@ -18,51 +18,71 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.RemovalCause;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
+import com.mongodb.client.model.Filters;
+import org.bson.conversions.Bson;
 import org.bson.types.ObjectId;
 
+import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.stream.Collectors;
+import java.util.function.Predicate;
 import java.util.stream.Stream;
 
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.CACHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.INVALIDATED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STALE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STATUS;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED_REFRESHED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED_REFRESHED_AFTER_WRITE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_SIZE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_SIZE_EXTENDED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_TIME;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_TIME_EXTENDED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.INVALIDATED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.INVALIDATED_REFRESHED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.INVALIDATED_REFRESHED_AFTER_WRITE;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
+import static java.util.stream.Collectors.groupingBy;
+import static java.util.stream.Collectors.toCollection;
+import static java.util.stream.Collectors.toSet;
 
-class InternalCacheManager<K, V> implements LazyInitializer<K, V> {
+@SuppressWarnings("squid:S1452")
+class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
 
     private final AtomicBoolean isActivated;
     private final Map<K, InternalCacheDocument<K, V>> latest;
     private final Map<K, InternalCacheDocument<K, V>> buffer;
-    private final Map<K, List<InternalCacheDocument<K, V>>> balance;
-    private final Set<ObjectId> ignore;
+    private final Map<K, Set<InternalCacheDocument<K, V>>> balance;
 
     private Cache<K, V> cache;
     private Policy<K, V> policy;
-    private InternalSynchronizationLock synchronizationLock;
+    private DistributionMode distributionMode;
+    private InternalExtendedPersistence extendedPersistence;
     private InternalMongoRepository<K, V> mongoRepository;
     private InternalMaintenanceWorker<K, V> maintenanceWorker;
-    private String origin;
-
+    private InternalSynchronizationLock synchronizationLock;
+    private Executor executor;
+    private Long origin;
+    private boolean hasEvictionPolicyByTime;
 
     InternalCacheManager() {
         this.isActivated = new AtomicBoolean(false);
         this.latest = new ConcurrentHashMap<>();
         this.buffer = new ConcurrentHashMap<>();
         this.balance = new ConcurrentHashMap<>();
-        this.ignore = ConcurrentHashMap.newKeySet();
         // see also initialize()
     }
 
@@ -70,10 +90,16 @@ class InternalCacheManager<K, V> implements LazyInitializer<K, V> {
     public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
         this.cache = distributedCaffeine.getCache();
         this.policy = distributedCaffeine.getCache().policy();
-        this.synchronizationLock = distributedCaffeine.getSynchronizationLock();
+        this.distributionMode = distributedCaffeine.getDistributionMode();
+        this.extendedPersistence = distributedCaffeine.getExtendedPersistence();
         this.mongoRepository = distributedCaffeine.getMongoRepository();
         this.maintenanceWorker = distributedCaffeine.getMaintenanceWorker();
-        this.origin = distributedCaffeine.getObjectIdGenerator().getOrigin();
+        this.synchronizationLock = distributedCaffeine.getSynchronizationLock();
+        this.executor = distributedCaffeine.getExecutor();
+        this.origin = distributedCaffeine.getOrigin();
+        this.hasEvictionPolicyByTime = Stream
+                .of(policy.expireAfterAccess(), policy.expireAfterWrite(), policy.expireVariably())
+                .anyMatch(Optional::isPresent);
     }
 
     void activate() {
@@ -91,186 +117,255 @@ class InternalCacheManager<K, V> implements LazyInitializer<K, V> {
         return isActivated.get();
     }
 
-    void manageOutboundInsert(Map<? extends K, ? extends V> map, String status,
-                              boolean manage, boolean originConscious) {
+    V putDistributed(K key, V value) {
+        putAllDistributed(Map.of(key, value));
+        return value;
+    }
+
+    Map<? extends K, ? extends V> putAllDistributed(Map<? extends K, ? extends V> map) {
+        manageOutboundInsert(map, CACHED, true);
+        return map;
+    }
+
+    Map<? extends K, ? extends V> putAllDistributedRefresh(Map<? extends K, ? extends V> map) {
+        manageOutboundInsert(map, CACHED_REFRESHED, true);
+        return map;
+    }
+
+    V putDistributedRefreshAfterWrite(K key, V newValue, V oldValue) {
+        // special handling (activated, old value, origin independence)
         if (isActivated()) {
-            if (manage) {
-                synchronizationLock.ensure();
-                commitCacheOutbound(map, status).forEach(this::addToBalance);
+            if (distributionMode.isPopulationConsidered()) {
+                manageOutboundInsert(Map.of(key, newValue), CACHED_REFRESHED_AFTER_WRITE, false);
+                // return old value which does not change the cache and does not trigger the removal listeners
+                return oldValue;
             } else {
-                commitCacheOutbound(map, status).stream()
-                        .filter(cacheDocument -> !originConscious)
-                        .map(InternalCacheDocument::getId)
-                        .forEach(ignore::add);
+                return newValue;
+            }
+        } else {
+            return newValue;
+        }
+    }
+
+    K invalidateDistributed(K key) {
+        invalidateAllDistributed(Set.of(key));
+        return key;
+    }
+
+    Set<K> invalidateAllDistributed(Set<K> keys) {
+        Map<K, V> map = new HashMap<>(); // allow null values
+        keys.forEach(key -> map.put(key, null));
+        manageOutboundInsert(map, INVALIDATED, true);
+        return keys;
+    }
+
+    Set<K> invalidateAllDistributedRefresh(Set<K> keys) {
+        Map<K, V> map = new HashMap<>(); // allow null values
+        keys.forEach(key -> map.put(key, null));
+        manageOutboundInsert(map, INVALIDATED_REFRESHED, true);
+        return keys;
+    }
+
+    V invalidateDistributedRefreshAfterWrite(K key, V oldValue) {
+        // special handling (activated, old value, origin independence)
+        if (isActivated()) {
+            if (distributionMode.isInvalidationConsidered()) {
+                Map<K, V> map = new HashMap<>(); // allow null values
+                map.put(key, null);
+                manageOutboundInsert(map, INVALIDATED_REFRESHED_AFTER_WRITE, false);
+                // return old value which does not change the cache and does not trigger the removal listener
+                return oldValue;
+            } else {
+                return null;
+            }
+        } else {
+            return null;
+        }
+    }
+
+    @SuppressWarnings("squid:S3776")
+    void evictDistributed(K key, V value, RemovalCause removalCause) {
+        // special handling (activated, eviction support, async, conditional replacement, origin independence)
+        if (isActivated() && (removalCause.equals(RemovalCause.SIZE) || removalCause.equals(RemovalCause.EXPIRED))) {
+            // run asynchronous
+            CompletableFuture.runAsync(() -> {
+                Status status;
+                if (extendedPersistence.hasExtendedPersistence()) {
+                    status = removalCause.equals(RemovalCause.SIZE)
+                            ? EVICTED_SIZE_EXTENDED
+                            : EVICTED_TIME_EXTENDED;
+                } else {
+                    status = removalCause.equals(RemovalCause.SIZE)
+                            ? EVICTED_SIZE
+                            : EVICTED_TIME;
+                }
+                // manage replacement if populations are distributed, but evictions are not distributed
+                if (distributionMode.isPopulationConsidered() && !distributionMode.isEvictionConsidered()) {
+                    Optional.ofNullable(latest.get(key))
+                            .filter(cacheDocument -> cacheDocument.getValue() == value)
+                            .ifPresent(cacheDocument -> {
+                                latest.values().remove(cacheDocument);
+                                maintenanceWorker.queueReplacement(cacheDocument);
+                            });
+                }
+                manageOutboundInsert(Map.of(key, value), status, false);
+            }, executor);
+        }
+    }
+
+    void synchronizeCacheFromStore() {
+        if (distributionMode.isPopulationConsidered()) {
+            Bson filter = Filters.or(
+                    Filters.and(
+                            Filters.eq(STATUS.toString(), CACHED.toString()),
+                            Filters.eq(STALE.toString(), false)),
+                    Filters.ne(STATUS.toString(), CACHED.toString()));
+            try (Stream<InternalCacheDocument<K, V>> cacheDocumentStream =
+                         mongoRepository.streamCacheDocuments(filter)) {
+                cacheDocumentStream
+                        // retain "hashCode -> bucket -> equals" semantics
+                        .collect(groupingBy(InternalCacheDocument::getKey))
+                        .forEach((k, cacheDocuments) -> {
+                            List<InternalCacheDocument<K, V>> sortedCacheDocuments = cacheDocuments.stream()
+                                    .sorted(Comparator.reverseOrder())
+                                    .collect(toCollection(ArrayList::new));
+                            if (!sortedCacheDocuments.isEmpty()) {
+                                // newest cache entry must be treated in the same way as a distributed inbound insert
+                                Optional.ofNullable(sortedCacheDocuments.remove(0))
+                                        .filter(InternalCacheDocument::isCached)
+                                        .ifPresent(newestCacheDocument ->
+                                                manageInboundInsert(newestCacheDocument, false));
+                                // correct any inconsistencies (if any) in relation to (not yet) stale cache entries
+                                sortedCacheDocuments.forEach(maintenanceWorker::queueReplacement);
+                            }
+                        });
+            }
+            // remove cache entries which are not managed (e.g., if synchronization is started after it was stopped)
+            synchronizationLock.runLocked(() -> {
+                if (isActivated()) {
+                    Set<K> keys = latest.entrySet().stream()
+                            .filter(entry -> entry.getValue().isCached())
+                            .map(Entry::getKey)
+                            .collect(toSet());
+                    cache.asMap().keySet().removeIf(key -> !keys.contains(key));
+                }
+            });
+        }
+    }
+
+    void manageInboundFailure(ObjectId objectId) {
+        if (isActivated() && distributionMode.isPopulationConsidered()) {
+            InternalCacheDocument<K, V> cacheDocument = new InternalCacheDocument<K, V>().setId(objectId);
+            removeFromBalance(cacheDocument);
+        }
+    }
+
+    void manageCleanUp(Duration outdatedDuration) {
+        if (isActivated()) {
+            // remove if not cached but outdated
+            Predicate<InternalCacheDocument<K, V>> outdated = cacheDocument ->
+                    !cacheDocument.isCached() && cacheDocument.isOlderThan(outdatedDuration);
+            latest.values().removeIf(outdated);
+            // trigger pending time-based eviction explicitly (to be more prompt)
+            if (distributionMode.isEvictionConsidered() && hasEvictionPolicyByTime) {
+                cache.cleanUp();
+                // workaround as cleanUp() does not seem to trigger all pending time-based evictions reliably
+                synchronizationLock.runLocked(() -> latest.values().stream()
+                        .filter(InternalCacheDocument::isCached)
+                        // preserve weakened key while streaming
+                        .map(cacheDocument -> cacheDocument.setKey(cacheDocument.getKey()))
+                        .filter(cacheDocument -> nonNull(cacheDocument.getKey()))
+                        .filter(cacheDocument -> isNull(policy.getIfPresentQuietly(cacheDocument.getKey())))
+                        .forEach(cacheDocument -> {
+                            // this should trigger a pending eviction
+                            cache.invalidate(cacheDocument.getKey());
+                            // weaken the key again
+                            cacheDocument.weakened();
+                        }));
             }
         }
     }
 
-    void manageInboundInsert(InternalCacheDocument<K, V> inboundCacheDocument, boolean manage, boolean isChangeStream) {
-        if (isActivated()) {
-            boolean ignored = ignore.remove(inboundCacheDocument.getId());
+    @SuppressWarnings("squid:S3776")
+    void manageInboundInsert(InternalCacheDocument<K, V> inboundCacheDocument, boolean eventBased) {
+        if (isActivated() && inboundCacheDocument.getStatus().isConsideredBy(distributionMode)) {
+            boolean manage = distributionMode.isPopulationConsidered();
             if (manage) {
-                synchronizationLock.ensure();
-                Optional<InternalCacheDocument<K, V>> outboundCacheDocument = removeFromBalance(inboundCacheDocument);
-                if (isInBalance(inboundCacheDocument.getKey())) { // in balance
-                    InternalCacheDocument<K, V> latestCacheDocument = latest.get(inboundCacheDocument.getKey());
-                    List<InternalCacheDocument<K, V>> sortedCacheDocuments = Stream.of(latestCacheDocument,
-                                    inboundCacheDocument, buffer.remove(inboundCacheDocument.getKey()))
-                            .filter(Objects::nonNull)
-                            .distinct()
-                            .sorted(Comparator.reverseOrder())
-                            .collect(Collectors.toCollection(ArrayList::new));
-                    InternalCacheDocument<K, V> newestCacheDocument = sortedCacheDocuments.remove(0);
-                    if (!newestCacheDocument.equals(latestCacheDocument)) {
-                        outboundCacheDocument
-                                .filter(newestCacheDocument::equals)
-                                // do not commit to cache if already done by outbound insert
-                                .ifPresentOrElse(originalCacheDocument -> {
-                                    // keep original key and value instances of outbound insert
-                                    newestCacheDocument
-                                            .setKey(originalCacheDocument.getKey())
-                                            .setValue(originalCacheDocument.getValue());
-                                }, () -> commitCacheInbound(newestCacheDocument));
-                        latest.put(newestCacheDocument.getKey(), newestCacheDocument.weakened());
+                synchronizationLock.runLocked(() -> {
+                    Optional<InternalCacheDocument<K, V>> outboundCacheDocument = removeFromBalance(inboundCacheDocument);
+                    if (isInBalance(inboundCacheDocument.getKey())) { // in balance
+                        InternalCacheDocument<K, V> latestCacheDocument = latest.get(inboundCacheDocument.getKey());
+                        List<InternalCacheDocument<K, V>> sortedCacheDocuments = Stream.of(latestCacheDocument,
+                                        inboundCacheDocument, buffer.remove(inboundCacheDocument.getKey()))
+                                .filter(Objects::nonNull)
+                                .distinct()
+                                .sorted(Comparator.reverseOrder())
+                                .collect(toCollection(ArrayList::new));
+                        InternalCacheDocument<K, V> newestCacheDocument = sortedCacheDocuments.remove(0);
+                        if (!newestCacheDocument.equals(latestCacheDocument)) {
+                            outboundCacheDocument
+                                    .filter(newestCacheDocument::equals)
+                                    // do not commit to cache if already done by outbound insert
+                                    .ifPresentOrElse(originalCacheDocument -> newestCacheDocument
+                                                    // keep original key and value instances of outbound insert
+                                                    .setKey(originalCacheDocument.getKey())
+                                                    .setValue(originalCacheDocument.getValue()),
+                                            () -> commitCacheInbound(newestCacheDocument));
+                            latest.put(newestCacheDocument.getKey(), newestCacheDocument.weakened());
+                        }
+                        // reduce redundant replacements across cache instances
+                        if (!eventBased || newestCacheDocument.hasSameOrigin(origin)) {
+                            sortedCacheDocuments.forEach(maintenanceWorker::queueReplacement);
+                        }
+                    } else { // not in balance
+                        if (inboundCacheDocument.isNewer(buffer.get(inboundCacheDocument.getKey()))) {
+                            Optional.ofNullable(buffer.put(inboundCacheDocument.getKey(), inboundCacheDocument))
+                                    // reduce redundant replacements across cache instances
+                                    .filter(bufferedCacheDocument -> inboundCacheDocument.hasSameOrigin(origin))
+                                    .ifPresent(maintenanceWorker::queueReplacement);
+                        } else {
+                            // reduce redundant replacements across cache instances
+                            if (inboundCacheDocument.hasSameOrigin(origin)) {
+                                maintenanceWorker.queueReplacement(inboundCacheDocument);
+                            }
+                        }
                     }
-                    // reduce redundant replacements across cache instances
-                    if (!isChangeStream || newestCacheDocument.hasOrigin(origin)) {
-                        sortedCacheDocuments.forEach(this::manageReplacement);
-                    }
-                } else { // not in balance
-                    if (inboundCacheDocument.isNewer(buffer.get(inboundCacheDocument.getKey()))) {
-                        Optional.ofNullable(buffer.put(inboundCacheDocument.getKey(), inboundCacheDocument))
-                                // reduce redundant replacements across cache instances
-                                .filter(bufferedCacheDocument -> inboundCacheDocument.hasOrigin(origin))
-                                .ifPresent(this::manageReplacement);
-                    } else {
-                        manageReplacement(inboundCacheDocument);
-                    }
-                }
+                });
             } else {
-                if (ignored || !inboundCacheDocument.hasOrigin(origin)) {
+                if (!inboundCacheDocument.hasSameOrigin(origin) || inboundCacheDocument.isOriginIndependent()) {
                     commitCacheInbound(inboundCacheDocument);
                 }
             }
         }
     }
 
-    void manageInboundUpdate(InternalCacheDocument<K, V> inboundCacheDocument) {
-        if (isActivated()) {
-            synchronizationLock.ensure();
-            Optional.ofNullable(latest.get(inboundCacheDocument.getKey()))
-                    .filter(inboundCacheDocument::equals)
-                    .filter(InternalCacheDocument::isCached)
-                    .filter(latestCacheDocument -> inboundCacheDocument.isCached())
-                    .filter(latestCacheDocument -> !latestCacheDocument.isNewer(inboundCacheDocument))
-                    .ifPresent(latestCacheDocument -> {
-                        cache.put(inboundCacheDocument.getKey(), inboundCacheDocument.getValue());
-                        latest.put(inboundCacheDocument.getKey(), inboundCacheDocument.weakened());
-                    });
-        }
-    }
-
-    void manageInboundDelete(ObjectId objectId) {
-        if (isActivated()) {
-            synchronizationLock.ensure();
-            InternalCacheDocument<K, V> cacheDocument = new InternalCacheDocument<K, V>().setId(objectId);
-            latest.entrySet().stream()
-                    .filter(entry -> entry.getValue().equals(cacheDocument))
-                    .findFirst()
-                    // map and add missing data (weakened on purpose)
-                    .map(entry -> entry.getValue().setKey(entry.getKey()))
-                    .ifPresent(latestCacheDocument -> {
-                        if (latestCacheDocument.isCached()) {
-                            cache.invalidate(latestCacheDocument.getKey());
-                        }
-                        latest.remove(latestCacheDocument.getKey(), latestCacheDocument);
-                        // speed up removeFromBalance()
-                        cacheDocument.setKey(latestCacheDocument.getKey());
-                    });
-            buffer.entrySet().stream()
-                    .filter(entry -> entry.getValue()
-                            .getId().equals(objectId))
-                    .findFirst()
-                    .map(Entry::getValue)
-                    .ifPresent(bufferedCacheDocument -> {
-                        buffer.remove(bufferedCacheDocument.getKey(), bufferedCacheDocument);
-                        // speed up removeFromBalance()
-                        cacheDocument.setKey(bufferedCacheDocument.getKey());
-                    });
-            removeFromBalance(cacheDocument);
-            ignore.remove(objectId);
-        }
-    }
-
-    void manageSynchronization() {
-        if (isActivated()) {
-            synchronizationLock.ensure();
-            Set<K> keys = latest.entrySet().stream()
-                    .filter(entry -> entry.getValue().isCached()
-                            || entry.getValue().isOrphaned())
-                    .map(Map.Entry::getKey)
-                    .collect(Collectors.toSet());
-            cache.asMap().keySet().removeIf(key -> !keys.contains(key));
-        }
-    }
-
-    void manageReplacement(InternalCacheDocument<K, V> cacheDocument) {
-        if (isActivated()) {
-            // no lock required
-            if (CACHED.equals(cacheDocument.getStatus())) {
-                maintenanceWorker.queueToBeOrphaned(cacheDocument.getId());
+    private void manageOutboundInsert(Map<? extends K, ? extends V> map, Status status, boolean manage) {
+        // extended persistence should work regardless of the distribution mode
+        if (isActivated() && (status.isConsideredBy(distributionMode) || status.isEvictedExtended())) {
+            // only manage if distributed population is supported
+            manage = manage && distributionMode.isPopulationConsidered();
+            if (manage) {
+                synchronizationLock.ensureLock();
+                commitCacheOutbound(map, status).forEach(this::addToBalance);
+            } else {
+                commitCacheOutbound(map, status);
             }
         }
     }
 
-    void manageReplacement(K key, V value, RemovalCause removalCause) {
-        if (isActivated()) {
-            boolean locked = synchronizationLock.tryLock();
-            try {
-                // distribution of reference-based evictions is not supported (yet)
-                if (removalCause != RemovalCause.COLLECTED) {
-                    Stream.concat(Optional.ofNullable(balance.get(key)).stream().flatMap(Collection::stream),
-                                    Stream.of(buffer.get(key), latest.get(key)))
-                            .filter(Objects::nonNull)
-                            .filter(cacheDocument -> cacheDocument.getValue() == value)
-                            .findFirst()
-                            .ifPresent(this::manageReplacement);
-                }
-            } finally {
-                synchronizationLock.tryUnlock(locked);
-            }
-        }
-    }
-
-    void manageInboundFailure(ObjectId objectId) {
-        if (isActivated()) {
-            boolean locked = synchronizationLock.tryLock();
-            try {
-                InternalCacheDocument<K, V> cacheDocument = new InternalCacheDocument<K, V>().setId(objectId);
-                if (cacheDocument.hasOrigin(origin)) {
-                    removeFromBalance(cacheDocument);
-                }
-            } finally {
-                synchronizationLock.tryUnlock(locked);
-            }
-        }
-    }
-
-    private Set<InternalCacheDocument<K, V>> commitCacheOutbound(Map<? extends K, ? extends V> map, String status) {
+    private Set<InternalCacheDocument<K, V>> commitCacheOutbound(Map<? extends K, ? extends V> map, Status status) {
         Map<? extends K, ? extends V> filteredMap = map.entrySet().stream()
-                .filter(entry ->
-                        // do not populate cache if value is the same instance
-                        (!CACHED.equals(status) || policy.getIfPresentQuietly(entry.getKey()) != entry.getValue())
-                                // do not invalidate cache if value is already absent
-                                && ((!INVALIDATED.equals(status)
-                                || nonNull(policy.getIfPresentQuietly(entry.getKey())))))
-                .collect(HashMap::new, (hashMap, entry) -> // allows null values
+                // do not distribute invalidation if value is already absent
+                .filter(entry -> !(status.isInvalidated() && isNull(policy.getIfPresentQuietly(entry.getKey()))))
+                .collect(HashMap::new, (hashMap, entry) -> // allow null values
                         hashMap.put(entry.getKey(), entry.getValue()), HashMap::putAll);
-        return mongoRepository.insert(filteredMap, status);
+        Set<InternalCacheDocument<K, V>> outboundCacheDocuments = mongoRepository.insert(filteredMap, status);
+        maintenanceWorker.queueActivity(outboundCacheDocuments);
+        return outboundCacheDocuments;
     }
 
     private void commitCacheInbound(InternalCacheDocument<K, V> cacheDocument) {
-        if (cacheDocument.isCached() || cacheDocument.isOrphaned()) {
+        if (cacheDocument.isCached()) {
             cache.put(cacheDocument.getKey(), cacheDocument.getValue());
         } else if ((cacheDocument.isInvalidated() || cacheDocument.isEvicted())
                 // only invalidate cache if value is present
@@ -286,7 +381,7 @@ class InternalCacheManager<K, V> implements LazyInitializer<K, V> {
     private void addToBalance(InternalCacheDocument<K, V> cacheDocument) {
         balance.compute(cacheDocument.getKey(), (key, value) -> {
             if (isNull(value)) {
-                return new ArrayList<>(List.of(cacheDocument));
+                return new HashSet<>(Set.of(cacheDocument));
             } else {
                 value.add(cacheDocument);
                 return value;
@@ -295,12 +390,12 @@ class InternalCacheManager<K, V> implements LazyInitializer<K, V> {
     }
 
     private Optional<InternalCacheDocument<K, V>> removeFromBalance(InternalCacheDocument<K, V> cacheDocument) {
-        List<InternalCacheDocument<K, V>> cacheDocuments = nonNull(cacheDocument.getKey())
-                ? balance.getOrDefault(cacheDocument.getKey(), List.of())
+        Set<InternalCacheDocument<K, V>> cacheDocuments = nonNull(cacheDocument.getKey())
+                ? balance.getOrDefault(cacheDocument.getKey(), Set.of())
                 : balance.values().stream()
                 .filter(value -> value.contains(cacheDocument))
                 .findFirst()
-                .orElse(List.of());
+                .orElseGet(Set::of);
         Optional<InternalCacheDocument<K, V>> optionalCacheDocument = cacheDocuments.stream()
                 .filter(cacheDocument::equals)
                 .findFirst();

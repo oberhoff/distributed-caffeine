@@ -18,17 +18,23 @@ package io.github.oberhoff.distributedcaffeine;
 import com.mongodb.MongoBulkWriteException;
 import com.mongodb.bulk.BulkWriteResult;
 import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoCursor;
+import com.mongodb.client.model.Accumulators;
+import com.mongodb.client.model.Aggregates;
 import com.mongodb.client.model.BulkWriteOptions;
 import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.IndexModel;
 import com.mongodb.client.model.IndexOptions;
 import com.mongodb.client.model.Indexes;
+import com.mongodb.client.model.Projections;
+import com.mongodb.client.model.Sorts;
 import com.mongodb.client.model.UpdateOneModel;
 import com.mongodb.client.model.UpdateOptions;
 import com.mongodb.client.model.Updates;
 import dev.failsafe.Failsafe;
 import dev.failsafe.RetryPolicy;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
+import io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field;
+import org.bson.BsonDocument;
 import org.bson.BsonObjectId;
 import org.bson.BsonValue;
 import org.bson.Document;
@@ -36,47 +42,75 @@ import org.bson.conversions.Bson;
 import org.bson.types.ObjectId;
 
 import java.io.Closeable;
-import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.security.SecureRandom;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.Spliterator;
 import java.util.Spliterators;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.EVICTED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.EXPIRES;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.HASH;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.ID;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.INVALIDATED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.KEY;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.ORPHANED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.STATUS;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.TOUCHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.VALUE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.DISCRIMINATOR;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.EXPIRES;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.HASH;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.KEY;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.ORIGIN;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STALE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STATUS;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.TOUCHED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.VALUE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field._ID;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED_GROUP;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_EXTENDED_GROUP;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_SIZE_EXTENDED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_TIME_EXTENDED;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
 import static java.lang.String.format;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.groupingBy;
+import static java.util.stream.Collectors.toCollection;
+import static java.util.stream.Collectors.toMap;
+import static java.util.stream.Collectors.toSet;
 
-class InternalMongoRepository<K, V> implements LazyInitializer<K, V> {
+class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
 
+    private final byte[] random;
+    private final int offset;
+
+    private int time;
+    private int counter;
     private Logger logger;
     private MongoCollection<Document> mongoCollection;
-    private InternalObjectIdGenerator objectIdGenerator;
     private InternalDocumentConverter<K, V> documentConverter;
+    private InternalExtendedPersistence extendedPersistence;
+    private Long origin;
 
     InternalMongoRepository() {
+        this.random = new byte[5];
+        SecureRandom secureRandom = new SecureRandom();
+        secureRandom.nextBytes(this.random);
+        this.offset = secureRandom.nextInt(16 * 1_000_000);
         // see also initialize()
     }
 
@@ -84,39 +118,72 @@ class InternalMongoRepository<K, V> implements LazyInitializer<K, V> {
     public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
         this.logger = distributedCaffeine.getLogger();
         this.mongoCollection = distributedCaffeine.getMongoCollection();
-        this.objectIdGenerator = distributedCaffeine.getObjectIdGenerator();
         this.documentConverter = distributedCaffeine.getDocumentConverter();
+        this.extendedPersistence = distributedCaffeine.getExtendedPersistence();
+        this.origin = distributedCaffeine.getOrigin();
 
         ensureIndexes();
     }
 
-    Stream<InternalCacheDocument<K, V>> streamCacheDocuments(Bson filter, Bson projection) {
-        return createStreamFromClosableIterator(mongoCollection.find()
+    Stream<InternalCacheDocument<K, V>> streamCacheDocuments(Bson filter) {
+        return createStreamFromClosableIterator(mongoCollection
+                .find()
                 .filter(filter)
-                .projection(projection)
                 .iterator())
-                .map(document -> {
-                    try {
-                        return documentConverter.toCacheDocument(document);
-                    } catch (Exception e) {
-                        logger.log(Level.WARNING,
-                                format("Deserializing of cache entry failed for collection '%s' (%s). Skipping...",
-                                        mongoCollection.getNamespace().getCollectionName(), document), e);
-                        return null;
-                    }
-                })
+                .map(this::toCacheDocumentOrNull)
                 .filter(Objects::nonNull);
     }
 
-    Set<InternalCacheDocument<K, V>> insert(Map<? extends K, ? extends V> map, String status) {
+    @SuppressWarnings("resource")
+    Stream<Set<InternalCacheDocument<K, V>>> streamCacheDocumentsGroupedByKeyInReverseOrder(Bson filter) {
+        MongoCursor<Document> mongoCursor = mongoCollection
+                .find()
+                .filter(filter)
+                .sort(Sorts.ascending(HASH.toString()))
+                .iterator();
+        Set<Integer> hashes = new LinkedHashSet<>();
+        Set<InternalCacheDocument<K, V>> cacheDocuments = new HashSet<>();
+        return Stream.generate(() -> {
+                    while (mongoCursor.hasNext() && hashes.size() <= 1) {
+                        InternalCacheDocument<K, V> cacheDocument = toCacheDocumentOrNull(mongoCursor.next());
+                        if (nonNull(cacheDocument)) {
+                            hashes.add(cacheDocument.getHash());
+                            cacheDocuments.add(cacheDocument);
+                        }
+                    }
+                    Map<K, Set<InternalCacheDocument<K, V>>> keyToCacheDocuments = new HashMap<>();
+                    hashes.stream()
+                            .findFirst()
+                            .ifPresent(hash -> {
+                                keyToCacheDocuments.putAll(cacheDocuments.stream()
+                                        .filter(it -> Objects.equals(hash, it.getHash()))
+                                        .collect(groupingBy(InternalCacheDocument::getKey, toSet())));
+                                hashes.remove(hash);
+                                cacheDocuments.removeIf(it -> Objects.equals(hash, it.getHash()));
+                            });
+                    return keyToCacheDocuments;
+                })
+                .takeWhile(keyToCacheDocuments -> {
+                    if (keyToCacheDocuments.isEmpty()) {
+                        mongoCursor.close();
+                        return false;
+                    } else {
+                        return true;
+                    }
+                })
+                .flatMap(keyToCacheDocuments -> keyToCacheDocuments.values().stream())
+                .map(it -> it.stream()
+                        .sorted(Comparator.reverseOrder())
+                        .collect(Collectors.toCollection(LinkedHashSet::new)));
+    }
+
+    Set<InternalCacheDocument<K, V>> insert(Map<? extends K, ? extends V> map, Status status) {
         if (!map.isEmpty()) {
             Map<K, ObjectId> keyToObjectId = new HashMap<>();
             List<UpdateOneModel<Document>> updates = new ArrayList<>();
             Map<Integer, K> indexToKey = new HashMap<>();
             AtomicInteger index = new AtomicInteger(0);
-            RetryPolicy<Void> retryPolicy = RetryPolicy.<Void>builder()
-                    .build();
-            Failsafe.with(retryPolicy)
+            Failsafe.with(RetryPolicy.ofDefaults())
                     .run(context -> {
                         if (context.getLastException() instanceof MongoBulkWriteException) {
                             MongoBulkWriteException mongoBulkWriteException = context.getLastException();
@@ -131,11 +198,11 @@ class InternalMongoRepository<K, V> implements LazyInitializer<K, V> {
                                 .forEach(key -> {
                                     V value = map.get(key);
                                     requireNonNull(key, "key cannot be null");
-                                    if (!INVALIDATED.equals(status)) {
+                                    if (!status.isInvalidated()) {
                                         requireNonNull(value, "value cannot be null");
                                     }
                                     // perform upsert to be able to use $currentTime (which is an update operator only)
-                                    Bson filter = Filters.eq(ID, objectIdGenerator.generate());
+                                    Bson filter = Filters.eq(_ID.toString(), generateObjectId());
                                     Bson update = toMongoUpdate(key, value, status);
                                     UpdateOptions updateOptions = new UpdateOptions().upsert(true);
                                     updates.add(new UpdateOneModel<>(filter, update, updateOptions));
@@ -152,86 +219,225 @@ class InternalMongoRepository<K, V> implements LazyInitializer<K, V> {
                             .setKey(entry.getKey())
                             .setValue(map.get(entry.getKey()))
                             .setStatus(status))
-                    .collect(Collectors.toSet());
+                    .collect(toSet());
         } else {
             return Set.of();
         }
     }
 
-    void updateOrphaned(Set<ObjectId> objectIds) {
+    void markAsStale(Set<ObjectId> objectIds) {
         if (!objectIds.isEmpty()) {
-            RetryPolicy<Void> retryPolicy = RetryPolicy.<Void>builder()
-                    .build();
-            Failsafe.with(retryPolicy)
+            Failsafe.with(RetryPolicy.ofDefaults())
                     .run(() -> {
                         Bson filter = Filters.and(
-                                Filters.in(ID, objectIds),
-                                Filters.ne(STATUS, ORPHANED));
+                                Filters.in(_ID.toString(), objectIds),
+                                Filters.eq(STALE.toString(), false));
                         Bson update = Updates.combine(
-                                Updates.set(STATUS, ORPHANED),
-                                Updates.currentDate(EXPIRES));
+                                Updates.set(STALE.toString(), true),
+                                Updates.currentDate(EXPIRES.toString()));
                         mongoCollection.updateMany(filter, update);
                     });
         }
     }
 
+    Set<ObjectId> identifyStaleExtended(Set<Integer> hashes) {
+        Set<ObjectId> objectIds = new HashSet<>();
+        if (!hashes.isEmpty()) {
+            Bson filter = Filters.and(
+                    Filters.in(HASH.toString(), hashes),
+                    Filters.in(STATUS.toString(),
+                            Stream.of(CACHED_GROUP, EVICTED_EXTENDED_GROUP)
+                                    .flatMap(Stream::of)
+                                    .map(Objects::toString)
+                                    .toArray(String[]::new)));
+            try (Stream<Document> documentStream = createStreamFromClosableIterator(mongoCollection
+                    .aggregate(
+                            List.of(
+                                    Aggregates.match(filter),
+                                    Aggregates.group(format("$%s", HASH),
+                                            Accumulators.sum("count", 1),
+                                            Accumulators.push("documents", new Document(Map.of(
+                                                    _ID.toString(), format("$%s", _ID),
+                                                    KEY.toString(), format("$%s", KEY),
+                                                    STATUS.toString(), format("$%s", STATUS),
+                                                    TOUCHED.toString(), format("$%s", TOUCHED))))),
+                                    Aggregates.match(Filters.gt("count", 1))))
+                    .iterator())) {
+                documentStream
+                        .map(document -> document.getList("documents", Document.class))
+                        .forEach(documents ->
+                                objectIds.addAll(documents.stream()
+                                        .map(document -> toCacheDocumentOrNull(document, _ID, KEY, STATUS, TOUCHED))
+                                        .filter(Objects::nonNull)
+                                        // retain "hashCode -> bucket -> equals" semantics
+                                        .collect(groupingBy(InternalCacheDocument::getKey))
+                                        .entrySet()
+                                        .stream()
+                                        .flatMap(entry -> entry.getValue().stream()
+                                                .sorted(Comparator.reverseOrder())
+                                                .skip(1) // newest cache entry stays untouched
+                                                .map(InternalCacheDocument::getId))
+                                        .collect(toSet())));
+            }
+        }
+        return objectIds;
+    }
+
+    Set<ObjectId> identifyStaleExtendedBySize() {
+        Bson filter = Filters.in(STATUS.toString(),
+                Stream.of(CACHED_GROUP, EVICTED_EXTENDED_GROUP)
+                        .flatMap(Stream::of)
+                        .map(Objects::toString)
+                        .toArray(String[]::new));
+        try (Stream<Document> documentStream = createStreamFromClosableIterator(mongoCollection
+                .find(filter)
+                .sort(Sorts.descending(TOUCHED.toString(), _ID.toString()))
+                .projection(Projections.include(_ID.toString(), KEY.toString(), STATUS.toString()))
+                .iterator())) {
+            AtomicInteger extendedCounter = new AtomicInteger(0);
+            Set<K> newestKeys = new HashSet<>();
+            Set<ObjectId> objectIds = new HashSet<>();
+            documentStream
+                    .map(document -> toCacheDocumentOrNull(document, _ID, KEY, STATUS))
+                    .filter(Objects::nonNull)
+                    .forEach(cacheDocument -> {
+                        if (extendedCounter.get() < extendedPersistence.getExtendedPersistenceSize()
+                                && !newestKeys.contains(cacheDocument.getKey())) {
+                            newestKeys.add(cacheDocument.getKey());
+                            if (cacheDocument.isEvictedExtended()) {
+                                extendedCounter.incrementAndGet();
+                            }
+                        } else {
+                            if (cacheDocument.isEvictedExtended()) {
+                                objectIds.add(cacheDocument.getId());
+                            }
+                        }
+                    });
+            return objectIds;
+        }
+    }
+
     private void ensureIndexes() {
-        IndexModel indexModelHash = new IndexModel(Indexes.ascending(HASH),
+        IndexModel indexHashDiscriminator = new IndexModel(Indexes.compoundIndex(
+                Indexes.ascending(HASH.toString()),
+                Indexes.ascending(DISCRIMINATOR.toString())),
                 new IndexOptions()
                         .unique(false)
                         .background(true));
-        IndexModel indexModelStatus = new IndexModel(Indexes.ascending(STATUS),
+        IndexModel indexHashStatusDiscriminator = new IndexModel(Indexes.compoundIndex(
+                Indexes.ascending(HASH.toString()),
+                Indexes.ascending(STATUS.toString()),
+                Indexes.ascending(DISCRIMINATOR.toString())),
                 new IndexOptions()
                         .unique(false)
                         .background(true));
-        IndexModel indexModelExpires = new IndexModel(Indexes.ascending(EXPIRES),
+        IndexModel indexStatusStale = new IndexModel(Indexes.compoundIndex(
+                Indexes.ascending(STATUS.toString()),
+                Indexes.ascending(STALE.toString())),
                 new IndexOptions()
                         .unique(false)
-                        .background(true)
-                        .expireAfter(1L, TimeUnit.MINUTES));
-        IndexModel indexModelIdStatus = new IndexModel(Indexes.compoundIndex(
-                Indexes.ascending(ID), Indexes.ascending(STATUS)),
-                new IndexOptions()
-                        .unique(true)
                         .background(true));
-        IndexModel indexModelHashStatus = new IndexModel(Indexes.compoundIndex(
-                Indexes.ascending(HASH), Indexes.ascending(STATUS)),
+        IndexModel indexIdStale = new IndexModel(Indexes.compoundIndex(
+                Indexes.ascending(_ID.toString()),
+                Indexes.ascending(STALE.toString())),
+                new IndexOptions()
+                        .unique(false)
+                        .background(true));
+        IndexModel indexStatusTouchedId = new IndexModel(Indexes.compoundIndex(
+                Indexes.ascending(STATUS.toString()),
+                Indexes.descending(TOUCHED.toString()),
+                Indexes.descending(_ID.toString())),
                 new IndexOptions()
                         .unique(false)
                         .background(true));
 
-        mongoCollection.createIndexes(List.of(indexModelHash, indexModelStatus, indexModelExpires,
-                indexModelIdStatus, indexModelHashStatus));
+        List<IndexModel> indexes = List.of(
+                indexHashDiscriminator,
+                indexHashStatusDiscriminator,
+                indexStatusTouchedId,
+                indexIdStale,
+                indexStatusStale);
+
+        mongoCollection.createIndexes(indexes);
+
+        // drop any other index
+        List<BsonDocument> indexKeys = indexes.stream()
+                .map(IndexModel::getKeys)
+                .map(Bson::toBsonDocument)
+                .collect(toCollection(ArrayList::new));
+        indexKeys.add(new Document(_ID.toString(), 1).toBsonDocument());
+
+        mongoCollection.listIndexes().forEach(existingIndex -> {
+            Bson keys = existingIndex.get("key", Document.class);
+            if (!indexKeys.contains(keys.toBsonDocument())) {
+                mongoCollection.dropIndex(keys);
+            }
+        });
     }
 
     private <I extends Iterator<T> & Closeable, T> Stream<T> createStreamFromClosableIterator(I iterator) {
         Spliterator<T> spliterator = Spliterators.spliteratorUnknownSize(iterator,
                 Spliterator.ORDERED | Spliterator.NONNULL);
-        return StreamSupport.stream(spliterator, false).onClose(() -> {
-            try {
-                iterator.close();
-            } catch (IOException e) {
-                throw new DistributedCaffeineException(e);
-            }
-        });
+        return StreamSupport.stream(spliterator, false)
+                .onClose(() -> runFailable(iterator::close));
     }
 
-    private Bson toMongoUpdate(K key, V value, String status) {
+    private InternalCacheDocument<K, V> toCacheDocumentOrNull(Document document, Field... validationFields) {
+        try {
+            return documentConverter.toCacheDocument(document, validationFields);
+        } catch (Exception e) {
+            logger.log(Level.WARNING,
+                    format("Deserializing of cache entry failed for collection '%s' (%s). Skipping...",
+                            mongoCollection.getNamespace().getCollectionName(), document), e);
+            return null;
+        }
+    }
+
+    private Bson toMongoUpdate(K key, V value, Status status) {
+        if (extendedPersistence.hasExtendedPersistence()
+                && status.isEvicted() && !status.isEvictedExtended()) {
+            throw new IllegalStateException(format("Status must be '%s' or '%s'",
+                    EVICTED_SIZE_EXTENDED, EVICTED_TIME_EXTENDED));
+        }
         try {
             Object serializedKey = documentConverter.toMongoKey(key);
             Object serializedValue = documentConverter.toMongoValue(value);
-            Bson expires = INVALIDATED.equals(status) || EVICTED.equals(status)
-                    ? Updates.currentDate(EXPIRES)
-                    : Updates.set(EXPIRES, null);
+            boolean stale;
+            Bson expiresUpdate;
+            if (status.isInvalidated() || (status.isEvicted() && !status.isEvictedExtended())) {
+                stale = true;
+                expiresUpdate = Updates.currentDate(EXPIRES.toString());
+            } else if (status.isEvictedExtended()) {
+                stale = false;
+                Instant maximumInstant = LocalDateTime.of(9999, 1, 1, 0, 0)
+                        .toInstant(ZoneOffset.UTC);
+                if (extendedPersistence.hasExtendedPersistenceByTime()) {
+                    Instant now = Instant.now();
+                    Duration extendedDuration = extendedPersistence.getExtendedPersistenceTime();
+                    Duration maximumDuration = Duration.between(now, maximumInstant);
+                    Instant extendedInstant = now.plus(extendedDuration.compareTo(maximumDuration) < 0
+                            ? extendedDuration
+                            : maximumDuration);
+                    expiresUpdate = Updates.set(EXPIRES.toString(), Date.from(extendedInstant));
+                } else {
+                    expiresUpdate = Updates.set(EXPIRES.toString(), Date.from(maximumInstant));
+                }
+            } else {
+                stale = false;
+                expiresUpdate = Updates.set(EXPIRES.toString(), null);
+            }
             return Updates.combine(
-                    Updates.set(HASH, key.hashCode()),
-                    Updates.set(KEY, serializedKey),
-                    Updates.set(VALUE, serializedValue),
-                    Updates.set(STATUS, status),
-                    Updates.currentDate(TOUCHED),
-                    expires);
+                    Updates.set(DISCRIMINATOR.toString(), null),
+                    Updates.set(ORIGIN.toString(), origin),
+                    Updates.set(HASH.toString(), key.hashCode()),
+                    Updates.set(KEY.toString(), serializedKey),
+                    Updates.set(VALUE.toString(), serializedValue),
+                    Updates.set(STATUS.toString(), status.toString()),
+                    Updates.set(STALE.toString(), stale),
+                    Updates.currentDate(TOUCHED.toString()),
+                    expiresUpdate);
         } catch (Exception e) {
-            throw new DistributedCaffeineException(e);
+            throw new IllegalStateException(e);
         }
     }
 
@@ -239,11 +445,11 @@ class InternalMongoRepository<K, V> implements LazyInitializer<K, V> {
         Map<K, ObjectId> keyToObjectId = new HashMap<>();
         keyToObjectId.putAll(bulkWriteResult.getInserts().stream()
                 .filter(bulkWriteInsert -> nonNull(indexToKey.get(bulkWriteInsert.getIndex())))
-                .collect(Collectors.toMap(bulkWriteInsert -> indexToKey.get(bulkWriteInsert.getIndex()),
+                .collect(toMap(bulkWriteInsert -> indexToKey.get(bulkWriteInsert.getIndex()),
                         bulkWriteInsert -> extractObjectId(bulkWriteInsert.getId()))));
         keyToObjectId.putAll(bulkWriteResult.getUpserts().stream()
                 .filter(bulkWriteUpsert -> nonNull(indexToKey.get(bulkWriteUpsert.getIndex())))
-                .collect(Collectors.toMap(bulkWriteUpsert -> indexToKey.get(bulkWriteUpsert.getIndex()),
+                .collect(toMap(bulkWriteUpsert -> indexToKey.get(bulkWriteUpsert.getIndex()),
                         bulkWriteUpsert -> extractObjectId(bulkWriteUpsert.getId()))));
         return keyToObjectId;
     }
@@ -253,7 +459,27 @@ class InternalMongoRepository<K, V> implements LazyInitializer<K, V> {
                 .filter(BsonValue::isObjectId)
                 .map(BsonValue::asObjectId)
                 .map(BsonObjectId::getValue)
-                .orElseThrow(() -> new DistributedCaffeineException(format("No 'objectId' found (%s)",
+                .orElseThrow(() -> new NoSuchElementException(format("No 'objectId' found (%s)",
                         bsonValue)));
+    }
+
+    private synchronized ObjectId generateObjectId() {
+        int currentTime = (int) Instant.now().getEpochSecond();
+        if (time != currentTime) {
+            time = currentTime;
+            counter = offset;
+        } else {
+            counter++;
+        }
+        byte[] bytes = new byte[]{
+                b(time, 24), b(time, 16), b(time, 8), b(time, 0),
+                random[0], random[1], random[2], random[3], random[4],
+                b(counter, 16), b(counter, 8), b(counter, 0)
+        };
+        return new ObjectId(bytes);
+    }
+
+    private byte b(int i, int b) {
+        return (byte) (i >> b);
     }
 }

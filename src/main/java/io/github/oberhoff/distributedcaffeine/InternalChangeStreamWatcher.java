@@ -15,6 +15,8 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import com.mongodb.MongoClientException;
+import com.mongodb.MongoTimeoutException;
 import com.mongodb.client.ChangeStreamIterable;
 import com.mongodb.client.MongoChangeStreamCursor;
 import com.mongodb.client.MongoCollection;
@@ -27,7 +29,7 @@ import com.mongodb.client.model.changestream.OperationType;
 import dev.failsafe.Failsafe;
 import dev.failsafe.Fallback;
 import dev.failsafe.RetryPolicy;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
+import io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field;
 import org.bson.BsonObjectId;
 import org.bson.BsonTimestamp;
 import org.bson.Document;
@@ -38,68 +40,70 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.time.Duration;
 import java.util.List;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import static com.mongodb.client.model.changestream.OperationType.DELETE;
 import static com.mongodb.client.model.changestream.OperationType.INSERT;
-import static com.mongodb.client.model.changestream.OperationType.REPLACE;
-import static com.mongodb.client.model.changestream.OperationType.UPDATE;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.CACHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.EVICTED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.EXPIRES;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.HASH;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.ID;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.INVALIDATED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.KEY;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.STATUS;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.TOUCHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.VALUE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.DISCRIMINATOR;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.EXPIRES;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.HASH;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.KEY;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.ORIGIN;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STALE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STATUS;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.TOUCHED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.VALUE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field._ID;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status;
 import static java.lang.String.format;
-import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
+import static java.util.Objects.requireNonNull;
+import static org.bson.BsonType.BOOLEAN;
 import static org.bson.BsonType.DATE_TIME;
 import static org.bson.BsonType.INT32;
+import static org.bson.BsonType.INT64;
 import static org.bson.BsonType.OBJECT_ID;
 import static org.bson.BsonType.STRING;
 
-class InternalChangeStreamWatcher<K, V> implements LazyInitializer<K, V> {
+class InternalChangeStreamWatcher<K, V> implements InternalLazyInitializer<K, V> {
 
-    private final static String DOCUMENT_KEY = "documentKey";
-    private final static String CLUSTER_TIME = "clusterTime";
-    private final static String OPERATION_TYPE = "operationType";
-    private final static String FULL_DOCUMENT = "fullDocument";
+    private static final Duration WATCHER_INTERVAL = Duration.ofSeconds(1);
+    private static final String DOCUMENT_KEY = "documentKey";
+    private static final String CLUSTER_TIME = "clusterTime";
+    private static final String OPERATION_TYPE = "operationType";
+    private static final String FULL_DOCUMENT = "fullDocument";
 
-    private DistributedCaffeine<K, V> distributedCaffeine;
+    private final AtomicBoolean isActivated;
+    private final AtomicReference<Throwable> failFastThrowable;
+    private final AtomicReference<BsonTimestamp> operationTime;
+
     private Logger logger;
+    private DistributionMode distributionMode;
     private MongoCollection<Document> mongoCollection;
+    private InternalCacheManager<K, V> cacheManager;
     private InternalDocumentConverter<K, V> documentConverter;
-    private AtomicBoolean isActivated;
-    private AtomicReference<Throwable> failFastThrowable;
-    private AtomicReference<BsonTimestamp> operationTime;
-    private ExecutorService executorService;
     private CompletableFuture<Void> watcherCompletableFuture;
 
     InternalChangeStreamWatcher() {
+        this.isActivated = new AtomicBoolean(false);
+        this.failFastThrowable = new AtomicReference<>(null);
+        this.operationTime = new AtomicReference<>(null);
         // see also initialize()
     }
 
     @Override
     public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
-        this.distributedCaffeine = distributedCaffeine;
         this.logger = distributedCaffeine.getLogger();
+        this.distributionMode = distributedCaffeine.getDistributionMode();
         this.mongoCollection = distributedCaffeine.getMongoCollection();
+        this.cacheManager = distributedCaffeine.getCacheManager();
         this.documentConverter = distributedCaffeine.getDocumentConverter();
-        this.isActivated = new AtomicBoolean(false);
-        this.failFastThrowable = new AtomicReference<>(null);
-        this.operationTime = new AtomicReference<>(null);
     }
 
     void activate() {
@@ -107,18 +111,19 @@ class InternalChangeStreamWatcher<K, V> implements LazyInitializer<K, V> {
         Optional.ofNullable(watcherCompletableFuture)
                 .ifPresent(CompletableFuture::join);
 
-        executorService = Executors.newSingleThreadExecutor(runnable ->
-                new Thread(runnable, Thread.class.getSimpleName()
-                        .concat(getClass().getSimpleName())
-                        .concat(String.valueOf(runnable.hashCode()))));
-
         scheduleChangeStreamWatcher();
 
         // wait until watching is activated or throw exception after timeout, but fail fast if watching is not possible
-        Duration timeoutDuration = Duration.ofMinutes(1);
+        Duration timeoutDuration = Optional.ofNullable(mongoCollection.getTimeout(TimeUnit.SECONDS))
+                .filter(seconds -> seconds > 0)
+                .map(Duration::ofSeconds)
+                .orElseGet(() -> Duration.ofSeconds(30)); // default MongoDB timeout
         Fallback<Boolean> fallback = Fallback.<Boolean>builderOfException(event ->
-                        new DistributedCaffeineException(format("Watching change streams failed for collection '%s'",
-                                mongoCollection.getNamespace().getCollectionName()), failFastThrowable.get()))
+                        new MongoClientException(format("Watching change streams failed for collection '%s'",
+                                mongoCollection.getNamespace().getCollectionName()),
+                                Optional.ofNullable(failFastThrowable.get())
+                                        .orElseGet(() -> new MongoTimeoutException(format("Timeout after %s seconds",
+                                                timeoutDuration.toSeconds())))))
                 .handleResult(false)
                 .build();
         RetryPolicy<Boolean> retryPolicy = RetryPolicy.<Boolean>builder()
@@ -135,14 +140,6 @@ class InternalChangeStreamWatcher<K, V> implements LazyInitializer<K, V> {
         isActivated.set(false);
         failFastThrowable.set(null);
         operationTime.set(null);
-
-        // wait async for completion if required and shut down executor service
-        Optional.ofNullable(watcherCompletableFuture)
-                .ifPresent(completableFuture ->
-                        CompletableFuture.runAsync(() -> {
-                            completableFuture.join();
-                            executorService.shutdownNow();
-                        }));
     }
 
     boolean isActivated() {
@@ -156,14 +153,18 @@ class InternalChangeStreamWatcher<K, V> implements LazyInitializer<K, V> {
                     return !isActivated();
                 })
                 .withMaxAttempts(-1)
-                .withDelay(Duration.ofSeconds(1))
-                .withDelayFnOn(context -> Duration.ofSeconds(Math.min(context.getAttemptCount(), 10)), Exception.class)
+                .withDelay(WATCHER_INTERVAL)
+                .withDelayFnOn(context -> WATCHER_INTERVAL.multipliedBy(Math.min(context.getAttemptCount(), 10)),
+                        Throwable.class)
                 .onRetryScheduled(event -> Optional.ofNullable(event.getLastException())
-                        .ifPresent(exception -> logger.log(Level.WARNING,
+                        .ifPresent(throwable -> logger.log(Level.WARNING,
                                 format("Watching change streams failed for collection '%s'. Retrying...",
-                                        mongoCollection.getNamespace().getCollectionName()), exception)))
+                                        mongoCollection.getNamespace().getCollectionName()), throwable)))
                 .build();
-        watcherCompletableFuture = Failsafe.with(retryPolicy)
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        InternalTaskPolicy<Void> taskPolicy = new InternalTaskPolicy<Void>()
+                .withPostExecutionTask(executorService::shutdown);
+        watcherCompletableFuture = Failsafe.with(taskPolicy, retryPolicy)
                 .with(executorService)
                 .runAsync(this::processChangeStreams);
     }
@@ -183,35 +184,28 @@ class InternalChangeStreamWatcher<K, V> implements LazyInitializer<K, V> {
         try (MongoChangeStreamCursor<ChangeStreamDocument<Document>> cursor =
                      changeStreamIterable.cursor()) {
             isActivated.set(true);
-            do { // do-while-loop to break earlier
+            while (isActivated()) {
                 ChangeStreamDocument<Document> changeStreamDocument = cursor.tryNext();
-                if (nonNull(changeStreamDocument)) {
+                // additional activation check necessary because tryNext() seems to be paced (blocked for a while)
+                if (nonNull(changeStreamDocument) && isActivated()) {
                     // set operation time to be used if watching fails and is retried
-                    operationTime.set(changeStreamDocument.getClusterTime());
+                    operationTime.set(requireNonNull(changeStreamDocument.getClusterTime(),
+                            "clusterTime cannot be null"));
                     processChangeStreamDocument(changeStreamDocument);
                 }
-            } while (isActivated());
+            }
         }
     }
 
     private void processChangeStreamDocument(ChangeStreamDocument<Document> changeStreamDocument) {
         Optional<ObjectId> optionalObjectId = Optional.ofNullable(changeStreamDocument.getDocumentKey())
-                .map(bsonDocument -> bsonDocument.getObjectId(ID, null))
+                .map(bsonDocument -> bsonDocument.getObjectId(_ID.toString(), null))
                 .map(BsonObjectId::getValue);
         try {
             OperationType operationType = changeStreamDocument.getOperationType();
-            if (nonNull(operationType)) {
-                if (operationType == INSERT) {
-                    distributedCaffeine.processInboundInsert(
-                            documentConverter.toCacheDocument(
-                                    changeStreamDocument.getFullDocument()), true);
-                } else if (operationType == UPDATE || operationType == REPLACE) {
-                    distributedCaffeine.processInboundUpdate(
-                            documentConverter.toCacheDocument(
-                                    changeStreamDocument.getFullDocument()));
-                } else if (operationType == DELETE) {
-                    optionalObjectId.ifPresent(distributedCaffeine::processInboundDelete);
-                }
+            if (nonNull(operationType) && operationType.equals(INSERT)) {
+                cacheManager.manageInboundInsert(
+                        documentConverter.toCacheDocument(changeStreamDocument.getFullDocument()), true);
             }
         } catch (Exception e) {
             logger.log(Level.WARNING,
@@ -220,117 +214,104 @@ class InternalChangeStreamWatcher<K, V> implements LazyInitializer<K, V> {
                             nonNull(changeStreamDocument.getFullDocument())
                                     ? changeStreamDocument.getFullDocument()
                                     : changeStreamDocument), e);
-            optionalObjectId.ifPresent(distributedCaffeine::processInboundFailure);
+            optionalObjectId.ifPresent(cacheManager::manageInboundFailure);
         }
     }
 
     private List<Bson> getAggregationPipeline() {
-        // watch only change stream documents of interest (specific operation types, fields and values)
+        // watch only change stream documents of interest (specific operation types, fields or values)
         return List.of(
-                matchWithoutNull(
-                        orWithoutNull(
-                                andWithoutNull(
-                                        Filters.eq(OPERATION_TYPE, INSERT.getValue()),
-                                        Filters.exists(FULL_DOCUMENT),
-                                        Filters.ne(FULL_DOCUMENT, null),
-                                        Filters.exists(fullDocument(ID)),
-                                        Filters.type(fullDocument(ID), OBJECT_ID),
-                                        Filters.ne(fullDocument(ID), null),
-                                        Filters.exists(fullDocument(HASH)),
-                                        Filters.type(fullDocument(HASH), INT32),
-                                        Filters.ne(fullDocument(HASH), null),
-                                        Filters.exists(fullDocument(KEY)),
-                                        Filters.ne(fullDocument(KEY), null),
-                                        Filters.exists(fullDocument(VALUE)),
-                                        orWithoutNull( // no filterOnlyIf needed because status is filtered
-                                                andWithoutNull(
-                                                        Filters.ne(fullDocument(VALUE), null),
-                                                        Filters.in(fullDocument(STATUS), CACHED, EVICTED)),
-                                                andWithoutNull(
-                                                        Filters.eq(fullDocument(VALUE), null),
-                                                        Filters.eq(fullDocument(STATUS), INVALIDATED))),
-                                        Filters.exists(fullDocument(STATUS)),
-                                        Filters.type(fullDocument(STATUS), STRING),
-                                        Filters.in(fullDocument(STATUS), filterStatus(CACHED, INVALIDATED, EVICTED)),
-                                        Filters.exists(fullDocument(TOUCHED)),
-                                        Filters.type(fullDocument(TOUCHED), DATE_TIME),
-                                        Filters.ne(fullDocument(TOUCHED), null),
-                                        Filters.exists(fullDocument(EXPIRES)),
-                                        orWithoutNull( // no filterOnlyIf needed because status is filtered
-                                                andWithoutNull(
-                                                        Filters.eq(fullDocument(EXPIRES), null),
-                                                        Filters.eq(fullDocument(STATUS), CACHED)),
-                                                andWithoutNull(
-                                                        Filters.type(fullDocument(EXPIRES), DATE_TIME),
-                                                        Filters.ne(fullDocument(EXPIRES), null),
-                                                        Filters.in(fullDocument(STATUS), INVALIDATED, EVICTED)))),
-                                filterOnlyIf(distributedCaffeine.isSupportedByDistributionMode(CACHED),
-                                        andWithoutNull(
-                                                Filters.in(OPERATION_TYPE, UPDATE.getValue(), REPLACE.getValue()),
-                                                Filters.exists(FULL_DOCUMENT),
-                                                Filters.ne(FULL_DOCUMENT, null),
-                                                Filters.exists(fullDocument(ID)),
-                                                Filters.type(fullDocument(ID), OBJECT_ID),
-                                                Filters.ne(fullDocument(ID), null),
-                                                Filters.exists(fullDocument(HASH)),
-                                                Filters.type(fullDocument(HASH), INT32),
-                                                Filters.ne(fullDocument(HASH), null),
-                                                Filters.exists(fullDocument(KEY)),
-                                                Filters.ne(fullDocument(KEY), null),
-                                                Filters.exists(fullDocument(VALUE)),
+                Aggregates.match(
+                        Filters.and(
+                                Filters.eq(OPERATION_TYPE, INSERT.getValue()),
+                                Filters.exists(FULL_DOCUMENT),
+                                Filters.ne(FULL_DOCUMENT, null),
+                                Filters.exists(fullDocument(_ID)),
+                                Filters.type(fullDocument(_ID), OBJECT_ID),
+                                Filters.ne(fullDocument(_ID), null),
+                                Filters.exists(fullDocument(DISCRIMINATOR)),
+                                Filters.or(
+                                        Filters.eq(fullDocument(DISCRIMINATOR), null),
+                                        Filters.and(
+                                                Filters.ne(fullDocument(DISCRIMINATOR), null),
+                                                Filters.type(fullDocument(DISCRIMINATOR), STRING))),
+                                Filters.exists(fullDocument(ORIGIN)),
+                                Filters.type(fullDocument(ORIGIN), INT64),
+                                Filters.ne(fullDocument(ORIGIN), null),
+                                Filters.exists(fullDocument(HASH)),
+                                Filters.type(fullDocument(HASH), INT32),
+                                Filters.ne(fullDocument(HASH), null),
+                                Filters.exists(fullDocument(KEY)),
+                                Filters.ne(fullDocument(KEY), null),
+                                Filters.exists(fullDocument(VALUE)),
+                                Filters.or(
+                                        Filters.and(
                                                 Filters.ne(fullDocument(VALUE), null),
-                                                Filters.exists(fullDocument(STATUS)),
-                                                Filters.type(fullDocument(STATUS), STRING),
-                                                Filters.eq(fullDocument(STATUS), CACHED),
-                                                Filters.exists(fullDocument(TOUCHED)),
-                                                Filters.type(fullDocument(TOUCHED), DATE_TIME),
-                                                Filters.ne(fullDocument(TOUCHED), null),
-                                                Filters.exists(fullDocument(EXPIRES)),
-                                                Filters.eq(fullDocument(EXPIRES), null))),
-                                filterOnlyIf(distributedCaffeine.isSupportedByDistributionMode(CACHED),
-                                        Filters.eq(OPERATION_TYPE, DELETE.getValue())))),
+                                                Filters.in(fullDocument(STATUS),
+                                                        aggregateStatusesToStrings(
+                                                                Status.CACHED_GROUP,
+                                                                Status.EVICTED_GROUP))),
+                                        Filters.and(
+                                                Filters.eq(fullDocument(VALUE), null),
+                                                Filters.in(fullDocument(STATUS),
+                                                        aggregateStatusesToStrings(
+                                                                Status.INVALIDATED_GROUP)))),
+                                Filters.exists(fullDocument(STATUS)),
+                                Filters.type(fullDocument(STATUS), STRING),
+                                Filters.in(fullDocument(STATUS),
+                                        filterStatuses(aggregateStatuses(
+                                                Status.CACHED_GROUP,
+                                                Status.INVALIDATED_GROUP,
+                                                Status.EVICTED_GROUP))),
+                                Filters.exists(fullDocument(STALE)),
+                                Filters.type(fullDocument(STALE), BOOLEAN),
+                                Filters.ne(fullDocument(STALE), null),
+                                Filters.exists(fullDocument(TOUCHED)),
+                                Filters.type(fullDocument(TOUCHED), DATE_TIME),
+                                Filters.ne(fullDocument(TOUCHED), null),
+                                Filters.exists(fullDocument(EXPIRES)),
+                                Filters.or(
+                                        Filters.and(
+                                                Filters.eq(fullDocument(EXPIRES), null),
+                                                Filters.in(fullDocument(STATUS),
+                                                        aggregateStatusesToStrings(
+                                                                Status.CACHED_GROUP))),
+                                        Filters.and(
+                                                Filters.ne(fullDocument(EXPIRES), null),
+                                                Filters.type(fullDocument(EXPIRES), DATE_TIME),
+                                                Filters.in(fullDocument(STATUS),
+                                                        aggregateStatusesToStrings(
+                                                                Status.INVALIDATED_GROUP,
+                                                                Status.EVICTED_GROUP)))))),
                 Aggregates.project(
                         Projections.fields(
                                 Projections.include(DOCUMENT_KEY, CLUSTER_TIME, OPERATION_TYPE,
-                                        fullDocument(ID), fullDocument(HASH), fullDocument(KEY), fullDocument(VALUE),
-                                        fullDocument(STATUS), fullDocument(TOUCHED), fullDocument(EXPIRES)))));
+                                        fullDocument(_ID), fullDocument(DISCRIMINATOR), fullDocument(ORIGIN),
+                                        fullDocument(HASH), fullDocument(KEY), fullDocument(VALUE),
+                                        fullDocument(STATUS), fullDocument(STALE), fullDocument(TOUCHED),
+                                        fullDocument(EXPIRES)))));
     }
 
-    private String fullDocument(String fieldName) {
-        return format("%s.%s", FULL_DOCUMENT, fieldName);
+    private String fullDocument(Field field) {
+        return format("%s.%s", FULL_DOCUMENT, field.toString());
     }
 
-    private Bson andWithoutNull(Bson... filters) {
-        List<Bson> filterList = Stream.of(filters)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toList());
-        return filterList.isEmpty()
-                ? null
-                : Filters.and(filterList);
-    }
-
-    private Bson orWithoutNull(Bson... filters) {
-        List<Bson> filterList = Stream.of(filters)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toList());
-        return filterList.isEmpty()
-                ? null
-                : Filters.or(filterList);
-    }
-
-    private Bson matchWithoutNull(Bson filter) {
-        return Aggregates.match(isNull(filter)
-                ? Filters.empty()
-                : filter);
-    }
-
-    private Bson filterOnlyIf(boolean condition, Bson filter) {
-        return condition ? filter : null;
-    }
-
-    private String[] filterStatus(String... statuses) {
+    private Status[] aggregateStatuses(Status[]... statuses) {
         return Stream.of(statuses)
-                .filter(distributedCaffeine::isSupportedByDistributionMode)
+                .flatMap(Stream::of)
+                .toArray(Status[]::new);
+    }
+
+    private String[] aggregateStatusesToStrings(Status[]... statuses) {
+        return Stream.of(aggregateStatuses(statuses))
+                .map(Status::toString)
+                .toArray(String[]::new);
+    }
+
+    private String[] filterStatuses(Status... statuses) {
+        return Stream.of(statuses)
+                .filter(status -> status.isConsideredBy(distributionMode))
+                .map(Status::toString)
                 .toArray(String[]::new);
     }
 }

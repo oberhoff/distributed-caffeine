@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine.serializer;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -33,85 +34,76 @@ public class JacksonSerializer<T> implements JsonSerializer<T> {
     private final ObjectMapper objectMapper;
     private final Class<T> typeClass;
     private final TypeReference<T> typeReference;
-    private final boolean storeAsBson;
+    private final boolean storeAsBinaryJson;
 
     /**
-     * Constructs a serializer with JSON representation based on <i>Jackson</i> along with {@link Class}-based type
+     * Constructs a serializer with JSON representation based on <i>Jackson</i> along with class-based type
      * information.
      *
-     * @param typeClass   the {@link Class} of the object to serialize
-     * @param storeAsBson {@code true} for BSON encoding or {@code false} for string encoding
+     * @param typeClass         the class of the object to serialize
+     * @param storeAsBinaryJson {@code true} for BSON encoding or {@code false} for string encoding
      */
-    public JacksonSerializer(Class<? super T> typeClass, boolean storeAsBson) {
-        this(new ObjectMapper(), typeClass, storeAsBson);
+    public JacksonSerializer(Class<T> typeClass, boolean storeAsBinaryJson) {
+        this(new ObjectMapper(), typeClass, storeAsBinaryJson);
     }
 
     /**
-     * Constructs a serializer with JSON representation based on <i>Jackson</i> along with {@link TypeReference}-based
+     * Constructs a serializer with JSON representation based on <i>Jackson</i> along with reference-based
      * type information.
      *
-     * @param typeReference the {@link TypeReference} of the object to serialize
-     * @param storeAsBson   {@code true} for BSON encoding or {@code false} for string encoding
+     * @param typeReference     the type reference of the object to serialize
+     * @param storeAsBinaryJson {@code true} for BSON encoding or {@code false} for string encoding
      */
-    public JacksonSerializer(TypeReference<T> typeReference, boolean storeAsBson) {
-        this(new ObjectMapper(), typeReference, storeAsBson);
+    public JacksonSerializer(TypeReference<T> typeReference, boolean storeAsBinaryJson) {
+        this(new ObjectMapper(), typeReference, storeAsBinaryJson);
     }
 
     /**
      * Constructs a serializer with JSON representation based on <i>Jackson</i> along with a customizable
-     * {@link ObjectMapper} and {@link Class}-based type information.
+     * object mapper and class-based type information.
      *
-     * @param objectMapper the customized {@link ObjectMapper}
-     * @param typeClass    the {@link Class} of the object to serialize
-     * @param storeAsBson  {@code true} for BSON encoding or {@code false} for string encoding
+     * @param objectMapper      the customized object mapper
+     * @param typeClass         the class of the object to serialize
+     * @param storeAsBinaryJson {@code true} for BSON encoding or {@code false} for string encoding
      */
-    @SuppressWarnings("unchecked")
-    public JacksonSerializer(ObjectMapper objectMapper, Class<? super T> typeClass, boolean storeAsBson) {
+    public JacksonSerializer(ObjectMapper objectMapper, Class<T> typeClass, boolean storeAsBinaryJson) {
         this.objectMapper = requireNonNull(objectMapper);
-        this.typeClass = (Class<T>) requireNonNull(typeClass);
+        this.typeClass = requireNonNull(typeClass);
         this.typeReference = null;
-        this.storeAsBson = storeAsBson;
+        this.storeAsBinaryJson = storeAsBinaryJson;
     }
 
     /**
      * Constructs a serializer with JSON representation based on <i>Jackson</i> along with a customizable
-     * {@link ObjectMapper} and {@link TypeReference}-based type information.
+     * object mapper and reference-based type information.
      *
-     * @param objectMapper  the customized {@link ObjectMapper}
-     * @param typeReference the {@link TypeReference} of the object to serialize
-     * @param storeAsBson   {@code true} for BSON encoding or {@code false} for string encoding
+     * @param objectMapper      the customized object mapper
+     * @param typeReference     the type reference of the object to serialize
+     * @param storeAsBinaryJson {@code true} for BSON encoding or {@code false} for string encoding
      */
-    public JacksonSerializer(ObjectMapper objectMapper, TypeReference<T> typeReference, boolean storeAsBson) {
+    public JacksonSerializer(ObjectMapper objectMapper, TypeReference<T> typeReference, boolean storeAsBinaryJson) {
         this.objectMapper = requireNonNull(objectMapper);
         this.typeClass = null;
         this.typeReference = requireNonNull(typeReference);
-        this.storeAsBson = storeAsBson;
+        this.storeAsBinaryJson = storeAsBinaryJson;
     }
 
     @Override
-    public String serialize(T object) throws SerializerException {
-        try {
-            return objectMapper.writeValueAsString(object);
-        } catch (Exception e) {
-            throw new SerializerException(e);
+    public String serialize(T object) throws JsonProcessingException {
+        return objectMapper.writeValueAsString(object);
+    }
+
+    @Override
+    public T deserialize(String value) throws JsonProcessingException {
+        if (nonNull(typeClass)) {
+            return objectMapper.readValue(value, typeClass);
+        } else {
+            return objectMapper.readValue(value, typeReference);
         }
     }
 
     @Override
-    public T deserialize(String value) throws SerializerException {
-        try {
-            if (nonNull(typeClass)) {
-                return objectMapper.readValue(value, typeClass);
-            } else {
-                return objectMapper.readValue(value, typeReference);
-            }
-        } catch (Exception e) {
-            throw new SerializerException(e);
-        }
-    }
-
-    @Override
-    public boolean storeAsBson() {
-        return storeAsBson;
+    public boolean storeAsBinaryJson() {
+        return storeAsBinaryJson;
     }
 }

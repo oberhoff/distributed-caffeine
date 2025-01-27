@@ -13,19 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.oberhoff.distributedcaffeine.serializer;
+package io.github.oberhoff.distributedcaffeine;
 
-/**
- * Interface to use when implementing a serializer with string representation.
- *
- * @param <T> the type of the object to serialize
- * @author Andreas Oberhoff
- */
-public interface StringSerializer<T> extends Serializer<T, String> {
+interface InternalLazyInitializer<K, V> {
 
-    @Override
-    String serialize(T object) throws Exception;
-
-    @Override
-    T deserialize(String value) throws Exception;
+    void initialize(DistributedCaffeine<K, V> distributedCaffeine);
 }

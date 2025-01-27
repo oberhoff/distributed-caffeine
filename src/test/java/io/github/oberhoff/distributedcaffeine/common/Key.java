@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.oberhoff.distributedcaffeine;
+package io.github.oberhoff.distributedcaffeine.common;
 
 import java.io.Serializable;
 import java.util.Objects;
@@ -25,7 +25,7 @@ public class Key implements Serializable {
 
     private Integer id;
     private String name;
-    transient String data;
+    private transient String data;
 
     public Key() {
     }
@@ -39,16 +39,27 @@ public class Key implements Serializable {
         return id;
     }
 
-    public void setId(Integer id) {
+    public Key setId(Integer id) {
         this.id = id;
+        return this;
     }
 
     public String getName() {
         return name;
     }
 
-    public void setName(String name) {
+    public Key setName(String name) {
         this.name = name;
+        return this;
+    }
+
+    public String getData() {
+        return data;
+    }
+
+    public Key setData(String data) {
+        this.data = data;
+        return this;
     }
 
     @Override
@@ -63,12 +74,12 @@ public class Key implements Serializable {
 
     @Override
     public int hashCode() {
-        return Objects.hash(name, id);
+        return Objects.hash(id, name);
     }
 
     @Override
     public String toString() {
-        return format("Key{ id=%s, name='%s'}", id, name);
+        return format("Key{id=%s, name=%s}", getId(), getName());
     }
 
     public static Key of(Integer id) {

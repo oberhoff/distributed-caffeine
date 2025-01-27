@@ -21,52 +21,44 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.CacheLoader;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
-import com.github.benmanes.caffeine.cache.RemovalCause;
+import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.RemovalListener;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.model.Filters;
-import com.mongodb.client.model.Projections;
+import com.mongodb.client.model.Updates;
 import io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer;
-import io.github.oberhoff.distributedcaffeine.serializer.FurySerializer;
+import io.github.oberhoff.distributedcaffeine.serializer.ForySerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.JavaObjectSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.bson.Document;
-import org.bson.conversions.Bson;
-import org.bson.types.ObjectId;
 
 import java.lang.System.Logger;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashMap;
+import java.security.SecureRandom;
+import java.time.Duration;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ForkJoinPool;
 import java.util.function.Function;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION;
-import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION_AND_EVICTION;
-import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.CACHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.EVICTED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.INVALIDATED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.KEY;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.ORPHANED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.STATUS;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.TOUCHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.VALUE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.DISCRIMINATOR;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.ORIGIN;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STALE;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
+import static java.lang.String.format;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.joining;
 
 /**
  * Distributed Caffeine is a {@link Caffeine}-based distributed cache using MongoDB change streams for near real-time
@@ -87,7 +79,9 @@ import static java.util.Objects.requireNonNull;
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
+ * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
  */
+@SuppressWarnings("squid:S1452")
 public final class DistributedCaffeine<K, V> {
 
     private final Logger logger;
@@ -96,16 +90,18 @@ public final class DistributedCaffeine<K, V> {
     private final DistributionMode distributionMode;
     private final Serializer<K, ?> keySerializer;
     private final Serializer<V, ?> valueSerializer;
+    private final InternalExtendedPersistence extendedPersistence;
+    private final InternalCacheLoader<K, V> cacheLoader;
+    private final Executor executor;
     private final Cache<K, V> cache;
-
-    private final InternalSynchronizationLock synchronizationLock;
-    private final InternalObjectIdGenerator objectIdGenerator;
 
     private final InternalDocumentConverter<K, V> documentConverter;
     private final InternalMongoRepository<K, V> mongoRepository;
     private final InternalCacheManager<K, V> cacheManager;
     private final InternalChangeStreamWatcher<K, V> changeStreamWatcher;
     private final InternalMaintenanceWorker<K, V> maintenanceWorker;
+    private final InternalSynchronizationLock synchronizationLock;
+    private final Long origin;
 
     private DistributedCaffeine(Builder<K, V> builder) {
         this.logger = System.getLogger(getClass().getName());
@@ -114,20 +110,22 @@ public final class DistributedCaffeine<K, V> {
         this.distributionMode = builder.distributionMode;
         this.keySerializer = builder.keySerializer;
         this.valueSerializer = builder.valueSerializer;
+        this.extendedPersistence = new InternalExtendedPersistence(
+                builder.extendedPersistenceSize, builder.extendedPersistenceTime, builder.extendedPersistenceLoader);
+        this.cacheLoader = builder.cacheLoader;
+        this.executor = builder.executor;
         this.cache = builder.cache;
-
-        this.synchronizationLock = new InternalSynchronizationLock();
-        this.objectIdGenerator = new InternalObjectIdGenerator();
 
         this.documentConverter = new InternalDocumentConverter<>();
         this.mongoRepository = new InternalMongoRepository<>();
         this.cacheManager = new InternalCacheManager<>();
         this.changeStreamWatcher = new InternalChangeStreamWatcher<>();
         this.maintenanceWorker = new InternalMaintenanceWorker<>();
+        this.synchronizationLock = new InternalSynchronizationLock();
+        this.origin = new SecureRandom().nextLong();
 
-        Stream.of(builder.wrappedRemovalListener, builder.wrappedEvictionListener, builder.wrappedCacheLoader,
-                        this.documentConverter, this.mongoRepository, this.cacheManager, this.changeStreamWatcher,
-                        this.maintenanceWorker)
+        Stream.of(builder.removalListener, builder.evictionListener, builder.cacheLoader, this.documentConverter,
+                        this.mongoRepository, this.cacheManager, this.changeStreamWatcher, this.maintenanceWorker)
                 .filter(Objects::nonNull)
                 .forEach(lazyInitializer -> lazyInitializer.initialize(this));
 
@@ -140,10 +138,9 @@ public final class DistributedCaffeine<K, V> {
      * {@link Cache}) or with {@link Builder#build(CacheLoader)} to construct a loading cache instance of type
      * {@link DistributedLoadingCache} (extends {@link LoadingCache}).
      * <p>
-     * <b>Note:</b> A call to this method must use additional generic type parameters for key and value directly
-     * before the method name like in the following example:
+     * Exemplary usage:
      * <pre>
-     * DistributedCache&#60;Key, Value&#62; distributedCache = DistributedCaffeine.&#60;Key, Value&#62;newBuilder(mongoCollection)
+     * DistributedCache&#60;Key, Value&#62; distributedCache = DistributedCaffeine.newBuilder(mongoCollection)
      *     ...
      *     .build();
      * </pre>
@@ -152,6 +149,7 @@ public final class DistributedCaffeine<K, V> {
      * @param <K>             the key type of the cache
      * @param <V>             the value type of the cache
      * @return builder for configuring and constructing cache instances
+     * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
      */
     public static <K, V> Builder<K, V> newBuilder(MongoCollection<Document> mongoCollection) {
         return new Builder<>(mongoCollection);
@@ -173,11 +171,15 @@ public final class DistributedCaffeine<K, V> {
         private DistributionMode distributionMode;
         private Serializer<K, ?> keySerializer;
         private Serializer<V, ?> valueSerializer;
+        private Integer extendedPersistenceSize;
+        private Duration extendedPersistenceTime;
+        private boolean extendedPersistenceLoader;
         private Cache<K, V> cache;
 
-        private InternalRemovalListener<K, V> wrappedRemovalListener;
-        private InternalEvictionListener<K, V> wrappedEvictionListener;
-        private InternalCacheLoader<K, V> wrappedCacheLoader;
+        private InternalRemovalListener<K, V> removalListener;
+        private InternalEvictionListener<K, V> evictionListener;
+        private Executor executor;
+        private InternalCacheLoader<K, V> cacheLoader;
 
         private Builder(MongoCollection<Document> mongoCollection) {
             requireNonNull(mongoCollection, "mongoCollection cannot be null");
@@ -185,12 +187,14 @@ public final class DistributedCaffeine<K, V> {
         }
 
         /**
-         * Specifies the Caffeine builder to be used for internal caching. It must be configured without a final build
-         * step. Instead of {@link Caffeine#build()} or {@link Caffeine#build(CacheLoader)}, this builder's
-         * {@link Builder#build()} or {@link Builder#build(CacheLoader)} can be used later on like in the following
-         * example:
+         * Specifies the Caffeine builder to be used for configuring the Caffeine cache used internally. This
+         * configuration also begins with a builder returned by invoking its own {@code newBuilder()} method, but
+         * without finalizing it by invoking one of its own {@code build(...)} methods. Instead, this construction is
+         * done internally by the outer {@code build...(...)} methods.
+         * <p>
+         * Exemplary usage:
          * <pre>
-         * DistributedCache&#60;Key, Value&#62; distributedCache = DistributedCaffeine.&#60;Key, Value&#62;newBuilder(mongoCollection)
+         * DistributedCache&#60;Key, Value&#62; distributedCache = DistributedCaffeine.newBuilder(mongoCollection)
          *     .withCaffeineBuilder(Caffeine.newBuilder()
          *         .maximumSize(10_000)
          *         .expireAfterWrite(Duration.ofMinutes(5)))
@@ -207,8 +211,9 @@ public final class DistributedCaffeine<K, V> {
          *      or time-based eviction instead.</li>
          * </ul>
          *
-         * @param caffeineBuilder {@link Caffeine} builder instance without final build step
+         * @param caffeineBuilder Caffeine builder instance without a final build step
          * @return a builder instance for chaining additional methods
+         * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
          */
         @SuppressWarnings("unchecked")
         public Builder<K, V> withCaffeineBuilder(Caffeine<?, ?> caffeineBuilder) {
@@ -223,7 +228,7 @@ public final class DistributedCaffeine<K, V> {
          * <b>Note:</b> {@link DistributionMode#POPULATION_AND_INVALIDATION_AND_EVICTION} is the default mode if this
          * method is skipped.
          *
-         * @param distributionMode {@link DistributionMode} used for distributed synchronization
+         * @param distributionMode distribution mode used for distributed synchronization
          * @return a builder instance for chaining additional methods
          */
         public Builder<K, V> withDistributionMode(DistributionMode distributionMode) {
@@ -233,18 +238,17 @@ public final class DistributedCaffeine<K, V> {
         }
 
         /**
-         * Specifies that cache entries are serialized with byte array representation using <i>Apache Fury</i> when
+         * Specifies that cache entries are serialized with byte array representation using <i>Apache Fory</i> when
          * stored in the MongoDB collection.
          * <p>
          * <b>Note:</b> This is the default serializer if builder methods for serializers are skipped.
          *
-         * @param registerClasses optional {@link Class} of the object (with additional classes of nested objects) to
-         *                        serialize
+         * @param registerClasses optional class of the object (with additional classes of nested objects) to serialize
          * @return a builder instance for chaining additional methods
          */
-        public Builder<K, V> withFurySerializer(Class<?>... registerClasses) {
-            this.keySerializer = new FurySerializer<>(registerClasses);
-            this.valueSerializer = new FurySerializer<>(registerClasses);
+        public Builder<K, V> withForySerializer(Class<?>... registerClasses) {
+            this.keySerializer = new ForySerializer<>(registerClasses);
+            this.valueSerializer = new ForySerializer<>(registerClasses);
             return this;
         }
 
@@ -253,7 +257,7 @@ public final class DistributedCaffeine<K, V> {
          * Serialization</i> when stored in the MongoDB collection. Objects to serialize must implement the
          * {@link java.io.Serializable} interface.
          * <p>
-         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fury</i> is the default serializer
+         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fory</i> is the default serializer
          * if builder methods for serializers are skipped.
          *
          * @return a builder instance for chaining additional methods
@@ -269,24 +273,24 @@ public final class DistributedCaffeine<K, V> {
          * <i>Jackson</i> when stored in the MongoDB collection. If a default object mapper is sufficient,
          * {@link Builder#withJsonSerializer(Class, Class, boolean)} can be used instead.
          * <p>
-         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fury</i> is the default serializer
+         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fory</i> is the default serializer
          * if builder methods for serializers are skipped.
          *
-         * @param objectMapper the customized {@link ObjectMapper}
-         * @param keyClass     the {@link Class} of the key object to serialize
-         * @param valueClass   the {@link Class} of the value object to serialize
-         * @param storeAsBson  {@code true} for BSON encoding or {@code false} for string encoding
+         * @param objectMapper      the customized object mapper
+         * @param keyClass          the class of the key object to serialize
+         * @param valueClass        the class of the value object to serialize
+         * @param storeAsBinaryJson {@code true} for BSON encoding or {@code false} for string encoding
          * @return a builder instance for chaining additional methods
          */
         public Builder<K, V> withJsonSerializer(ObjectMapper objectMapper,
-                                                Class<? super K> keyClass,
-                                                Class<? super V> valueClass,
-                                                boolean storeAsBson) {
+                                                Class<K> keyClass,
+                                                Class<V> valueClass,
+                                                boolean storeAsBinaryJson) {
             requireNonNull(objectMapper, "objectMapper cannot be null");
             requireNonNull(keyClass, "keyClass cannot be null");
             requireNonNull(valueClass, "valueClass cannot be null");
-            this.keySerializer = new JacksonSerializer<>(objectMapper, keyClass, storeAsBson);
-            this.valueSerializer = new JacksonSerializer<>(objectMapper, valueClass, storeAsBson);
+            this.keySerializer = new JacksonSerializer<>(objectMapper, keyClass, storeAsBinaryJson);
+            this.valueSerializer = new JacksonSerializer<>(objectMapper, valueClass, storeAsBinaryJson);
             return this;
         }
 
@@ -295,24 +299,24 @@ public final class DistributedCaffeine<K, V> {
          * <i>Jackson</i> when stored in the MongoDB collection. If a default object mapper is sufficient,
          * {@link Builder#withJsonSerializer(TypeReference, TypeReference, boolean)} can be used instead.
          * <p>
-         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fury</i> is the default serializer
+         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fory</i> is the default serializer
          * if builder methods for serializers are skipped.
          *
-         * @param objectMapper       the customized {@link ObjectMapper}
-         * @param keyTypeReference   the {@link TypeReference} of the key object
-         * @param valueTypeReference the {@link TypeReference} of the value object
-         * @param storeAsBson        {@code true} for BSON encoding or {@code false} for string encoding
+         * @param objectMapper       the customized object mapper
+         * @param keyTypeReference   the type reference of the key object
+         * @param valueTypeReference the type reference of the value object
+         * @param storeAsBinaryJson  {@code true} for BSON encoding or {@code false} for string encoding
          * @return a builder instance for chaining additional methods
          */
         public Builder<K, V> withJsonSerializer(ObjectMapper objectMapper,
                                                 TypeReference<K> keyTypeReference,
                                                 TypeReference<V> valueTypeReference,
-                                                boolean storeAsBson) {
+                                                boolean storeAsBinaryJson) {
             requireNonNull(objectMapper, "objectMapper cannot be null");
             requireNonNull(keyTypeReference, "keyTypeReference cannot be null");
             requireNonNull(valueTypeReference, "valueTypeReference cannot be null");
-            this.keySerializer = new JacksonSerializer<>(objectMapper, keyTypeReference, storeAsBson);
-            this.valueSerializer = new JacksonSerializer<>(objectMapper, valueTypeReference, storeAsBson);
+            this.keySerializer = new JacksonSerializer<>(objectMapper, keyTypeReference, storeAsBinaryJson);
+            this.valueSerializer = new JacksonSerializer<>(objectMapper, valueTypeReference, storeAsBinaryJson);
             return this;
         }
 
@@ -321,21 +325,21 @@ public final class DistributedCaffeine<K, V> {
          * <i>Jackson</i> when stored in the MongoDB collection. If a customized object mapper is required,
          * {@link Builder#withJsonSerializer(ObjectMapper, Class, Class, boolean)} can be used instead.
          * <p>
-         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fury</i> is the default serializer
+         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fory</i> is the default serializer
          * if builder methods for serializers are skipped.
          *
-         * @param keyClass    the {@link Class} of the key object to serialize
-         * @param valueClass  the {@link Class} of the value object to serialize
-         * @param storeAsBson {@code true} for BSON encoding or {@code false} for string encoding
+         * @param keyClass          the class of the key object to serialize
+         * @param valueClass        the class of the value object to serialize
+         * @param storeAsBinaryJson {@code true} for BSON encoding or {@code false} for string encoding
          * @return a builder instance for chaining additional methods
          */
-        public Builder<K, V> withJsonSerializer(Class<? super K> keyClass,
-                                                Class<? super V> valueClass,
-                                                boolean storeAsBson) {
+        public Builder<K, V> withJsonSerializer(Class<K> keyClass,
+                                                Class<V> valueClass,
+                                                boolean storeAsBinaryJson) {
             requireNonNull(keyClass, "keyClass cannot be null");
             requireNonNull(valueClass, "valueClass cannot be null");
-            this.keySerializer = new JacksonSerializer<>(keyClass, storeAsBson);
-            this.valueSerializer = new JacksonSerializer<>(valueClass, storeAsBson);
+            this.keySerializer = new JacksonSerializer<>(keyClass, storeAsBinaryJson);
+            this.valueSerializer = new JacksonSerializer<>(valueClass, storeAsBinaryJson);
             return this;
         }
 
@@ -344,21 +348,21 @@ public final class DistributedCaffeine<K, V> {
          * <i>Jackson</i> when stored in the MongoDB collection. If a customized object mapper is required,
          * {@link Builder#withJsonSerializer(ObjectMapper, TypeReference, TypeReference, boolean)} can be used instead.
          * <p>
-         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fury</i> is the default serializer
+         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fory</i> is the default serializer
          * if builder methods for serializers are skipped.
          *
-         * @param keyTypeReference   the {@link TypeReference} of the key object
-         * @param valueTypeReference the {@link TypeReference} of the value object
-         * @param storeAsBson        {@code true} for BSON encoding or {@code false} for string encoding
+         * @param keyTypeReference   the type reference of the key object
+         * @param valueTypeReference the type reference of the value object
+         * @param storeAsBinaryJson  {@code true} for BSON encoding or {@code false} for string encoding
          * @return a builder instance for chaining additional methods
          */
         public Builder<K, V> withJsonSerializer(TypeReference<K> keyTypeReference,
                                                 TypeReference<V> valueTypeReference,
-                                                boolean storeAsBson) {
+                                                boolean storeAsBinaryJson) {
             requireNonNull(keyTypeReference, "keyTypeReference cannot be null");
             requireNonNull(valueTypeReference, "valueTypeReference cannot be null");
-            this.keySerializer = new JacksonSerializer<>(keyTypeReference, storeAsBson);
-            this.valueSerializer = new JacksonSerializer<>(valueTypeReference, storeAsBson);
+            this.keySerializer = new JacksonSerializer<>(keyTypeReference, storeAsBinaryJson);
+            this.valueSerializer = new JacksonSerializer<>(valueTypeReference, storeAsBinaryJson);
             return this;
         }
 
@@ -372,7 +376,7 @@ public final class DistributedCaffeine<K, V> {
          *     </li>
          * </ul>
          * <p>
-         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fury</i> is the default serializer
+         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fory</i> is the default serializer
          * if builder methods for serializers are skipped.
          *
          * @param keySerializer the custom serializer for key objects
@@ -380,6 +384,7 @@ public final class DistributedCaffeine<K, V> {
          */
         public Builder<K, V> withCustomKeySerializer(Serializer<K, ?> keySerializer) {
             requireNonNull(keySerializer, "keySerializer cannot be null");
+            ensureInstanceOfSerializer(keySerializer);
             this.keySerializer = keySerializer;
             return this;
         }
@@ -394,7 +399,7 @@ public final class DistributedCaffeine<K, V> {
          *     </li>
          * </ul>
          * <p>
-         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fury</i> is the default serializer
+         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fory</i> is the default serializer
          * if builder methods for serializers are skipped.
          *
          * @param valueSerializer the custom serializer for value objects
@@ -402,101 +407,246 @@ public final class DistributedCaffeine<K, V> {
          */
         public Builder<K, V> withCustomValueSerializer(Serializer<V, ?> valueSerializer) {
             requireNonNull(valueSerializer, "valueSerializer cannot be null");
+            ensureInstanceOfSerializer(valueSerializer);
             this.valueSerializer = valueSerializer;
             return this;
         }
 
+        private void ensureInstanceOfSerializer(Serializer<?, ?> serializer) {
+            List<Class<?>> serializers = List.of(
+                    ByteArraySerializer.class, StringSerializer.class, JsonSerializer.class);
+            if (serializers.stream()
+                    .noneMatch(serializerClass -> serializerClass.isInstance(serializer))) {
+                throw new IllegalArgumentException(format(
+                        "Custom serializer must implement one of the following interfaces: %s",
+                        serializers.stream()
+                                .map(Class::getSimpleName)
+                                .collect(joining(", "))));
+            }
+        }
+
         /**
-         * Same as {@link Caffeine#build()}. Constructs a {@link DistributedCache} instance (extends {@link Cache}) with
-         * additional distributed synchronization functionality.
+         * Specifies the maximum size for the extended persistence up to which recently evicted cache entries will
+         * remain in the MongoDB collection and may be reloaded on demand.
+         * <p>
+         * Cache entries with extended persistence can be reloaded using a variant of a {@link DistributedLoadingCache}
+         * instance with special semantics which can be constructed using {@link #buildWithExtendedPersistence()} or
+         * {@link #buildWithExtendedPersistence(CacheLoader)}. Alternatively,
+         * {@link DistributedPolicy#getFromMongo(Object, boolean)} or
+         * {@link DistributedPolicy#getAllFromMongo(Iterable, boolean)} can be used to load those cache entries directly
+         * from the MongoDB collection bypassing this cache instance.
+         * <p>
+         * <b>Note:</b> If extended persistence is configured, at least one eviction policy must be configured.
          *
-         * @return the new {@link DistributedCache} instance
+         * @param maximumSize the maximum size for the extended persistence (must be positive)
+         * @return a builder instance for chaining additional methods
          */
-        public DistributedCache<K, V> build() {
+        public Builder<K, V> withExtendedPersistence(Integer maximumSize) {
+            requireNonNull(maximumSize, "maximumSize cannot be null");
+            if (maximumSize <= 0) {
+                throw new IllegalArgumentException("maximumSize must be positive");
+            }
+            this.extendedPersistenceSize = maximumSize;
+            return this;
+        }
+
+        /**
+         * Specifies the maximum amount of time for the extended persistence that recently evicted cache entries will
+         * remain in the MongoDB collection and may be reloaded on demand.
+         * <p>
+         * Cache entries with extended persistence can be reloaded using a variant of a {@link DistributedLoadingCache}
+         * instance with special semantics which can be constructed using {@link #buildWithExtendedPersistence()} or
+         * {@link #buildWithExtendedPersistence(CacheLoader)}. Alternatively,
+         * {@link DistributedPolicy#getFromMongo(Object, boolean)} or
+         * {@link DistributedPolicy#getAllFromMongo(Iterable, boolean)} can be used to load those cache entries directly
+         * from the MongoDB collection bypassing this cache instance.
+         * <p>
+         * <b>Note:</b> If extended persistence is configured, at least one eviction policy must be configured.
+         *
+         * @param maximumTime the maximum amount of time for the extended persistence (must be positive)
+         * @return a builder instance for chaining additional methods
+         */
+        public Builder<K, V> withExtendedPersistence(Duration maximumTime) {
+            requireNonNull(maximumTime, "maximumTime cannot be null");
+            if (maximumTime.isZero() || maximumTime.isNegative()) {
+                throw new IllegalArgumentException("maximumTime must be positive");
+            }
+            this.extendedPersistenceTime = maximumTime;
+            return this;
+        }
+
+        /**
+         * Constructs a {@link DistributedCache} (extends {@link Cache}) instance (similar to {@link Caffeine#build()}).
+         *
+         * @param <K1> the key type of the cache (same as {@link K})
+         * @param <V1> the value type of the cache (same as {@link V})
+         * @return the new distributed cache instance
+         */
+        @SuppressWarnings("unchecked")
+        public <K1 extends K, V1 extends V> DistributedCache<K1, V1> build() {
             DistributedCaffeine<K, V> distributedCaffeine = buildCommon(Caffeine::build);
             InternalDistributedCache<K, V> distributedCache = new InternalDistributedCache<>();
             distributedCache.initialize(distributedCaffeine);
-            return distributedCache;
+            return (DistributedCache<K1, V1>) distributedCache;
         }
 
         /**
-         * Same as {@link Caffeine#build(CacheLoader)}. Constructs a {@link DistributedLoadingCache} instance (extends
-         * {@link LoadingCache}) with additional distributed synchronization functionality.
+         * Constructs a {@link DistributedLoadingCache} (extends {@link LoadingCache}) instance (similar to
+         * {@link Caffeine#build(CacheLoader)}).
          *
-         * @param cacheLoader the {@link CacheLoader} used to obtain new values
-         * @return the new {@link DistributedLoadingCache} instance
+         * @param cacheLoader the cache loader used to obtain new values
+         * @param <K1>        the key type of the cache (same as {@link K})
+         * @param <V1>        the value type of the cache (same as {@link V})
+         * @return the new distributed loading cache instance
          */
-        public DistributedLoadingCache<K, V> build(CacheLoader<K, V> cacheLoader) {
+        @SuppressWarnings("unchecked")
+        public <K1 extends K, V1 extends V> DistributedLoadingCache<K1, V1> build(
+                CacheLoader<? super K1, ? super V1> cacheLoader) {
             requireNonNull(cacheLoader, "cacheLoader cannot be null");
-            wrappedCacheLoader = new InternalCacheLoader<>(cacheLoader);
-            DistributedCaffeine<K, V> distributedCaffeine = buildCommon(caffeine ->
-                    caffeine.build(wrappedCacheLoader));
+            this.cacheLoader = new InternalCacheLoader<>((CacheLoader<K, V>) cacheLoader);
+            DistributedCaffeine<K, V> distributedCaffeine = buildCommon(caffeine -> caffeine.build(this.cacheLoader));
             InternalDistributedLoadingCache<K, V> distributedLoadingCache = new InternalDistributedLoadingCache<>();
             distributedLoadingCache.initialize(distributedCaffeine);
-            return distributedLoadingCache;
+            return (DistributedLoadingCache<K1, V1>) distributedLoadingCache;
         }
 
+        /**
+         * Constructs a variant of a {@link DistributedLoadingCache} (extends {@link LoadingCache}) instance with
+         * special semantics regarding extended persistence which can be configured by size using
+         * {@link #withExtendedPersistence(Integer)} or by time using {@link #withExtendedPersistence(Duration)}.
+         * <p>
+         * Special semantics means that a provided {@link CacheLoader} is only invoked to obtain missing cache entries
+         * if these could not be reloaded from the MongoDB collection beforehand.
+         * <p>
+         * This method is a shortcut for {@link #buildWithExtendedPersistence(CacheLoader)} using an implicit cache
+         * loader that always returns {@code null} values.
+         * <p>
+         * <b>Note:</b> Before constructing a variant of a {@link DistributedLoadingCache} instance with special
+         * semantics, extended persistence and at least one eviction policy must be configured.
+         *
+         * @param <K1> the key type of the cache (same as {@link K})
+         * @param <V1> the value type of the cache  (same as {@link V})
+         * @return the new distributed loading cache instance with special semantics
+         */
+        public <K1 extends K, V1 extends V> DistributedLoadingCache<K1, V1> buildWithExtendedPersistence() {
+            return buildWithExtendedPersistence(key -> null);
+        }
+
+        /**
+         * Constructs a variant of a {@link DistributedLoadingCache} (extends {@link LoadingCache}) instance with
+         * special semantics regarding extended persistence which can be configured by size using
+         * {@link #withExtendedPersistence(Integer)} or by time using {@link #withExtendedPersistence(Duration)}.
+         * <p>
+         * Special semantics means that a provided {@link CacheLoader} is only invoked to obtain missing cache entries
+         * if these could not be reloaded from the MongoDB collection beforehand.
+         * <p>
+         * If a cache loader is required that always returns {@code null} values,
+         * {@link #buildWithExtendedPersistence()} can be used instead.
+         * <p>
+         * <b>Note:</b> Before constructing a variant of a {@link DistributedLoadingCache} instance with special
+         * semantics, extended persistence and at least one eviction policy must be configured.
+         *
+         * @param cacheLoader the cache loader used to obtain new values
+         * @param <K1>        the key type of the cache (same as {@link K})
+         * @param <V1>        the value type of the cache (same as {@link V})
+         * @return the new distributed loading cache instance with special semantics
+         */
         @SuppressWarnings("unchecked")
+        public <K1 extends K, V1 extends V> DistributedLoadingCache<K1, V1> buildWithExtendedPersistence(
+                CacheLoader<? super K1, ? super V1> cacheLoader) {
+            requireNonNull(cacheLoader, "cacheLoader cannot be null");
+            if (isNull(extendedPersistenceTime) && isNull(extendedPersistenceSize)) {
+                throw new IllegalStateException(
+                        "If no extended persistence size and no extended persistence time is set, "
+                                .concat("'build(...)' must be used"));
+            }
+            this.cacheLoader = new InternalCacheLoader<>((CacheLoader<K, V>) cacheLoader);
+            this.extendedPersistenceLoader = true;
+            DistributedCaffeine<K, V> distributedCaffeine = buildCommon(caffeine -> caffeine.build(this.cacheLoader));
+            InternalDistributedLoadingCache<K, V> distributedLoadingCache = new InternalDistributedLoadingCache<>();
+            distributedLoadingCache.initialize(distributedCaffeine);
+            return (DistributedLoadingCache<K1, V1>) distributedLoadingCache;
+        }
+
+        @SuppressWarnings({"unchecked", "squid:S3011"})
         private DistributedCaffeine<K, V> buildCommon(Function<Caffeine<Object, Object>, Cache<K, V>> build) {
             // use default Caffeine builder if no customized builder is set
             Caffeine<Object, Object> caffeine = Optional.ofNullable(this.caffeineBuilder)
                     .orElseGet(Caffeine::newBuilder);
 
             // throw exception if weak or soft references are configured
-            boolean hasWeakReferences;
-            try {
-                Method isStrongKeysMethod = caffeine.getClass().getDeclaredMethod("isStrongKeys");
-                Method isStrongValuesMethod = caffeine.getClass().getDeclaredMethod("isStrongValues");
-                isStrongKeysMethod.setAccessible(true);
-                isStrongValuesMethod.setAccessible(true);
-                hasWeakReferences = !((Boolean) isStrongKeysMethod.invoke(caffeine)
-                        && (Boolean) isStrongValuesMethod.invoke(caffeine));
-                isStrongKeysMethod.setAccessible(false);
-                isStrongValuesMethod.setAccessible(false);
-            } catch (Exception e) {
-                throw new DistributedCaffeineException(e);
-            }
-            if (hasWeakReferences) {
-                throw new DistributedCaffeineException("The use of weak or soft references is not supported");
+            boolean hasWeakOrSoftReferences;
+            Method isStrongKeysMethod = getFailable(() ->
+                    caffeine.getClass().getDeclaredMethod("isStrongKeys"));
+            Method isStrongValuesMethod = getFailable(() ->
+                    caffeine.getClass().getDeclaredMethod("isStrongValues"));
+            isStrongKeysMethod.setAccessible(true);
+            isStrongValuesMethod.setAccessible(true);
+            hasWeakOrSoftReferences = !((Boolean) getFailable(() -> isStrongKeysMethod.invoke(caffeine))
+                    || (Boolean) getFailable(() -> isStrongValuesMethod.invoke(caffeine)));
+            isStrongKeysMethod.setAccessible(false);
+            isStrongValuesMethod.setAccessible(false);
+            if (hasWeakOrSoftReferences) {
+                throw new IllegalStateException("The use of weak or soft references is not supported");
             }
 
-            // inject wrapped removal and eviction listener
-            try {
-                Field removalListenerField = caffeine.getClass().getDeclaredField("removalListener");
-                Field evictionListenerField = caffeine.getClass().getDeclaredField("evictionListener");
-                removalListenerField.setAccessible(true);
-                evictionListenerField.setAccessible(true);
-                RemovalListener<K, V> removalListener = (RemovalListener<K, V>) removalListenerField.get(caffeine);
-                RemovalListener<K, V> evictionListener = (RemovalListener<K, V>) evictionListenerField.get(caffeine);
-                RemovalListener<K, V> noopListener = (key, value, removalCause) -> {
-                };
-                wrappedRemovalListener = new InternalRemovalListener<>(nonNull(removalListener)
-                        ? removalListener
-                        : noopListener);
-                wrappedEvictionListener = new InternalEvictionListener<>(nonNull(evictionListener)
-                        ? evictionListener
-                        : noopListener);
-                removalListenerField.set(caffeine, wrappedRemovalListener);
-                evictionListenerField.set(caffeine, wrappedEvictionListener);
-                removalListenerField.setAccessible(false);
-                evictionListenerField.setAccessible(false);
-            } catch (Exception e) {
-                throw new DistributedCaffeineException(e);
-            }
+            // inject removal and eviction listener
+            Field removalListenerField = getFailable(() ->
+                    caffeine.getClass().getDeclaredField("removalListener"));
+            Field evictionListenerField = getFailable(() ->
+                    caffeine.getClass().getDeclaredField("evictionListener"));
+            removalListenerField.setAccessible(true);
+            evictionListenerField.setAccessible(true);
+            RemovalListener<K, V> caffeineRemovalListener = getFailable(() ->
+                    (RemovalListener<K, V>) removalListenerField.get(caffeine));
+            RemovalListener<K, V> caffeineEvictionListener = getFailable(() ->
+                    (RemovalListener<K, V>) evictionListenerField.get(caffeine));
+            RemovalListener<K, V> noopListener = (key, value, removalCause) -> {
+            };
+            this.removalListener = new InternalRemovalListener<>(nonNull(caffeineRemovalListener)
+                    ? caffeineRemovalListener
+                    : noopListener);
+            this.evictionListener = new InternalEvictionListener<>(nonNull(caffeineEvictionListener)
+                    ? caffeineEvictionListener
+                    : noopListener);
+            runFailable(() -> removalListenerField.set(caffeine, removalListener));
+            runFailable(() -> evictionListenerField.set(caffeine, evictionListener));
+            removalListenerField.setAccessible(false);
+            evictionListenerField.setAccessible(false);
+
+            // extract executor
+            Field executorField = getFailable(() ->
+                    caffeine.getClass().getDeclaredField("executor"));
+            executorField.setAccessible(true);
+            this.executor = Optional.ofNullable(
+                            getFailable(() -> (Executor) executorField.get(caffeine)))
+                    .orElseGet(ForkJoinPool::commonPool);
+            executorField.setAccessible(false);
 
             // set defaults
             if (isNull(this.distributionMode)) {
                 this.distributionMode = POPULATION_AND_INVALIDATION_AND_EVICTION;
             }
             if (isNull(this.keySerializer)) {
-                this.keySerializer = new FurySerializer<>();
+                this.keySerializer = new ForySerializer<>();
             }
             if (isNull(this.valueSerializer)) {
-                this.valueSerializer = new FurySerializer<>();
+                this.valueSerializer = new ForySerializer<>();
             }
 
             // build final Caffeine cache instance
             this.cache = build.apply(caffeine);
+
+            // throw exception if extended persistence is configured but eviction policies are missing
+            Policy<K, V> policy = cache.policy();
+            if ((nonNull(extendedPersistenceSize) || nonNull(extendedPersistenceTime))
+                    && Stream.of(policy.eviction(), policy.expireAfterAccess(), policy.expireAfterWrite(),
+                            policy.expireVariably())
+                    .allMatch(Optional::isEmpty)) {
+                throw new IllegalStateException(
+                        "If an extended persistence size or an extended persistence time is set, "
+                                .concat("at least one eviction policy must be configured."));
+            }
 
             // construct and return DistributedCaffeine instance
             return new DistributedCaffeine<>(this);
@@ -505,187 +655,40 @@ public final class DistributedCaffeine<K, V> {
 
     void activate() {
         if (!isActivated()) {
-            cacheManager.activate();
-            changeStreamWatcher.activate();
-            maintenanceWorker.activate();
+            // migrations can be removed in future releases
+            mongoCollection.updateMany(
+                    Filters.exists(DISCRIMINATOR.toString(), false),
+                    Updates.set(DISCRIMINATOR.toString(), null));
+            mongoCollection.updateMany(
+                    Filters.exists(ORIGIN.toString(), false),
+                    Updates.set(ORIGIN.toString(), 0L));
+            mongoCollection.updateMany(
+                    Filters.exists(STALE.toString(), false),
+                    Updates.set(STALE.toString(), false));
+            synchronizationLock.runLocked(() -> {
+                cacheManager.activate();
+                changeStreamWatcher.activate();
+                maintenanceWorker.activate();
+            });
             // synchronization after watching so that no changes are missed
-            synchronizeCacheWithMongoCollection();
+            cacheManager.synchronizeCacheFromStore();
         }
     }
 
     void deactivate() {
-        maintenanceWorker.deactivate();
-        changeStreamWatcher.deactivate();
-        cacheManager.deactivate();
+        if (isActivated()) {
+            synchronizationLock.runLocked(() -> {
+                maintenanceWorker.deactivate();
+                changeStreamWatcher.deactivate();
+                cacheManager.deactivate();
+            });
+        }
     }
 
     boolean isActivated() {
         return cacheManager.isActivated()
                 && changeStreamWatcher.isActivated()
                 && maintenanceWorker.isActivated();
-    }
-
-    void processOutboundInsert(Map<? extends K, ? extends V> map, String status,
-                               boolean manage, boolean originConscious) {
-        if (isSupportedByDistributionMode(status)) {
-            manage = manage && isSupportedByDistributionMode(CACHED);
-            cacheManager.manageOutboundInsert(map, status, manage, originConscious);
-        }
-    }
-
-    void processInboundInsert(InternalCacheDocument<K, V> cacheDocument, boolean isChangeStream) {
-        if (isSupportedByDistributionMode(cacheDocument.getStatus())) {
-            synchronizationLock.lock();
-            try {
-                boolean manage = isSupportedByDistributionMode(CACHED);
-                cacheManager.manageInboundInsert(cacheDocument, manage, isChangeStream);
-            } finally {
-                synchronizationLock.unlock();
-            }
-        }
-    }
-
-    void processInboundUpdate(InternalCacheDocument<K, V> cacheDocument) {
-        if (isSupportedByDistributionMode(CACHED)) {
-            synchronizationLock.lock();
-            try {
-                cacheManager.manageInboundUpdate(cacheDocument);
-            } finally {
-                synchronizationLock.unlock();
-            }
-        }
-    }
-
-    void processInboundDelete(ObjectId objectId) {
-        if (isSupportedByDistributionMode(CACHED)) {
-            synchronizationLock.lock();
-            try {
-                cacheManager.manageInboundDelete(objectId);
-            } finally {
-                synchronizationLock.unlock();
-            }
-        }
-    }
-
-    void processInboundFailure(ObjectId objectId) {
-        if (isSupportedByDistributionMode(CACHED)) {
-            synchronizationLock.lock();
-            try {
-                cacheManager.manageInboundFailure(objectId);
-            } finally {
-                synchronizationLock.unlock();
-            }
-        }
-    }
-
-    V putDistributed(K key, V value) {
-        putAllDistributed(Map.of(key, value));
-        return value;
-    }
-
-    Map<? extends K, ? extends V> putAllDistributed(Map<? extends K, ? extends V> map) {
-        processOutboundInsert(map, CACHED, true, true);
-        return map;
-    }
-
-    V putDistributedRefresh(K key, V newValue, V oldValue) {
-        if (isActivated()) {
-            if (isSupportedByDistributionMode(CACHED)) {
-                processOutboundInsert(Map.of(key, newValue), CACHED, false, false);
-                // return old value which does not change the cache and does not trigger the removal listener
-                return oldValue;
-            } else {
-                return newValue;
-            }
-        } else {
-            return newValue;
-        }
-    }
-
-    K invalidateDistributed(K key) {
-        invalidateAllDistributed(Set.of(key));
-        return key;
-    }
-
-    Set<K> invalidateAllDistributed(Set<K> keys) {
-        Map<K, V> map = new HashMap<>(); // allows null values
-        keys.forEach(key -> map.put(key, null));
-        processOutboundInsert(map, INVALIDATED, true, true);
-        return keys;
-    }
-
-    V invalidateDistributedRefresh(K key, V oldValue) {
-        if (isActivated()) {
-            if (isSupportedByDistributionMode(INVALIDATED)) {
-                Map<K, V> map = new HashMap<>(); // allows null values
-                map.put(key, null);
-                processOutboundInsert(map, INVALIDATED, false, false);
-                // return old value which does not change the cache and does not trigger the removal listener
-                return oldValue;
-            } else {
-                return null;
-            }
-        } else {
-            return null;
-        }
-    }
-
-    void evictDistributed(K key, V value, RemovalCause removalCause) {
-        // distribution of reference-based evictions is not supported (yet)
-        if (removalCause != RemovalCause.COLLECTED) {
-            processOutboundInsert(Map.of(key, value), EVICTED, false, true);
-        }
-        // manage replacement if populations are distributed, but evictions are not distributed
-        if (isSupportedByDistributionMode(CACHED) && !isSupportedByDistributionMode(EVICTED)) {
-            cacheManager.manageReplacement(key, value, removalCause);
-        }
-    }
-
-    boolean isSupportedByDistributionMode(String status) {
-        if (CACHED.equals(status) || ORPHANED.equals(status)) {
-            return distributionMode == POPULATION_AND_INVALIDATION_AND_EVICTION
-                    || distributionMode == POPULATION_AND_INVALIDATION;
-        } else if (INVALIDATED.equals(status)) {
-            return distributionMode == POPULATION_AND_INVALIDATION_AND_EVICTION
-                    || distributionMode == POPULATION_AND_INVALIDATION
-                    || distributionMode == INVALIDATION_AND_EVICTION
-                    || distributionMode == INVALIDATION;
-        } else if (EVICTED.equals(status)) {
-            return distributionMode == POPULATION_AND_INVALIDATION_AND_EVICTION
-                    || distributionMode == INVALIDATION_AND_EVICTION;
-        } else {
-            return false;
-        }
-    }
-
-    private void synchronizeCacheWithMongoCollection() {
-        if (isSupportedByDistributionMode(CACHED)) {
-            Bson filter = Filters.ne(STATUS, ORPHANED);
-            Bson projection = Projections.include(KEY, VALUE, STATUS, TOUCHED);
-            try (Stream<InternalCacheDocument<K, V>> cacheDocumentStream =
-                         mongoRepository.streamCacheDocuments(filter, projection)) {
-                cacheDocumentStream
-                        .collect(Collectors.groupingBy(InternalCacheDocument::getKey))
-                        .forEach((k, cacheDocuments) -> {
-                            List<InternalCacheDocument<K, V>> sortedCacheDocuments = cacheDocuments.stream()
-                                    .sorted(Comparator.reverseOrder())
-                                    .collect(Collectors.toCollection(ArrayList::new));
-                            if (!sortedCacheDocuments.isEmpty()) {
-                                // newest cache entry must be treated in the same way as a distributed inbound insert
-                                processInboundInsert(sortedCacheDocuments.remove(0), false);
-                                // correct any inconsistencies (if exist) in relation to (not yet) orphaned cache entries
-                                sortedCacheDocuments.forEach(cacheManager::manageReplacement);
-                            }
-                        });
-            }
-            // remove cache entries which are not managed (e.g. if synchronization is started after it was stopped)
-            synchronizationLock.lock();
-            try {
-                cacheManager.manageSynchronization();
-            } finally {
-                synchronizationLock.unlock();
-            }
-        }
     }
 
     Logger getLogger() {
@@ -696,6 +699,10 @@ public final class DistributedCaffeine<K, V> {
         return requireNonNull(mongoCollection);
     }
 
+    DistributionMode getDistributionMode() {
+        return requireNonNull(distributionMode);
+    }
+
     Serializer<K, ?> getKeySerializer() {
         return requireNonNull(keySerializer);
     }
@@ -704,16 +711,20 @@ public final class DistributedCaffeine<K, V> {
         return requireNonNull(valueSerializer);
     }
 
+    InternalExtendedPersistence getExtendedPersistence() {
+        return requireNonNull(extendedPersistence);
+    }
+
+    InternalCacheLoader<K, V> getCacheLoader() {
+        return requireNonNull(cacheLoader);
+    }
+
+    Executor getExecutor() {
+        return requireNonNull(executor);
+    }
+
     Cache<K, V> getCache() {
         return requireNonNull(cache);
-    }
-
-    InternalSynchronizationLock getSynchronizationLock() {
-        return requireNonNull(synchronizationLock);
-    }
-
-    InternalObjectIdGenerator getObjectIdGenerator() {
-        return requireNonNull(objectIdGenerator);
     }
 
     InternalDocumentConverter<K, V> getDocumentConverter() {
@@ -728,12 +739,19 @@ public final class DistributedCaffeine<K, V> {
         return requireNonNull(cacheManager);
     }
 
+    InternalChangeStreamWatcher<K, V> getChangeStreamWatcher() {
+        return requireNonNull(changeStreamWatcher);
+    }
+
     InternalMaintenanceWorker<K, V> getMaintenanceWorker() {
         return requireNonNull(maintenanceWorker);
     }
 
-    interface LazyInitializer<K, V> {
+    InternalSynchronizationLock getSynchronizationLock() {
+        return requireNonNull(synchronizationLock);
+    }
 
-        void initialize(DistributedCaffeine<K, V> distributedCaffeine);
+    Long getOrigin() {
+        return requireNonNull(origin);
     }
 }

@@ -19,42 +19,149 @@ import org.bson.types.ObjectId;
 import org.jspecify.annotations.NonNull;
 
 import java.lang.ref.WeakReference;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Comparator;
-import java.util.Date;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Stream;
 
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.EXPIRES;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.HASH;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.KEY;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.ORIGIN;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STALE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STATUS;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.TOUCHED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.VALUE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field._ID;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED_REFRESHED_AFTER_WRITE;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullOnCondition;
 import static java.lang.String.format;
 import static java.util.Objects.isNull;
 
-class InternalCacheDocument<K, V> implements DistributedPolicy.CacheEntry<K, V>, Comparable<InternalCacheDocument<K, V>> {
+class InternalCacheDocument<K, V> implements Comparable<InternalCacheDocument<K, V>> {
 
-    static final String ID = "_id";
-    static final String HASH = "hash";
-    static final String KEY = "key";
-    static final String VALUE = "value";
-    static final String STATUS = "status";
-    static final String TOUCHED = "touched";
-    static final String EXPIRES = "expires";
+    @SuppressWarnings("squid:S115")
+    enum Field {
 
-    static final String CACHED = "cached";
-    static final String INVALIDATED = "invalidated";
-    static final String EVICTED = "evicted";
-    static final String ORPHANED = "orphaned";
+        _ID,
+        DISCRIMINATOR,
+        ORIGIN,
+        HASH,
+        KEY,
+        VALUE,
+        STATUS,
+        STALE,
+        TOUCHED,
+        EXPIRES;
+
+        private final String value;
+
+        Field() {
+            this.value = name().toLowerCase();
+        }
+
+        @Override
+        public String toString() {
+            return value;
+        }
+    }
+
+    enum Status {
+
+        CACHED,
+        CACHED_REFRESHED,
+        CACHED_REFRESHED_AFTER_WRITE,
+        INVALIDATED,
+        INVALIDATED_REFRESHED,
+        INVALIDATED_REFRESHED_AFTER_WRITE,
+        EVICTED_SIZE,
+        EVICTED_TIME,
+        EVICTED_SIZE_EXTENDED,
+        EVICTED_TIME_EXTENDED;
+
+        static final Status[] CACHED_GROUP = new Status[]{CACHED, CACHED_REFRESHED, CACHED_REFRESHED_AFTER_WRITE};
+        static final Status[] INVALIDATED_GROUP = new Status[]{INVALIDATED, INVALIDATED_REFRESHED,
+                INVALIDATED_REFRESHED_AFTER_WRITE};
+        static final Status[] EVICTED_GROUP = new Status[]{EVICTED_SIZE, EVICTED_TIME, EVICTED_SIZE_EXTENDED,
+                EVICTED_TIME_EXTENDED};
+        static final Status[] EVICTED_EXTENDED_GROUP = new Status[]{EVICTED_SIZE_EXTENDED, EVICTED_TIME_EXTENDED};
+
+        private final String value;
+
+        Status() {
+            this.value = name().toLowerCase();
+        }
+
+        boolean isCached() {
+            return isMemberOf(CACHED_GROUP);
+        }
+
+        boolean isInvalidated() {
+            return isMemberOf(INVALIDATED_GROUP);
+        }
+
+        boolean isEvicted() {
+            return isMemberOf(EVICTED_GROUP);
+        }
+
+        boolean isEvictedExtended() {
+            return isMemberOf(EVICTED_EXTENDED_GROUP);
+        }
+
+        boolean isConsideredBy(DistributionMode distributionMode) {
+            if (isCached()) {
+                return distributionMode.isPopulationConsidered();
+            } else if (isInvalidated()) {
+                return distributionMode.isInvalidationConsidered();
+            } else if (isEvicted()) {
+                return distributionMode.isEvictionConsidered();
+            } else {
+                return false;
+            }
+        }
+
+        private boolean isMemberOf(Status[] statuses) {
+            // for-loop is fastest
+            for (Status status : statuses) {
+                if (status.equals(this)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        @Override
+        public String toString() {
+            return value;
+        }
+
+        static Status of(String value) {
+            return Stream.of(Status.values())
+                    .filter(status -> status.value.equals(value))
+                    .findFirst()
+                    .orElse(null); // fails on validation
+        }
+    }
 
     private ObjectId id;
     private Integer hash;
+    private String discriminator;
+    private Long origin;
     private K key;
     private WeakReference<K> weakKey;
     private V value;
     private WeakReference<V> weakValue;
-    private String status;
-    private Date touched;
-    private Date expires;
+    private Status status;
+    private Boolean stale;
+    private Instant touched;
+    private Instant expires;
 
-    @Override
-    public ObjectId getId() {
+    private final Instant constructed = Instant.now();
+
+    ObjectId getId() {
         return id;
     }
 
@@ -63,7 +170,24 @@ class InternalCacheDocument<K, V> implements DistributedPolicy.CacheEntry<K, V>,
         return this;
     }
 
-    @SuppressWarnings("unused")
+    public Long getOrigin() {
+        return origin;
+    }
+
+    public String getDiscriminator() {
+        return discriminator;
+    }
+
+    public InternalCacheDocument<K, V> setDiscriminator(String discriminator) {
+        this.discriminator = discriminator;
+        return this;
+    }
+
+    public InternalCacheDocument<K, V> setOrigin(Long origin) {
+        this.origin = origin;
+        return this;
+    }
+
     Integer getHash() {
         return hash;
     }
@@ -73,13 +197,10 @@ class InternalCacheDocument<K, V> implements DistributedPolicy.CacheEntry<K, V>,
         return this;
     }
 
-    @Override
-    public K getKey() {
-        return Stream.of(key, Optional.ofNullable(weakKey)
-                        .map(WeakReference::get)
-                        .orElse(null))
-                .filter(Objects::nonNull)
-                .findFirst()
+    K getKey() {
+        return Optional.ofNullable(key)
+                .or(() -> Optional.ofNullable(weakKey)
+                        .map(WeakReference::get))
                 .orElse(null);
     }
 
@@ -89,13 +210,10 @@ class InternalCacheDocument<K, V> implements DistributedPolicy.CacheEntry<K, V>,
         return this;
     }
 
-    @Override
-    public V getValue() {
-        return Stream.of(value, Optional.ofNullable(weakValue)
-                        .map(WeakReference::get)
-                        .orElse(null))
-                .filter(Objects::nonNull)
-                .findFirst()
+    V getValue() {
+        return Optional.ofNullable(value)
+                .or(() -> Optional.ofNullable(weakValue)
+                        .map(WeakReference::get))
                 .orElse(null);
     }
 
@@ -105,59 +223,75 @@ class InternalCacheDocument<K, V> implements DistributedPolicy.CacheEntry<K, V>,
         return this;
     }
 
-    @Override
-    public String getStatus() {
+
+    Status getStatus() {
         return status;
     }
 
-    InternalCacheDocument<K, V> setStatus(String status) {
+    InternalCacheDocument<K, V> setStatus(Status status) {
         this.status = status;
         return this;
     }
 
-    @Override
-    public Date getTouched() {
+    public Boolean isStale() {
+        return stale;
+    }
+
+    public InternalCacheDocument<K, V> setStale(Boolean stale) {
+        this.stale = stale;
+        return this;
+    }
+
+    Instant getTouched() {
         return touched;
     }
 
-    InternalCacheDocument<K, V> setTouched(Date touched) {
+    InternalCacheDocument<K, V> setTouched(Instant touched) {
         this.touched = touched;
         return this;
     }
 
-    @SuppressWarnings("unused")
-    Date getExpires() {
+    Instant getExpires() {
         return expires;
     }
 
-    InternalCacheDocument<K, V> setExpires(Date expires) {
+    InternalCacheDocument<K, V> setExpires(Instant expires) {
         this.expires = expires;
         return this;
     }
 
     boolean isCached() {
-        return CACHED.equals(status);
+        return status.isCached();
     }
 
     boolean isInvalidated() {
-        return INVALIDATED.equals(status);
+        return status.isInvalidated();
     }
 
-    @Override
-    public boolean isEvicted() {
-        return EVICTED.equals(status);
+    boolean isEvicted() {
+        return status.isEvicted();
     }
 
-    boolean isOrphaned() {
-        return ORPHANED.equals(status);
+    boolean isEvictedExtended() {
+        return status.isEvictedExtended();
     }
 
     boolean isNewer(InternalCacheDocument<K, V> cacheDocument) {
         return isNull(cacheDocument) || compareTo(cacheDocument) > 0;
     }
 
-    boolean hasOrigin(String origin) {
-        return id.toHexString().substring(8, 18).equals(origin);
+    boolean isOlderThan(Duration duration) {
+        return constructed.plus(duration).isBefore(Instant.now());
+    }
+
+    boolean isOriginIndependent() {
+        return isEvicted()
+                || status.equals(CACHED_REFRESHED_AFTER_WRITE)
+                || status.equals(Status.INVALIDATED_REFRESHED_AFTER_WRITE);
+    }
+
+    boolean hasSameOrigin(Long origin) {
+        return this.origin.equals(origin);
     }
 
     InternalCacheDocument<K, V> weakened() {
@@ -166,19 +300,38 @@ class InternalCacheDocument<K, V> implements DistributedPolicy.CacheEntry<K, V>,
         return this;
     }
 
+    InternalCacheDocument<K, V> validate(Field... fields) {
+        Set<Field> validationFields = fields.length == 0
+                ? Set.of(Field.values())
+                : Set.of(fields);
+        requireNonNullOnCondition(validationFields.contains(_ID), id, "id cannot be null");
+        // discriminator can be null
+        requireNonNullOnCondition(validationFields.contains(ORIGIN), origin, "origin cannot be null");
+        requireNonNullOnCondition(validationFields.contains(HASH), hash, "hash cannot be null");
+        requireNonNullOnCondition(validationFields.contains(KEY), key, "key cannot be null");
+        requireNonNullOnCondition(validationFields.contains(VALUE) && !status.isInvalidated(), value,
+                "value cannot be null");
+        requireNonNullOnCondition(validationFields.contains(STATUS), status, "status cannot be null");
+        requireNonNullOnCondition(validationFields.contains(STALE), stale, "stale cannot be null");
+        requireNonNullOnCondition(validationFields.contains(TOUCHED), touched, "touched cannot be null");
+        requireNonNullOnCondition(validationFields.contains(EXPIRES) && !status.isCached(), expires,
+                "expires cannot be null");
+        return this;
+    }
+
     @Override
     public int compareTo(@NonNull InternalCacheDocument<K, V> that) {
-        // unique object id is used as tie-breaker if touched is equal
-        return Comparator.<InternalCacheDocument<K, V>, Date>comparing(InternalCacheDocument::getTouched)
+        return Comparator.<InternalCacheDocument<K, V>, Instant>comparing(InternalCacheDocument::getTouched)
+                // unique id is used as tie-breaker if touched is equal
                 .thenComparing(InternalCacheDocument::getId)
                 .compare(this, that);
     }
 
     @Override
-    public boolean equals(Object o) {
-        if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
-        InternalCacheDocument<?, ?> that = (InternalCacheDocument<?, ?>) o;
+    public boolean equals(Object object) {
+        if (this == object) return true;
+        if (object == null || getClass() != object.getClass()) return false;
+        InternalCacheDocument<?, ?> that = (InternalCacheDocument<?, ?>) object;
         return Objects.equals(this.id, that.id);
     }
 
@@ -189,7 +342,9 @@ class InternalCacheDocument<K, V> implements DistributedPolicy.CacheEntry<K, V>,
 
     @Override
     public String toString() {
-        return format("CacheDocument{id=%s, hash=%s, key=%s, value=%s, status='%s', touched=%s, expires=%s}",
-                id, hash, key, value, status, touched, expires);
+        return format("CacheDocument{id=%s, origin=%s hash=%s, key=%s, value=%s, "
+                        .concat("status=%s, stale=%s touched=%s, expires=%s}"),
+                getId(), getOrigin(), getHash(), getKey(), getValue(),
+                getStatus(), isStale(), getTouched(), getExpires());
     }
 }

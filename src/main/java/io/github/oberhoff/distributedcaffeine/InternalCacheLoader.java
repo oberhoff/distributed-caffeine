@@ -16,33 +16,39 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.CacheLoader;
-import com.github.benmanes.caffeine.cache.Policy;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
+import com.mongodb.client.model.Filters;
+import org.bson.conversions.Bson;
 import org.jspecify.annotations.NonNull;
-import org.jspecify.annotations.Nullable;
 
 import java.lang.reflect.Method;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
-import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.HASH;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static java.util.Objects.nonNull;
+import static java.util.stream.Collectors.groupingBy;
+import static java.util.stream.Collectors.toList;
 
-class InternalCacheLoader<K, V> implements CacheLoader<K, V>, LazyInitializer<K, V> {
+@SuppressWarnings("squid:S1452")
+class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitializer<K, V> {
 
     private static final String LOAD_ALL = "loadAll";
-    // private static final String ASYNC_LOAD_ALL = "asyncLoadAll";
 
     private final CacheLoader<K, V> cacheLoader;
 
-    private DistributedCaffeine<K, V> distributedCaffeine;
-    private Policy<K, V> policy;
-    private InternalSynchronizationLock synchronizationLock;
+    private InternalCacheManager<K, V> cacheManager;
+    private InternalMongoRepository<K, V> mongoRepository;
+    private InternalExtendedPersistence extendedPersistence;
 
     InternalCacheLoader(CacheLoader<K, V> cacheLoader) {
         this.cacheLoader = cacheLoader;
@@ -51,148 +57,149 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, LazyInitializer<K,
 
     @Override
     public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
-        this.distributedCaffeine = distributedCaffeine;
-        this.policy = distributedCaffeine.getCache().policy();
-        this.synchronizationLock = distributedCaffeine.getSynchronizationLock();
+        this.cacheManager = distributedCaffeine.getCacheManager();
+        this.mongoRepository = distributedCaffeine.getMongoRepository();
+        this.extendedPersistence = distributedCaffeine.getExtendedPersistence();
     }
 
-    @Override
-    public @Nullable V load(@NonNull K key) throws Exception {
-        synchronizationLock.lock();
-        try {
-            return Optional.ofNullable(cacheLoader.load(key))
-                    .map(value -> distributedCaffeine.putDistributed(key, value))
-                    .orElse(null);
-        } finally {
-            synchronizationLock.unlock();
-        }
+    @Override // should never be invoked due to custom implementation (loadDelegated() must be used)
+    public V load(@NonNull K key) throws Exception {
+        throw new IllegalAccessException();
     }
 
-    @Override
+    @Override // should never be invoked due to custom implementation (loadAllDelegated() must be used)
     public @NonNull Map<? extends K, ? extends V> loadAll(@NonNull Set<? extends K> keys) throws Exception {
-        if (hasLoadAll(cacheLoader)) {
-            synchronizationLock.lock();
-            try {
-                return distributedCaffeine.putAllDistributed(cacheLoader.loadAll(keys));
-            } finally {
-                synchronizationLock.unlock();
-            }
-        } else {
-            return keys.stream()
-                    .map(key -> {
-                        try {
-                            return Optional.ofNullable(load(key))
-                                    .map(value -> Map.entry(key, value))
-                                    .orElse(null);
-                        } catch (Exception e) {
-                            throw new DistributedCaffeineException(e);
-                        }
-                    })
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toMap(Entry::getKey, Entry::getValue));
-        }
+        throw new IllegalAccessException();
     }
 
-    @Override
-    public @Nullable V reload(@NonNull K key, @NonNull V oldValue) throws Exception {
-        synchronizationLock.lock();
-        try {
-            V value = cacheLoader.reload(key, oldValue);
-            // retain the original 'remove if null' semantic
-            if (nonNull(value)) {
-                return distributedCaffeine.putDistributed(key, value);
-            } else {
-                distributedCaffeine.invalidateDistributed(key);
-                return null;
-            }
-        } finally {
-            synchronizationLock.unlock();
-        }
-    }
-
-    /*
-     * This method is only used by refresh operations (if no value found) so special handling works as expected.
-     * Of course this only applies as long as AsyncCache and AsyncLoadingCache are not supported.
-     */
-    @Override
+    @Override // should never be invoked due to custom implementation (asyncLoadDelegated() must be used)
     public @NonNull CompletableFuture<? extends V> asyncLoad(@NonNull K key, @NonNull Executor executor)
             throws Exception {
-        return cacheLoader.asyncLoad(key, executor)
-                .thenApply(newValue -> {
-                    if (nonNull(newValue)) {
-                        // special handling, no lock required
-                        V oldValue = policy.getIfPresentQuietly(key);
-                        return distributedCaffeine.putDistributedRefresh(key, newValue, oldValue);
-                    } else {
-                        return null;
-                    }
-                });
+        throw new IllegalAccessException();
     }
 
-    @Override
+    @Override // should never be invoked due to custom implementation (asyncLoadAllDelegated() must be used)
     public @NonNull CompletableFuture<? extends Map<? extends K, ? extends V>> asyncLoadAll(
-            @NonNull Set<? extends K> keys, @NonNull Executor executor) {
-        throw new UnsupportedOperationException();
-        /*
-         *  AsyncCache and AsyncLoadingCache are not supported (yet).
-         *
-        if (hasAsyncLoadAll(cacheLoader)) {
-            return cacheLoader.asyncLoadAll(keys, executor)
-                    .thenApply(map -> distributedCaffeine.putAllDistributedAsync(map));
-        } else {
-            return CompletableFuture.supplyAsync(() -> {
-                try {
-                    return loadAll(keys);
-                } catch (Exception e) {
-                    throw new DistributedCaffeineException(e);
-                }
-            }, executor);
-        } */
+            @NonNull Set<? extends K> keys, @NonNull Executor executor) throws Exception {
+        throw new IllegalAccessException();
     }
 
-    /*
-     * This method is only used by refresh operations (if value found) so special handling works as expected.
-     */
-    @Override
+    @Override // should never be invoked due to custom implementation (reloadDelegated() must be used)
+    public V reload(@NonNull K key, @NonNull V oldValue) throws Exception {
+        throw new IllegalAccessException();
+    }
+
+    @Override // only invoked internally if expireAfterWrite is used (special handling needed)
     public @NonNull CompletableFuture<? extends V> asyncReload(@NonNull K key, @NonNull V oldValue,
                                                                @NonNull Executor executor) throws Exception {
         return cacheLoader.asyncReload(key, oldValue, executor)
                 .thenApply(newValue -> {
-                    // retain the original 'remove if null' semantic
+                    // retain the original 'remove if null' semantics
                     if (nonNull(newValue)) {
                         // special handling, no lock required
-                        return distributedCaffeine.putDistributedRefresh(key, newValue, oldValue);
+                        return cacheManager.putDistributedRefreshAfterWrite(key, newValue, oldValue);
                     } else {
                         // special handling, no lock required
-                        return distributedCaffeine.invalidateDistributedRefresh(key, oldValue);
+                        return cacheManager.invalidateDistributedRefreshAfterWrite(key, oldValue);
                     }
                 });
     }
 
-    /*
-     * Copy of com.github.benmanes.caffeine.cache.LocalLoadingCache#hasLoadAll(CacheLoader).
-     */
-    private boolean hasLoadAll(CacheLoader<?, ?> loader) throws NoSuchMethodException {
-        Method classLoadAll = loader.getClass().getMethod(LOAD_ALL, Set.class);
-        Method defaultLoadAll = CacheLoader.class.getMethod(LOAD_ALL, Set.class);
-        return !classLoadAll.equals(defaultLoadAll);
+    // invoked by custom implementation
+    V loadDelegated(K key) throws Exception {
+        if (extendedPersistence.hasExtendedPersistenceLoader()) {
+            V newValue = loadExtendedFromMongo(key);
+            if (nonNull(newValue)) {
+                return newValue;
+            } else {
+                return cacheLoader.load(key);
+            }
+        } else {
+            return cacheLoader.load(key);
+        }
     }
 
-    /*
-     * Copy of com.github.benmanes.caffeine.cache.LocalAsyncLoadingCache#canBulkLoad(AsyncCacheLoader).
-     *
-    private boolean hasAsyncLoadAll(AsyncCacheLoader<?, ?> loader) throws NoSuchMethodException {
-        Class<?> defaultLoaderClass = AsyncCacheLoader.class;
-        if (loader instanceof CacheLoader<?, ?>) {
-            defaultLoaderClass = CacheLoader.class;
-            Method classLoadAll = loader.getClass().getMethod(LOAD_ALL, Set.class);
-            Method defaultLoadAll = CacheLoader.class.getMethod(LOAD_ALL, Set.class);
-            if (!classLoadAll.equals(defaultLoadAll)) {
-                return true;
-            }
+    // invoked by custom implementation
+    Map<? extends K, ? extends V> loadAllDelegated(Set<? extends K> keys) throws Exception {
+        if (extendedPersistence.hasExtendedPersistenceLoader()) {
+            HashMap<K, V> keyToNewValue = new HashMap<>(loadAllExtendedFromMongo(keys));
+            Set<K> notFound = new HashSet<>(keys);
+            notFound.removeAll(keyToNewValue.keySet());
+            keyToNewValue.putAll(cacheLoader.loadAll(notFound));
+            return keyToNewValue;
+        } else {
+            return cacheLoader.loadAll(keys);
         }
-        Method classAsyncLoadAll = loader.getClass().getMethod(ASYNC_LOAD_ALL, Set.class, Executor.class);
-        Method defaultAsyncLoadAll = defaultLoaderClass.getMethod(ASYNC_LOAD_ALL, Set.class, Executor.class);
-        return !classAsyncLoadAll.equals(defaultAsyncLoadAll);
-    }*/
+    }
+
+    @NonNull // invoked by custom implementation
+    @SuppressWarnings("unchecked")
+    CompletableFuture<? extends V> asyncLoadDelegated(@NonNull K key, @NonNull Executor executor) throws Exception {
+        if (extendedPersistence.hasExtendedPersistenceLoader()) {
+            return CompletableFuture.supplyAsync(() -> loadExtendedFromMongo(key), executor)
+                    .thenCompose(newValue -> {
+                        if (nonNull(newValue)) {
+                            return CompletableFuture.completedFuture(newValue);
+                        } else {
+                            return (CompletableFuture<V>) getFailable(() ->
+                                            cacheLoader.asyncLoad(key, executor),
+                                    CompletionException::new);
+                        }
+                    });
+        } else {
+            return cacheLoader.asyncLoad(key, executor);
+        }
+    }
+
+    @NonNull // invoked by custom implementation
+    @SuppressWarnings("unchecked")
+    CompletableFuture<? extends V> asyncReloadDelegated(@NonNull K key, @NonNull V oldValue, @NonNull Executor executor)
+            throws Exception {
+        if (extendedPersistence.hasExtendedPersistenceLoader()) {
+            return CompletableFuture.supplyAsync(() -> loadExtendedFromMongo(key), executor)
+                    .thenCompose(newValue -> {
+                        if (nonNull(newValue)) {
+                            return CompletableFuture.completedFuture(newValue);
+                        } else {
+                            return (CompletableFuture<V>) getFailable(() ->
+                                            cacheLoader.asyncReload(key, oldValue, executor),
+                                    CompletionException::new);
+                        }
+                    });
+        } else {
+            return cacheLoader.asyncReload(key, oldValue, executor);
+        }
+    }
+
+    // based on com.github.benmanes.caffeine.cache.LocalLoadingCache.hasLoadAll()
+    boolean hasLoadAll() {
+        Method instanceLoadAll = getFailable(() -> cacheLoader.getClass().getMethod(LOAD_ALL, Set.class));
+        Method defaultLoadAll = getFailable(() -> CacheLoader.class.getMethod(LOAD_ALL, Set.class));
+        return !instanceLoadAll.equals(defaultLoadAll);
+    }
+
+    private V loadExtendedFromMongo(K key) {
+        return loadAllExtendedFromMongo(Set.of(key)).get(key);
+    }
+
+    private Map<? extends K, ? extends V> loadAllExtendedFromMongo(Set<? extends K> keys) {
+        List<Integer> hashes = keys.stream()
+                .map(Objects::hashCode)
+                .collect(toList());
+        Bson filter = Filters.in(HASH.toString(), hashes);
+        Map<K, V> keyToValue = new HashMap<>();
+        try (Stream<InternalCacheDocument<K, V>> cacheDocumentStream =
+                     mongoRepository.streamCacheDocuments(filter)) {
+            cacheDocumentStream
+                    .filter(cacheDocument -> keys.contains(cacheDocument.getKey()))
+                    // retain "hashCode -> bucket -> equals" semantics
+                    .collect(groupingBy(InternalCacheDocument::getKey))
+                    .forEach((key, cacheDocuments) -> cacheDocuments.stream()
+                            .max(Comparator.naturalOrder())
+                            .filter(InternalCacheDocument::isEvictedExtended)
+                            .ifPresent(cacheDocument ->
+                                    keyToValue.put(cacheDocument.getKey(), cacheDocument.getValue())));
+        }
+        return keyToValue;
+    }
 }
