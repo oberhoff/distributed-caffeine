@@ -393,7 +393,7 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, LazyInitialize
         public V setValue(V value) {
             V oldValue = getValue();
             super.setValue(value);
-            map.put(super.getKey(), value);
+            map.put(super.getKey(), value); // implicit distribution
             return oldValue;
         }
 

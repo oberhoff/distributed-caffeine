@@ -39,16 +39,27 @@ public class Value implements Serializable {
         return id;
     }
 
-    public void setId(Integer id) {
+    public Value setId(Integer id) {
         this.id = id;
+        return this;
     }
 
     public String getName() {
         return name;
     }
 
-    public void setName(String name) {
+    public Value setName(String name) {
         this.name = name;
+        return this;
+    }
+
+    public String getData() {
+        return data;
+    }
+
+    public Value setData(String data) {
+        this.data = data;
+        return this;
     }
 
     @Override

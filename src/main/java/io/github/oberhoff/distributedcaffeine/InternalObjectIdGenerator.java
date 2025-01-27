@@ -18,7 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import org.bson.types.ObjectId;
 
 import java.security.SecureRandom;
-import java.util.Date;
+import java.time.Instant;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -49,7 +49,7 @@ class InternalObjectIdGenerator {
     ObjectId generate() {
         reentrantLock.lock();
         try {
-            int currentTime = (int) new Date().getTime() / 1_000;
+            int currentTime = (int) Instant.now().getEpochSecond();
             if (time != currentTime) {
                 time = currentTime;
                 counter = offset;

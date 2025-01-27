@@ -40,10 +40,9 @@ public class FurySerializer<T> implements ByteArraySerializer<T> {
 
     /**
      * Constructs a serializer with byte array representation based on <i>Apache Fury</i> along with optional
-     * {@link Class}-based type information.
+     * class-based type information.
      *
-     * @param registerClasses optional {@link Class} of the object (with additional classes of nested objects) to
-     *                        serialize
+     * @param registerClasses optional class of the object (with additional classes of nested objects) to serialize
      */
     public FurySerializer(Class<?>... registerClasses) {
         this.fury = Fury.builder()
@@ -56,21 +55,13 @@ public class FurySerializer<T> implements ByteArraySerializer<T> {
     }
 
     @Override
-    public byte[] serialize(Object object) throws SerializerException {
-        try {
-            return fury.serialize(object);
-        } catch (Exception e) {
-            throw new SerializerException(e);
-        }
+    public byte[] serialize(Object object) {
+        return fury.serialize(object);
     }
 
     @Override
     @SuppressWarnings("unchecked")
-    public T deserialize(byte[] value) throws SerializerException {
-        try {
-            return (T) fury.deserialize(value);
-        } catch (Exception e) {
-            throw new SerializerException(e);
-        }
+    public T deserialize(byte[] value) {
+        return (T) fury.deserialize(value);
     }
 }

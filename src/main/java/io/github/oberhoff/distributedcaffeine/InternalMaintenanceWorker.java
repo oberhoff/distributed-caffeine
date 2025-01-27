@@ -36,15 +36,17 @@ import static java.util.Objects.nonNull;
 
 class InternalMaintenanceWorker<K, V> implements LazyInitializer<K, V> {
 
+    private final AtomicBoolean isActivated;
+    private final PriorityBlockingQueue<ObjectId> toBeOrphaned;
+
     private Logger logger;
     private String mongoCollectionName;
     private InternalMongoRepository<K, V> mongoRepository;
-    private AtomicBoolean isActivated;
-    private PriorityBlockingQueue<ObjectId> toBeOrphaned;
-    private ExecutorService executorService;
     private CompletableFuture<Void> maintenanceCompletableFuture;
 
     InternalMaintenanceWorker() {
+        this.isActivated = new AtomicBoolean(false);
+        this.toBeOrphaned = new PriorityBlockingQueue<>();
         // see also initialize()
     }
 
@@ -53,19 +55,12 @@ class InternalMaintenanceWorker<K, V> implements LazyInitializer<K, V> {
         this.logger = distributedCaffeine.getLogger();
         this.mongoCollectionName = distributedCaffeine.getMongoCollection().getNamespace().getCollectionName();
         this.mongoRepository = distributedCaffeine.getMongoRepository();
-        this.isActivated = new AtomicBoolean(false);
-        this.toBeOrphaned = new PriorityBlockingQueue<>();
     }
 
     void activate() {
         // wait for completion if required
         Optional.ofNullable(maintenanceCompletableFuture)
                 .ifPresent(CompletableFuture::join);
-
-        executorService = Executors.newSingleThreadExecutor(runnable ->
-                new Thread(runnable, Thread.class.getSimpleName()
-                        .concat(getClass().getSimpleName())
-                        .concat(String.valueOf(runnable.hashCode()))));
 
         scheduleMaintenanceWork();
 
@@ -74,14 +69,6 @@ class InternalMaintenanceWorker<K, V> implements LazyInitializer<K, V> {
 
     void deactivate() {
         isActivated.set(false);
-
-        // wait async for completion and shut down executor service if required
-        Optional.ofNullable(maintenanceCompletableFuture)
-                .ifPresent(completableFuture ->
-                        CompletableFuture.runAsync(() -> {
-                            completableFuture.join();
-                            executorService.shutdownNow();
-                        }));
     }
 
     boolean isActivated() {
@@ -99,13 +86,16 @@ class InternalMaintenanceWorker<K, V> implements LazyInitializer<K, V> {
                 .handleResultIf(result -> isActivated())
                 .withMaxAttempts(-1)
                 .withDelay(Duration.ofSeconds(1))
-                .withDelayFnOn(context -> Duration.ofSeconds(Math.min(context.getAttemptCount(), 10)), Exception.class)
+                .withDelayFnOn(context -> Duration.ofSeconds(Math.min(context.getAttemptCount(), 10)), Throwable.class)
                 .onRetryScheduled(event -> Optional.ofNullable(event.getLastException())
-                        .ifPresent(exception -> logger.log(Level.WARNING,
+                        .ifPresent(throwable -> logger.log(Level.WARNING,
                                 format("Maintenance failed for collection '%s'. Retrying...",
-                                        mongoCollectionName), exception)))
+                                        mongoCollectionName), throwable)))
                 .build();
-        maintenanceCompletableFuture = Failsafe.with(retryPolicy)
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        InternalTaskPolicy<Void> taskPolicy = new InternalTaskPolicy<Void>()
+                .withPostExecutionTask(executorService::shutdown);
+        maintenanceCompletableFuture = Failsafe.with(taskPolicy, retryPolicy)
                 .with(executorService)
                 .runAsync(this::processMaintenance);
     }
