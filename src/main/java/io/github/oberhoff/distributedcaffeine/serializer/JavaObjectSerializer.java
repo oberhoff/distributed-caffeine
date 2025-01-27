@@ -17,6 +17,7 @@ package io.github.oberhoff.distributedcaffeine.serializer;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 
@@ -39,24 +40,20 @@ public class JavaObjectSerializer<T> implements ByteArraySerializer<T> {
     }
 
     @Override
-    public byte[] serialize(T object) throws SerializerException {
+    public byte[] serialize(T object) throws IOException {
         try (ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
              ObjectOutputStream objectOutputStream = new ObjectOutputStream(byteArrayOutputStream)) {
             objectOutputStream.writeObject(object);
             return byteArrayOutputStream.toByteArray();
-        } catch (Exception e) {
-            throw new SerializerException(e);
         }
     }
 
     @Override
     @SuppressWarnings("unchecked")
-    public T deserialize(byte[] value) throws SerializerException {
+    public T deserialize(byte[] value) throws IOException, ClassNotFoundException {
         try (ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(value);
              ObjectInputStream objectInputStream = new ObjectInputStream(byteArrayInputStream)) {
             return (T) objectInputStream.readObject();
-        } catch (Exception e) {
-            throw new SerializerException(e);
         }
     }
 }

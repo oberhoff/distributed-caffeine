@@ -18,7 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.Cache;
 
 /**
- * Interface representing a cache instance. Cache entries are manually added and are stored in the cache until either
+ * Interface representing a cache instance. Cache entries are added manually and remain in the cache until either
  * invalidated or evicted.
  *
  * @param <K> the key type of the cache
@@ -30,7 +30,7 @@ public interface DistributedCache<K, V> extends Cache<K, V> {
     /**
      * Returns an access point for inspecting and performing low-level operations on the cache instance.
      *
-     * @return the {@link DistributedPolicy} as an access point
+     * @return the distributed policy as an access point
      */
     DistributedPolicy<K, V> distributedPolicy();
 }
