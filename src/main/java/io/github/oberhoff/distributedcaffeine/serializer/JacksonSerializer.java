@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine.serializer;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -36,10 +37,10 @@ public class JacksonSerializer<T> implements JsonSerializer<T> {
     private final boolean storeAsBson;
 
     /**
-     * Constructs a serializer with JSON representation based on <i>Jackson</i> along with {@link Class}-based type
+     * Constructs a serializer with JSON representation based on <i>Jackson</i> along with class-based type
      * information.
      *
-     * @param typeClass   the {@link Class} of the object to serialize
+     * @param typeClass   the class of the object to serialize
      * @param storeAsBson {@code true} for BSON encoding or {@code false} for string encoding
      */
     public JacksonSerializer(Class<? super T> typeClass, boolean storeAsBson) {
@@ -47,10 +48,10 @@ public class JacksonSerializer<T> implements JsonSerializer<T> {
     }
 
     /**
-     * Constructs a serializer with JSON representation based on <i>Jackson</i> along with {@link TypeReference}-based
+     * Constructs a serializer with JSON representation based on <i>Jackson</i> along with reference-based
      * type information.
      *
-     * @param typeReference the {@link TypeReference} of the object to serialize
+     * @param typeReference the type reference of the object to serialize
      * @param storeAsBson   {@code true} for BSON encoding or {@code false} for string encoding
      */
     public JacksonSerializer(TypeReference<T> typeReference, boolean storeAsBson) {
@@ -59,10 +60,10 @@ public class JacksonSerializer<T> implements JsonSerializer<T> {
 
     /**
      * Constructs a serializer with JSON representation based on <i>Jackson</i> along with a customizable
-     * {@link ObjectMapper} and {@link Class}-based type information.
+     * object mapper and class-based type information.
      *
-     * @param objectMapper the customized {@link ObjectMapper}
-     * @param typeClass    the {@link Class} of the object to serialize
+     * @param objectMapper the customized object mapper
+     * @param typeClass    the class of the object to serialize
      * @param storeAsBson  {@code true} for BSON encoding or {@code false} for string encoding
      */
     @SuppressWarnings("unchecked")
@@ -75,10 +76,10 @@ public class JacksonSerializer<T> implements JsonSerializer<T> {
 
     /**
      * Constructs a serializer with JSON representation based on <i>Jackson</i> along with a customizable
-     * {@link ObjectMapper} and {@link TypeReference}-based type information.
+     * object mapper and reference-based type information.
      *
-     * @param objectMapper  the customized {@link ObjectMapper}
-     * @param typeReference the {@link TypeReference} of the object to serialize
+     * @param objectMapper  the customized object mapper
+     * @param typeReference the type reference of the object to serialize
      * @param storeAsBson   {@code true} for BSON encoding or {@code false} for string encoding
      */
     public JacksonSerializer(ObjectMapper objectMapper, TypeReference<T> typeReference, boolean storeAsBson) {
@@ -89,24 +90,16 @@ public class JacksonSerializer<T> implements JsonSerializer<T> {
     }
 
     @Override
-    public String serialize(T object) throws SerializerException {
-        try {
-            return objectMapper.writeValueAsString(object);
-        } catch (Exception e) {
-            throw new SerializerException(e);
-        }
+    public String serialize(T object) throws JsonProcessingException {
+        return objectMapper.writeValueAsString(object);
     }
 
     @Override
-    public T deserialize(String value) throws SerializerException {
-        try {
-            if (nonNull(typeClass)) {
-                return objectMapper.readValue(value, typeClass);
-            } else {
-                return objectMapper.readValue(value, typeReference);
-            }
-        } catch (Exception e) {
-            throw new SerializerException(e);
+    public T deserialize(String value) throws JsonProcessingException {
+        if (nonNull(typeClass)) {
+            return objectMapper.readValue(value, typeClass);
+        } else {
+            return objectMapper.readValue(value, typeReference);
         }
     }
 
