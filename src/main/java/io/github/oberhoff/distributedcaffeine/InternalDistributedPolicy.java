@@ -21,7 +21,9 @@ import com.mongodb.client.model.Projections;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
 import org.bson.Document;
 import org.bson.conversions.Bson;
+import org.bson.types.ObjectId;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -31,11 +33,12 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.HASH;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.KEY;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.STATUS;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.TOUCHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.VALUE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.EXPIRES;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.HASH;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.KEY;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STATUS;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.TOUCHED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.VALUE;
 import static java.util.Objects.requireNonNull;
 
 class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, LazyInitializer<K, V> {
@@ -92,8 +95,9 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, LazyIn
                 .map(key -> requireNonNull(key, "key cannot be null"))
                 .map(Objects::hashCode)
                 .collect(Collectors.toList());
-        Bson filter = Filters.in(HASH, hashes);
-        Bson projection = Projections.include(KEY, VALUE, STATUS, TOUCHED);
+        Bson filter = Filters.in(HASH.toString(), hashes);
+        Bson projection = Projections.include(
+                KEY.toString(), VALUE.toString(), STATUS.toString(), TOUCHED.toString(), EXPIRES.toString());
         List<CacheEntry<K, V>> result = new ArrayList<>();
         try (Stream<InternalCacheDocument<K, V>> cacheDocumentStream =
                      mongoRepository.streamCacheDocuments(filter, projection)) {
@@ -103,10 +107,50 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, LazyIn
                     .collect(Collectors.groupingBy(InternalCacheDocument::getKey))
                     .forEach((key, cacheDocuments) -> cacheDocuments.stream()
                             .max(Comparator.naturalOrder())
-                            .filter(cacheDocument ->
-                                    cacheDocument.isCached() || (includeEvicted && cacheDocument.isEvicted()))
+                            .filter(cacheDocument -> cacheDocument.isCached()
+                                    || (includeEvicted && (cacheDocument.isEvicted() || cacheDocument.isExtended())))
+                            .map(this::toCacheEntry)
                             .ifPresent(result::add));
         }
         return result;
+    }
+
+    private CacheEntry<K, V> toCacheEntry(InternalCacheDocument<K, V> cacheDocument) {
+        return new CacheEntry<>() {
+            @Override
+            public ObjectId getId() {
+                return cacheDocument.getId();
+            }
+
+            @Override
+            public K getKey() {
+                return cacheDocument.getKey();
+            }
+
+            @Override
+            public V getValue() {
+                return cacheDocument.getValue();
+            }
+
+            @Override
+            public String getStatus() {
+                return cacheDocument.getStatus().toString();
+            }
+
+            @Override
+            public Instant getTouched() {
+                return cacheDocument.getTouched();
+            }
+
+            @Override
+            public Instant getExpires() {
+                return cacheDocument.getExpires();
+            }
+
+            @Override
+            public boolean isEvicted() {
+                return cacheDocument.isEvicted() || cacheDocument.isExtended();
+            }
+        };
     }
 }

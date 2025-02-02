@@ -35,17 +35,17 @@ public interface Serializer<T, U> {
      *
      * @param object the object to be serialized
      * @return the serialized value
-     * @throws SerializerException if serialization fails
+     * @throws Exception if serialization fails
      */
-    U serialize(T object) throws SerializerException;
+    U serialize(T object) throws Exception;
 
     /**
      * Deserializes a value.
      *
      * @param value the value to be deserialized
      * @return the deserialized object
-     * @throws SerializerException if deserialization fails
+     * @throws Exception if deserialization fails
      */
     @SuppressWarnings("unused")
-    T deserialize(U value) throws SerializerException;
+    T deserialize(U value) throws Exception;
 }
