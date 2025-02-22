@@ -28,13 +28,8 @@ import dev.failsafe.Failsafe;
 import dev.failsafe.Fallback;
 import dev.failsafe.RetryPolicy;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
-import io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer;
-import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
-import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
-import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.bson.BsonObjectId;
 import org.bson.BsonTimestamp;
-import org.bson.BsonType;
 import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.bson.types.ObjectId;
@@ -70,9 +65,7 @@ import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.VALUE
 import static java.lang.String.format;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
-import static org.bson.BsonType.BINARY;
 import static org.bson.BsonType.DATE_TIME;
-import static org.bson.BsonType.DOCUMENT;
 import static org.bson.BsonType.INT32;
 import static org.bson.BsonType.OBJECT_ID;
 import static org.bson.BsonType.STRING;
@@ -88,8 +81,6 @@ class InternalChangeStreamWatcher<K, V> implements LazyInitializer<K, V> {
     private Logger logger;
     private MongoCollection<Document> mongoCollection;
     private InternalDocumentConverter<K, V> documentConverter;
-    private Serializer<K, ?> keySerializer;
-    private Serializer<V, ?> valueSerializer;
     private AtomicBoolean isActivated;
     private AtomicReference<Throwable> failFastThrowable;
     private AtomicReference<BsonTimestamp> operationTime;
@@ -106,8 +97,6 @@ class InternalChangeStreamWatcher<K, V> implements LazyInitializer<K, V> {
         this.logger = distributedCaffeine.getLogger();
         this.mongoCollection = distributedCaffeine.getMongoCollection();
         this.documentConverter = distributedCaffeine.getDocumentConverter();
-        this.keySerializer = distributedCaffeine.getKeySerializer();
-        this.valueSerializer = distributedCaffeine.getValueSerializer();
         this.isActivated = new AtomicBoolean(false);
         this.failFastThrowable = new AtomicReference<>(null);
         this.operationTime = new AtomicReference<>(null);
@@ -251,12 +240,10 @@ class InternalChangeStreamWatcher<K, V> implements LazyInitializer<K, V> {
                                         Filters.type(fullDocument(HASH), INT32),
                                         Filters.ne(fullDocument(HASH), null),
                                         Filters.exists(fullDocument(KEY)),
-                                        Filters.type(fullDocument(KEY), getBsonTypeForKey()),
                                         Filters.ne(fullDocument(KEY), null),
                                         Filters.exists(fullDocument(VALUE)),
                                         orWithoutNull( // no filterOnlyIf needed because status is filtered
                                                 andWithoutNull(
-                                                        Filters.type(fullDocument(VALUE), getBsonTypeForValue()),
                                                         Filters.ne(fullDocument(VALUE), null),
                                                         Filters.in(fullDocument(STATUS), CACHED, EVICTED)),
                                                 andWithoutNull(
@@ -289,10 +276,8 @@ class InternalChangeStreamWatcher<K, V> implements LazyInitializer<K, V> {
                                                 Filters.type(fullDocument(HASH), INT32),
                                                 Filters.ne(fullDocument(HASH), null),
                                                 Filters.exists(fullDocument(KEY)),
-                                                Filters.type(fullDocument(KEY), getBsonTypeForKey()),
                                                 Filters.ne(fullDocument(KEY), null),
                                                 Filters.exists(fullDocument(VALUE)),
-                                                Filters.type(fullDocument(VALUE), getBsonTypeForValue()),
                                                 Filters.ne(fullDocument(VALUE), null),
                                                 Filters.exists(fullDocument(STATUS)),
                                                 Filters.type(fullDocument(STATUS), STRING),
@@ -347,32 +332,5 @@ class InternalChangeStreamWatcher<K, V> implements LazyInitializer<K, V> {
         return Stream.of(statuses)
                 .filter(distributedCaffeine::isSupportedByDistributionMode)
                 .toArray(String[]::new);
-    }
-
-    private BsonType getBsonTypeForKey() {
-        return getBsonType(keySerializer);
-    }
-
-    private BsonType getBsonTypeForValue() {
-        return getBsonType(valueSerializer);
-    }
-
-    @SuppressWarnings("unchecked")
-    private <T> BsonType getBsonType(Serializer<T, ?> serializer) {
-        if (serializer instanceof ByteArraySerializer) {
-            return BINARY;
-        } else if (serializer instanceof JsonSerializer) {
-            JsonSerializer<T> jsonSerializer = (JsonSerializer<T>) serializer;
-            if (jsonSerializer.storeAsBson()) {
-                return DOCUMENT;
-            } else {
-                return STRING;
-            }
-        } else if (serializer instanceof StringSerializer) {
-            return STRING;
-        } else {
-            throw new DistributedCaffeineException(format("Unknown serializer '%s'",
-                    serializer.getClass().getName()));
-        }
     }
 }

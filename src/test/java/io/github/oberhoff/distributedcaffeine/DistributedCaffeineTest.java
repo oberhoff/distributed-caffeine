@@ -25,6 +25,8 @@ import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.github.benmanes.caffeine.cache.Policy.VarExpiration;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
+import com.mongodb.ReadConcern;
+import com.mongodb.ReadConcernLevel;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoCollection;
@@ -1848,7 +1850,7 @@ final class DistributedCaffeineTest {
                 }
 
                 @Override
-                public@NonNull  CompletableFuture<? extends Value> asyncReload(@NonNull Key key, @NonNull Value oldValue, @NonNull Executor executor) {
+                public @NonNull CompletableFuture<? extends Value> asyncReload(@NonNull Key key, @NonNull Value oldValue, @NonNull Executor executor) {
                     asyncReloadInvocations.incrementAndGet();
                     return CompletableFuture.completedFuture(oldValue);
                 }
@@ -1896,23 +1898,14 @@ final class DistributedCaffeineTest {
             String collectionName = getCollectionNameWithSuffix("cacheChangeStreamWatcher");
 
             // test early failure
-            assertThatThrownBy(() ->
-                    createDistributedCache(collectionName,
-                            b -> b.withCustomKeySerializer(new Serializer<>() {
-                                @Override
-                                public Object serialize(Object object) {
-                                    return null;
-                                }
-
-                                @Override
-                                public Object deserialize(Object value) {
-                                    return null;
-                                }
-                            })))
+            assertThatThrownBy(() -> DistributedCaffeine
+                    .<Key, Value>newBuilder(mongoDatabase.getCollection(collectionName)
+                            .withReadConcern(ReadConcern.LOCAL))
+                    .build())
                     .isInstanceOf(DistributedCaffeineException.class)
                     .hasMessageStartingWith("Watching change streams failed")
                     .cause()
-                    .hasMessageStartingWith("Unknown serializer");
+                    .hasMessageContaining(ReadConcernLevel.MAJORITY.getValue());
 
             DistributedCache<Key, Value> distributedCache = createDistributedCache(collectionName);
             distributedCache.put(Key.of(1), Value.of(1));
