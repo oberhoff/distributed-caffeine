@@ -16,7 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.serializer;
 
 /**
- * Interface to be used when implementing a custom serializer with string representation.
+ * Interface to use when implementing a serializer with string representation.
  *
  * @param <T> the type of the object to serialize
  * @author Andreas Oberhoff
@@ -24,8 +24,8 @@ package io.github.oberhoff.distributedcaffeine.serializer;
 public interface StringSerializer<T> extends Serializer<T, String> {
 
     @Override
-    String serialize(T object) throws SerializerException;
+    String serialize(T object) throws Exception;
 
     @Override
-    T deserialize(String value) throws SerializerException;
+    T deserialize(String value) throws Exception;
 }

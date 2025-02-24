@@ -16,10 +16,15 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.mongodb.client.MongoCollection;
+import io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer;
+import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
+import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
+import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.bson.Document;
 import org.bson.types.ObjectId;
 
-import java.util.Date;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -34,7 +39,7 @@ public interface DistributedPolicy<K, V> {
     /**
      * Get the MongoDB collection used for distributed synchronization between cache instances.
      *
-     * @return the {@link MongoCollection}
+     * @return the mongo collection
      */
     MongoCollection<Document> getMongoCollection();
 
@@ -51,27 +56,63 @@ public interface DistributedPolicy<K, V> {
      * Stop distributed synchronization for this cache instance. After stopping, changes to this cache instance are not
      * distributed to other cache instances, nor are changes to other cache instances distributed to this cache
      * instance. Therefore, this cache instance behaves like a cache instance without distributed synchronization
-     * functionality.
+     * functionality. This also releases the connection to MongoDB.
      */
     void stopSynchronization();
 
     /**
+     * Get the configured serializer for key objects which is always an implementation of one of the following
+     * interfaces:
+     * <ul>
+     *     <li>{@link ByteArraySerializer} for serializing an object to a byte array representation</li>
+     *     <li>{@link StringSerializer} for serializing an object to a string representation</li>
+     *     <li>{@link JsonSerializer} for serializing an object to a JSON representation (encoded as String or BSON)
+     *     </li>
+     * </ul>
+     *
+     * @return the serializer for key objects
+     */
+    Serializer<K, ?> getKeySerializer();
+
+    /**
+     * Get the configured serializer for value objects which is always an implementation of one of the following
+     * interfaces:
+     * <ul>
+     *     <li>{@link ByteArraySerializer} for serializing an object to a byte array representation</li>
+     *     <li>{@link StringSerializer} for serializing an object to a string representation</li>
+     *     <li>{@link JsonSerializer} for serializing an object to a JSON representation (encoded as String or BSON)
+     *     </li>
+     * </ul>
+     *
+     * @return the serializer for value objects
+     */
+    Serializer<V, ?> getValueSerializer();
+
+    /**
      * Get the cache entry mapped to the specified key directly from the MongoDB collection bypassing this cache
-     * instance. If desired, already evicted cache entries can also be included.
+     * instance.
+     * <p>
+     * Evicted cache entries can also be included, which can be particularly useful if extended persistence is
+     * configured using {@link DistributedCaffeine.Builder#withExtendedPersistence(Integer)} or
+     * {@link DistributedCaffeine.Builder#withExtendedPersistence(Duration)}.
      *
      * @param key            the key whose associated cache entry is to be returned
      * @param includeEvicted {@code true} if evicted cache entries should also be included, {@code false} otherwise
-     * @return the cache entry to which the specified key is mapped, or null if no mapping for the key is found
+     * @return the cache entry to which the specified key is mapped, or null if no mapping is found
      */
     CacheEntry<K, V> getFromMongo(K key, boolean includeEvicted);
 
     /**
      * Get the cache entries mapped to the specified keys directly from the MongoDB collection bypassing this cache
-     * instance. If desired, already evicted cache entries can also be included.
+     * instance.
+     * <p>
+     * Evicted cache entries can also be included, which can be particularly useful if extended persistence is
+     * configured using {@link DistributedCaffeine.Builder#withExtendedPersistence(Integer)} or
+     * {@link DistributedCaffeine.Builder#withExtendedPersistence(Duration)}.
      *
      * @param keys           the keys whose associated cache entries are to be returned
      * @param includeEvicted {@code true} if evicted cache entries should also be included, {@code false} otherwise
-     * @return a list of cache entries to which the specified keys are mapped
+     * @return a list of cache entries to which the specified keys are mapped, keys without mapping are omitted
      */
     List<CacheEntry<K, V>> getAllFromMongo(Iterable<? extends K> keys, boolean includeEvicted);
 
@@ -106,18 +147,25 @@ public interface DistributedPolicy<K, V> {
         V getValue();
 
         /**
-         * Get the status of the cache entry
+         * Get the status of the cache entry.
          *
          * @return the status
          */
         String getStatus();
 
         /**
-         * Get the touched date of the cache entry.
+         * Get the touched instant of the cache entry.
          *
-         * @return the touched date
+         * @return the touched instant
          */
-        Date getTouched();
+        Instant getTouched();
+
+        /**
+         * Get the expires instant of the cache entry.
+         *
+         * @return the expires instant
+         */
+        Instant getExpires();
 
         /**
          * Indicates whether the cache entry is already evicted or not.
