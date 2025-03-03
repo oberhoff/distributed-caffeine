@@ -166,7 +166,7 @@ class InternalPolicy<K, V> implements Policy<K, V>, LazyInitializer<K, V> {
         }
 
         @Override
-        public @NonNull Map<K, V> oldest( int limit) {
+        public @NonNull Map<K, V> oldest(int limit) {
             return varExpiration.oldest(limit);
         }
 
@@ -176,7 +176,7 @@ class InternalPolicy<K, V> implements Policy<K, V>, LazyInitializer<K, V> {
         }
 
         @Override
-        public @NonNull Map<K, V> youngest( int limit) {
+        public @NonNull Map<K, V> youngest(int limit) {
             return varExpiration.youngest(limit);
         }
 

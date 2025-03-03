@@ -25,6 +25,8 @@ import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.github.benmanes.caffeine.cache.Policy.VarExpiration;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
+import com.mongodb.MongoClientException;
+import com.mongodb.MongoCommandException;
 import com.mongodb.ReadConcern;
 import com.mongodb.ReadConcernLevel;
 import com.mongodb.client.MongoClient;
@@ -35,10 +37,13 @@ import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.Sorts;
 import com.mongodb.client.model.UpdateOptions;
 import com.mongodb.client.model.Updates;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Builder;
 import io.github.oberhoff.distributedcaffeine.DistributedPolicy.CacheEntry;
+import io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.FurySerializer;
+import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
-import io.github.oberhoff.distributedcaffeine.serializer.SerializerException;
+import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.assertj.core.util.introspection.CaseFormatUtils;
 import org.awaitility.Awaitility;
 import org.awaitility.core.ConditionFactory;
@@ -66,15 +71,13 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.platform.commons.util.ReflectionUtils;
 import org.junit.platform.commons.util.ReflectionUtils.HierarchyTraversalMode;
 import org.testcontainers.containers.MongoDBContainer;
-import org.testcontainers.images.AbstractImagePullPolicy;
-import org.testcontainers.images.ImageData;
+import org.testcontainers.images.PullPolicy;
 import org.testcontainers.utility.DockerImageName;
 
 import java.lang.System.Logger;
 import java.lang.reflect.Field;
 import java.security.SecureRandom;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.AbstractMap.SimpleEntry;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -82,7 +85,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.ResourceBundle;
 import java.util.Set;
@@ -96,8 +98,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BiFunction;
-import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
@@ -109,16 +109,18 @@ import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATI
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION_AND_EVICTION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.CACHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.EVICTED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.EXPIRES;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.HASH;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.ID;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.INVALIDATED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.ORPHANED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.STATUS;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.TOUCHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.VALUE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.EXPIRES;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.HASH;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STATUS;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.TOUCHED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.VALUE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field._ID;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.INVALIDATED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.ORPHANED;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
 import static java.lang.String.format;
 import static java.util.Objects.isNull;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -204,14 +206,14 @@ final class DistributedCaffeineTest {
 
         @DisplayName("Test put() and getIfPresent()")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
-        @MethodSource("provideCacheBiFunctionsWithDifferentSerializers")
-        void test_DistributedCache_put_getIfPresent(CacheBiFunction<Key, Value> cacheBiFunction) {
-            DistributedCache<Key, Value> distributedCache = cacheBiFunction.apply(null, null);
-            DistributedCache<Key, Value> syncedDistributedCache = cacheBiFunction.apply(null, null);
-
-            assertThat(distributedCache.estimatedSize()).isZero();
-            assertThat(syncedDistributedCache.estimatedSize()).isZero();
-            assertThat(countMongoStatus(distributedCache)).isZero();
+        @MethodSource("provideCacheFactoriesWithDifferentSerializers")
+        void test_DistributedCache_put_getIfPresent(CacheFactory<Key, Value> cacheFactory) {
+            DistributedCache<Key, Value> distributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    Builder::build);
+            DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    Builder::build);
 
             Key key = Key.of(1);
             Value value = Value.of(1);
@@ -233,14 +235,14 @@ final class DistributedCaffeineTest {
 
         @DisplayName("Test putAll() and getAllPresent()")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
-        @MethodSource("provideCacheBiFunctionsWithDifferentSerializers")
-        void test_DistributedCache_putAll_getAllPresent(CacheBiFunction<Key, Value> cacheBiFunction) {
-            DistributedCache<Key, Value> distributedCache = cacheBiFunction.apply(null, null);
-            DistributedCache<Key, Value> syncedDistributedCache = cacheBiFunction.apply(null, null);
-
-            assertThat(distributedCache.estimatedSize()).isZero();
-            assertThat(syncedDistributedCache.estimatedSize()).isZero();
-            assertThat(countMongoStatus(distributedCache)).isZero();
+        @MethodSource("provideCacheFactoriesWithDifferentSerializers")
+        void test_DistributedCache_putAll_getAllPresent(CacheFactory<Key, Value> cacheFactory) {
+            DistributedCache<Key, Value> distributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    Builder::build);
+            DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    Builder::build);
 
             Map<Key, Value> keyValueMap = Map.of(
                     Key.of(1), Value.of(1),
@@ -263,14 +265,14 @@ final class DistributedCaffeineTest {
 
         @DisplayName("Test get() and getAll()")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
-        @MethodSource("provideCacheBiFunctionsWithDifferentSerializers")
-        void test_DistributedCache_get_getAll(CacheBiFunction<Key, Value> cacheBiFunction) {
-            DistributedCache<Key, Value> distributedCache = cacheBiFunction.apply(null, null);
-            DistributedCache<Key, Value> syncedDistributedCache = cacheBiFunction.apply(null, null);
-
-            assertThat(distributedCache.estimatedSize()).isZero();
-            assertThat(syncedDistributedCache.estimatedSize()).isZero();
-            assertThat(countMongoStatus(distributedCache)).isZero();
+        @MethodSource("provideCacheFactoriesWithDifferentSerializers")
+        void test_DistributedCache_get_getAll(CacheFactory<Key, Value> cacheFactory) {
+            DistributedCache<Key, Value> distributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    Builder::build);
+            DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    Builder::build);
 
             Key key = Key.of(1);
             Value value = Value.of(1);
@@ -297,14 +299,14 @@ final class DistributedCaffeineTest {
 
         @DisplayName("Test invalidate() and invalidateAll()")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
-        @MethodSource("provideCacheBiFunctionsWithDifferentSerializers")
-        void test_DistributedCache_invalidate_invalidateAll(CacheBiFunction<Key, Value> cacheBiFunction) {
-            DistributedCache<Key, Value> distributedCache = cacheBiFunction.apply(null, null);
-            DistributedCache<Key, Value> syncedDistributedCache = cacheBiFunction.apply(null, null);
-
-            assertThat(distributedCache.estimatedSize()).isZero();
-            assertThat(syncedDistributedCache.estimatedSize()).isZero();
-            assertThat(countMongoStatus(distributedCache)).isZero();
+        @MethodSource("provideCacheFactoriesWithDifferentSerializers")
+        void test_DistributedCache_invalidate_invalidateAll(CacheFactory<Key, Value> cacheFactory) {
+            DistributedCache<Key, Value> distributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    Builder::build);
+            DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    Builder::build);
 
             Key key = Key.of(1);
             Value value = Value.of(1);
@@ -369,24 +371,24 @@ final class DistributedCaffeineTest {
                     .atMost(WAITING_DURATION)
                     .failFast(() -> cleanUp(distributedCache, syncedDistributedCache))
                     .untilAsserted(() -> {
-                        assertThat(distributedCache.estimatedSize()).isZero();
-                        assertThat(syncedDistributedCache.estimatedSize()).isZero();
-                        assertThat(countMongoStatus(distributedCache, CACHED)).isZero();
+                        assertThat(distributedCache.estimatedSize()).isEqualTo(0);
+                        assertThat(syncedDistributedCache.estimatedSize()).isEqualTo(0);
+                        assertThat(countMongoStatus(distributedCache, CACHED)).isEqualTo(0);
                     });
         }
 
         @DisplayName("Test get() and getAll()")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
-        @MethodSource("provideCacheBiFunctionsWithDifferentSerializers")
-        void test_DistributedLoadingCache_get_getAll(CacheBiFunction<Key, Value> cacheBiFunction) {
+        @MethodSource("provideCacheFactoriesWithDifferentSerializers")
+        void test_DistributedLoadingCache_get_getAll(CacheFactory<Key, Value> cacheFactory) {
             CacheLoader<Key, Value> cacheLoader = key -> Value.of(key.getId());
 
-            DistributedLoadingCache<Key, Value> distributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheBiFunction.apply(null, cacheLoader);
-            DistributedLoadingCache<Key, Value> syncedDistributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheBiFunction.apply(null, cacheLoader);
-
-            assertThat(distributedLoadingCache.estimatedSize()).isZero();
-            assertThat(syncedDistributedLoadingCache.estimatedSize()).isZero();
-            assertThat(countMongoStatus(distributedLoadingCache)).isZero();
+            DistributedLoadingCache<Key, Value> distributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
+                    CacheBuilder.identity(),
+                    b -> b.build(cacheLoader));
+            DistributedLoadingCache<Key, Value> syncedDistributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
+                    CacheBuilder.identity(),
+                    b -> b.build(cacheLoader));
 
             Key key = Key.of(1);
             Value loadedValue = Value.of(1);
@@ -426,16 +428,16 @@ final class DistributedCaffeineTest {
 
         @DisplayName("Test refresh() and refreshAll()")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
-        @MethodSource("provideCacheBiFunctionsWithDifferentSerializers")
-        void test_DistributedLoadingCache_refresh_refreshAll(CacheBiFunction<Key, Value> cacheBiFunction) {
+        @MethodSource("provideCacheFactoriesWithDifferentSerializers")
+        void test_DistributedLoadingCache_refresh_refreshAll(CacheFactory<Key, Value> cacheFactory) {
             CacheLoader<Key, Value> cacheLoader = key -> Value.of(key.getId());
 
-            DistributedLoadingCache<Key, Value> distributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheBiFunction.apply(null, cacheLoader);
-            DistributedLoadingCache<Key, Value> syncedDistributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheBiFunction.apply(null, cacheLoader);
-
-            assertThat(distributedLoadingCache.estimatedSize()).isZero();
-            assertThat(syncedDistributedLoadingCache.estimatedSize()).isZero();
-            assertThat(countMongoStatus(distributedLoadingCache)).isZero();
+            DistributedLoadingCache<Key, Value> distributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
+                    CacheBuilder.identity(),
+                    b -> b.build(cacheLoader));
+            DistributedLoadingCache<Key, Value> syncedDistributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
+                    CacheBuilder.identity(),
+                    b -> b.build(cacheLoader));
 
             // CacheLoader#load (async) is used if no entry exists
 
@@ -503,17 +505,17 @@ final class DistributedCaffeineTest {
 
         @DisplayName("Test put(), putIfAbsent() and putAll() via asMap()")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
-        @MethodSource("provideCacheBiFunctionsWithDifferentSerializers")
-        void test_ConcurrentMap_put_putIfAbsent_putAll(CacheBiFunction<Key, Value> cacheBiFunction) {
-            DistributedCache<Key, Value> distributedCache = cacheBiFunction.apply(null, null);
-            DistributedCache<Key, Value> syncedDistributedCache = cacheBiFunction.apply(null, null);
+        @MethodSource("provideCacheFactoriesWithDifferentSerializers")
+        void test_ConcurrentMap_put_putIfAbsent_putAll(CacheFactory<Key, Value> cacheFactory) {
+            DistributedCache<Key, Value> distributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    Builder::build);
+            DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    Builder::build);
 
             ConcurrentMap<Key, Value> distributedCacheMap = distributedCache.asMap();
             ConcurrentMap<Key, Value> syncedDistributedCacheMap = syncedDistributedCache.asMap();
-
-            assertThat(distributedCacheMap).isEmpty();
-            assertThat(syncedDistributedCacheMap).isEmpty();
-            assertThat(countMongoStatus(distributedCache)).isZero();
 
             Key key1 = Key.of(1);
             Value value1 = Value.of(1);
@@ -547,17 +549,17 @@ final class DistributedCaffeineTest {
 
         @DisplayName("Test compute(), computeIfAbsent() and computeIfPresent() via asMap()")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
-        @MethodSource("provideCacheBiFunctionsWithDifferentSerializers")
-        void test_ConcurrentMap_compute_computeIfAbsent_computeIfPresent(CacheBiFunction<Key, Value> cacheBiFunction) {
-            DistributedCache<Key, Value> distributedCache = cacheBiFunction.apply(null, null);
-            DistributedCache<Key, Value> syncedDistributedCache = cacheBiFunction.apply(null, null);
+        @MethodSource("provideCacheFactoriesWithDifferentSerializers")
+        void test_ConcurrentMap_compute_computeIfAbsent_computeIfPresent(CacheFactory<Key, Value> cacheFactory) {
+            DistributedCache<Key, Value> distributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    Builder::build);
+            DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    Builder::build);
 
             ConcurrentMap<Key, Value> distributedCacheMap = distributedCache.asMap();
             ConcurrentMap<Key, Value> syncedDistributedCacheMap = syncedDistributedCache.asMap();
-
-            assertThat(distributedCacheMap).isEmpty();
-            assertThat(syncedDistributedCacheMap).isEmpty();
-            assertThat(countMongoStatus(distributedCache)).isZero();
 
             Key key1 = Key.of(1);
             Value computedValue1 = Value.of(1);
@@ -605,17 +607,17 @@ final class DistributedCaffeineTest {
 
         @DisplayName("Test replace(), replaceAll() and merge() via asMap()")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
-        @MethodSource("provideCacheBiFunctionsWithDifferentSerializers")
-        void test_ConcurrentMap_replace_replaceAll_merge(CacheBiFunction<Key, Value> cacheBiFunction) {
-            DistributedCache<Key, Value> distributedCache = cacheBiFunction.apply(null, null);
-            DistributedCache<Key, Value> syncedDistributedCache = cacheBiFunction.apply(null, null);
+        @MethodSource("provideCacheFactoriesWithDifferentSerializers")
+        void test_ConcurrentMap_replace_replaceAll_merge(CacheFactory<Key, Value> cacheFactory) {
+            DistributedCache<Key, Value> distributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    Builder::build);
+            DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    Builder::build);
 
             ConcurrentMap<Key, Value> distributedCacheMap = distributedCache.asMap();
             ConcurrentMap<Key, Value> syncedDistributedCacheMap = syncedDistributedCache.asMap();
-
-            assertThat(distributedCacheMap).isEmpty();
-            assertThat(syncedDistributedCacheMap).isEmpty();
-            assertThat(countMongoStatus(distributedCache)).isZero();
 
             Key key1 = Key.of(1);
             Value value1 = Value.of(1, "to be replaced");
@@ -672,17 +674,17 @@ final class DistributedCaffeineTest {
 
         @DisplayName("Test keySet(), values() and entrySet() via asMap()")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
-        @MethodSource("provideCacheBiFunctionsWithDifferentSerializers")
-        void test_ConcurrentMap_keySet_values_entrySet(CacheBiFunction<Key, Value> cacheBiFunction) {
-            DistributedCache<Key, Value> distributedCache = cacheBiFunction.apply(null, null);
-            DistributedCache<Key, Value> syncedDistributedCache = cacheBiFunction.apply(null, null);
+        @MethodSource("provideCacheFactoriesWithDifferentSerializers")
+        void test_ConcurrentMap_keySet_values_entrySet(CacheFactory<Key, Value> cacheFactory) {
+            DistributedCache<Key, Value> distributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    Builder::build);
+            DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    Builder::build);
 
             ConcurrentMap<Key, Value> distributedCacheMap = distributedCache.asMap();
             ConcurrentMap<Key, Value> syncedDistributedCacheMap = syncedDistributedCache.asMap();
-
-            assertThat(distributedCacheMap).isEmpty();
-            assertThat(syncedDistributedCacheMap).isEmpty();
-            assertThat(countMongoStatus(distributedCache)).isZero();
 
             Key exceptionKey1 = Key.of(1, "exception");
             Value exceptionValue1 = Value.of(1, "exception");
@@ -738,7 +740,7 @@ final class DistributedCaffeineTest {
                     .untilAsserted(() -> {
                         assertThat(distributedCacheMap).isEmpty();
                         assertThat(syncedDistributedCacheMap).isEmpty();
-                        assertThat(countMongoStatus(distributedCache, CACHED)).isZero();
+                        assertThat(countMongoStatus(distributedCache, CACHED)).isEqualTo(0);
                     });
 
             distributedCacheMap.putAll(keyValueMap);
@@ -802,17 +804,17 @@ final class DistributedCaffeineTest {
 
         @DisplayName("Test remove() and clear() via asMap()")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
-        @MethodSource("provideCacheBiFunctionsWithDifferentSerializers")
-        void test_ConcurrentMap_remove_clear(CacheBiFunction<Key, Value> cacheBiFunction) {
-            DistributedCache<Key, Value> distributedCache = cacheBiFunction.apply(null, null);
-            DistributedCache<Key, Value> syncedDistributedCache = cacheBiFunction.apply(null, null);
+        @MethodSource("provideCacheFactoriesWithDifferentSerializers")
+        void test_ConcurrentMap_remove_clear(CacheFactory<Key, Value> cacheFactory) {
+            DistributedCache<Key, Value> distributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    Builder::build);
+            DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    Builder::build);
 
             ConcurrentMap<Key, Value> distributedCacheMap = distributedCache.asMap();
             ConcurrentMap<Key, Value> syncedDistributedCacheMap = syncedDistributedCache.asMap();
-
-            assertThat(distributedCacheMap).isEmpty();
-            assertThat(syncedDistributedCacheMap).isEmpty();
-            assertThat(countMongoStatus(distributedCache)).isZero();
 
             Key key = Key.of(1);
             Value value = Value.of(1);
@@ -879,28 +881,26 @@ final class DistributedCaffeineTest {
                     .untilAsserted(() -> {
                         assertThat(distributedCacheMap).isEmpty();
                         assertThat(syncedDistributedCacheMap).isEmpty();
-                        assertThat(countMongoStatus(distributedCache, CACHED)).isZero();
+                        assertThat(countMongoStatus(distributedCache, CACHED)).isEqualTo(0);
                     });
         }
 
         @DisplayName("Test population")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
-        @MethodSource("provideCacheBiFunctionsWithDifferentDistributionModes")
-        void test_DistributedCaffeine_population_with_different_distribution_modes(CacheBiFunction<Key, Value> cacheBiFunction) {
-            Supplier<BuilderFunction<Key, Value>> builderFunctionSupplier = () ->
+        @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
+        void test_DistributedCaffeine_population_with_different_distribution_modes(CacheFactory<Key, Value> cacheFactory) {
+            Supplier<CacheBuilder<Key, Value>> cacheBuilderSupplier = () ->
                     b -> b.withCaffeineBuilder(Caffeine.newBuilder()
                             .maximumSize(2));
 
-            DistributedCache<Key, Value> distributedCacheA = cacheBiFunction.apply(builderFunctionSupplier.get(), null);
-            DistributedCache<Key, Value> distributedCacheB = cacheBiFunction.apply(builderFunctionSupplier.get(), null);
+            DistributedCache<Key, Value> distributedCacheA = cacheFactory.create(
+                    cacheBuilderSupplier.get(),
+                    Builder::build);
+            DistributedCache<Key, Value> distributedCacheB = cacheFactory.create(
+                    cacheBuilderSupplier.get(),
+                    Builder::build);
 
-            DistributedCaffeine<Key, Value> distributedCaffeine = getDistributedCaffeine(distributedCacheA);
-            DistributionMode distributionMode = readFieldValue(distributedCaffeine, DistributedCaffeine.class,
-                    "distributionMode", DistributionMode.class);
-
-            assertThat(distributedCacheA.estimatedSize()).isZero();
-            assertThat(distributedCacheB.estimatedSize()).isZero();
-            assertThat(countMongoStatus(distributedCacheA)).isZero();
+            DistributionMode distributionMode = getDistributedCaffeine(distributedCacheA).getDistributionMode();
 
             Key key1 = Key.of(1);
             Value value1 = Value.of(1);
@@ -977,18 +977,20 @@ final class DistributedCaffeineTest {
 
         @DisplayName("Test invalidation")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
-        @MethodSource("provideCacheBiFunctionsWithDifferentDistributionModes")
-        void test_DistributedCaffeine_invalidation_with_different_distribution_modes(CacheBiFunction<Key, Value> cacheBiFunction) {
-            Supplier<BuilderFunction<Key, Value>> builderFunctionSupplier = () ->
+        @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
+        void test_DistributedCaffeine_invalidation_with_different_distribution_modes(CacheFactory<Key, Value> cacheFactory) {
+            Supplier<CacheBuilder<Key, Value>> cacheBuilderSupplier = () ->
                     b -> b.withCaffeineBuilder(Caffeine.newBuilder()
                             .maximumSize(2));
 
-            DistributedCache<Key, Value> distributedCacheA = cacheBiFunction.apply(builderFunctionSupplier.get(), null);
-            DistributedCache<Key, Value> distributedCacheB = cacheBiFunction.apply(builderFunctionSupplier.get(), null);
+            DistributedCache<Key, Value> distributedCacheA = cacheFactory.create(
+                    cacheBuilderSupplier.get(),
+                    Builder::build);
+            DistributedCache<Key, Value> distributedCacheB = cacheFactory.create(
+                    cacheBuilderSupplier.get(),
+                    Builder::build);
 
-            DistributedCaffeine<Key, Value> distributedCaffeine = getDistributedCaffeine(distributedCacheA);
-            DistributionMode distributionMode = readFieldValue(distributedCaffeine, DistributedCaffeine.class,
-                    "distributionMode", DistributionMode.class);
+            DistributionMode distributionMode = getDistributedCaffeine(distributedCacheA).getDistributionMode();
 
             Key key1 = Key.of(1);
             Value value1 = Value.of(1);
@@ -1089,18 +1091,20 @@ final class DistributedCaffeineTest {
 
         @DisplayName("Test eviction")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
-        @MethodSource("provideCacheBiFunctionsWithDifferentDistributionModes")
-        void test_DistributedCaffeine_eviction_with_different_distribution_modes(CacheBiFunction<Key, Value> cacheBiFunction) {
-            Supplier<BuilderFunction<Key, Value>> builderFunctionSupplier = () ->
+        @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
+        void test_DistributedCaffeine_eviction_with_different_distribution_modes(CacheFactory<Key, Value> cacheFactory) {
+            Supplier<CacheBuilder<Key, Value>> cacheBuilderSupplier = () ->
                     b -> b.withCaffeineBuilder(Caffeine.newBuilder()
                             .maximumSize(1));
 
-            DistributedCache<Key, Value> distributedCacheA = cacheBiFunction.apply(builderFunctionSupplier.get(), null);
-            DistributedCache<Key, Value> distributedCacheB = cacheBiFunction.apply(builderFunctionSupplier.get(), null);
+            DistributedCache<Key, Value> distributedCacheA = cacheFactory.create(
+                    cacheBuilderSupplier.get(),
+                    Builder::build);
+            DistributedCache<Key, Value> distributedCacheB = cacheFactory.create(
+                    cacheBuilderSupplier.get(),
+                    Builder::build);
 
-            DistributedCaffeine<Key, Value> distributedCaffeine = getDistributedCaffeine(distributedCacheA);
-            DistributionMode distributionMode = readFieldValue(distributedCaffeine, DistributedCaffeine.class,
-                    "distributionMode", DistributionMode.class);
+            DistributionMode distributionMode = getDistributedCaffeine(distributedCacheA).getDistributionMode();
 
             Key key1 = Key.of(1);
             Value value1 = Value.of(1);
@@ -1222,17 +1226,17 @@ final class DistributedCaffeineTest {
 
         @DisplayName("Test synchronization")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
-        @MethodSource("provideCacheBiFunctionsWithDifferentDistributionModes")
-        void test_DistributedCaffeine_synchronization_with_different_distribution_modes(CacheBiFunction<Key, Value> cacheBiFunction) {
-            Supplier<BuilderFunction<Key, Value>> builderFunctionSupplier = () ->
+        @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
+        void test_DistributedCaffeine_synchronization_with_different_distribution_modes(CacheFactory<Key, Value> cacheFactory) {
+            Supplier<CacheBuilder<Key, Value>> cacheBuilderSupplier = () ->
                     b -> b.withCaffeineBuilder(Caffeine.newBuilder()
                             .maximumSize(2));
 
-            DistributedCache<Key, Value> distributedCacheA = cacheBiFunction.apply(builderFunctionSupplier.get(), null);
+            DistributedCache<Key, Value> distributedCacheA = cacheFactory.create(
+                    cacheBuilderSupplier.get(),
+                    Builder::build);
 
-            DistributedCaffeine<Key, Value> distributedCaffeine = getDistributedCaffeine(distributedCacheA);
-            DistributionMode distributionMode = readFieldValue(distributedCaffeine, DistributedCaffeine.class,
-                    "distributionMode", DistributionMode.class);
+            DistributionMode distributionMode = getDistributedCaffeine(distributedCacheA).getDistributionMode();
 
             Key key1 = Key.of(1);
             Value value1 = Value.of(1);
@@ -1242,7 +1246,9 @@ final class DistributedCaffeineTest {
             distributedCacheA.put(key1, value1);
             distributedCacheA.put(key2, value2);
 
-            DistributedCache<Key, Value> distributedCacheB = cacheBiFunction.apply(builderFunctionSupplier.get(), null);
+            DistributedCache<Key, Value> distributedCacheB = cacheFactory.create(
+                    cacheBuilderSupplier.get(),
+                    Builder::build);
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
@@ -1279,9 +1285,9 @@ final class DistributedCaffeineTest {
 
         @DisplayName("Test refresh")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
-        @MethodSource("provideCacheBiFunctionsWithDifferentDistributionModes")
-        void test_DistributedCaffeine_refresh_with_different_distribution_modes(CacheBiFunction<Key, Value> cacheBiFunction) {
-            Supplier<BuilderFunction<Key, Value>> builderFunctionSupplier = () ->
+        @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
+        void test_DistributedCaffeine_refresh_with_different_distribution_modes(CacheFactory<Key, Value> cacheFactory) {
+            Supplier<CacheBuilder<Key, Value>> cacheBuilderSupplier = () ->
                     b -> b.withCaffeineBuilder(Caffeine.newBuilder()
                             .maximumSize(2));
 
@@ -1291,16 +1297,14 @@ final class DistributedCaffeineTest {
                     ? null
                     : Value.of(idCounter.incrementAndGet());
 
-            DistributedLoadingCache<Key, Value> distributedLoadingCacheA = (DistributedLoadingCache<Key, Value>) cacheBiFunction.apply(builderFunctionSupplier.get(), cacheLoader);
-            DistributedLoadingCache<Key, Value> distributedLoadingCacheB = (DistributedLoadingCache<Key, Value>) cacheBiFunction.apply(builderFunctionSupplier.get(), cacheLoader);
+            DistributedLoadingCache<Key, Value> distributedLoadingCacheA = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
+                    cacheBuilderSupplier.get(),
+                    b -> b.build(cacheLoader));
+            DistributedLoadingCache<Key, Value> distributedLoadingCacheB = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
+                    cacheBuilderSupplier.get(),
+                    b -> b.build(cacheLoader));
 
-            DistributedCaffeine<Key, Value> distributedCaffeine = getDistributedCaffeine(distributedLoadingCacheA);
-            DistributionMode distributionMode = readFieldValue(distributedCaffeine, DistributedCaffeine.class,
-                    "distributionMode", DistributionMode.class);
-
-            assertThat(distributedLoadingCacheA.estimatedSize()).isZero();
-            assertThat(distributedLoadingCacheB.estimatedSize()).isZero();
-            assertThat(countMongoStatus(distributedLoadingCacheA)).isZero();
+            DistributionMode distributionMode = getDistributedCaffeine(distributedLoadingCacheA).getDistributionMode();
 
             Key key1 = Key.of(1);
             Key key2 = Key.of(2);
@@ -1421,18 +1425,20 @@ final class DistributedCaffeineTest {
                             assertThat(isCacheManagerMaintained(distributedLoadingCacheA, distributedLoadingCacheB)).isTrue());
         }
 
-        @DisplayName("Test MongoDB synchronization")
+        @DisplayName("Test synchronization")
         @Test
-        void test_DistributedCaffeine_MongoDB_synchronization() {
-            String collectionName = getCollectionNameWithSuffix("cacheMongoSynchronization");
+        void test_DistributedCaffeine_synchronization() {
+            String collectionName = getUniqueCollectionName("cacheSynchronization");
 
-            DistributedCache<Key, Value> distributedCache = createDistributedCache(collectionName);
+            DistributedCache<Key, Value> distributedCache = createCache(collectionName,
+                    CacheBuilder.identity(),
+                    Builder::build);
 
             Key key1 = Key.of(1);
             Value value1 = Value.of(1);
             distributedCache.put(key1, value1);
             // create orphaned cache entry
-            distributedCache.put(key1, Value.of(1)); // new value instance
+            distributedCache.put(key1, value1);
 
             await("maintenance")
                     .atMost(WAITING_DURATION)
@@ -1441,12 +1447,16 @@ final class DistributedCaffeineTest {
 
             // create inconsistencies in relation to not orphaned cache entries
             distributedCache.distributedPolicy().getMongoCollection().updateMany(Filters.empty(),
-                    Updates.combine(Updates.set(STATUS, CACHED), Updates.set(EXPIRES, null)));
+                    Updates.combine(
+                            Updates.set(STATUS.toString(), CACHED.toString()),
+                            Updates.set(EXPIRES.toString(), null)));
 
             assertThat(countMongoStatus(distributedCache, CACHED)).isEqualTo(2);
 
             // corrects inconsistencies in relation to not orphaned cache entries implicitly
-            DistributedCache<Key, Value> syncedDistributedCache = createDistributedCache(collectionName);
+            DistributedCache<Key, Value> syncedDistributedCache = createCache(collectionName,
+                    CacheBuilder.identity(),
+                    Builder::build);
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
@@ -1518,38 +1528,67 @@ final class DistributedCaffeineTest {
         @DisplayName("Test removal and eviction listener")
         @Test
         void test_DistributedCaffeine_removal_and_eviction_listener() {
-            String collectionName = getCollectionNameWithSuffix("cacheEvictionListener");
+            String collectionName = getUniqueCollectionName("cacheEvictionListener");
 
+            AtomicInteger removalCount = new AtomicInteger(0);
             AtomicReference<RemovalCause> removalCause = new AtomicReference<>(null);
+            AtomicInteger evictionCount = new AtomicInteger(0);
             AtomicReference<RemovalCause> evictionCause = new AtomicReference<>(null);
 
-            RemovalListener<Key, Value> removalListener = (key, value, cause) ->
-                    removalCause.set(cause);
-            RemovalListener<Key, Value> evictionListener = (key, value, cause) ->
-                    evictionCause.set(cause);
+            RemovalListener<Key, Value> removalListener = (key, value, cause) -> {
+                removalCount.incrementAndGet();
+                removalCause.set(cause);
+            };
+            RemovalListener<Key, Value> evictionListener = (key, value, cause) -> {
+                evictionCount.incrementAndGet();
+                evictionCause.set(cause);
+            };
 
-            DistributedCache<Key, Value> distributedCacheWithListeners = createDistributedCache(collectionName,
+            DistributedCache<Key, Value> distributedCacheWithListeners = createCache(collectionName,
                     b -> b.withCaffeineBuilder(Caffeine.newBuilder()
                             .maximumSize(1)
                             .removalListener(removalListener)
-                            .evictionListener(evictionListener)));
-
-            assertThat(removalCause).hasNullValue();
-            assertThat(evictionCause).hasNullValue();
+                            .evictionListener(evictionListener)),
+                    Builder::build);
 
             Key key1 = Key.of(1);
             Value value1 = Value.of(1);
             Key key2 = Key.of(2);
             Value value2 = Value.of(2);
+
             distributedCacheWithListeners.put(key1, value1);
+
+            await("invocation of listeners")
+                    .atMost(WAITING_DURATION)
+                    .failFast(() -> cleanUp(distributedCacheWithListeners))
+                    .untilAsserted(() -> {
+                        assertThat(removalCount).hasValue(0);
+                        assertThat(removalCause).hasNullValue();
+                        assertThat(evictionCount).hasValue(0);
+                        assertThat(evictionCause).hasNullValue();
+                    });
+
             distributedCacheWithListeners.put(key2, value2);
+
+            await("invocation of listeners")
+                    .atMost(WAITING_DURATION)
+                    .failFast(() -> cleanUp(distributedCacheWithListeners))
+                    .untilAsserted(() -> {
+                        assertThat(removalCount).hasValue(1);
+                        assertThat(removalCause).hasValue(RemovalCause.SIZE);
+                        assertThat(evictionCount).hasValue(1);
+                        assertThat(evictionCause).hasValue(RemovalCause.SIZE);
+                    });
+
             distributedCacheWithListeners.invalidateAll();
 
             await("invocation of listeners")
                     .atMost(WAITING_DURATION)
                     .failFast(() -> cleanUp(distributedCacheWithListeners))
                     .untilAsserted(() -> {
+                        assertThat(evictionCount).hasValue(1);
                         assertThat(removalCause).hasValue(RemovalCause.EXPLICIT);
+                        assertThat(removalCount).hasValue(2);
                         assertThat(evictionCause).hasValue(RemovalCause.SIZE);
                     });
         }
@@ -1557,33 +1596,19 @@ final class DistributedCaffeineTest {
         @DisplayName("Test policy()")
         @Test
         void test_DistributedCaffeine_policy() {
-            String collectionName = getCollectionNameWithSuffix("cachePolicy");
+            String collectionName = getUniqueCollectionName("cachePolicy");
 
-            Expiry<Key, Value> expiry = new Expiry<>() {
+            Expiry<Key, Value> expiry = Expiry.creating((key, value) -> Duration.ofSeconds(Long.MAX_VALUE));
 
-                @Override
-                public long expireAfterCreate(@NonNull Key key, @NonNull Value value, long currentTime) {
-                    return Long.MAX_VALUE;
-                }
-
-                @Override
-                public long expireAfterUpdate(@NonNull Key key, @NonNull Value value, long currentTime, long currentDuration) {
-                    return Long.MAX_VALUE;
-                }
-
-                @Override
-                public long expireAfterRead(@NonNull Key key, @NonNull Value value, long currentTime, long currentDuration) {
-                    return Long.MAX_VALUE;
-                }
-            };
-
-            DistributedCache<Key, Value> distributedCacheWithVarExpiration = createDistributedCache(collectionName,
+            DistributedCache<Key, Value> distributedCacheWithVarExpiration = createCache(collectionName,
                     b -> b.withCaffeineBuilder(Caffeine.newBuilder()
-                            .expireAfter(expiry)));
+                            .expireAfter(expiry)),
+                    Builder::build);
 
-            DistributedCache<Key, Value> syncedDistributedCacheWithVarExpiration = createDistributedCache(collectionName,
+            DistributedCache<Key, Value> syncedDistributedCacheWithVarExpiration = createCache(collectionName,
                     b -> b.withCaffeineBuilder(Caffeine.newBuilder()
-                            .expireAfter(expiry)));
+                            .expireAfter(expiry)),
+                    Builder::build);
 
             VarExpiration<Key, Value> varExpiration = distributedCacheWithVarExpiration.policy().expireVariably().orElseThrow();
 
@@ -1632,33 +1657,23 @@ final class DistributedCaffeineTest {
         @DisplayName("Test distributedPolicy()")
         @Test
         void test_DistributedCaffeine_distributedPolicy() {
-            String collectionName = getCollectionNameWithSuffix("cacheDistributedPolicy");
+            String collectionName = getUniqueCollectionName("cacheDistributedPolicy");
 
-            Expiry<Key, Value> expiry = new Expiry<>() {
+            Expiry<Key, Value> expiry = Expiry.creating((key, value) -> Duration.ofSeconds(Long.MAX_VALUE));
 
-                @Override
-                public long expireAfterCreate(@NonNull Key key, @NonNull Value value, long currentTime) {
-                    return Long.MAX_VALUE;
-                }
-
-                @Override
-                public long expireAfterUpdate(@NonNull Key key, @NonNull Value value, long currentTime, long currentDuration) {
-                    return Long.MAX_VALUE;
-                }
-
-                @Override
-                public long expireAfterRead(@NonNull Key key, @NonNull Value value, long currentTime, long currentDuration) {
-                    return Long.MAX_VALUE;
-                }
-            };
-
-            DistributedCache<Key, Value> distributedCache = createDistributedCache(collectionName,
+            DistributedCache<Key, Value> distributedCache = createCache(collectionName,
                     b -> b.withCaffeineBuilder(Caffeine.newBuilder()
-                            .expireAfter(expiry)));
+                            .expireAfter(expiry)),
+                    Builder::build);
             DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
 
             assertThat(distributedPolicy.getMongoCollection().getNamespace().getCollectionName())
                     .isEqualTo(collectionName);
+
+            assertThat(distributedPolicy.getKeySerializer())
+                    .isInstanceOfAny(ByteArraySerializer.class, StringSerializer.class, JsonSerializer.class);
+            assertThat(distributedPolicy.getValueSerializer())
+                    .isInstanceOfAny(ByteArraySerializer.class, StringSerializer.class, JsonSerializer.class);
 
             Key manipulatedKey = Key.of(0);
             Value manipulatedValue = Value.of(0);
@@ -1673,7 +1688,7 @@ final class DistributedCaffeineTest {
 
             // create inconsistencies in relation to hash values
             distributedPolicy.getMongoCollection()
-                    .updateMany(Filters.empty(), Updates.set(HASH, key1.hashCode()));
+                    .updateMany(Filters.empty(), Updates.set(HASH.toString(), key1.hashCode()));
 
             varExpiration.put(key1, value1, Duration.ofHours(1));
             distributedCache.invalidate(key1);
@@ -1686,6 +1701,9 @@ final class DistributedCaffeineTest {
                     .untilAsserted(() -> {
                         assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
                         assertThat(distributedPolicy.getFromMongo(key2, true).getValue()).isEqualTo(value2);
+                        assertThat(distributedPolicy.getFromMongo(key2, true).getStatus()).isEqualTo(EVICTED.toString());
+                        assertThat(distributedPolicy.getFromMongo(key2, true).getTouched()).isNotNull();
+                        assertThat(distributedPolicy.getFromMongo(key2, true).getExpires()).isNotNull();
                         assertThat(distributedPolicy.getAllFromMongo(Set.of(key1, key2), false).stream()
                                 .collect(Collectors.toMap(CacheEntry::getKey, CacheEntry::getValue)))
                                 .containsExactlyInAnyOrderEntriesOf(Map.of(key1, value1));
@@ -1703,9 +1721,11 @@ final class DistributedCaffeineTest {
         @DisplayName("Test direct manipulation")
         @Test
         void test_DistributedCaffeine_direct_manipulation() {
-            String collectionName = getCollectionNameWithSuffix("cacheDirectManipulation");
+            String collectionName = getUniqueCollectionName("cacheDirectManipulation");
 
-            DistributedCache<Key, Value> distributedCache = createDistributedCache(collectionName);
+            DistributedCache<Key, Value> distributedCache = createCache(collectionName,
+                    CacheBuilder.identity(),
+                    Builder::build);
 
             DistributedCaffeine<Key, Value> distributedCaffeine = getDistributedCaffeine(distributedCache);
             MongoCollection<Document> mongoCollection = distributedCaffeine.getMongoCollection();
@@ -1716,9 +1736,9 @@ final class DistributedCaffeineTest {
 
             ObjectId objectId = new ObjectId();
             Bson update = invokeMethod(mongoRepository, InternalMongoRepository.class,
-                    "toMongoUpdate", List.of(Key.class, Value.class, String.class), List.of(key, value, CACHED));
+                    "toMongoUpdate", List.of(Key.class, Value.class, Status.class), List.of(key, value, CACHED));
 
-            mongoCollection.updateOne(Filters.eq(ID, objectId), update, new UpdateOptions().upsert(true));
+            mongoCollection.updateOne(Filters.eq(_ID.toString(), objectId), update, new UpdateOptions().upsert(true));
 
             await("distribution via change streams")
                     .atMost(WAITING_DURATION)
@@ -1733,11 +1753,11 @@ final class DistributedCaffeineTest {
             Value updatedValue = Value.of(1, "updatedValue");
             Serializer<Value, ?> valueSerializer = getDistributedCaffeine(distributedCache).getValueSerializer();
             try {
-                update = Updates.set(VALUE, valueSerializer.serialize(updatedValue));
-            } catch (SerializerException ignored) {
+                update = Updates.set(VALUE.toString(), valueSerializer.serialize(updatedValue));
+            } catch (Exception ignored) {
             }
 
-            mongoCollection.updateOne(Filters.eq(ID, objectId), update);
+            mongoCollection.updateOne(Filters.eq(_ID.toString(), objectId), update);
 
             await("distribution via change streams")
                     .atMost(WAITING_DURATION)
@@ -1755,20 +1775,24 @@ final class DistributedCaffeineTest {
                     .atMost(WAITING_DURATION)
                     .failFast(() -> cleanUp(distributedCache))
                     .untilAsserted(() -> {
-                        assertThat(distributedCache.estimatedSize()).isZero();
+                        assertThat(distributedCache.estimatedSize()).isEqualTo(0);
                         assertThat(distributedCache.getIfPresent(key)).isNull();
-                        assertThat(countMongoStatus(distributedCache)).isZero();
+                        assertThat(countMongoStatus(distributedCache)).isEqualTo(0);
                         assertThat(isCacheManagerMaintained(distributedCache)).isTrue();
                     });
         }
 
-        @DisplayName("Test that no unnecessary operations")
+        @DisplayName("Test same value instance handling and invalidation of already absent value")
         @Test
-        void test_DistributedCaffeine_no_unnecessary_operations() {
-            String collectionName = getCollectionNameWithSuffix("cacheNoUnnecessaryOperations");
+        void test_DistributedCaffeine_same_value_and_already_absent() {
+            String collectionName = getUniqueCollectionName("cacheSameValueAndAlreadyAbsentValue");
 
-            DistributedCache<Key, Value> distributedCache = createDistributedCache(collectionName);
-            DistributedCache<Key, Value> syncedDistributedCache = createDistributedCache(collectionName);
+            DistributedCache<Key, Value> distributedCache = createCache(collectionName,
+                    CacheBuilder.identity(),
+                    Builder::build);
+            DistributedCache<Key, Value> syncedDistributedCache = createCache(collectionName,
+                    CacheBuilder.identity(),
+                    Builder::build);
 
             Key key = Key.of(1);
             Value value = Value.of(1);
@@ -1790,52 +1814,534 @@ final class DistributedCaffeineTest {
                         assertThat(syncedDistributedCache.getIfPresent(key)).isNotSameAs(value);
                     });
 
-            distributedCache.put(key, value); // same value instance
+            distributedCache.put(key, value); // same value instance but should create orphaned entry
             distributedCache.invalidate(Key.of(0, "not present"));
 
             await("synchronization between cache instances")
-                    .pollInterval(WAITING_DURATION) // wait for (no) synchronization
-                    .untilAsserted(() -> {
-                        assertThat(countMongoStatus(distributedCache, CACHED)).isEqualTo(1);
-                        assertThat(countMongoStatus(distributedCache, ORPHANED)).isEqualTo(0);
-                        assertThat(countMongoStatus(distributedCache, INVALIDATED)).isEqualTo(0);
-                    });
-
-            distributedCache.put(key, Value.of(value.getId())); // new value instance
-
-            await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
+                    .failFast(() -> cleanUp(distributedCache))
                     .untilAsserted(() -> {
                         assertThat(countMongoStatus(distributedCache, CACHED)).isEqualTo(1);
                         assertThat(countMongoStatus(distributedCache, ORPHANED)).isEqualTo(1);
+                        assertThat(countMongoStatus(distributedCache, INVALIDATED)).isEqualTo(0);
                     });
         }
 
-        @DisplayName("Test that weak or soft references are not supported")
+        @DisplayName("Test ChangeStreamWatcher")
         @Test
-        void test_DistributedCaffeine_weak_or_soft_references_not_supported() {
-            String collectionName = getCollectionNameWithSuffix("cacheWeakOrSoftReferencesNotSupported");
+        void test_ChangeStreamWatcher_fails_and_retries() {
+            String collectionName = getUniqueCollectionName("cacheChangeStreamWatcher");
+
+            // test early failure
+            assertThatThrownBy(() -> DistributedCaffeine.<Key, Value>newBuilder(mongoDatabase
+                            .getCollection(collectionName)
+                            .withReadConcern(ReadConcern.LOCAL))
+                    .build())
+                    .isInstanceOf(MongoClientException.class)
+                    .hasMessageStartingWith("Watching change streams failed")
+                    .hasMessageNotContaining("Retrying")
+                    .cause()
+                    .isInstanceOf(MongoCommandException.class)
+                    .hasMessageContainingAll(ReadConcernLevel.LOCAL.getValue(), ReadConcernLevel.MAJORITY.getValue());
+
+            Key key = Key.of(1);
+            Value value = Value.of(1);
+
+            DistributedCache<Key, Value> distributedCache = createCache(collectionName,
+                    CacheBuilder.identity(),
+                    Builder::build);
+            distributedCache.put(key, value);
+
+            await("cache manager maintenance")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() ->
+                            assertThat(isCacheManagerMaintained(distributedCache)).isTrue());
+
+            InternalChangeStreamWatcher<Key, Value> changeStreamWatcher = getDistributedCaffeine(distributedCache)
+                    .getChangeStreamWatcher();
+
+            List<String> logs = new ArrayList<>();
+            Logger logger = new Logger() {
+
+                @Override
+                public String getName() {
+                    return "";
+                }
+
+                @Override
+                public boolean isLoggable(Level level) {
+                    return false;
+                }
+
+                @Override
+                public void log(Level level, ResourceBundle bundle, String msg, Throwable thrown) {
+                    logs.add(msg);
+                }
+
+                @Override
+                public void log(Level level, ResourceBundle bundle, String format, Object... params) {
+                }
+            };
+
+            // provoke failure
+            writeFieldValue(changeStreamWatcher, InternalChangeStreamWatcher.class, "logger", logger);
+            AtomicReference<BsonTimestamp> operationTime = readFieldValue(changeStreamWatcher, InternalChangeStreamWatcher.class,
+                    "operationTime", AtomicReference.class);
+            writeFieldValue(changeStreamWatcher, InternalChangeStreamWatcher.class, "operationTime", null);
+
+            distributedCache.put(key, value);
+
+            await("failure")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        assertThat(logs.size()).isPositive();
+                        assertThat(logs).allMatch(log ->
+                                log.startsWith("Watching change streams failed")
+                                        && log.endsWith("Retrying..."));
+                    });
+
+            await("cache manager maintenance")
+                    .pollInterval(WAITING_DURATION) // wait for (no) cache manager maintenance
+                    .untilAsserted(() ->
+                            assertThat(isCacheManagerMaintained(distributedCache)).isFalse());
+
+            // fix failure
+            writeFieldValue(changeStreamWatcher, InternalChangeStreamWatcher.class, "operationTime", operationTime);
+
+            await("cache manager maintenance")
+                    .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure
+                    .untilAsserted(() ->
+                            assertThat(isCacheManagerMaintained(distributedCache)).isTrue());
+
+            // provoke failure
+            InternalDocumentConverter<Key, Value> documentConverter = readFieldValue(changeStreamWatcher, InternalChangeStreamWatcher.class,
+                    "documentConverter", InternalDocumentConverter.class);
+            writeFieldValue(changeStreamWatcher, InternalChangeStreamWatcher.class, "documentConverter", null);
+
+            logs.clear();
+            distributedCache.put(key, value);
+
+            await("failure")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        assertThat(logs.size()).isPositive();
+                        assertThat(logs).allMatch(log ->
+                                log.startsWith("Deserializing of cache entry failed")
+                                        && log.endsWith("Skipping..."));
+                    });
+
+            // fix failure
+            writeFieldValue(changeStreamWatcher, InternalChangeStreamWatcher.class, "documentConverter", documentConverter);
+
+            await("cache manager maintenance")
+                    .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure
+                    .untilAsserted(() ->
+                            assertThat(isCacheManagerMaintained(distributedCache)).isTrue());
+
+            // deactivate synchronization
+            distributedCache.distributedPolicy().stopSynchronization();
+
+            distributedCache.put(key, value);
+
+            await("insert")
+                    .pollInterval(WAITING_DURATION) // wait for (no) insert
+                    .untilAsserted(() ->
+                            assertThat(countMongoStatus(distributedCache)).isEqualTo(3));
+
+            // activate synchronization
+            distributedCache.distributedPolicy().startSynchronization();
+
+            distributedCache.put(key, value);
+
+            await("insert")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() ->
+                            assertThat(countMongoStatus(distributedCache)).isEqualTo(4));
+        }
+
+        @DisplayName("Test MaintenanceWorker")
+        @Test
+        void test_MaintenanceWorker_fails_and_retries() {
+            String collectionName = getUniqueCollectionName("cacheMaintenanceWorker");
+
+            Key key = Key.of(1);
+            Value value = Value.of(1);
+
+            DistributedCache<Key, Value> distributedCache = createCache(collectionName,
+                    CacheBuilder.identity(),
+                    Builder::build);
+            distributedCache.put(key, value);
+
+            // create orphaned cache entry
+            distributedCache.put(key, value);
+
+            await("maintenance")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() ->
+                            assertThat(countMongoStatus(distributedCache, ORPHANED)).isEqualTo(1));
+
+            deleteMongoExpires(distributedCache);
+
+            await("deletion")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() ->
+                            assertThat(countMongoStatus(distributedCache, ORPHANED)).isEqualTo(0));
+
+            // create orphaned cache entry
+            distributedCache.put(key, value);
+
+            await("maintenance")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() ->
+                            assertThat(countMongoStatus(distributedCache, ORPHANED)).isEqualTo(1));
+
+            InternalMaintenanceWorker<Key, Value> maintenanceWorker = getDistributedCaffeine(distributedCache)
+                    .getMaintenanceWorker();
+
+            List<String> logs = new ArrayList<>();
+            Logger logger = new Logger() {
+
+                @Override
+                public String getName() {
+                    return "";
+                }
+
+                @Override
+                public boolean isLoggable(Level level) {
+                    return false;
+                }
+
+                @Override
+                public void log(Level level, ResourceBundle bundle, String msg, Throwable thrown) {
+                    logs.add(msg);
+                }
+
+                @Override
+                public void log(Level level, ResourceBundle bundle, String format, Object... params) {
+                }
+            };
+
+            // provoke failure
+            writeFieldValue(maintenanceWorker, InternalMaintenanceWorker.class, "logger", logger);
+            PriorityBlockingQueue<ObjectId> toBeOrphaned = readFieldValue(maintenanceWorker, InternalMaintenanceWorker.class,
+                    "toBeOrphaned", PriorityBlockingQueue.class);
+            writeFieldValue(maintenanceWorker, InternalMaintenanceWorker.class, "toBeOrphaned", null);
+
+            await("failure")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        assertThat(logs.size()).isPositive();
+                        assertThat(logs).allMatch(log ->
+                                log.startsWith("Maintenance failed")
+                                        && log.endsWith("Retrying..."));
+                    });
+
+            deleteMongoExpires(distributedCache);
+
+            await("deletion")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() ->
+                            assertThat(countMongoStatus(distributedCache, ORPHANED)).isEqualTo(0));
+
+            // fix failure
+            writeFieldValue(maintenanceWorker, InternalMaintenanceWorker.class, "toBeOrphaned", toBeOrphaned);
+
+            // create orphaned cache entry
+            distributedCache.put(key, value);
+
+            await("maintenance")
+                    .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure
+                    .untilAsserted(() ->
+                            assertThat(countMongoStatus(distributedCache, ORPHANED)).isEqualTo(1));
+
+            // deactivate synchronization
+            distributedCache.distributedPolicy().stopSynchronization();
+
+            // create orphaned cache entry
+            distributedCache.put(key, value);
+
+            await("maintenance")
+                    .pollInterval(WAITING_DURATION) // wait for (no) maintenance
+                    .untilAsserted(() ->
+                            assertThat(countMongoStatus(distributedCache, ORPHANED)).isEqualTo(1));
+
+            // activate synchronization
+            distributedCache.distributedPolicy().startSynchronization();
+
+            // create orphaned cache entry
+            distributedCache.put(key, value);
+
+            await("maintenance")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() ->
+                            assertThat(countMongoStatus(distributedCache, ORPHANED)).isEqualTo(2));
+        }
+
+        @DisplayName("Test checks on arguments and states for builder")
+        @Test
+        void test_Builder_checks_on_arguments_and_states() {
+            String collectionName = getUniqueCollectionName("cacheChecksOnArgumentsAndStates");
 
             assertThatThrownBy(() ->
-                    createDistributedCache(collectionName,
+                    DistributedCaffeine.newBuilder(null))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("mongoCollection cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withCaffeineBuilder(null),
+                            Builder::build))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("caffeineBuilder cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withDistributionMode(null),
+                            Builder::build))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("distributionMode cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withJsonSerializer(null, null, (Class<? super Object>) null, true),
+                            Builder::build))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("objectMapper cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withJsonSerializer(new ObjectMapper(), null, (Class<Object>) null, true),
+                            Builder::build))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("keyClass cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withJsonSerializer(new ObjectMapper(), Object.class, null, true),
+                            Builder::build))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("valueClass cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withJsonSerializer(null, null, (TypeReference<Object>) null, true),
+                            Builder::build))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("objectMapper cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withJsonSerializer(new ObjectMapper(), null, (TypeReference<Object>) null, true),
+                            Builder::build))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("keyTypeReference cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withJsonSerializer(new ObjectMapper(), new TypeReference<>() {
+                            }, null, true),
+                            Builder::build))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("valueTypeReference cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withJsonSerializer(null, (Class<Object>) null, true),
+                            Builder::build))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("keyClass cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withJsonSerializer(Object.class, null, true),
+                            Builder::build))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("valueClass cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withJsonSerializer(null, (TypeReference<Object>) null, true),
+                            Builder::build))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("keyTypeReference cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withJsonSerializer(new TypeReference<>() {
+                            }, null, true),
+                            Builder::build))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("valueTypeReference cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withCustomKeySerializer(null),
+                            Builder::build))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("keySerializer cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withCustomValueSerializer(null),
+                            Builder::build))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("valueSerializer cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withCustomKeySerializer(new Serializer<>() {
+                                @Override
+                                public Object serialize(Object object) {
+                                    return null;
+                                }
+
+                                @Override
+                                public Object deserialize(Object value) {
+                                    return null;
+                                }
+                            }),
+                            Builder::build))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("Custom serializer must implement one of the following interfaces: "
+                            .concat("ByteArraySerializer, StringSerializer, JsonSerializer"));
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withCustomValueSerializer(new Serializer<>() {
+                                @Override
+                                public Object serialize(Object object) {
+                                    return null;
+                                }
+
+                                @Override
+                                public Object deserialize(Object value) {
+                                    return null;
+                                }
+                            }),
+                            Builder::build))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("Custom serializer must implement one of the following interfaces: "
+                            .concat("ByteArraySerializer, StringSerializer, JsonSerializer"));
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withExtendedPersistence((Integer) null),
+                            Builder::build))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("maximumSize cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withExtendedPersistence(0),
+                            Builder::build))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("maximumSize must be positive");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withExtendedPersistence((Duration) null),
+                            Builder::build))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("maximumTime cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withExtendedPersistence(Duration.ZERO),
+                            Builder::build))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("maximumTime must be positive");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withExtendedPersistence(1),
+                            Builder::build))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("If an extended persistence size or an extended persistence time is set, "
+                            .concat("'buildWithExtendedPersistence(...)' must be used"));
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withExtendedPersistence(Duration.ofSeconds(1)),
+                            Builder::build))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("If an extended persistence size or an extended persistence time is set, "
+                            .concat("'buildWithExtendedPersistence(...)' must be used"));
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withExtendedPersistence(1),
+                            b -> b.build(key -> null)))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("If an extended persistence size or an extended persistence time is set, "
+                            .concat("'buildWithExtendedPersistence(...)' must be used"));
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withExtendedPersistence(Duration.ofSeconds(1)),
+                            b -> b.build(key -> null)))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("If an extended persistence size or an extended persistence time is set, "
+                            .concat("'buildWithExtendedPersistence(...)' must be used"));
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            CacheBuilder.identity(),
+                            b -> b.build(null)))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("cacheLoader cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            CacheBuilder.identity(),
+                            Builder::buildWithExtendedPersistence))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("If no extended persistence size and no extended persistence time is set, "
+                            .concat("'build(...)' must be used"));
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            CacheBuilder.identity(),
+                            b -> b.buildWithExtendedPersistence(key -> null)))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("If no extended persistence size and no extended persistence time is set, "
+                            .concat("'build(...)' must be used"));
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withExtendedPersistence(1),
+                            b -> b.buildWithExtendedPersistence(null)))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("cacheLoader cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
+                            b -> b.withExtendedPersistence(1),
+                            b -> b.buildWithExtendedPersistence(key -> null)))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("If an extended persistence size or an extended persistence time is set, "
+                            .concat("at least one eviction policy must be configured."));
+
+            assertThatThrownBy(() ->
+                    createCache(collectionName,
                             b -> b.withCaffeineBuilder(Caffeine.newBuilder()
                                     .weakKeys()
-                                    .weakValues())))
-                    .isInstanceOf(DistributedCaffeineException.class)
-                    .hasMessageStartingWith("The use of weak or soft references is not supported");
+                                    .weakValues()),
+                            Builder::build))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("The use of weak or soft references is not supported");
         }
 
         @DisplayName("Test that removal listener is not invoked if refresh returns old value")
         @Test
         void test_Caffeine_removal_listener_is_not_invoked_if_refresh_returns_old_value() {
 
-            AtomicInteger removalInvocations = new AtomicInteger();
+            AtomicInteger removalCount = new AtomicInteger(0);
             RemovalListener<Key, Value> removalListener = (key, value, removalCause) ->
-                    removalInvocations.incrementAndGet();
+                    removalCount.incrementAndGet();
 
-            AtomicInteger loadInvocations = new AtomicInteger();
-            AtomicInteger asyncLoadInvocations = new AtomicInteger();
-            AtomicInteger asyncReloadInvocations = new AtomicInteger();
+            AtomicInteger loadInvocations = new AtomicInteger(0);
+            AtomicInteger asyncLoadInvocations = new AtomicInteger(0);
+            AtomicInteger asyncReloadInvocations = new AtomicInteger(0);
             CacheLoader<Key, Value> cacheLoader = new CacheLoader<>() {
                 @Override
                 public Value load(Key key) {
@@ -1871,7 +2377,7 @@ final class DistributedCaffeineTest {
                     .pollInterval(WAITING_DURATION) // wait for (no) async removal listener
                     .untilAsserted(() -> {
                         assertThat(loadingCache.estimatedSize()).isEqualTo(3);
-                        assertThat(removalInvocations).hasValue(0);
+                        assertThat(removalCount).hasValue(0);
                         assertThat(loadInvocations).hasValue(3);
                         assertThat(asyncLoadInvocations).hasValue(3);
                         assertThat(asyncReloadInvocations).hasValue(0);
@@ -1885,265 +2391,11 @@ final class DistributedCaffeineTest {
                     .pollInterval(WAITING_DURATION) // wait for (no) async removal listener
                     .untilAsserted(() -> {
                         assertThat(loadingCache.estimatedSize()).isEqualTo(3);
-                        assertThat(removalInvocations).hasValue(0);
+                        assertThat(removalCount).hasValue(0);
                         assertThat(loadInvocations).hasValue(3);
                         assertThat(asyncLoadInvocations).hasValue(3);
                         assertThat(asyncReloadInvocations).hasValue(3);
                     });
-        }
-
-        @DisplayName("Test ChangeStreamWatcher")
-        @Test
-        void test_ChangeStreamWatcher() {
-            String collectionName = getCollectionNameWithSuffix("cacheChangeStreamWatcher");
-
-            // test early failure
-            assertThatThrownBy(() -> DistributedCaffeine
-                    .<Key, Value>newBuilder(mongoDatabase.getCollection(collectionName)
-                            .withReadConcern(ReadConcern.LOCAL))
-                    .build())
-                    .isInstanceOf(DistributedCaffeineException.class)
-                    .hasMessageStartingWith("Watching change streams failed")
-                    .cause()
-                    .hasMessageContaining(ReadConcernLevel.MAJORITY.getValue());
-
-            DistributedCache<Key, Value> distributedCache = createDistributedCache(collectionName);
-            distributedCache.put(Key.of(1), Value.of(1));
-
-            await("cache manager maintenance")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() ->
-                            assertThat(isCacheManagerMaintained(distributedCache)).isTrue());
-
-            // test retry on failure
-
-            DistributedCaffeine<Key, Value> distributedCaffeine = getDistributedCaffeine(distributedCache);
-            InternalChangeStreamWatcher<Key, Value> changeStreamWatcher = readFieldValue(distributedCaffeine, DistributedCaffeine.class,
-                    "changeStreamWatcher", InternalChangeStreamWatcher.class);
-
-            List<String> logs = new ArrayList<>();
-            Logger logger = new Logger() {
-                @Override
-                public String getName() {
-                    throw new UnsupportedOperationException();
-                }
-
-                @Override
-                public boolean isLoggable(Level level) {
-                    throw new UnsupportedOperationException();
-                }
-
-                @Override
-                public void log(Level level, ResourceBundle bundle, String msg, Throwable thrown) {
-                    logs.add(msg);
-                }
-
-                @Override
-                public void log(Level level, ResourceBundle bundle, String format, Object... params) {
-                    throw new UnsupportedOperationException();
-                }
-            };
-
-            // provoke failure
-            writeFieldValue(changeStreamWatcher, InternalChangeStreamWatcher.class, "logger", logger);
-            AtomicReference<BsonTimestamp> operationTime = readFieldValue(changeStreamWatcher, InternalChangeStreamWatcher.class,
-                    "operationTime", AtomicReference.class);
-            writeFieldValue(changeStreamWatcher, InternalChangeStreamWatcher.class, "operationTime", null);
-
-            distributedCache.put(Key.of(1), Value.of(1)); // new value instance
-
-            await("failure")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> {
-                        assertThat(logs.size()).isPositive();
-                        assertThat(logs).allMatch(log -> log.contains("Watching change streams failed"));
-                    });
-
-            await("cache manager maintenance")
-                    .pollInterval(WAITING_DURATION) // wait for (no) cache manager maintenance
-                    .untilAsserted(() ->
-                            assertThat(isCacheManagerMaintained(distributedCache)).isFalse());
-
-            // fix failure
-            writeFieldValue(changeStreamWatcher, InternalChangeStreamWatcher.class, "operationTime", operationTime);
-
-            await("cache manager maintenance")
-                    .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure
-                    .untilAsserted(() ->
-                            assertThat(isCacheManagerMaintained(distributedCache)).isTrue());
-
-            // provoke failure
-            InternalDocumentConverter<Key, Value> documentConverter = readFieldValue(changeStreamWatcher, InternalChangeStreamWatcher.class,
-                    "documentConverter", InternalDocumentConverter.class);
-            writeFieldValue(changeStreamWatcher, InternalChangeStreamWatcher.class, "documentConverter", null);
-
-            logs.clear();
-            distributedCache.put(Key.of(1), Value.of(1)); // new value instance
-
-            await("failure")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> {
-                        assertThat(logs.size()).isPositive();
-                        assertThat(logs).allMatch(log -> log.contains("Deserializing of cache entry failed"));
-                    });
-
-            // fix failure
-            writeFieldValue(changeStreamWatcher, InternalChangeStreamWatcher.class, "documentConverter", documentConverter);
-
-            await("cache manager maintenance")
-                    .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure
-                    .untilAsserted(() ->
-                            assertThat(isCacheManagerMaintained(distributedCache)).isTrue());
-
-            // deactivate synchronization
-            distributedCache.distributedPolicy().stopSynchronization();
-
-            distributedCache.put(Key.of(1), Value.of(1)); // new value instance
-
-            await("insert")
-                    .pollInterval(WAITING_DURATION) // wait for (no) insert
-                    .untilAsserted(() ->
-                            assertThat(countMongoStatus(distributedCache)).isEqualTo(3));
-
-            @SuppressWarnings("resource")
-            ExecutorService executorService = readFieldValue(changeStreamWatcher, InternalChangeStreamWatcher.class,
-                    "executorService", ExecutorService.class);
-
-            await("shut down")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() ->
-                            assertThat(executorService.isShutdown()).isTrue());
-
-            // activate synchronization
-            distributedCache.distributedPolicy().startSynchronization();
-
-            distributedCache.put(Key.of(1), Value.of(1)); // new value instance
-
-            await("insert")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() ->
-                            assertThat(countMongoStatus(distributedCache)).isEqualTo(4));
-        }
-
-        @DisplayName("Test MaintenanceWorker")
-        @Test
-        void test_MaintenanceWorker() {
-            String collectionName = getCollectionNameWithSuffix("cacheMaintenanceWorker");
-
-            DistributedCache<Key, Value> distributedCache = createDistributedCache(collectionName);
-            distributedCache.put(Key.of(1), Value.of(1));
-
-            // create orphaned cache entry
-            distributedCache.put(Key.of(1), Value.of(1)); // new value instance
-
-            await("maintenance")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() ->
-                            assertThat(countMongoStatus(distributedCache, ORPHANED)).isEqualTo(1));
-
-            deleteMongoExpires(distributedCache);
-
-            await("deletion")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() ->
-                            assertThat(countMongoStatus(distributedCache, ORPHANED)).isZero());
-
-            // create orphaned cache entry
-            distributedCache.put(Key.of(1), Value.of(1)); // new value instance
-
-            await("maintenance")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() ->
-                            assertThat(countMongoStatus(distributedCache, ORPHANED)).isEqualTo(1));
-
-            // test retry on failure
-
-            InternalMaintenanceWorker<Key, Value> maintenanceWorker = getDistributedCaffeine(distributedCache).getMaintenanceWorker();
-
-            List<String> logs = new ArrayList<>();
-            Logger logger = new Logger() {
-                @Override
-                public String getName() {
-                    throw new UnsupportedOperationException();
-                }
-
-                @Override
-                public boolean isLoggable(Level level) {
-                    throw new UnsupportedOperationException();
-                }
-
-                @Override
-                public void log(Level level, ResourceBundle bundle, String msg, Throwable thrown) {
-                    logs.add(msg);
-                }
-
-                @Override
-                public void log(Level level, ResourceBundle bundle, String format, Object... params) {
-                    throw new UnsupportedOperationException();
-                }
-            };
-
-            // provoke failure
-            writeFieldValue(maintenanceWorker, InternalMaintenanceWorker.class, "logger", logger);
-            PriorityBlockingQueue<ObjectId> toBeOrphaned = readFieldValue(maintenanceWorker, InternalMaintenanceWorker.class,
-                    "toBeOrphaned", PriorityBlockingQueue.class);
-            writeFieldValue(maintenanceWorker, InternalMaintenanceWorker.class, "toBeOrphaned", null);
-
-            await("failure")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> {
-                        assertThat(logs.size()).isPositive();
-                        assertThat(logs).allMatch(log -> log.contains("Maintenance failed"));
-                    });
-
-            deleteMongoExpires(distributedCache);
-
-            await("deletion")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() ->
-                            assertThat(countMongoStatus(distributedCache, ORPHANED)).isZero());
-
-            // fix failure
-            writeFieldValue(maintenanceWorker, InternalMaintenanceWorker.class, "toBeOrphaned", toBeOrphaned);
-
-            // create orphaned cache entry
-            distributedCache.put(Key.of(1), Value.of(1)); // new value instance
-
-            await("maintenance")
-                    .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure
-                    .untilAsserted(() ->
-                            assertThat(countMongoStatus(distributedCache, ORPHANED)).isEqualTo(1));
-
-            // deactivate synchronization
-            distributedCache.distributedPolicy().stopSynchronization();
-
-            // create orphaned cache entry
-            distributedCache.put(Key.of(1), Value.of(1)); // new value instance
-
-            await("maintenance")
-                    .pollInterval(WAITING_DURATION) // wait for (no) maintenance
-                    .untilAsserted(() ->
-                            assertThat(countMongoStatus(distributedCache, ORPHANED)).isEqualTo(1));
-
-            @SuppressWarnings("resource")
-            ExecutorService executorService = readFieldValue(maintenanceWorker, InternalMaintenanceWorker.class,
-                    "executorService", ExecutorService.class);
-
-            await("shut down")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() ->
-                            assertThat(executorService.isShutdown()).isTrue());
-
-            // activate synchronization
-            distributedCache.distributedPolicy().startSynchronization();
-
-            // create orphaned cache entry
-            distributedCache.put(Key.of(1), Value.of(1)); // new value instance
-
-            await("maintenance")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() ->
-                            assertThat(countMongoStatus(distributedCache, ORPHANED)).isEqualTo(2));
         }
 
         @DisplayName("Stress test synchronization from MongoDB")
@@ -2152,17 +2404,18 @@ final class DistributedCaffeineTest {
             final Duration EXTENDED_WAITING_DURATION = WAITING_DURATION.multipliedBy(100);
             final Duration EXTENDED_POLL_INTERVAL = Duration.ofSeconds(1);
 
-            String collectionName = getCollectionNameWithSuffix("cacheStressSynchronizationFromMongo");
+            String collectionName = getUniqueCollectionName("cacheStressSynchronizationFromMongo");
             int cacheSize = 100_000;
 
             Supplier<DistributedLoadingCache<Key, Value>> cacheSupplier = () -> {
                 CacheLoader<Key, Value> cacheLoader = key -> nextInt(2) == 1
                         ? Value.of(key.getId(), format("load_%s_%s", System.currentTimeMillis(), key.getId()))
                         : null;
-                return createDistributedLoadingCache(collectionName,
+                DistributedCache<Key, Value> cache = createCache(collectionName,
                         b -> b.withCaffeineBuilder(Caffeine.newBuilder()
                                 .maximumSize(cacheSize)),
-                        cacheLoader);
+                        b -> b.build(cacheLoader));
+                return (DistributedLoadingCache<Key, Value>) cache;
             };
 
             DistributedLoadingCache<Key, Value> distributedLoadingCache = cacheSupplier.get();
@@ -2254,17 +2507,18 @@ final class DistributedCaffeineTest {
             final Duration EXTENDED_WAITING_DURATION = WAITING_DURATION.multipliedBy(100);
             final Duration EXTENDED_POLL_INTERVAL = Duration.ofSeconds(1);
 
-            String collectionName = getCollectionNameWithSuffix("cacheStressMultiThread");
+            String collectionName = getUniqueCollectionName("cacheStressMultiThread");
             int cacheSize = 100;
 
             Supplier<DistributedLoadingCache<Key, Value>> cacheSupplier = () -> {
                 CacheLoader<Key, Value> cacheLoader = key -> nextInt(2) == 1
                         ? Value.of(key.getId(), format("load_%s_%s", System.currentTimeMillis(), key.getId()))
                         : null;
-                return createDistributedLoadingCache(collectionName,
+                DistributedCache<Key, Value> cache = createCache(collectionName,
                         b -> b.withCaffeineBuilder(Caffeine.newBuilder()
                                 .maximumSize(cacheSize)),
-                        cacheLoader);
+                        b -> b.build(cacheLoader));
+                return (DistributedLoadingCache<Key, Value>) cache;
             };
 
             // first cache only watches passively
@@ -2348,7 +2602,7 @@ final class DistributedCaffeineTest {
                     .untilAsserted(() -> {
                         assertThat(isCacheManagerMaintained(distributedLoadingCaches
                                 .<DistributedCache<Key, Value>>toArray(DistributedCache[]::new))).isTrue();
-                        assertThat(countMongoStatus(firstDistributedLoadingCache)).isZero();
+                        assertThat(countMongoStatus(firstDistributedLoadingCache)).isEqualTo(0);
                     });
         }
     }
@@ -2358,59 +2612,48 @@ final class DistributedCaffeineTest {
 
         static final String LATEST_ONLY = "latestOnly";
         static final String DATABASE_NAME = "distributedCaffeineTestSuiteDatabase";
-        static final Duration WAITING_DURATION = Duration.ofSeconds(5);
-
-        MongoDBContainer mongoContainer;
-        MongoClient mongoClient;
-        MongoDatabase mongoDatabase;
+        static final Duration WAITING_DURATION = Duration.ofSeconds(3);
 
         AtomicLong collectionNameSuffix;
         ExecutorService executorService;
         SecureRandom secureRandom;
 
+        MongoDBContainer mongoContainer;
+        MongoClient mongoClient;
+        MongoDatabase mongoDatabase;
+
         Collection<DistributedCache<?, ?>> distributedCacheInstances;
 
         @BeforeAll
         void beforeAll() {
+            collectionNameSuffix = new AtomicLong(0);
+            executorService = Executors.newCachedThreadPool();
+            secureRandom = new SecureRandom();
+
             String tag = Optional.ofNullable(getClass().getAnnotation(Tag.class))
                     .map(Tag::value)
                     .orElseThrow();
             String displayName = Optional.ofNullable(getClass().getAnnotation(DisplayName.class))
                     .map(DisplayName::value)
-                    .map(value -> value.replace(' ', '-'))
+                    .map(value -> value.replace(" ", "-"))
                     .map(String::toLowerCase)
                     .orElseThrow();
             DockerImageName dockerImageName = DockerImageName.parse(tag);
 
             mongoContainer = new MongoDBContainer(dockerImageName)
                     .withCreateContainerCmdModifier(cmd -> cmd.withName(displayName))
-                    // images with latest tag should be pulled periodically to get the newest version
-                    .withImagePullPolicy(new AbstractImagePullPolicy() {
-                        @Override
-                        protected boolean shouldPullCached(DockerImageName imageName, ImageData localImageData) {
-                            Duration maxAge = Duration.ofDays(30);
-                            boolean isLatest = !imageName.getVersionPart().contains(".");
-                            boolean isOutdated = Instant.now().isAfter(localImageData.getCreatedAt().plus(maxAge));
-                            return isLatest && isOutdated;
-                        }
-                    });
+                    .withImagePullPolicy(PullPolicy.alwaysPull());
             mongoContainer.start();
-            mongoClient = MongoClients.create(mongoContainer.getConnectionString());
-            mongoDatabase = mongoClient.getDatabase(DATABASE_NAME);
 
-            collectionNameSuffix = new AtomicLong(0);
-            executorService = Executors.newCachedThreadPool(runnable ->
-                    new Thread(runnable, Thread.class.getSimpleName()
-                            .concat(DistributedCaffeineTest.class.getSimpleName())
-                            .concat(String.valueOf(runnable.hashCode()))));
-            secureRandom = new SecureRandom();
+            mongoClient = MongoClients.create(mongoContainer.getReplicaSetUrl());
+            mongoDatabase = mongoClient.getDatabase(DATABASE_NAME);
         }
 
         @AfterAll
         void afterAll() {
             mongoClient.close();
             mongoContainer.stop();
-            executorService.shutdownNow();
+            executorService.shutdown();
         }
 
         @BeforeEach
@@ -2428,15 +2671,15 @@ final class DistributedCaffeineTest {
             distributedCacheInstances.clear();
         }
 
-        Stream<Arguments> provideCacheBiFunctionsWithDifferentSerializers() {
+        Stream<Arguments> provideCacheFactoriesWithDifferentSerializers() {
             Stream<DistributedCaffeineConfiguration<Key, Value>> distributedCaffeineConfigurations = createDistributedCaffeineConfigurationWithDifferentSerializers();
-            return createNamedCacheBiFunctionsForParametrizedTests(distributedCaffeineConfigurations)
+            return createNamedCacheFactoriesForParametrizedTests(distributedCaffeineConfigurations)
                     .map(Arguments::of);
         }
 
-        Stream<Arguments> provideCacheBiFunctionsWithDifferentDistributionModes() {
+        Stream<Arguments> provideCacheFactoriesWithDifferentDistributionModes() {
             Stream<DistributedCaffeineConfiguration<Key, Value>> distributedCaffeineConfigurations = createDistributedCaffeineConfigurationsWithDifferentDistributionModes();
-            return createNamedCacheBiFunctionsForParametrizedTests(distributedCaffeineConfigurations)
+            return createNamedCacheFactoriesForParametrizedTests(distributedCaffeineConfigurations)
                     .map(Arguments::of);
         }
 
@@ -2445,7 +2688,7 @@ final class DistributedCaffeineTest {
                     new DistributedCaffeineConfiguration<>(
                             "with Fury Serializer",
                             "cacheWithFurySerializer",
-                            DistributedCaffeine.Builder::withFurySerializer),
+                            Builder::withFurySerializer),
                     new DistributedCaffeineConfiguration<>(
                             "with Fury Serializer (Class)",
                             "cacheWithFurySerializerClass",
@@ -2454,7 +2697,7 @@ final class DistributedCaffeineTest {
                     new DistributedCaffeineConfiguration<>(
                             "with Java Object Serializer",
                             "cacheWithJavaObjectSerializer",
-                            DistributedCaffeine.Builder::withJavaObjectSerializer),
+                            Builder::withJavaObjectSerializer),
                     new DistributedCaffeineConfiguration<>(
                             "with Jackson Serializer (BSON, Class)",
                             "cacheWithJsonSerializerBsonClass",
@@ -2497,45 +2740,28 @@ final class DistributedCaffeineTest {
                     });
         }
 
-        private <K, V> Stream<Named<CacheBiFunction<K, V>>> createNamedCacheBiFunctionsForParametrizedTests(Stream<DistributedCaffeineConfiguration<K, V>> distributedCaffeineConfigurations) {
+        private <K, V> Stream<Named<CacheFactory<K, V>>> createNamedCacheFactoriesForParametrizedTests(Stream<DistributedCaffeineConfiguration<K, V>> distributedCaffeineConfigurations) {
             return distributedCaffeineConfigurations
                     .map(distributedCaffeineConfiguration -> {
-                        String collectionNameWithSuffix = getCollectionNameWithSuffix(distributedCaffeineConfiguration.getCollectionName());
-                        CacheBiFunction<K, V> cacheBiFunction = (builderFunction, cacheLoader) -> {
-                            List<BuilderFunction<K, V>> builderFunctions = Stream.of(builderFunction, distributedCaffeineConfiguration.getBuilderFunction())
-                                    .filter(Objects::nonNull)
-                                    .collect(Collectors.toList());
-                            return createCacheInstance(collectionNameWithSuffix, builderFunctions, cacheLoader);
+                        String collectionName = getUniqueCollectionName(distributedCaffeineConfiguration.getCollectionName());
+                        CacheFactory<K, V> cacheFactory = (cacheBuilder, cacheConstructor) -> {
+                            CacheBuilder<K, V> aggregatedCacheBuilder = b -> distributedCaffeineConfiguration.getCacheBuilder()
+                                    .apply(cacheBuilder.apply(b));
+                            return createCache(collectionName, aggregatedCacheBuilder, cacheConstructor);
                         };
-                        return Named.of(distributedCaffeineConfiguration.getDisplayName(), cacheBiFunction);
+                        return Named.of(distributedCaffeineConfiguration.getDisplayName(), cacheFactory);
                     });
         }
 
-        private <K, V> DistributedCache<K, V> createCacheInstance(String collectionName, List<BuilderFunction<K, V>> builderFunctions, CacheLoader<K, V> cacheLoader) {
-            DistributedCaffeine.Builder<K, V> distributedCaffeineBuilder = DistributedCaffeine.newBuilder(mongoDatabase.getCollection(collectionName));
-            for (Function<DistributedCaffeine.Builder<K, V>, DistributedCaffeine.Builder<K, V>> builderFunction : builderFunctions) {
-                distributedCaffeineBuilder = builderFunction.apply(distributedCaffeineBuilder);
-            }
-            DistributedCache<K, V> distributedCache = isNull(cacheLoader)
-                    ? distributedCaffeineBuilder.build()
-                    : distributedCaffeineBuilder.build(cacheLoader);
+        <K, V> DistributedCache<K, V> createCache(String collectionName, CacheBuilder<K, V> cacheBuilder, CacheConstructor<K, V> cacheConstructor) {
+            MongoCollection<Document> mongoCollection = mongoDatabase.getCollection(collectionName);
+            DistributedCache<K, V> distributedCache = cacheConstructor.construct(cacheBuilder
+                    .apply(DistributedCaffeine.newBuilder(mongoCollection)));
             distributedCacheInstances.add(distributedCache);
             return distributedCache;
         }
 
-        <K, V> DistributedCache<K, V> createDistributedCache(String collectionName) {
-            return createCacheInstance(collectionName, List.of(), null);
-        }
-
-        <K, V> DistributedCache<K, V> createDistributedCache(String collectionName, BuilderFunction<K, V> builderFunction) {
-            return createCacheInstance(collectionName, List.of(builderFunction), null);
-        }
-
-        <K, V> DistributedLoadingCache<K, V> createDistributedLoadingCache(String collectionName, BuilderFunction<K, V> builderFunction, CacheLoader<K, V> cacheLoader) {
-            return (DistributedLoadingCache<K, V>) createCacheInstance(collectionName, List.of(builderFunction), cacheLoader);
-        }
-
-        String getCollectionNameWithSuffix(String collectionName) {
+        String getUniqueCollectionName(String collectionName) {
             return format("%s_%05d", collectionName, collectionNameSuffix.incrementAndGet());
         }
 
@@ -2559,7 +2785,7 @@ final class DistributedCaffeineTest {
             return Stream.of(distributedCaches)
                     .allMatch(distributedCache -> {
                         DistributedCaffeine<K, V> distributedCaffeine = getDistributedCaffeine(distributedCache);
-                        boolean isCachedSupported = distributedCaffeine.isSupportedByDistributionMode(CACHED);
+                        boolean isCachedSupported = CACHED.matches(distributedCaffeine.getDistributionMode());
                         InternalCacheManager<K, V> cacheManager = distributedCaffeine.getCacheManager();
                         ConcurrentMap<?, ?> latest = readFieldValue(cacheManager, InternalCacheManager.class,
                                 "latest", ConcurrentMap.class);
@@ -2576,20 +2802,22 @@ final class DistributedCaffeineTest {
                     });
         }
 
-        <K, V> DistributedCaffeine<K, V> getDistributedCaffeine(DistributedCache<K, V> distributedCache) {
-            return ((InternalDistributedCache<K, V>) distributedCache).distributedCaffeine;
-        }
-
-        <K, V> long countMongoStatus(DistributedCache<K, V> distributedCache, String... statuses) {
+        <K, V> long countMongoStatus(DistributedCache<K, V> distributedCache, Status... statuses) {
             Bson filter = isNull(statuses) || statuses.length == 0
                     ? Filters.empty()
-                    : Filters.in(STATUS, statuses);
+                    : Filters.in(STATUS.toString(), Stream.of(statuses)
+                    .map(Status::toString)
+                    .collect(Collectors.toList()));
             return distributedCache.distributedPolicy().getMongoCollection().countDocuments(filter);
         }
 
         <K, V> void deleteMongoExpires(DistributedCache<K, V> distributedCache) {
-            Bson filter = Filters.ne(EXPIRES, null);
+            Bson filter = Filters.ne(EXPIRES.toString(), null);
             distributedCache.distributedPolicy().getMongoCollection().deleteMany(filter);
+        }
+
+        <K, V> DistributedCaffeine<K, V> getDistributedCaffeine(DistributedCache<K, V> distributedCache) {
+            return ((InternalDistributedCache<K, V>) distributedCache).distributedCaffeine;
         }
 
         void executeRandomOperation(DistributedCache<Key, Value> distributedCache, int cacheSize) {
@@ -2689,10 +2917,10 @@ final class DistributedCaffeineTest {
 
         @SuppressWarnings("unused")
         <K, V> void printMongoCollection(DistributedCache<K, V> distributedCache, Bson filter) {
-            AtomicInteger counter = new AtomicInteger();
+            AtomicInteger counter = new AtomicInteger(0);
             distributedCache.distributedPolicy().getMongoCollection().find()
                     .filter(isNull(filter) ? Filters.empty() : filter)
-                    .sort(Sorts.orderBy(Sorts.ascending(TOUCHED)))
+                    .sort(Sorts.orderBy(Sorts.ascending(TOUCHED.toString())))
                     .forEach(document -> System.out.printf("%07d %s%n", counter.incrementAndGet(), document));
         }
 
@@ -2701,20 +2929,16 @@ final class DistributedCaffeineTest {
             return (R) ReflectionUtils.tryToReadFieldValue(instanceClass, fieldName, instanceClass.cast(instanceObject))
                     .toOptional()
                     .filter(fieldClass::isInstance)
-                    .orElseThrow();
+                    .orElseThrow(NoSuchFieldError::new);
         }
 
         <T> void writeFieldValue(Object instanceObject, Class<T> instanceClass, String fieldName, Object fieldValue) {
             Predicate<Field> fieldPredicate = field -> field.getName().equals(fieldName);
             Field field = ReflectionUtils.streamFields(instanceClass, fieldPredicate, HierarchyTraversalMode.TOP_DOWN)
                     .findFirst()
-                    .orElseThrow();
+                    .orElseThrow(NoSuchFieldError::new);
             ReflectionUtils.makeAccessible(field);
-            try {
-                field.set(instanceObject, fieldValue);
-            } catch (IllegalAccessException e) {
-                throw new RuntimeException(e);
-            }
+            runFailable(() -> field.set(instanceObject, fieldValue));
         }
 
         @SuppressWarnings("unchecked")
@@ -2725,28 +2949,38 @@ final class DistributedCaffeineTest {
                     instanceObject, parameterObjects.toArray(Object[]::new));
         }
 
-        interface BuilderFunction<K, V> extends Function<DistributedCaffeine.Builder<K, V>, DistributedCaffeine.Builder<K, V>> {
+        @FunctionalInterface
+        interface CacheBuilder<K, V> {
 
-            @Override
-            DistributedCaffeine.Builder<K, V> apply(DistributedCaffeine.Builder<K, V> builder);
+            Builder<K, V> apply(Builder<K, V> builder);
+
+            static <K, V> CacheBuilder<K, V> identity() {
+                return cacheBuilder -> cacheBuilder;
+            }
         }
 
-        interface CacheBiFunction<K, V> extends BiFunction<BuilderFunction<K, V>, CacheLoader<K, V>, DistributedCache<K, V>> {
+        @FunctionalInterface
+        interface CacheConstructor<K, V> {
 
-            @Override
-            DistributedCache<K, V> apply(BuilderFunction<K, V> builderFunction, CacheLoader<K, V> cacheLoader);
+            DistributedCache<K, V> construct(Builder<K, V> builder);
+        }
+
+        @FunctionalInterface
+        interface CacheFactory<K, V> {
+
+            DistributedCache<K, V> create(CacheBuilder<K, V> cacheBuilder, CacheConstructor<K, V> cacheConstructor);
         }
 
         static class DistributedCaffeineConfiguration<K, V> {
 
             private final String displayName;
             private final String collectionName;
-            private final BuilderFunction<K, V> builderFunction;
+            private final CacheBuilder<K, V> cacheBuilder;
 
-            DistributedCaffeineConfiguration(String displayName, String collectionName, BuilderFunction<K, V> builderFunction) {
+            DistributedCaffeineConfiguration(String displayName, String collectionName, CacheBuilder<K, V> cacheBuilder) {
                 this.displayName = displayName;
                 this.collectionName = collectionName;
-                this.builderFunction = builderFunction;
+                this.cacheBuilder = cacheBuilder;
             }
 
             String getDisplayName() {
@@ -2757,8 +2991,8 @@ final class DistributedCaffeineTest {
                 return collectionName;
             }
 
-            BuilderFunction<K, V> getBuilderFunction() {
-                return builderFunction;
+            CacheBuilder<K, V> getCacheBuilder() {
+                return cacheBuilder;
             }
         }
     }

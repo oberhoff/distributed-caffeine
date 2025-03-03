@@ -18,8 +18,8 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 
 /**
- * Interface representing a loading cache instance. Cache entries are manually added or automatically loaded and are
- * stored in the cache until either invalidated or evicted.
+ * Interface representing a loading cache instance. Cache entries are added manually or loaded automatically and remain
+ * in the cache until either invalidated or evicted.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache

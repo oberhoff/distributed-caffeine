@@ -28,6 +28,7 @@ import com.mongodb.client.model.UpdateOptions;
 import com.mongodb.client.model.Updates;
 import dev.failsafe.Failsafe;
 import dev.failsafe.RetryPolicy;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.ExtendedPersistenceConfig;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
 import org.bson.BsonObjectId;
 import org.bson.BsonValue;
@@ -36,14 +37,17 @@ import org.bson.conversions.Bson;
 import org.bson.types.ObjectId;
 
 import java.io.Closeable;
-import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -55,16 +59,19 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.EVICTED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.EXPIRES;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.HASH;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.ID;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.INVALIDATED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.KEY;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.ORPHANED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.STATUS;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.TOUCHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.VALUE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.EXPIRES;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.HASH;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.KEY;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STATUS;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.TOUCHED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.VALUE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field._ID;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EXTENDED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.INVALIDATED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.ORPHANED;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
 import static java.lang.String.format;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
@@ -75,6 +82,7 @@ class InternalMongoRepository<K, V> implements LazyInitializer<K, V> {
     private MongoCollection<Document> mongoCollection;
     private InternalObjectIdGenerator objectIdGenerator;
     private InternalDocumentConverter<K, V> documentConverter;
+    private ExtendedPersistenceConfig extendedPersistenceConfig;
 
     InternalMongoRepository() {
         // see also initialize()
@@ -86,14 +94,14 @@ class InternalMongoRepository<K, V> implements LazyInitializer<K, V> {
         this.mongoCollection = distributedCaffeine.getMongoCollection();
         this.objectIdGenerator = distributedCaffeine.getObjectIdGenerator();
         this.documentConverter = distributedCaffeine.getDocumentConverter();
+        this.extendedPersistenceConfig = distributedCaffeine.getExtendedPersistenceConfig();
 
         ensureIndexes();
     }
 
-    Stream<InternalCacheDocument<K, V>> streamCacheDocuments(Bson filter, Bson projection) {
+    Stream<InternalCacheDocument<K, V>> streamCacheDocuments(Bson filter) {
         return createStreamFromClosableIterator(mongoCollection.find()
                 .filter(filter)
-                .projection(projection)
                 .iterator())
                 .map(document -> {
                     try {
@@ -108,15 +116,13 @@ class InternalMongoRepository<K, V> implements LazyInitializer<K, V> {
                 .filter(Objects::nonNull);
     }
 
-    Set<InternalCacheDocument<K, V>> insert(Map<? extends K, ? extends V> map, String status) {
+    Set<InternalCacheDocument<K, V>> insert(Map<? extends K, ? extends V> map, Status status) {
         if (!map.isEmpty()) {
             Map<K, ObjectId> keyToObjectId = new HashMap<>();
             List<UpdateOneModel<Document>> updates = new ArrayList<>();
             Map<Integer, K> indexToKey = new HashMap<>();
             AtomicInteger index = new AtomicInteger(0);
-            RetryPolicy<Void> retryPolicy = RetryPolicy.<Void>builder()
-                    .build();
-            Failsafe.with(retryPolicy)
+            Failsafe.with(RetryPolicy.ofDefaults())
                     .run(context -> {
                         if (context.getLastException() instanceof MongoBulkWriteException) {
                             MongoBulkWriteException mongoBulkWriteException = context.getLastException();
@@ -131,11 +137,11 @@ class InternalMongoRepository<K, V> implements LazyInitializer<K, V> {
                                 .forEach(key -> {
                                     V value = map.get(key);
                                     requireNonNull(key, "key cannot be null");
-                                    if (!INVALIDATED.equals(status)) {
+                                    if (status != INVALIDATED) {
                                         requireNonNull(value, "value cannot be null");
                                     }
                                     // perform upsert to be able to use $currentTime (which is an update operator only)
-                                    Bson filter = Filters.eq(ID, objectIdGenerator.generate());
+                                    Bson filter = Filters.eq(_ID.toString(), objectIdGenerator.generate());
                                     Bson update = toMongoUpdate(key, value, status);
                                     UpdateOptions updateOptions = new UpdateOptions().upsert(true);
                                     updates.add(new UpdateOneModel<>(filter, update, updateOptions));
@@ -160,42 +166,40 @@ class InternalMongoRepository<K, V> implements LazyInitializer<K, V> {
 
     void updateOrphaned(Set<ObjectId> objectIds) {
         if (!objectIds.isEmpty()) {
-            RetryPolicy<Void> retryPolicy = RetryPolicy.<Void>builder()
-                    .build();
-            Failsafe.with(retryPolicy)
+            Failsafe.with(RetryPolicy.ofDefaults())
                     .run(() -> {
                         Bson filter = Filters.and(
-                                Filters.in(ID, objectIds),
-                                Filters.ne(STATUS, ORPHANED));
+                                Filters.in(_ID.toString(), objectIds),
+                                Filters.ne(STATUS.toString(), ORPHANED.toString()));
                         Bson update = Updates.combine(
-                                Updates.set(STATUS, ORPHANED),
-                                Updates.currentDate(EXPIRES));
+                                Updates.set(STATUS.toString(), ORPHANED.toString()),
+                                Updates.currentDate(EXPIRES.toString()));
                         mongoCollection.updateMany(filter, update);
                     });
         }
     }
 
     private void ensureIndexes() {
-        IndexModel indexModelHash = new IndexModel(Indexes.ascending(HASH),
+        IndexModel indexModelHash = new IndexModel(Indexes.ascending(HASH.toString()),
                 new IndexOptions()
                         .unique(false)
                         .background(true));
-        IndexModel indexModelStatus = new IndexModel(Indexes.ascending(STATUS),
+        IndexModel indexModelStatus = new IndexModel(Indexes.ascending(STATUS.toString()),
                 new IndexOptions()
                         .unique(false)
                         .background(true));
-        IndexModel indexModelExpires = new IndexModel(Indexes.ascending(EXPIRES),
+        IndexModel indexModelExpires = new IndexModel(Indexes.ascending(EXPIRES.toString()),
                 new IndexOptions()
                         .unique(false)
                         .background(true)
                         .expireAfter(1L, TimeUnit.MINUTES));
         IndexModel indexModelIdStatus = new IndexModel(Indexes.compoundIndex(
-                Indexes.ascending(ID), Indexes.ascending(STATUS)),
+                Indexes.ascending(_ID.toString()), Indexes.ascending(STATUS.toString())),
                 new IndexOptions()
                         .unique(true)
                         .background(true));
         IndexModel indexModelHashStatus = new IndexModel(Indexes.compoundIndex(
-                Indexes.ascending(HASH), Indexes.ascending(STATUS)),
+                Indexes.ascending(HASH.toString()), Indexes.ascending(STATUS.toString())),
                 new IndexOptions()
                         .unique(false)
                         .background(true));
@@ -207,31 +211,40 @@ class InternalMongoRepository<K, V> implements LazyInitializer<K, V> {
     private <I extends Iterator<T> & Closeable, T> Stream<T> createStreamFromClosableIterator(I iterator) {
         Spliterator<T> spliterator = Spliterators.spliteratorUnknownSize(iterator,
                 Spliterator.ORDERED | Spliterator.NONNULL);
-        return StreamSupport.stream(spliterator, false).onClose(() -> {
-            try {
-                iterator.close();
-            } catch (IOException e) {
-                throw new DistributedCaffeineException(e);
-            }
-        });
+        return StreamSupport.stream(spliterator, false)
+                .onClose(() -> runFailable(iterator::close));
     }
 
-    private Bson toMongoUpdate(K key, V value, String status) {
+    private Bson toMongoUpdate(K key, V value, Status status) {
+        if (extendedPersistenceConfig.isExtendedPersistence() && status == EVICTED) {
+            throw new IllegalStateException(format("Status must be '%s'", EXTENDED));
+        }
         try {
             Object serializedKey = documentConverter.toMongoKey(key);
             Object serializedValue = documentConverter.toMongoValue(value);
-            Bson expires = INVALIDATED.equals(status) || EVICTED.equals(status)
-                    ? Updates.currentDate(EXPIRES)
-                    : Updates.set(EXPIRES, null);
+            Bson expires;
+            if (status == INVALIDATED || (status == EVICTED)) {
+                expires = Updates.currentDate(EXPIRES.toString());
+            } else if (status == EXTENDED) {
+                if (nonNull(extendedPersistenceConfig.getExtendedPersistenceTime())) {
+                    expires = Updates.set(EXPIRES.toString(), Date.from(
+                            Instant.now().plus(extendedPersistenceConfig.getExtendedPersistenceTime())));
+                } else {
+                    expires = Updates.set(EXPIRES.toString(), Date.from(
+                            Instant.now().plus(1000, ChronoUnit.YEARS)));
+                }
+            } else {
+                expires = Updates.set(EXPIRES.toString(), null);
+            }
             return Updates.combine(
-                    Updates.set(HASH, key.hashCode()),
-                    Updates.set(KEY, serializedKey),
-                    Updates.set(VALUE, serializedValue),
-                    Updates.set(STATUS, status),
-                    Updates.currentDate(TOUCHED),
+                    Updates.set(HASH.toString(), key.hashCode()),
+                    Updates.set(KEY.toString(), serializedKey),
+                    Updates.set(VALUE.toString(), serializedValue),
+                    Updates.set(STATUS.toString(), status.toString()),
+                    Updates.currentDate(TOUCHED.toString()),
                     expires);
         } catch (Exception e) {
-            throw new DistributedCaffeineException(e);
+            throw new RuntimeException(e);
         }
     }
 
@@ -253,7 +266,7 @@ class InternalMongoRepository<K, V> implements LazyInitializer<K, V> {
                 .filter(BsonValue::isObjectId)
                 .map(BsonValue::asObjectId)
                 .map(BsonObjectId::getValue)
-                .orElseThrow(() -> new DistributedCaffeineException(format("No 'objectId' found (%s)",
+                .orElseThrow(() -> new NoSuchElementException(format("No 'objectId' found (%s)",
                         bsonValue)));
     }
 }

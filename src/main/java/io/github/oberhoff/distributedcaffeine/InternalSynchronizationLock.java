@@ -45,7 +45,7 @@ class InternalSynchronizationLock {
 
     void ensure() {
         if (!lock.isLocked()) {
-            throw new DistributedCaffeineException("No synchronization lock found");
+            throw new IllegalStateException("No synchronization lock found");
         }
     }
 }

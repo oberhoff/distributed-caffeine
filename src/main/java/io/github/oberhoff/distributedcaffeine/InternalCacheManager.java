@@ -36,8 +36,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.CACHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.INVALIDATED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.INVALIDATED;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 
@@ -55,7 +56,6 @@ class InternalCacheManager<K, V> implements LazyInitializer<K, V> {
     private InternalMongoRepository<K, V> mongoRepository;
     private InternalMaintenanceWorker<K, V> maintenanceWorker;
     private String origin;
-
 
     InternalCacheManager() {
         this.isActivated = new AtomicBoolean(false);
@@ -85,13 +85,14 @@ class InternalCacheManager<K, V> implements LazyInitializer<K, V> {
         latest.clear();
         buffer.clear();
         balance.clear();
+        ignore.clear();
     }
 
     boolean isActivated() {
         return isActivated.get();
     }
 
-    void manageOutboundInsert(Map<? extends K, ? extends V> map, String status,
+    void manageOutboundInsert(Map<? extends K, ? extends V> map, Status status,
                               boolean manage, boolean originConscious) {
         if (isActivated()) {
             if (manage) {
@@ -217,7 +218,7 @@ class InternalCacheManager<K, V> implements LazyInitializer<K, V> {
     void manageReplacement(InternalCacheDocument<K, V> cacheDocument) {
         if (isActivated()) {
             // no lock required
-            if (CACHED.equals(cacheDocument.getStatus())) {
+            if (cacheDocument.getStatus() == CACHED) {
                 maintenanceWorker.queueToBeOrphaned(cacheDocument.getId());
             }
         }
@@ -256,14 +257,10 @@ class InternalCacheManager<K, V> implements LazyInitializer<K, V> {
         }
     }
 
-    private Set<InternalCacheDocument<K, V>> commitCacheOutbound(Map<? extends K, ? extends V> map, String status) {
+    private Set<InternalCacheDocument<K, V>> commitCacheOutbound(Map<? extends K, ? extends V> map, Status status) {
         Map<? extends K, ? extends V> filteredMap = map.entrySet().stream()
-                .filter(entry ->
-                        // do not populate cache if value is the same instance
-                        (!CACHED.equals(status) || policy.getIfPresentQuietly(entry.getKey()) != entry.getValue())
-                                // do not invalidate cache if value is already absent
-                                && ((!INVALIDATED.equals(status)
-                                || nonNull(policy.getIfPresentQuietly(entry.getKey())))))
+                // do not distribute invalidation if value is already absent
+                .filter(entry -> status != INVALIDATED || nonNull(policy.getIfPresentQuietly(entry.getKey())))
                 .collect(HashMap::new, (hashMap, entry) -> // allows null values
                         hashMap.put(entry.getKey(), entry.getValue()), HashMap::putAll);
         return mongoRepository.insert(filteredMap, status);
@@ -272,7 +269,7 @@ class InternalCacheManager<K, V> implements LazyInitializer<K, V> {
     private void commitCacheInbound(InternalCacheDocument<K, V> cacheDocument) {
         if (cacheDocument.isCached() || cacheDocument.isOrphaned()) {
             cache.put(cacheDocument.getKey(), cacheDocument.getValue());
-        } else if ((cacheDocument.isInvalidated() || cacheDocument.isEvicted())
+        } else if ((cacheDocument.isInvalidated() || cacheDocument.isEvicted() || cacheDocument.isExtended())
                 // only invalidate cache if value is present
                 && nonNull(policy.getIfPresentQuietly(cacheDocument.getKey()))) {
             cache.invalidate(cacheDocument.getKey());
@@ -300,7 +297,7 @@ class InternalCacheManager<K, V> implements LazyInitializer<K, V> {
                 : balance.values().stream()
                 .filter(value -> value.contains(cacheDocument))
                 .findFirst()
-                .orElse(List.of());
+                .orElseGet(List::of);
         Optional<InternalCacheDocument<K, V>> optionalCacheDocument = cacheDocuments.stream()
                 .filter(cacheDocument::equals)
                 .findFirst();

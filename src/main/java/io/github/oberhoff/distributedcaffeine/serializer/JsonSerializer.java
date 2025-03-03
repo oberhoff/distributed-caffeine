@@ -16,7 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.serializer;
 
 /**
- * Interface to be used when implementing a custom serializer with JSON representation (encoded as String or BSON).
+ * Interface to use when implementing a serializer with JSON representation (encoded as String or BSON).
  *
  * @param <T> the type of the object to serialize
  * @author Andreas Oberhoff

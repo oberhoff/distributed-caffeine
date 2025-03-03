@@ -19,29 +19,94 @@ import org.bson.types.ObjectId;
 import org.jspecify.annotations.NonNull;
 
 import java.lang.ref.WeakReference;
+import java.time.Instant;
 import java.util.Comparator;
-import java.util.Date;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Stream;
 
+import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION;
+import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION_AND_EVICTION;
+import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION;
+import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EXTENDED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.INVALIDATED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.ORPHANED;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.extractOrigin;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullOnCondition;
 import static java.lang.String.format;
 import static java.util.Objects.isNull;
+import static java.util.Objects.requireNonNull;
 
-class InternalCacheDocument<K, V> implements DistributedPolicy.CacheEntry<K, V>, Comparable<InternalCacheDocument<K, V>> {
+class InternalCacheDocument<K, V> implements Comparable<InternalCacheDocument<K, V>> {
 
-    static final String ID = "_id";
-    static final String HASH = "hash";
-    static final String KEY = "key";
-    static final String VALUE = "value";
-    static final String STATUS = "status";
-    static final String TOUCHED = "touched";
-    static final String EXPIRES = "expires";
+    enum Field {
 
-    static final String CACHED = "cached";
-    static final String INVALIDATED = "invalidated";
-    static final String EVICTED = "evicted";
-    static final String ORPHANED = "orphaned";
+        _ID,
+        HASH,
+        KEY,
+        VALUE,
+        STATUS,
+        TOUCHED,
+        EXPIRES;
+
+        private final String value;
+
+        Field() {
+            this.value = name().toLowerCase();
+        }
+
+        @Override
+        public String toString() {
+            return value;
+        }
+    }
+
+    enum Status {
+
+        CACHED,
+        INVALIDATED,
+        EVICTED,
+        EXTENDED,
+        ORPHANED;
+
+        private final String value;
+
+        Status() {
+            this.value = name().toLowerCase();
+        }
+
+        @Override
+        public String toString() {
+            return value;
+        }
+
+        boolean matches(DistributionMode distributionMode) {
+            if (this == CACHED || this == ORPHANED) {
+                return distributionMode == POPULATION_AND_INVALIDATION_AND_EVICTION
+                        || distributionMode == POPULATION_AND_INVALIDATION;
+            } else if (this == INVALIDATED) {
+                return distributionMode == POPULATION_AND_INVALIDATION_AND_EVICTION
+                        || distributionMode == POPULATION_AND_INVALIDATION
+                        || distributionMode == INVALIDATION_AND_EVICTION
+                        || distributionMode == INVALIDATION;
+            } else if (this == EVICTED || this == EXTENDED) {
+                return distributionMode == POPULATION_AND_INVALIDATION_AND_EVICTION
+                        || distributionMode == INVALIDATION_AND_EVICTION;
+            } else {
+                return false;
+            }
+        }
+
+        static Status of(String value) {
+            return Stream.of(values())
+                    .filter(status -> status.toString().equals(value))
+                    .findFirst()
+                    .orElse(null);
+        }
+    }
 
     private ObjectId id;
     private Integer hash;
@@ -49,12 +114,11 @@ class InternalCacheDocument<K, V> implements DistributedPolicy.CacheEntry<K, V>,
     private WeakReference<K> weakKey;
     private V value;
     private WeakReference<V> weakValue;
-    private String status;
-    private Date touched;
-    private Date expires;
+    private Status status;
+    private Instant touched;
+    private Instant expires;
 
-    @Override
-    public ObjectId getId() {
+    ObjectId getId() {
         return id;
     }
 
@@ -73,8 +137,7 @@ class InternalCacheDocument<K, V> implements DistributedPolicy.CacheEntry<K, V>,
         return this;
     }
 
-    @Override
-    public K getKey() {
+    K getKey() {
         return Stream.of(key, Optional.ofNullable(weakKey)
                         .map(WeakReference::get)
                         .orElse(null))
@@ -89,8 +152,7 @@ class InternalCacheDocument<K, V> implements DistributedPolicy.CacheEntry<K, V>,
         return this;
     }
 
-    @Override
-    public V getValue() {
+    V getValue() {
         return Stream.of(value, Optional.ofNullable(weakValue)
                         .map(WeakReference::get)
                         .orElse(null))
@@ -105,51 +167,52 @@ class InternalCacheDocument<K, V> implements DistributedPolicy.CacheEntry<K, V>,
         return this;
     }
 
-    @Override
-    public String getStatus() {
+
+    Status getStatus() {
         return status;
     }
 
-    InternalCacheDocument<K, V> setStatus(String status) {
+    InternalCacheDocument<K, V> setStatus(Status status) {
         this.status = status;
         return this;
     }
 
-    @Override
-    public Date getTouched() {
+    Instant getTouched() {
         return touched;
     }
 
-    InternalCacheDocument<K, V> setTouched(Date touched) {
+    InternalCacheDocument<K, V> setTouched(Instant touched) {
         this.touched = touched;
         return this;
     }
 
-    @SuppressWarnings("unused")
-    Date getExpires() {
+    Instant getExpires() {
         return expires;
     }
 
-    InternalCacheDocument<K, V> setExpires(Date expires) {
+    InternalCacheDocument<K, V> setExpires(Instant expires) {
         this.expires = expires;
         return this;
     }
 
     boolean isCached() {
-        return CACHED.equals(status);
+        return status == CACHED;
     }
 
     boolean isInvalidated() {
-        return INVALIDATED.equals(status);
+        return status == INVALIDATED;
     }
 
-    @Override
-    public boolean isEvicted() {
-        return EVICTED.equals(status);
+    boolean isEvicted() {
+        return status == EVICTED;
+    }
+
+    boolean isExtended() {
+        return status == EXTENDED;
     }
 
     boolean isOrphaned() {
-        return ORPHANED.equals(status);
+        return status == ORPHANED;
     }
 
     boolean isNewer(InternalCacheDocument<K, V> cacheDocument) {
@@ -157,7 +220,18 @@ class InternalCacheDocument<K, V> implements DistributedPolicy.CacheEntry<K, V>,
     }
 
     boolean hasOrigin(String origin) {
-        return id.toHexString().substring(8, 18).equals(origin);
+        return extractOrigin(id).equals(origin);
+    }
+
+    InternalCacheDocument<K, V> validate() {
+        requireNonNull(id, "id cannot be null");
+        requireNonNull(hash, "hash cannot be null");
+        requireNonNull(key, "key cannot be null");
+        requireNonNullOnCondition(status != INVALIDATED, value, "value cannot be null");
+        requireNonNull(status, "status cannot be null");
+        requireNonNull(touched, "touched cannot be null");
+        requireNonNullOnCondition(status != CACHED, expires, "expires cannot be null");
+        return this;
     }
 
     InternalCacheDocument<K, V> weakened() {
@@ -168,8 +242,8 @@ class InternalCacheDocument<K, V> implements DistributedPolicy.CacheEntry<K, V>,
 
     @Override
     public int compareTo(@NonNull InternalCacheDocument<K, V> that) {
-        // unique object id is used as tie-breaker if touched is equal
-        return Comparator.<InternalCacheDocument<K, V>, Date>comparing(InternalCacheDocument::getTouched)
+        return Comparator.<InternalCacheDocument<K, V>, Instant>comparing(InternalCacheDocument::getTouched)
+                // unique object id is used as tie-breaker if touched is equal
                 .thenComparing(InternalCacheDocument::getId)
                 .compare(this, that);
     }

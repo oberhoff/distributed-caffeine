@@ -39,16 +39,27 @@ public class Key implements Serializable {
         return id;
     }
 
-    public void setId(Integer id) {
+    public Key setId(Integer id) {
         this.id = id;
+        return this;
     }
 
     public String getName() {
         return name;
     }
 
-    public void setName(String name) {
+    public Key setName(String name) {
         this.name = name;
+        return this;
+    }
+
+    public String getData() {
+        return data;
+    }
+
+    public Key setData(String data) {
+        this.data = data;
+        return this;
     }
 
     @Override
@@ -68,7 +79,7 @@ public class Key implements Serializable {
 
     @Override
     public String toString() {
-        return format("Key{ id=%s, name='%s'}", id, name);
+        return format("Key{id=%s, name='%s'}", id, name);
     }
 
     public static Key of(Integer id) {
