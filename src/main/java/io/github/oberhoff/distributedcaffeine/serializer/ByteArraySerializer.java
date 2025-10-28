@@ -16,7 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.serializer;
 
 /**
- * Interface to be used when implementing a custom serializer with byte array representation.
+ * Interface to use when implementing a serializer with byte array representation.
  *
  * @param <T> the type of the object to serialize
  * @author Andreas Oberhoff
@@ -24,8 +24,8 @@ package io.github.oberhoff.distributedcaffeine.serializer;
 public interface ByteArraySerializer<T> extends Serializer<T, byte[]> {
 
     @Override
-    byte[] serialize(T object) throws SerializerException;
+    byte[] serialize(T object) throws Exception;
 
     @Override
-    T deserialize(byte[] value) throws SerializerException;
+    T deserialize(byte[] value) throws Exception;
 }

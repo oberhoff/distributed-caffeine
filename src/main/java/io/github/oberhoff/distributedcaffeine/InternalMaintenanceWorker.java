@@ -17,34 +17,47 @@ package io.github.oberhoff.distributedcaffeine;
 
 import dev.failsafe.Failsafe;
 import dev.failsafe.RetryPolicy;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
 import org.bson.types.ObjectId;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.time.Duration;
-import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static java.lang.String.format;
-import static java.util.Objects.nonNull;
+import static java.util.Collections.synchronizedSet;
+import static java.util.stream.Collectors.toSet;
 
-class InternalMaintenanceWorker<K, V> implements LazyInitializer<K, V> {
+class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
+
+    private static final Duration MAINTENANCE_INTERVAL = Duration.ofSeconds(1);
+    private static final Integer MAX_QUEUE_DRAIN_SIZE = 1_000;
+    private static final Duration OUTDATED_DURATION = Duration.ofMinutes(1);
+
+    private final AtomicBoolean isActivated;
+    private final Set<ObjectId> toBeMarkedAsStale;
+    private final Set<Integer> maybeToBeMarkedAsStaleForExtendedPersistence;
+    private final AtomicBoolean checkToBeMarkedAsStaleForExtendedPersistenceBySize;
 
     private Logger logger;
     private String mongoCollectionName;
     private InternalMongoRepository<K, V> mongoRepository;
-    private AtomicBoolean isActivated;
-    private PriorityBlockingQueue<ObjectId> toBeOrphaned;
-    private ExecutorService executorService;
+    private InternalCacheManager<K, V> cacheManager;
+    private InternalExtendedPersistence extendedPersistence;
     private CompletableFuture<Void> maintenanceCompletableFuture;
 
     InternalMaintenanceWorker() {
+        this.isActivated = new AtomicBoolean(false);
+        // LinkedHashSet for FIFO without duplicate elements
+        this.toBeMarkedAsStale = synchronizedSet(new LinkedHashSet<>());
+        this.maybeToBeMarkedAsStaleForExtendedPersistence = synchronizedSet(new LinkedHashSet<>());
+        this.checkToBeMarkedAsStaleForExtendedPersistenceBySize = new AtomicBoolean(false);
         // see also initialize()
     }
 
@@ -53,19 +66,14 @@ class InternalMaintenanceWorker<K, V> implements LazyInitializer<K, V> {
         this.logger = distributedCaffeine.getLogger();
         this.mongoCollectionName = distributedCaffeine.getMongoCollection().getNamespace().getCollectionName();
         this.mongoRepository = distributedCaffeine.getMongoRepository();
-        this.isActivated = new AtomicBoolean(false);
-        this.toBeOrphaned = new PriorityBlockingQueue<>();
+        this.cacheManager = distributedCaffeine.getCacheManager();
+        this.extendedPersistence = distributedCaffeine.getExtendedPersistence();
     }
 
     void activate() {
         // wait for completion if required
         Optional.ofNullable(maintenanceCompletableFuture)
                 .ifPresent(CompletableFuture::join);
-
-        executorService = Executors.newSingleThreadExecutor(runnable ->
-                new Thread(runnable, Thread.class.getSimpleName()
-                        .concat(getClass().getSimpleName())
-                        .concat(String.valueOf(runnable.hashCode()))));
 
         scheduleMaintenanceWork();
 
@@ -74,23 +82,34 @@ class InternalMaintenanceWorker<K, V> implements LazyInitializer<K, V> {
 
     void deactivate() {
         isActivated.set(false);
-
-        // wait async for completion and shut down executor service if required
-        Optional.ofNullable(maintenanceCompletableFuture)
-                .ifPresent(completableFuture ->
-                        CompletableFuture.runAsync(() -> {
-                            completableFuture.join();
-                            executorService.shutdownNow();
-                        }));
+        toBeMarkedAsStale.clear();
+        maybeToBeMarkedAsStaleForExtendedPersistence.clear();
+        checkToBeMarkedAsStaleForExtendedPersistenceBySize.set(false);
     }
 
     boolean isActivated() {
         return isActivated.get();
     }
 
-    void queueToBeOrphaned(ObjectId objectId) {
-        if (nonNull(objectId) && !toBeOrphaned.contains(objectId)) {
-            toBeOrphaned.add(objectId);
+    void queueReplacement(InternalCacheDocument<K, V> cacheDocument) {
+        if (isActivated()) {
+            Optional.ofNullable(cacheDocument)
+                    .filter(it -> it.isCached() && !it.isStale())
+                    .map(InternalCacheDocument::getId)
+                    .ifPresent(toBeMarkedAsStale::add);
+        }
+    }
+
+    void queueActivity(Set<InternalCacheDocument<K, V>> cacheDocuments) {
+        if (isActivated()) {
+            if (extendedPersistence.hasExtendedPersistence()) {
+                maybeToBeMarkedAsStaleForExtendedPersistence.addAll(cacheDocuments.stream()
+                        .map(InternalCacheDocument::getHash)
+                        .collect(toSet()));
+            }
+            if (extendedPersistence.hasExtendedPersistenceBySize()) {
+                checkToBeMarkedAsStaleForExtendedPersistenceBySize.set(true);
+            }
         }
     }
 
@@ -98,23 +117,69 @@ class InternalMaintenanceWorker<K, V> implements LazyInitializer<K, V> {
         RetryPolicy<Void> retryPolicy = RetryPolicy.<Void>builder()
                 .handleResultIf(result -> isActivated())
                 .withMaxAttempts(-1)
-                .withDelay(Duration.ofSeconds(1))
-                .withDelayFnOn(context -> Duration.ofSeconds(Math.min(context.getAttemptCount(), 10)), Exception.class)
+                .withDelay(MAINTENANCE_INTERVAL)
+                .withDelayFnOn(context -> MAINTENANCE_INTERVAL.multipliedBy(Math.min(context.getAttemptCount(), 10)),
+                        Throwable.class)
                 .onRetryScheduled(event -> Optional.ofNullable(event.getLastException())
-                        .ifPresent(exception -> logger.log(Level.WARNING,
+                        .ifPresent(throwable -> logger.log(Level.WARNING,
                                 format("Maintenance failed for collection '%s'. Retrying...",
-                                        mongoCollectionName), exception)))
+                                        mongoCollectionName), throwable)))
                 .build();
-        maintenanceCompletableFuture = Failsafe.with(retryPolicy)
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        InternalTaskPolicy<Void> taskPolicy = new InternalTaskPolicy<Void>()
+                .withPostExecutionTask(executorService::shutdown);
+        maintenanceCompletableFuture = Failsafe.with(taskPolicy, retryPolicy)
                 .with(executorService)
                 .runAsync(this::processMaintenance);
     }
 
     private void processMaintenance() {
         if (isActivated()) {
-            HashSet<ObjectId> drained = new HashSet<>();
-            toBeOrphaned.drainTo(drained, 10_000);
-            mongoRepository.updateOrphaned(drained);
+            processToBeMarkedAsStale();
+            processMaybeToBeMarkedAsStaleForExtendedPersistenceBySize();
+            processToBeMarkedAsStaleForExtendedPersistenceBySize();
+            processOutdated();
         }
+    }
+
+    private void processToBeMarkedAsStale() {
+        // traversing must be synchronized additionally (see documentation of synchronizedSet())
+        synchronized (toBeMarkedAsStale) {
+            Set<ObjectId> batch = toBeMarkedAsStale.stream()
+                    .limit(MAX_QUEUE_DRAIN_SIZE)
+                    .collect(toSet());
+            mongoRepository.markAsStale(batch);
+            toBeMarkedAsStale.removeAll(batch);
+        }
+    }
+
+    private void processMaybeToBeMarkedAsStaleForExtendedPersistenceBySize() {
+        // avoid unnecessary work
+        if (extendedPersistence.hasExtendedPersistence()
+                && toBeMarkedAsStale.isEmpty()) {
+            // traversing must be synchronized additionally (see documentation of synchronizedSet())
+            synchronized (maybeToBeMarkedAsStaleForExtendedPersistence) {
+                Set<Integer> batch = maybeToBeMarkedAsStaleForExtendedPersistence.stream()
+                        .limit(MAX_QUEUE_DRAIN_SIZE)
+                        .collect(toSet());
+                toBeMarkedAsStale.addAll(mongoRepository.identifyStaleExtended(batch));
+                maybeToBeMarkedAsStaleForExtendedPersistence.removeAll(batch);
+            }
+        }
+    }
+
+    private void processToBeMarkedAsStaleForExtendedPersistenceBySize() {
+        // avoid unnecessary work
+        if (extendedPersistence.hasExtendedPersistenceBySize()
+                && toBeMarkedAsStale.isEmpty()
+                && maybeToBeMarkedAsStaleForExtendedPersistence.isEmpty()
+                && checkToBeMarkedAsStaleForExtendedPersistenceBySize.get()) {
+            toBeMarkedAsStale.addAll(mongoRepository.identifyStaleExtendedBySize());
+            checkToBeMarkedAsStaleForExtendedPersistenceBySize.set(false);
+        }
+    }
+
+    private void processOutdated() {
+        cacheManager.manageCleanUp(OUTDATED_DURATION);
     }
 }

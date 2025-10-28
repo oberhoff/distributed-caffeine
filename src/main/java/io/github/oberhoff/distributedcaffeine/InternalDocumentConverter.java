@@ -15,7 +15,8 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
+import io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field;
+import io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status;
 import io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
@@ -23,17 +24,23 @@ import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.bson.Document;
 import org.bson.types.Binary;
 
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.EXPIRES;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.HASH;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.ID;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.KEY;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.STATUS;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.TOUCHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.VALUE;
+import java.util.Date;
+import java.util.Optional;
+
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.DISCRIMINATOR;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.EXPIRES;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.HASH;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.KEY;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.ORIGIN;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STALE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STATUS;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.TOUCHED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.VALUE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field._ID;
 import static java.lang.String.format;
 import static java.util.Objects.isNull;
 
-class InternalDocumentConverter<K, V> implements LazyInitializer<K, V> {
+class InternalDocumentConverter<K, V> implements InternalLazyInitializer<K, V> {
 
     private Serializer<K, ?> keySerializer;
     private Serializer<V, ?> valueSerializer;
@@ -56,17 +63,25 @@ class InternalDocumentConverter<K, V> implements LazyInitializer<K, V> {
         return serialize(valueSerializer, value);
     }
 
-    InternalCacheDocument<K, V> toCacheDocument(Document document) throws Exception {
+    InternalCacheDocument<K, V> toCacheDocument(Document document, Field... validationFields) throws Exception {
         K deserializedKey = deserialize(keySerializer, KEY, document);
         V deserializedValue = deserialize(valueSerializer, VALUE, document);
         return new InternalCacheDocument<K, V>()
-                .setId(document.getObjectId(ID))
-                .setHash(document.getInteger(HASH))
+                .setId(document.getObjectId(_ID.toString()))
+                .setDiscriminator(document.getString(DISCRIMINATOR.toString()))
+                .setOrigin(document.getLong(ORIGIN.toString()))
+                .setHash(document.getInteger(HASH.toString()))
                 .setKey(deserializedKey)
                 .setValue(deserializedValue)
-                .setStatus(document.getString(STATUS))
-                .setTouched(document.getDate(TOUCHED))
-                .setExpires(document.getDate(EXPIRES));
+                .setStatus(Status.of(document.getString(STATUS.toString())))
+                .setStale(document.getBoolean(STALE.toString()))
+                .setTouched(Optional.ofNullable(document.getDate(TOUCHED.toString()))
+                        .map(Date::toInstant)
+                        .orElse(null))
+                .setExpires(Optional.ofNullable(document.getDate(EXPIRES.toString()))
+                        .map(Date::toInstant)
+                        .orElse(null))
+                .validate(validationFields);
     }
 
     @SuppressWarnings("unchecked")
@@ -79,7 +94,7 @@ class InternalDocumentConverter<K, V> implements LazyInitializer<K, V> {
             serializedValue = byteArraySerializer.serialize(value);
         } else if (serializer instanceof JsonSerializer) {
             JsonSerializer<T> jsonSerializer = (JsonSerializer<T>) serializer;
-            if (jsonSerializer.storeAsBson()) {
+            if (jsonSerializer.storeAsBinaryJson()) {
                 serializedValue = convertJsonToBson(jsonSerializer.serialize(value));
             } else {
                 serializedValue = jsonSerializer.serialize(value);
@@ -88,33 +103,32 @@ class InternalDocumentConverter<K, V> implements LazyInitializer<K, V> {
             StringSerializer<T> stringSerializer = (StringSerializer<T>) serializer;
             serializedValue = stringSerializer.serialize(value);
         } else {
-            throw new DistributedCaffeineException(format("Unknown serializer '%s' for serializing '%s'",
-                    serializer.getClass().getName(), value));
+            throw new IllegalStateException("No serializer found");
         }
         return serializedValue;
     }
 
     @SuppressWarnings("unchecked")
-    private <T> T deserialize(Serializer<T, ?> serializer, String documentKey, Document document) throws Exception {
+    private <T> T deserialize(Serializer<T, ?> serializer, Field fieldName, Document document) throws Exception {
         T deserializedValue;
-        if (isNull(document.get(documentKey))) {
+        if (isNull(document.get(fieldName.toString()))) {
             deserializedValue = null;
         } else if (serializer instanceof ByteArraySerializer) {
             ByteArraySerializer<T> byteArraySerializer = (ByteArraySerializer<T>) serializer;
-            deserializedValue = byteArraySerializer.deserialize(document.get(documentKey, Binary.class).getData());
+            deserializedValue = byteArraySerializer.deserialize(document.get(fieldName.toString(), Binary.class)
+                    .getData());
         } else if (serializer instanceof JsonSerializer) {
             JsonSerializer<T> jsonSerializer = (JsonSerializer<T>) serializer;
-            if (jsonSerializer.storeAsBson()) {
-                deserializedValue = jsonSerializer.deserialize(convertBsonToJson(documentKey, document));
+            if (jsonSerializer.storeAsBinaryJson()) {
+                deserializedValue = jsonSerializer.deserialize(convertBsonToJson(fieldName.toString(), document));
             } else {
-                deserializedValue = jsonSerializer.deserialize(document.getString(documentKey));
+                deserializedValue = jsonSerializer.deserialize(document.getString(fieldName.toString()));
             }
         } else if (serializer instanceof StringSerializer) {
             StringSerializer<T> stringSerializer = (StringSerializer<T>) serializer;
-            deserializedValue = stringSerializer.deserialize(document.getString(documentKey));
+            deserializedValue = stringSerializer.deserialize(document.getString(fieldName.toString()));
         } else {
-            throw new DistributedCaffeineException(format("Unknown serializer '%s' for deserializing '%s' of document '%s'",
-                    serializer.getClass().getName(), documentKey, document));
+            throw new IllegalStateException("No serializer found");
         }
         return deserializedValue;
     }
@@ -129,6 +143,6 @@ class InternalDocumentConverter<K, V> implements LazyInitializer<K, V> {
     private String convertBsonToJson(String bsonKey, Document bson) {
         Document document = new Document(bsonKey, bson.get(bsonKey));
         String json = document.toJson();
-        return json.substring(json.indexOf(':') + 1, json.lastIndexOf('}')).strip();
+        return json.substring(json.indexOf(":") + 1, json.lastIndexOf("}")).strip();
     }
 }

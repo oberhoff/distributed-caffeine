@@ -16,7 +16,6 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.Policy;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 
@@ -31,8 +30,9 @@ import java.util.function.Function;
 import java.util.stream.Stream;
 
 import static java.util.Objects.isNull;
+import static java.util.Objects.requireNonNull;
 
-class InternalPolicy<K, V> implements Policy<K, V>, LazyInitializer<K, V> {
+class InternalPolicy<K, V> implements Policy<K, V>, InternalLazyInitializer<K, V> {
 
     private DistributedCaffeine<K, V> distributedCaffeine;
     private Policy<K, V> policy;
@@ -95,18 +95,61 @@ class InternalPolicy<K, V> implements Policy<K, V>, LazyInitializer<K, V> {
 
     static class InternalExpiration<K, V> implements VarExpiration<K, V> {
 
-        private final DistributedCaffeine<K, V> distributedCaffeine;
         private final Policy<K, V> policy;
         private final VarExpiration<K, V> varExpiration;
+        private final InternalCacheManager<K, V> cacheManager;
         private final InternalSynchronizationLock synchronizationLock;
 
         InternalExpiration(DistributedCaffeine<K, V> distributedCaffeine,
                            Policy<K, V> policy,
                            VarExpiration<K, V> varExpiration) {
-            this.distributedCaffeine = distributedCaffeine;
             this.policy = policy;
             this.varExpiration = varExpiration;
+            this.cacheManager = distributedCaffeine.getCacheManager();
             this.synchronizationLock = distributedCaffeine.getSynchronizationLock();
+        }
+
+        @Override
+        public V put(@NonNull K key, @NonNull V value, long duration, @NonNull TimeUnit unit) {
+            requireNonNull(key);
+            requireNonNull(value);
+            requireNonNull(unit);
+            return synchronizationLock.getLocked(() ->
+                    varExpiration.put(key, cacheManager.putDistributed(key, value), duration, unit));
+        }
+
+        @Override
+        public @Nullable V putIfAbsent(@NonNull K key, @NonNull V value, long duration, @NonNull TimeUnit unit) {
+            requireNonNull(key);
+            requireNonNull(value);
+            requireNonNull(unit);
+            V oldValue = policy.getIfPresentQuietly(key);
+            if (isNull(oldValue)) {
+                return put(key, value, duration, unit); // implicit distribution
+            } else {
+                return oldValue;
+            }
+        }
+
+        @Override
+        public @Nullable V compute(@NonNull K key,
+                                   @NonNull BiFunction<? super K, ? super V, ? extends @Nullable V> remappingFunction,
+                                   @NonNull Duration duration) {
+            requireNonNull(key);
+            requireNonNull(remappingFunction);
+            requireNonNull(duration);
+            return synchronizationLock.getLocked(() -> {
+                BiFunction<K, V, V> distributedRemappingFunction = (k, v) -> {
+                    V newValue = remappingFunction.apply(k, v);
+                    if (isNull(newValue)) {
+                        cacheManager.invalidateDistributed(k);
+                    } else {
+                        cacheManager.putDistributed(k, newValue);
+                    }
+                    return newValue;
+                };
+                return varExpiration.compute(key, distributedRemappingFunction, duration);
+            });
         }
 
         @Override
@@ -120,53 +163,7 @@ class InternalPolicy<K, V> implements Policy<K, V>, LazyInitializer<K, V> {
         }
 
         @Override
-        public @Nullable V putIfAbsent(@NonNull K key, @NonNull V value, long duration, @NonNull TimeUnit unit) {
-            synchronizationLock.lock();
-            try {
-                V presentValue = policy.getIfPresentQuietly(key);
-                if (isNull(presentValue)) {
-                    return put(key, value, duration, unit); // implicit distribution
-                } else {
-                    return presentValue;
-                }
-            } finally {
-                synchronizationLock.unlock();
-            }
-        }
-
-        @Override
-        public V put(@NonNull K key, @NonNull V value, long duration, @NonNull TimeUnit unit) {
-            synchronizationLock.lock();
-            try {
-                return varExpiration.put(key, distributedCaffeine.putDistributed(key, value), duration, unit);
-            } finally {
-                synchronizationLock.unlock();
-            }
-        }
-
-        @Override
-        public @Nullable V compute(@NonNull K key,
-                                   @NonNull BiFunction<? super K, ? super V, ? extends @Nullable V> remappingFunction,
-                                   @NonNull Duration duration) {
-            synchronizationLock.lock();
-            try {
-                BiFunction<? super K, ? super V, ? extends V> distributedRemappingFunction = (k, v) -> {
-                    V newValue = remappingFunction.apply(k, v);
-                    if (isNull(newValue)) {
-                        distributedCaffeine.invalidateDistributed(k);
-                    } else {
-                        distributedCaffeine.putDistributed(k, newValue);
-                    }
-                    return newValue;
-                };
-                return varExpiration.compute(key, distributedRemappingFunction, duration);
-            } finally {
-                synchronizationLock.unlock();
-            }
-        }
-
-        @Override
-        public @NonNull Map<K, V> oldest( int limit) {
+        public @NonNull Map<K, V> oldest(int limit) {
             return varExpiration.oldest(limit);
         }
 
@@ -176,7 +173,7 @@ class InternalPolicy<K, V> implements Policy<K, V>, LazyInitializer<K, V> {
         }
 
         @Override
-        public @NonNull Map<K, V> youngest( int limit) {
+        public @NonNull Map<K, V> youngest(int limit) {
             return varExpiration.youngest(limit);
         }
 

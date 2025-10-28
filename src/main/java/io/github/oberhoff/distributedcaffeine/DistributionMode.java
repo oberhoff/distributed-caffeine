@@ -48,5 +48,33 @@ public enum DistributionMode {
      * Includes invalidation (explicit removal), but excludes population (manual or loading) and eviction (size- or
      * time-based removal).
      */
-    INVALIDATION
+    INVALIDATION;
+
+    /**
+     * Indicates weather population is considered for distributed synchronization between cache instances or not.
+     *
+     * @return {@code true} if population is considered, otherwise {@code false}
+     */
+    public boolean isPopulationConsidered() {
+        return this.equals(POPULATION_AND_INVALIDATION_AND_EVICTION) || this.equals(POPULATION_AND_INVALIDATION);
+    }
+
+    /**
+     * Indicates weather invalidation is considered for distributed synchronization between cache instances or not.
+     *
+     * @return {@code true} if invalidation is considered, otherwise {@code false}
+     */
+    public boolean isInvalidationConsidered() {
+        return this.equals(POPULATION_AND_INVALIDATION_AND_EVICTION) || this.equals(POPULATION_AND_INVALIDATION)
+                || this.equals(INVALIDATION_AND_EVICTION) || this.equals(INVALIDATION);
+    }
+
+    /**
+     * Indicates weather eviction is considered for distributed synchronization between cache instances or not.
+     *
+     * @return {@code true} if eviction is considered, otherwise {@code false}
+     */
+    public boolean isEvictionConsidered() {
+        return this.equals(POPULATION_AND_INVALIDATION_AND_EVICTION) || this.equals(INVALIDATION_AND_EVICTION);
+    }
 }

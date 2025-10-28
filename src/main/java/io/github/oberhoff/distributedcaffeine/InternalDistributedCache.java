@@ -16,31 +16,32 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Function;
-import java.util.stream.Collectors;
-import java.util.stream.StreamSupport;
 
-import static java.lang.String.format;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullIterable;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullMap;
+import static java.util.Collections.unmodifiableMap;
+import static java.util.Objects.isNull;
+import static java.util.Objects.nonNull;
+import static java.util.Objects.requireNonNull;
 
-class InternalDistributedCache<K, V> implements DistributedCache<K, V>, LazyInitializer<K, V> {
+class InternalDistributedCache<K, V> implements DistributedCache<K, V>, InternalLazyInitializer<K, V> {
 
     protected DistributedCaffeine<K, V> distributedCaffeine;
     protected Cache<K, V> cache;
+    protected Policy<K, V> policy;
+    protected InternalCacheManager<K, V> cacheManager;
     protected InternalSynchronizationLock synchronizationLock;
-
-    private String origin;
-    private String mongoCollectionName;
 
     InternalDistributedCache() {
         // see also initialize()
@@ -50,9 +51,9 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, LazyInit
     public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
         this.distributedCaffeine = distributedCaffeine;
         this.cache = distributedCaffeine.getCache();
+        this.policy = distributedCaffeine.getCache().policy();
+        this.cacheManager = distributedCaffeine.getCacheManager();
         this.synchronizationLock = distributedCaffeine.getSynchronizationLock();
-        this.origin = distributedCaffeine.getObjectIdGenerator().getOrigin();
-        this.mongoCollectionName = distributedCaffeine.getMongoCollection().getNamespace().getCollectionName();
     }
 
     @Override
@@ -62,13 +63,10 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, LazyInit
 
     @Override
     public V get(@NonNull K key, @NonNull Function<? super K, ? extends V> mappingFunction) {
-        synchronizationLock.lock();
-        try {
-            return cache.get(key, mappedKey ->
-                    distributedCaffeine.putDistributed(mappedKey, mappingFunction.apply(mappedKey)));
-        } finally {
-            synchronizationLock.unlock();
-        }
+        requireNonNull(key);
+        requireNonNull(mappingFunction);
+        // custom implementation to share logic
+        return getCommon(key, mappingFunction);
     }
 
     @Override
@@ -78,67 +76,50 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, LazyInit
 
     @Override
     public @NonNull Map<K, V> getAll(@NonNull Iterable<? extends K> keys,
-                                     @NonNull Function<? super Set<? extends K>, ? extends Map<? extends K, ? extends V>> mappingFunction) {
-        synchronizationLock.lock();
-        try {
-            return cache.getAll(keys, mappedKeys ->
-                    distributedCaffeine.putAllDistributed(mappingFunction.apply(mappedKeys)));
-        } finally {
-            synchronizationLock.unlock();
-        }
+                                     @NonNull Function<? super Set<? extends K>,
+                                             ? extends Map<? extends K, ? extends V>> mappingFunction) {
+        Set<K> keySet = requireNonNullIterable(keys);
+        requireNonNull(mappingFunction);
+        // custom implementation to share logic
+        return getAllCommon(keySet, mappingFunction);
     }
 
     @Override
     public void put(@NonNull K key, @NonNull V value) {
-        synchronizationLock.lock();
-        try {
-            cache.put(key, distributedCaffeine.putDistributed(key, value));
-        } finally {
-            synchronizationLock.unlock();
-        }
+        requireNonNull(key);
+        requireNonNull(value);
+        synchronizationLock.runLocked(() ->
+                cache.put(key, cacheManager.putDistributed(key, value)));
     }
 
     @Override
     public void putAll(@NonNull Map<? extends K, ? extends V> map) {
-        synchronizationLock.lock();
-        try {
-            cache.putAll(distributedCaffeine.putAllDistributed(map));
-        } finally {
-            synchronizationLock.unlock();
-        }
+        requireNonNullMap(map);
+        synchronizationLock.runLocked(() ->
+                cache.putAll(cacheManager.putAllDistributed(map)));
     }
 
     @Override
     public void invalidate(@NonNull K key) {
-        synchronizationLock.lock();
-        try {
-            cache.invalidate(distributedCaffeine.invalidateDistributed(key));
-        } finally {
-            synchronizationLock.unlock();
-        }
+        requireNonNull(key);
+        synchronizationLock.runLocked(() ->
+                cache.invalidate(cacheManager.invalidateDistributed(key)));
     }
 
     @Override
     public void invalidateAll(@NonNull Iterable<? extends K> keys) {
-        synchronizationLock.lock();
-        try {
-            Set<K> keySet = StreamSupport.stream(keys.spliterator(), false)
-                    .collect(Collectors.toSet());
-            cache.invalidateAll(distributedCaffeine.invalidateAllDistributed(keySet));
-        } finally {
-            synchronizationLock.unlock();
-        }
+        Set<K> keySet = requireNonNullIterable(keys);
+        synchronizationLock.runLocked(() ->
+                cache.invalidateAll(cacheManager.invalidateAllDistributed(keySet)));
     }
 
     @Override
     public void invalidateAll() {
-        synchronizationLock.lock();
-        try {
-            distributedCaffeine.invalidateAllDistributed(cache.asMap().keySet());
-            cache.invalidateAll();
-        } finally {
-            synchronizationLock.unlock();
-        }
+        synchronizationLock.runLocked(() -> {
+            Set<K> keySet = cache.asMap().keySet();
+            cacheManager.invalidateAllDistributed(keySet);
+            keySet.clear();
+        });
     }
 
     @Override
@@ -158,44 +139,58 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, LazyInit
 
     @Override
     public @NonNull ConcurrentMap<K, V> asMap() {
-        InternalConcurrentMap<K, V> concurrentMap = new InternalConcurrentMap<>();
-        concurrentMap.initialize(distributedCaffeine);
-        return concurrentMap;
+        InternalConcurrentMap<K, V> internalConcurrentMap = new InternalConcurrentMap<>();
+        internalConcurrentMap.initialize(distributedCaffeine);
+        return internalConcurrentMap;
     }
 
     @Override
     public @NonNull Policy<K, V> policy() {
-        InternalPolicy<K, V> policy = new InternalPolicy<>();
-        policy.initialize(distributedCaffeine);
-        return policy;
+        InternalPolicy<K, V> internalPolicy = new InternalPolicy<>();
+        internalPolicy.initialize(distributedCaffeine);
+        return internalPolicy;
     }
 
     @Override
     public DistributedPolicy<K, V> distributedPolicy() {
-        InternalDistributedPolicy<K, V> distributedPolicy = new InternalDistributedPolicy<>();
-        distributedPolicy.initialize(distributedCaffeine);
-        return distributedPolicy;
+        InternalDistributedPolicy<K, V> internalDistributedPolicy = new InternalDistributedPolicy<>();
+        internalDistributedPolicy.initialize(distributedCaffeine);
+        return internalDistributedPolicy;
     }
 
-    @Override
-    public boolean equals(Object o) {
-        if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
-        InternalDistributedCache<?, ?> that = (InternalDistributedCache<?, ?>) o;
-        return Objects.equals(this.origin, that.origin);
+    protected V getCommon(K key, Function<? super K, ? extends V> mappingFunction) {
+        V oldValue = policy.getIfPresentQuietly(key);
+        if (isNull(oldValue)) {
+            V newValue = mappingFunction.apply(key);
+            if (nonNull(newValue)) {
+                synchronizationLock.runLocked(() ->
+                        cache.put(key, cacheManager.putDistributed(key, newValue)));
+            }
+            return newValue;
+        }
+        return oldValue;
     }
 
-    @Override
-    public int hashCode() {
-        return Objects.hashCode(origin);
-    }
-
-    @Override
-    public String toString() {
-        String cacheClassName = cache instanceof LoadingCache
-                ? DistributedLoadingCache.class.getSimpleName()
-                : DistributedCache.class.getSimpleName();
-        return format("%s{id=%s, collection='%s'}",
-                cacheClassName, origin, mongoCollectionName);
+    protected Map<K, V> getAllCommon(Set<K> keys, Function<? super Set<? extends K>,
+            ? extends Map<? extends K, ? extends V>> mappingFunction) {
+        Set<K> keysWithNullValues = new HashSet<>();
+        Map<K, V> keyToOldValue = new HashMap<>();
+        keys.forEach(key -> {
+            V oldValue = policy.getIfPresentQuietly(key);
+            if (isNull(oldValue)) {
+                keysWithNullValues.add(key);
+            } else {
+                keyToOldValue.put(key, oldValue);
+            }
+        });
+        // take existing entries into account (might be overwritten by loaded entries)
+        Map<K, V> keyToNewValue = new HashMap<>(keyToOldValue);
+        // retain 'all returned entries will be cached' semantics
+        keyToNewValue.putAll(requireNonNullMap(mappingFunction.apply(keysWithNullValues))); // key/value null check
+        synchronizationLock.runLocked(() ->
+                cache.putAll(cacheManager.putAllDistributed(keyToNewValue)));
+        // retain 'only the entries for keys will be returned' semantics
+        keyToNewValue.keySet().removeIf(key -> !keys.contains(key));
+        return unmodifiableMap(keyToNewValue);
     }
 }

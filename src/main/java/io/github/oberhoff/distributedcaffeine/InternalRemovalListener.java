@@ -17,11 +17,10 @@ package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 
-class InternalRemovalListener<K, V> implements RemovalListener<K, V>, LazyInitializer<K, V> {
+class InternalRemovalListener<K, V> implements RemovalListener<K, V>, InternalLazyInitializer<K, V> {
 
     private final RemovalListener<K, V> removalListener;
 
@@ -32,6 +31,7 @@ class InternalRemovalListener<K, V> implements RemovalListener<K, V>, LazyInitia
 
     @Override
     public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
+        // noop
     }
 
     @Override

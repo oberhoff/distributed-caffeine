@@ -15,7 +15,6 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.LazyInitializer;
 import org.jspecify.annotations.NonNull;
 
 import java.util.AbstractCollection;
@@ -27,12 +26,16 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
-import java.util.stream.Collectors;
 
-class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, LazyInitializer<K, V> {
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullMap;
+import static java.util.Objects.isNull;
+import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.toSet;
 
-    private DistributedCaffeine<K, V> distributedCaffeine;
+class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyInitializer<K, V> {
+
     private ConcurrentMap<K, V> concurrentMap;
+    private InternalCacheManager<K, V> cacheManager;
     private InternalSynchronizationLock synchronizationLock;
 
     InternalConcurrentMap() {
@@ -41,8 +44,8 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, LazyInitialize
 
     @Override
     public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
-        this.distributedCaffeine = distributedCaffeine;
         this.concurrentMap = distributedCaffeine.getCache().asMap();
+        this.cacheManager = distributedCaffeine.getCacheManager();
         this.synchronizationLock = distributedCaffeine.getSynchronizationLock();
     }
 
@@ -53,26 +56,22 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, LazyInitialize
 
     @Override
     public V put(K key, V value) {
-        synchronizationLock.lock();
-        try {
-            return concurrentMap.put(key, distributedCaffeine.putDistributed(key, value));
-        } finally {
-            synchronizationLock.unlock();
-        }
+        requireNonNull(key);
+        requireNonNull(value);
+        return synchronizationLock.getLocked(() ->
+                concurrentMap.put(key, cacheManager.putDistributed(key, value)));
     }
 
     @Override
     public void putAll(@NonNull Map<? extends K, ? extends V> map) {
-        synchronizationLock.lock();
-        try {
-            concurrentMap.putAll(distributedCaffeine.putAllDistributed(map));
-        } finally {
-            synchronizationLock.unlock();
-        }
+        requireNonNullMap(map);
+        synchronizationLock.runLocked(() ->
+                concurrentMap.putAll(cacheManager.putAllDistributed(map)));
     }
 
     @Override
     public V putIfAbsent(@NonNull K key, V value) {
+        requireNonNull(key);
         if (!containsKey(key)) {
             return put(key, value); // implicit distribution
         } else {
@@ -81,7 +80,21 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, LazyInitialize
     }
 
     @Override
+    public V replace(@NonNull K key, @NonNull V value) {
+        requireNonNull(key);
+        requireNonNull(value);
+        if (containsKey(key)) {
+            return put(key, value); // implicit distribution
+        } else {
+            return null;
+        }
+    }
+
+    @Override
     public boolean replace(@NonNull K key, @NonNull V oldValue, @NonNull V newValue) {
+        requireNonNull(key);
+        requireNonNull(oldValue);
+        requireNonNull(newValue);
         if (containsKey(key) && Objects.equals(get(key), oldValue)) {
             put(key, newValue); // implicit distribution
             return true;
@@ -91,27 +104,16 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, LazyInitialize
     }
 
     @Override
-    public V replace(@NonNull K key, @NonNull V value) {
-        if (containsKey(key)) {
-            return put(key, value); // implicit distribution
-        } else {
-            return null;
-        }
-    }
-
-    @Override
     @SuppressWarnings("unchecked")
     public V remove(Object key) {
-        synchronizationLock.lock();
-        try {
-            return concurrentMap.remove(distributedCaffeine.invalidateDistributed((K) key));
-        } finally {
-            synchronizationLock.unlock();
-        }
+        requireNonNull(key);
+        return synchronizationLock.getLocked(() ->
+                concurrentMap.remove(cacheManager.invalidateDistributed((K) key)));
     }
 
     @Override
     public boolean remove(@NonNull Object key, Object value) {
+        requireNonNull(key);
         if (containsKey(key) && Objects.equals(get(key), value)) {
             remove(key); // implicit distribution
             return true;
@@ -122,13 +124,11 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, LazyInitialize
 
     @Override
     public void clear() {
-        synchronizationLock.lock();
-        try {
-            distributedCaffeine.invalidateAllDistributed(concurrentMap.keySet());
-            concurrentMap.clear();
-        } finally {
-            synchronizationLock.unlock();
-        }
+        synchronizationLock.runLocked(() -> {
+            Set<K> keySet = concurrentMap.keySet();
+            cacheManager.invalidateAllDistributed(keySet);
+            keySet.clear();
+        });
     }
 
     @Override
@@ -156,66 +156,64 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, LazyInitialize
         return new AbstractSet<>() {
             public @NonNull Iterator<K> iterator() {
                 return new Iterator<>() {
-                    private final Iterator<Entry<K, V>> iterator = concurrentMap.entrySet().iterator();
-                    private Entry<K, V> next;
+                    private final Iterator<K> iterator = concurrentMap.keySet().iterator();
+                    private K next;
 
+                    @Override
                     public boolean hasNext() {
                         return iterator.hasNext();
                     }
 
+                    @Override
                     public K next() {
-                        next = new WriteThroughEntry<>(iterator.next(), InternalConcurrentMap.this);
-                        return next.getKey();
+                        next = iterator.next();
+                        return next;
                     }
 
                     @Override
                     public void remove() {
-                        synchronizationLock.lock();
-                        try {
-                            distributedCaffeine.invalidateDistributed(next.getKey());
-                            iterator.remove();
-                        } finally {
-                            synchronizationLock.unlock();
+                        if (isNull(next)) {
+                            throw new IllegalStateException();
+                        } else {
+                            synchronizationLock.runLocked(() -> {
+                                cacheManager.invalidateDistributed(next);
+                                iterator.remove();
+                            });
                         }
                     }
                 };
             }
 
-            public int size() {
-                return InternalConcurrentMap.this.size();
-            }
-
             @Override
             public boolean removeAll(Collection<?> c) {
-                synchronizationLock.lock();
-                try {
+                return synchronizationLock.getLocked(() -> {
                     Set<K> keys = concurrentMap.keySet().stream()
                             .filter(c::contains)
-                            .collect(Collectors.toSet());
-                    distributedCaffeine.invalidateAllDistributed(keys);
+                            .collect(toSet());
+                    cacheManager.invalidateAllDistributed(keys);
                     return concurrentMap.keySet().removeAll(c);
-                } finally {
-                    synchronizationLock.unlock();
-                }
+                });
             }
 
             @Override
             public boolean retainAll(@NonNull Collection<?> c) {
-                synchronizationLock.lock();
-                try {
+                return synchronizationLock.getLocked(() -> {
                     Set<K> keys = concurrentMap.keySet().stream()
                             .filter(key -> !c.contains(key))
-                            .collect(Collectors.toSet());
-                    distributedCaffeine.invalidateAllDistributed(keys);
+                            .collect(toSet());
+                    cacheManager.invalidateAllDistributed(keys);
                     return concurrentMap.keySet().retainAll(c);
-                } finally {
-                    synchronizationLock.unlock();
-                }
+                });
             }
 
             @Override
             public void clear() {
                 InternalConcurrentMap.this.clear(); // implicit distribution
+            }
+
+            @Override
+            public int size() {
+                return InternalConcurrentMap.this.size();
             }
         };
     }
@@ -228,65 +226,62 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, LazyInitialize
                     private final Iterator<Entry<K, V>> iterator = concurrentMap.entrySet().iterator();
                     private Entry<K, V> next;
 
+                    @Override
                     public boolean hasNext() {
                         return iterator.hasNext();
                     }
 
+                    @Override
                     public V next() {
-                        next = new WriteThroughEntry<>(iterator.next(), InternalConcurrentMap.this);
+                        next = iterator.next();
                         return next.getValue();
                     }
 
                     @Override
                     public void remove() {
-                        synchronizationLock.lock();
-                        try {
-                            distributedCaffeine.invalidateDistributed(next.getKey());
-                            iterator.remove();
-                        } finally {
-                            synchronizationLock.unlock();
+                        if (isNull(next)) {
+                            throw new IllegalStateException();
+                        } else {
+                            synchronizationLock.runLocked(() -> {
+                                cacheManager.invalidateDistributed(next.getKey());
+                                iterator.remove();
+                            });
                         }
                     }
                 };
             }
 
-            public int size() {
-                return InternalConcurrentMap.this.size();
-            }
-
             @Override
             public boolean removeAll(@NonNull Collection<?> c) {
-                synchronizationLock.lock();
-                try {
+                return synchronizationLock.getLocked(() -> {
                     Set<K> keys = concurrentMap.entrySet().stream()
                             .filter(entry -> c.contains(entry.getValue()))
                             .map(Entry::getKey)
-                            .collect(Collectors.toSet());
-                    distributedCaffeine.invalidateAllDistributed(keys);
+                            .collect(toSet());
+                    cacheManager.invalidateAllDistributed(keys);
                     return concurrentMap.values().removeAll(c);
-                } finally {
-                    synchronizationLock.unlock();
-                }
+                });
             }
 
             @Override
             public boolean retainAll(@NonNull Collection<?> c) {
-                synchronizationLock.lock();
-                try {
+                return synchronizationLock.getLocked(() -> {
                     Set<K> keys = concurrentMap.entrySet().stream()
                             .filter(entry -> !c.contains(entry.getValue()))
                             .map(Entry::getKey)
-                            .collect(Collectors.toSet());
-                    distributedCaffeine.invalidateAllDistributed(keys);
+                            .collect(toSet());
+                    cacheManager.invalidateAllDistributed(keys);
                     return concurrentMap.values().retainAll(c);
-                } finally {
-                    synchronizationLock.unlock();
-                }
+                });
             }
 
             @Override
             public void clear() {
                 InternalConcurrentMap.this.clear(); // implicit distribution
+            }
+
+            public int size() {
+                return InternalConcurrentMap.this.size();
             }
         };
     }
@@ -299,10 +294,12 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, LazyInitialize
                     private final Iterator<Entry<K, V>> iterator = concurrentMap.entrySet().iterator();
                     private Entry<K, V> next;
 
+                    @Override
                     public boolean hasNext() {
                         return iterator.hasNext();
                     }
 
+                    @Override
                     public Entry<K, V> next() {
                         next = new WriteThroughEntry<>(iterator.next(), InternalConcurrentMap.this);
                         return next;
@@ -310,64 +307,57 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, LazyInitialize
 
                     @Override
                     public void remove() {
-                        synchronizationLock.lock();
-                        try {
-                            distributedCaffeine.invalidateDistributed(next.getKey());
-                            iterator.remove();
-                        } finally {
-                            synchronizationLock.unlock();
+                        if (isNull(next)) {
+                            throw new IllegalStateException();
+                        } else {
+                            synchronizationLock.runLocked(() -> {
+                                cacheManager.invalidateDistributed(next.getKey());
+                                iterator.remove();
+                            });
                         }
                     }
                 };
             }
 
-            public int size() {
-                return InternalConcurrentMap.this.size();
-            }
-
             @Override
             public boolean removeAll(Collection<?> c) {
-                synchronizationLock.lock();
-                try {
+                return synchronizationLock.getLocked(() -> {
                     Set<K> keys = concurrentMap.entrySet().stream()
                             .filter(c::contains)
                             .map(Entry::getKey)
-                            .collect(Collectors.toSet());
-                    distributedCaffeine.invalidateAllDistributed(keys);
+                            .collect(toSet());
+                    cacheManager.invalidateAllDistributed(keys);
                     return concurrentMap.entrySet().removeAll(c);
-                } finally {
-                    synchronizationLock.unlock();
-                }
+                });
             }
 
             @Override
             public boolean retainAll(@NonNull Collection<?> c) {
-                synchronizationLock.lock();
-                try {
+                return synchronizationLock.getLocked(() -> {
                     Set<K> keys = concurrentMap.entrySet().stream()
                             .filter(entry -> !c.contains(entry))
                             .map(Entry::getKey)
-                            .collect(Collectors.toSet());
-                    distributedCaffeine.invalidateAllDistributed(keys);
+                            .collect(toSet());
+                    cacheManager.invalidateAllDistributed(keys);
                     return concurrentMap.entrySet().retainAll(c);
-                } finally {
-                    synchronizationLock.unlock();
-                }
+                });
             }
 
             @Override
             public void clear() {
                 InternalConcurrentMap.this.clear(); // implicit distribution
             }
+
+            @Override
+            public int size() {
+                return InternalConcurrentMap.this.size();
+            }
         };
     }
 
     @Override
-    public boolean equals(Object o) {
-        if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
-        InternalConcurrentMap<?, ?> that = (InternalConcurrentMap<?, ?>) o;
-        return concurrentMap.equals(that.concurrentMap);
+    public boolean equals(Object object) {
+        return object instanceof Map && concurrentMap.equals(object);
     }
 
     @Override
@@ -380,9 +370,10 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, LazyInitialize
         return concurrentMap.toString();
     }
 
+    @SuppressWarnings("squid:S2160")
     static final class WriteThroughEntry<K, V> extends SimpleEntry<K, V> {
 
-        private final Map<K, V> map;
+        private final transient Map<K, V> map;
 
         public WriteThroughEntry(Entry<? extends K, ? extends V> entry, Map<K, V> map) {
             super(entry);
@@ -392,24 +383,9 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, LazyInitialize
         @Override
         public V setValue(V value) {
             V oldValue = getValue();
+            map.put(super.getKey(), value); // implicit distribution
             super.setValue(value);
-            map.put(super.getKey(), value);
             return oldValue;
-        }
-
-        @Override
-        public boolean equals(Object o) {
-            if (this == o) return true;
-            if (o == null || getClass() != o.getClass()) return false;
-            if (!super.equals(o)) return false;
-            WriteThroughEntry<?, ?> that = (WriteThroughEntry<?, ?>) o;
-            return Objects.equals(getKey(), that.getKey())
-                    && Objects.equals(getValue(), that.getValue());
-        }
-
-        @Override
-        public int hashCode() {
-            return Objects.hash(getKey(), getValue());
         }
     }
 }

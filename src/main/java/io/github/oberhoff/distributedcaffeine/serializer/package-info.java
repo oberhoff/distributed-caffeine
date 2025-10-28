@@ -13,18 +13,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 /**
- * This package contains classes and interfaces providing serializing/deserializing functionality for Distributed
+ * This package contains classes and interfaces that provide serializing/deserializing functionality for Distributed
  * Caffeine cache instances.
  * <p>
  * Distributed Caffeine already has build-in serializers:
  * <ul>
- *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.FurySerializer}</li>
+ *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.ForySerializer}</li>
  *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer}</li>
  *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JavaObjectSerializer}</li>
  * </ul>
  * <p>
- * If custom serializers are required, they must implement one of the following interfaces:
+ * If custom serializers are required, they must implement one of the following interfaces (or extend one of the
+ * above serializers):
  * <ul>
  *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer} for serializing an object to a
  *      byte array representation</li>
@@ -33,5 +35,8 @@
  *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer} for serializing an object to a JSON
  *      representation (encoded as String or BSON)</li>
  * </ul>
+ *
+ * @author Andreas Oberhoff
+ * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
  */
 package io.github.oberhoff.distributedcaffeine.serializer;
