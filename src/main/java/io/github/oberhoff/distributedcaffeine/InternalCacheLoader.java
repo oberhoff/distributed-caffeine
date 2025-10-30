@@ -16,28 +16,19 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.CacheLoader;
-import com.mongodb.client.model.Filters;
-import org.bson.conversions.Bson;
 import org.jspecify.annotations.NonNull;
 
 import java.lang.reflect.Method;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
-import java.util.stream.Stream;
 
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.HASH;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static java.util.Objects.nonNull;
-import static java.util.stream.Collectors.groupingBy;
-import static java.util.stream.Collectors.toList;
 
 @SuppressWarnings("squid:S1452")
 class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitializer<K, V> {
@@ -183,23 +174,13 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
     }
 
     private Map<? extends K, ? extends V> loadAllExtendedFromMongo(Set<? extends K> keys) {
-        List<Integer> hashes = keys.stream()
-                .map(Objects::hashCode)
-                .collect(toList());
-        Bson filter = Filters.in(HASH.toString(), hashes);
         Map<K, V> keyToValue = new HashMap<>();
-        try (Stream<InternalCacheDocument<K, V>> cacheDocumentStream =
-                     mongoRepository.streamCacheDocuments(filter)) {
-            cacheDocumentStream
-                    .filter(cacheDocument -> keys.contains(cacheDocument.getKey()))
-                    // retain "hashCode -> bucket -> equals" semantics
-                    .collect(groupingBy(InternalCacheDocument::getKey))
-                    .forEach((key, cacheDocuments) -> cacheDocuments.stream()
-                            .max(Comparator.naturalOrder())
-                            .filter(InternalCacheDocument::isEvictedExtended)
-                            .ifPresent(cacheDocument ->
-                                    keyToValue.put(cacheDocument.getKey(), cacheDocument.getValue())));
-        }
+        mongoRepository.streamCacheDocumentsGroupedByKeyInReverseOrder(keys)
+                .forEach(cacheDocuments -> cacheDocuments.stream()
+                        .findFirst()
+                        .filter(InternalCacheDocument::isEvictedExtended)
+                        .ifPresent(cacheDocument ->
+                                keyToValue.put(cacheDocument.getKey(), cacheDocument.getValue())));
         return keyToValue;
     }
 }

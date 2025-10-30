@@ -24,8 +24,6 @@ import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.RemovalListener;
 import com.mongodb.client.MongoCollection;
-import com.mongodb.client.model.Filters;
-import com.mongodb.client.model.Updates;
 import io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.ForySerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer;
@@ -49,9 +47,6 @@ import java.util.function.Function;
 import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.DISCRIMINATOR;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.ORIGIN;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STALE;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
 import static java.lang.String.format;
@@ -655,16 +650,6 @@ public final class DistributedCaffeine<K, V> {
 
     void activate() {
         if (!isActivated()) {
-            // migrations can be removed in future releases
-            mongoCollection.updateMany(
-                    Filters.exists(DISCRIMINATOR.toString(), false),
-                    Updates.set(DISCRIMINATOR.toString(), null));
-            mongoCollection.updateMany(
-                    Filters.exists(ORIGIN.toString(), false),
-                    Updates.set(ORIGIN.toString(), 0L));
-            mongoCollection.updateMany(
-                    Filters.exists(STALE.toString(), false),
-                    Updates.set(STALE.toString(), false));
             synchronizationLock.runLocked(() -> {
                 cacheManager.activate();
                 changeStreamWatcher.activate();

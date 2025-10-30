@@ -16,26 +16,19 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.mongodb.client.MongoCollection;
-import com.mongodb.client.model.Filters;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import org.bson.Document;
-import org.bson.conversions.Bson;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
-import java.util.stream.Stream;
 
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.HASH;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullIterable;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
-import static java.util.stream.Collectors.groupingBy;
-import static java.util.stream.Collectors.toList;
 
 class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, InternalLazyInitializer<K, V> {
 
@@ -102,24 +95,14 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
     }
 
     private List<CacheEntry<K, V>> getAllDistributed(Set<? extends K> keys, boolean includeEvicted) {
-        List<Integer> hashes = keys.stream()
-                .map(Objects::hashCode)
-                .collect(toList());
-        Bson filter = Filters.in(HASH.toString(), hashes);
         List<CacheEntry<K, V>> cacheEntries = new ArrayList<>();
-        try (Stream<InternalCacheDocument<K, V>> cacheDocumentStream =
-                     mongoRepository.streamCacheDocuments(filter)) {
-            cacheDocumentStream
-                    .filter(cacheDocument -> keys.contains(cacheDocument.getKey()))
-                    // retain "hashCode -> bucket -> equals" semantics
-                    .collect(groupingBy(InternalCacheDocument::getKey))
-                    .forEach((key, cacheDocuments) -> cacheDocuments.stream()
-                            .max(Comparator.naturalOrder())
-                            .filter(cacheDocument -> cacheDocument.isCached()
-                                    || (includeEvicted && cacheDocument.isEvictedExtended()))
-                            .map(this::toCacheEntry)
-                            .ifPresent(cacheEntries::add));
-        }
+        mongoRepository.streamCacheDocumentsGroupedByKeyInReverseOrder(keys)
+                .forEach(cacheDocuments -> cacheDocuments.stream()
+                        .findFirst()
+                        .filter(cacheDocument -> cacheDocument.isCached()
+                                || (includeEvicted && cacheDocument.isEvictedExtended()))
+                        .map(this::toCacheEntry)
+                        .ifPresent(cacheEntries::add));
         return cacheEntries;
     }
 

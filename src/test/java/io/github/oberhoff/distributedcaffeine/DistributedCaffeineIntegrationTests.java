@@ -38,6 +38,9 @@ import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.IndexModel;
+import com.mongodb.client.model.IndexOptions;
+import com.mongodb.client.model.Indexes;
 import com.mongodb.client.model.Updates;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Builder;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.DockerImage;
@@ -88,6 +91,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -116,10 +120,8 @@ import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATI
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION_AND_EVICTION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.DISCRIMINATOR;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.EXPIRES;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.HASH;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.ORIGIN;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STALE;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STATUS;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status;
@@ -4309,59 +4311,44 @@ final class DistributedCaffeineIntegrationTests {
                             Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(1), s -> s.isEqualTo(3))));
         }
 
-        @DisplayName("Test Migration")
+        @DisplayName("Test MongoRepository")
         @Test
-        void test_Migration() {
-            // this test can be removed when migrations are removed
+        void test_MongoRepository_indexes() {
             DistributedCache<Key, Value> distributedCache = createCache(
                     CacheBuilder.identity(),
                     Builder::build);
 
-            Key key1 = Key.of(1);
-            Value value1 = Value.of(1);
-
-            distributedCache.put(key1, value1);
-            distributedCache.distributedPolicy().stopSynchronization();
-            distributedCache.invalidateAll();
-
             MongoCollection<Document> mongoCollection = distributedCache.distributedPolicy().getMongoCollection();
 
-            mongoCollection.updateMany(
-                    Filters.empty(),
-                    Updates.combine(
-                            Updates.unset(DISCRIMINATOR.toString()),
-                            Updates.unset(ORIGIN.toString()),
-                            Updates.unset(STALE.toString())));
+            String indexName = UUID.randomUUID().toString();
+            IndexModel index = new IndexModel(Indexes.compoundIndex(
+                    Stream.of(InternalCacheDocument.Field.values())
+                            .map(field -> Indexes.ascending(field.toString()))
+                            .toArray(Bson[]::new)),
+                    new IndexOptions()
+                            .name(indexName)
+                            .unique(false)
+                            .background(true));
 
-            await("unset")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> {
-                        assertThat(distributedCache.estimatedSize()).isEqualTo(0);
-                        assertThat(distributedCache.getIfPresent(key1)).isNull();
-                        assertThat(mongoCollection.countDocuments(Filters.empty())).isEqualTo(1);
-                        @SuppressWarnings("resource")
-                        Document document = mongoCollection.find(Filters.empty()).limit(1).iterator().next();
-                        assertThat(document.containsKey(DISCRIMINATOR.toString())).isFalse();
-                        assertThat(document.containsKey(ORIGIN.toString())).isFalse();
-                        assertThat(document.containsKey(STALE.toString())).isFalse();
-                    });
+            mongoCollection.createIndexes(List.of(index));
 
-            distributedCache.distributedPolicy().startSynchronization();
+            HashSet<String> names = new HashSet<>();
+            mongoCollection.listIndexes().forEach(document ->
+                    names.add(document.getString("name")));
+            int indexCount = names.size();
 
-            await(WAITING_DURATION);
+            assertThat(names).containsOnlyOnce(indexName);
 
-            await("sync")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> {
-                        assertThat(distributedCache.estimatedSize()).isEqualTo(1);
-                        assertThat(distributedCache.getIfPresent(key1)).isEqualTo(value1);
-                        assertThat(mongoCollection.countDocuments(Filters.empty())).isEqualTo(1);
-                        @SuppressWarnings("resource")
-                        Document document = mongoCollection.find(Filters.empty()).limit(1).iterator().next();
-                        assertThat(document.getString(DISCRIMINATOR.toString())).isNull();
-                        assertThat(document.getLong(ORIGIN.toString())).isEqualTo(0L);
-                        assertThat(document.getBoolean(STALE.toString())).isFalse();
-                    });
+            createCache(
+                    CacheBuilder.identity(),
+                    Builder::build);
+
+            names.clear();
+            mongoCollection.listIndexes().forEach(document ->
+                    names.add(document.getString("name")));
+
+            assertThat(names).doesNotContain(indexName)
+                    .hasSize(indexCount - 1);
         }
 
         @DisplayName("Stress test synchronization from data store")
@@ -5034,9 +5021,10 @@ final class DistributedCaffeineIntegrationTests {
                     .map(this::getDistributedCaffeine)
                     .map(DistributedCaffeine::getMongoRepository)
                     .orElseThrow()
-                    .streamCacheDocuments(filters.length == 0
-                            ? null
+                    .streamCacheDocumentsGroupedByKeyInReverseOrder(filters.length == 0
+                            ? Filters.empty()
                             : Filters.and(filters))
+                    .flatMap(Set::stream)
                     .sorted()
                     .forEach(cacheDocument -> System.out.printf("%05d %s%n", counter.incrementAndGet(), cacheDocument));
         }
