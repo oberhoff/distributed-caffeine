@@ -55,7 +55,6 @@ import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Statu
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.INVALIDATED_REFRESHED_AFTER_WRITE;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
-import static java.util.stream.Collectors.groupingBy;
 import static java.util.stream.Collectors.toCollection;
 import static java.util.stream.Collectors.toSet;
 
@@ -220,26 +219,19 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
                             Filters.eq(STATUS.toString(), CACHED.toString()),
                             Filters.eq(STALE.toString(), false)),
                     Filters.ne(STATUS.toString(), CACHED.toString()));
-            try (Stream<InternalCacheDocument<K, V>> cacheDocumentStream =
-                         mongoRepository.streamCacheDocuments(filter)) {
-                cacheDocumentStream
-                        // retain "hashCode -> bucket -> equals" semantics
-                        .collect(groupingBy(InternalCacheDocument::getKey))
-                        .forEach((k, cacheDocuments) -> {
-                            List<InternalCacheDocument<K, V>> sortedCacheDocuments = cacheDocuments.stream()
-                                    .sorted(Comparator.reverseOrder())
-                                    .collect(toCollection(ArrayList::new));
-                            if (!sortedCacheDocuments.isEmpty()) {
-                                // newest cache entry must be treated in the same way as a distributed inbound insert
-                                Optional.ofNullable(sortedCacheDocuments.remove(0))
-                                        .filter(InternalCacheDocument::isCached)
-                                        .ifPresent(newestCacheDocument ->
-                                                manageInboundInsert(newestCacheDocument, false));
-                                // correct any inconsistencies (if any) in relation to (not yet) stale cache entries
-                                sortedCacheDocuments.forEach(maintenanceWorker::queueReplacement);
-                            }
-                        });
-            }
+            mongoRepository.streamCacheDocumentsGroupedByKeyInReverseOrder(filter)
+                    .forEach(cacheDocuments -> {
+                        // newest cache entry must be treated in the same way as a distributed inbound insert
+                        cacheDocuments.stream()
+                                .findFirst()
+                                .filter(InternalCacheDocument::isCached)
+                                .ifPresent(cacheDocument ->
+                                        manageInboundInsert(cacheDocument, false));
+                        // correct any inconsistencies (if any) in relation to (not yet) stale cache entries
+                        cacheDocuments.stream()
+                                .skip(1)
+                                .forEach(maintenanceWorker::queueReplacement);
+                    });
             // remove cache entries which are not managed (e.g., if synchronization is started after it was stopped)
             synchronizationLock.runLocked(() -> {
                 if (isActivated()) {
