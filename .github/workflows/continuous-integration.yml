@@ -1,4 +1,4 @@
-name: Verify with Maven
+name: Continuous Integration (CI)
 
 on:
   push:
@@ -10,7 +10,8 @@ on:
       - '**'
 
 jobs:
-  verify:
+  continuous-integration:
+    name: Continuous Integration (CI)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout branch
