@@ -96,13 +96,13 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
 
     private List<CacheEntry<K, V>> getAllDistributed(Set<? extends K> keys, boolean includeEvicted) {
         List<CacheEntry<K, V>> cacheEntries = new ArrayList<>();
-        mongoRepository.streamCacheDocumentsGroupedByKeyInReverseOrder(keys)
-                .forEach(cacheDocuments -> cacheDocuments.stream()
+        mongoRepository.consumeCacheDocumentsGroupedByKeyInReverseOrder(keys, stream ->
+                stream.forEach(cacheDocuments -> cacheDocuments.stream()
                         .findFirst()
                         .filter(cacheDocument -> cacheDocument.isCached()
                                 || (includeEvicted && cacheDocument.isEvictedExtended()))
                         .map(this::toCacheEntry)
-                        .ifPresent(cacheEntries::add));
+                        .ifPresent(cacheEntries::add)));
         return cacheEntries;
     }
 

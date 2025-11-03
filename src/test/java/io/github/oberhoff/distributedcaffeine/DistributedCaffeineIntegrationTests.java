@@ -5023,12 +5023,14 @@ final class DistributedCaffeineIntegrationTests {
                     .map(this::getDistributedCaffeine)
                     .map(DistributedCaffeine::getMongoRepository)
                     .orElseThrow()
-                    .streamCacheDocumentsGroupedByKeyInReverseOrder(filters.length == 0
-                            ? Filters.empty()
-                            : Filters.and(filters))
-                    .flatMap(Set::stream)
-                    .sorted()
-                    .forEach(cacheDocument -> System.out.printf("%05d %s%n", counter.incrementAndGet(), cacheDocument));
+                    .consumeCacheDocumentsGroupedByKeyInReverseOrder(filters.length == 0
+                                    ? Filters.empty()
+                                    : Filters.and(filters),
+                            stream -> stream
+                                    .flatMap(Set::stream)
+                                    .sorted()
+                                    .forEach(cacheDocument ->
+                                            System.out.printf("%05d %s%n", counter.incrementAndGet(), cacheDocument)));
         }
 
         <T> T runsOnGitHub(T yes, T no) {

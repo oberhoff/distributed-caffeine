@@ -61,9 +61,13 @@ import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.Spliterator;
+import java.util.Spliterators;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
 
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.DISCRIMINATOR;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.EXPIRES;
@@ -81,7 +85,6 @@ import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Statu
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_SIZE_EXTENDED;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_TIME_EXTENDED;
 import static java.lang.String.format;
-import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.groupingBy;
@@ -122,24 +125,30 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
         ensureIndexes();
     }
 
-    Stream<Set<InternalCacheDocument<K, V>>> streamCacheDocumentsGroupedByKeyInReverseOrder(Set<? extends K> keys) {
+    void consumeCacheDocumentsGroupedByKeyInReverseOrder(
+            Set<? extends K> keys, Consumer<Stream<Set<InternalCacheDocument<K, V>>>> streamConsumer) {
         List<Integer> hashes = keys.stream()
                 .map(Objects::hashCode)
                 .collect(toList());
         Bson filter = Filters.in(HASH.toString(), hashes);
-        return streamCacheDocumentsGroupedByKey(filter)
+        try (Stream<Set<InternalCacheDocument<K, V>>> stream = streamCacheDocumentsGroupedByKey(filter)
                 // only return requested keys, even if hash collisions occur
                 .filter(entry -> keys.contains(entry.getKey()))
                 .map(entry -> entry.getValue().stream()
                         .sorted(Comparator.reverseOrder())
-                        .collect(Collectors.toCollection(LinkedHashSet::new)));
+                        .collect(toCollection(LinkedHashSet::new)))) {
+            streamConsumer.accept(stream);
+        }
     }
 
-    Stream<Set<InternalCacheDocument<K, V>>> streamCacheDocumentsGroupedByKeyInReverseOrder(Bson filter) {
-        return streamCacheDocumentsGroupedByKey(filter)
+    void consumeCacheDocumentsGroupedByKeyInReverseOrder(
+            Bson filter, Consumer<Stream<Set<InternalCacheDocument<K, V>>>> streamConsumer) {
+        try (Stream<Set<InternalCacheDocument<K, V>>> stream = streamCacheDocumentsGroupedByKey(filter)
                 .map(entry -> entry.getValue().stream()
                         .sorted(Comparator.reverseOrder())
-                        .collect(Collectors.toCollection(LinkedHashSet::new)));
+                        .collect(Collectors.toCollection(LinkedHashSet::new)))) {
+            streamConsumer.accept(stream);
+        }
     }
 
     Set<InternalCacheDocument<K, V>> insert(Map<? extends K, ? extends V> map, Status status) {
@@ -215,8 +224,7 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
                                     .flatMap(Stream::of)
                                     .map(Objects::toString)
                                     .toArray(String[]::new)));
-            streamFromMongoCursor(mongoCollection
-                    .aggregate(
+            try (Stream<Document> stream = streamFromMongoCursor(mongoCollection.aggregate(
                             List.of(
                                     Aggregates.match(filter),
                                     Aggregates.group(format("$%s", HASH),
@@ -227,21 +235,22 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
                                                     STATUS.toString(), format("$%s", STATUS),
                                                     TOUCHED.toString(), format("$%s", TOUCHED))))),
                                     Aggregates.match(Filters.gt("count", 1))))
-                    .iterator())
-                    .map(document -> document.getList("documents", Document.class))
-                    .forEach(documents ->
-                            objectIds.addAll(documents.stream()
-                                    .map(document -> toCacheDocumentOrNull(document, _ID, KEY, STATUS, TOUCHED))
-                                    .filter(Objects::nonNull)
-                                    // retain "hashCode -> bucket -> equals" semantics
-                                    .collect(groupingBy(InternalCacheDocument::getKey))
-                                    .entrySet()
-                                    .stream()
-                                    .flatMap(entry -> entry.getValue().stream()
-                                            .sorted(Comparator.reverseOrder())
-                                            .skip(1) // newest cache entry stays untouched
-                                            .map(InternalCacheDocument::getId))
-                                    .collect(toSet())));
+                    .iterator())) {
+                stream.map(document -> document.getList("documents", Document.class))
+                        .forEach(documents ->
+                                objectIds.addAll(documents.stream()
+                                        .map(document -> toCacheDocumentOrNull(document, _ID, KEY, STATUS, TOUCHED))
+                                        .filter(Objects::nonNull)
+                                        // retain "hashCode -> bucket -> equals" semantics
+                                        .collect(groupingBy(InternalCacheDocument::getKey))
+                                        .entrySet()
+                                        .stream()
+                                        .flatMap(entry -> entry.getValue().stream()
+                                                .sorted(Comparator.reverseOrder())
+                                                .skip(1) // newest cache entry stays untouched
+                                                .map(InternalCacheDocument::getId))
+                                        .collect(toSet())));
+            }
         }
         return objectIds;
     }
@@ -255,26 +264,26 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
         AtomicInteger extendedCounter = new AtomicInteger(0);
         Set<K> newestKeys = new HashSet<>();
         Set<ObjectId> objectIds = new HashSet<>();
-        streamFromMongoCursor(mongoCollection
-                .find(filter)
+        try (Stream<Document> stream = streamFromMongoCursor(mongoCollection.find(filter)
                 .sort(Sorts.descending(TOUCHED.toString(), _ID.toString()))
                 .projection(Projections.include(_ID.toString(), KEY.toString(), STATUS.toString()))
-                .iterator())
-                .map(document -> toCacheDocumentOrNull(document, _ID, KEY, STATUS))
-                .filter(Objects::nonNull)
-                .forEach(cacheDocument -> {
-                    if (extendedCounter.get() < extendedPersistence.getExtendedPersistenceSize()
-                            && !newestKeys.contains(cacheDocument.getKey())) {
-                        newestKeys.add(cacheDocument.getKey());
-                        if (cacheDocument.isEvictedExtended()) {
-                            extendedCounter.incrementAndGet();
+                .iterator())) {
+            stream.map(document -> toCacheDocumentOrNull(document, _ID, KEY, STATUS))
+                    .filter(Objects::nonNull)
+                    .forEach(cacheDocument -> {
+                        if (extendedCounter.get() < extendedPersistence.getExtendedPersistenceSize()
+                                && !newestKeys.contains(cacheDocument.getKey())) {
+                            newestKeys.add(cacheDocument.getKey());
+                            if (cacheDocument.isEvictedExtended()) {
+                                extendedCounter.incrementAndGet();
+                            }
+                        } else {
+                            if (cacheDocument.isEvictedExtended()) {
+                                objectIds.add(cacheDocument.getId());
+                            }
                         }
-                    } else {
-                        if (cacheDocument.isEvictedExtended()) {
-                            objectIds.add(cacheDocument.getId());
-                        }
-                    }
-                });
+                    });
+        }
         return objectIds;
     }
 
@@ -329,7 +338,7 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
         // add keys for default index
         indexKeys.add(new Document(_ID.toString(), 1).toBsonDocument());
 
-        // drop any other index using keys
+        // drop any other index not in collected keys
         mongoCollection.listIndexes().forEach(existingIndex -> {
             Bson keys = existingIndex.get("key", Document.class);
             if (!indexKeys.contains(keys.toBsonDocument())) {
@@ -338,11 +347,8 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
         });
     }
 
-    @SuppressWarnings("resource")
     private Stream<Entry<K, Set<InternalCacheDocument<K, V>>>> streamCacheDocumentsGroupedByKey(Bson filter) {
-        MongoCursor<Document> mongoCursor = mongoCollection
-                .find()
-                .filter(filter)
+        MongoCursor<Document> mongoCursor = mongoCollection.find(filter)
                 .sort(Sorts.ascending(HASH.toString()))
                 .iterator();
         Set<Integer> hashes = new LinkedHashSet<>();
@@ -370,29 +376,16 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
                             });
                     return keyToCacheDocuments;
                 })
-                .takeWhile(keyToCacheDocuments -> {
-                    if (keyToCacheDocuments.isEmpty()) {
-                        mongoCursor.close();
-                        return false;
-                    } else {
-                        return true;
-                    }
-                })
-                .flatMap(keyToCacheDocuments -> keyToCacheDocuments.entrySet().stream());
+                .takeWhile(keyToCacheDocuments -> !keyToCacheDocuments.isEmpty())
+                .flatMap(keyToCacheDocuments -> keyToCacheDocuments.entrySet().stream())
+                .onClose(mongoCursor::close);
     }
 
     private <T> Stream<T> streamFromMongoCursor(MongoCursor<T> mongoCursor) {
-        return Stream.generate(() -> mongoCursor.hasNext()
-                        ? mongoCursor.next()
-                        : null)
-                .takeWhile(document -> {
-                    if (isNull(document)) {
-                        mongoCursor.close();
-                        return false;
-                    } else {
-                        return true;
-                    }
-                });
+        Spliterator<T> spliterator = Spliterators.spliteratorUnknownSize(mongoCursor,
+                Spliterator.ORDERED | Spliterator.NONNULL);
+        return StreamSupport.stream(spliterator, false)
+                .onClose(mongoCursor::close);
     }
 
     private InternalCacheDocument<K, V> toCacheDocumentOrNull(Document document, Field... validationFields) {

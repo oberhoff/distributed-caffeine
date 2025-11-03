@@ -219,8 +219,8 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
                             Filters.eq(STATUS.toString(), CACHED.toString()),
                             Filters.eq(STALE.toString(), false)),
                     Filters.ne(STATUS.toString(), CACHED.toString()));
-            mongoRepository.streamCacheDocumentsGroupedByKeyInReverseOrder(filter)
-                    .forEach(cacheDocuments -> {
+            mongoRepository.consumeCacheDocumentsGroupedByKeyInReverseOrder(filter, stream ->
+                    stream.forEach(cacheDocuments -> {
                         // newest cache entry must be treated in the same way as a distributed inbound insert
                         cacheDocuments.stream()
                                 .findFirst()
@@ -231,7 +231,7 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
                         cacheDocuments.stream()
                                 .skip(1)
                                 .forEach(maintenanceWorker::queueReplacement);
-                    });
+                    }));
             // remove cache entries which are not managed (e.g., if synchronization is started after it was stopped)
             synchronizationLock.runLocked(() -> {
                 if (isActivated()) {

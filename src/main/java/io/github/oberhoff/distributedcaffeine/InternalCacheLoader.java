@@ -175,12 +175,12 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
 
     private Map<? extends K, ? extends V> loadAllExtendedFromMongo(Set<? extends K> keys) {
         Map<K, V> keyToValue = new HashMap<>();
-        mongoRepository.streamCacheDocumentsGroupedByKeyInReverseOrder(keys)
-                .forEach(cacheDocuments -> cacheDocuments.stream()
+        mongoRepository.consumeCacheDocumentsGroupedByKeyInReverseOrder(keys, stream ->
+                stream.forEach(cacheDocuments -> cacheDocuments.stream()
                         .findFirst()
                         .filter(InternalCacheDocument::isEvictedExtended)
                         .ifPresent(cacheDocument ->
-                                keyToValue.put(cacheDocument.getKey(), cacheDocument.getValue())));
+                                keyToValue.put(cacheDocument.getKey(), cacheDocument.getValue()))));
         return keyToValue;
     }
 }
