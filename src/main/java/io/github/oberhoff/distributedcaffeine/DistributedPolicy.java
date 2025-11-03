@@ -22,6 +22,7 @@ import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.bson.Document;
 import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
 import java.util.List;
@@ -104,6 +105,7 @@ public interface DistributedPolicy<K, V> {
      *                       {@code false} otherwise
      * @return the cache entry to which the specified key is mapped, or null if no mapping is found
      */
+    @Nullable
     CacheEntry<K, V> getFromMongo(@NonNull K key, boolean includeEvicted);
 
     /**

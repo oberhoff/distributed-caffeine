@@ -2074,6 +2074,8 @@ final class DistributedCaffeineIntegrationTests {
             // test equals() and hashCode() and toString()
             CacheEntry<Key, Value> cacheEntry1 = distributedPolicy.getFromMongo(key1, true);
             CacheEntry<Key, Value> cacheEntry2 = distributedPolicy.getFromMongo(key2, true);
+            assertThat(cacheEntry1).isNotNull();
+            assertThat(cacheEntry2).isNotNull();
             // noinspection ConstantValue
             assertThat(cacheEntry1.equals(null)).isFalse();
             // noinspection EqualsBetweenInconvertibleTypes
@@ -3177,10 +3179,10 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false).getValue())
-                                    .isEqualTo(loadedValue1);
-                            assertThat(distributedPolicy.getFromMongo(key1, true).getValue())
-                                    .isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED, f -> f.isEqualTo(maximumSize), s -> s.isEqualTo(0)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
@@ -3226,12 +3228,12 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
                             assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true).getValue())
-                                    .isEqualTo(loadedValue1);
-                            assertThat(distributedPolicy.getFromMongo(key2, false).getValue())
-                                    .isEqualTo(loadedValue2);
-                            assertThat(distributedPolicy.getFromMongo(key2, true).getValue())
-                                    .isEqualTo(loadedValue2);
+                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED, f -> f.isEqualTo(maximumSize), s -> s.isEqualTo(1)),
                                     Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(1), s -> s.isBetween(0L, 1L)));
@@ -3280,13 +3282,13 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false).getValue())
-                                    .isEqualTo(loadedValue1);
-                            assertThat(distributedPolicy.getFromMongo(key1, true).getValue())
-                                    .isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true).getValue())
-                                    .isEqualTo(loadedValue2);
+                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED, f -> f.isEqualTo(maximumSize), s -> s.isEqualTo(2)),
                                     Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(1), s -> s.isBetween(1L, 3L)));
@@ -3337,15 +3339,15 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
                             assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true).getValue())
-                                    .isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true).getValue())
-                                    .isEqualTo(loadedValue2);
-                            assertThat(distributedPolicy.getFromMongo(key3, false).getValue())
-                                    .isEqualTo(loadedValue3);
-                            assertThat(distributedPolicy.getFromMongo(key3, true).getValue())
-                                    .isEqualTo(loadedValue3);
+                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                            assertThat(distributedPolicy.getFromMongo(key3, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
+                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED, f -> f.isEqualTo(maximumSize), s -> s.isEqualTo(3)),
                                     Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(extendedMaximumSize), s -> s.isBetween(1L, 4L)));
@@ -3358,8 +3360,8 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
                             assertThat(distributedPolicy.getFromMongo(key1, true)).isNull();
                             assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true).getValue())
-                                    .isEqualTo(loadedValue2);
+                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
                             assertThat(distributedPolicy.getFromMongo(key3, true)).isNull();
                             assertThatDataStoreHasCounts(
@@ -3402,16 +3404,16 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false).getValue())
-                                    .isEqualTo(loadedValue1);
-                            assertThat(distributedPolicy.getFromMongo(key1, true).getValue())
-                                    .isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true).getValue())
-                                    .isEqualTo(loadedValue2);
+                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key3, true).getValue())
-                                    .isEqualTo(loadedValue3);
+                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED, f -> f.isEqualTo(maximumSize), s -> s.isEqualTo(4)),
                                     Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(extendedMaximumSize), s -> s.isBetween(2L, 6L)));
@@ -3424,8 +3426,8 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
                             assertThat(distributedPolicy.getFromMongo(key1, true)).isNull();
                             assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true).getValue())
-                                    .isEqualTo(loadedValue2);
+                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
                             assertThat(distributedPolicy.getFromMongo(key3, true)).isNull();
                             assertThatDataStoreHasCounts(
@@ -3467,18 +3469,18 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
                             assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true).getValue())
-                                    .isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true).getValue())
-                                    .isEqualTo(loadedValue2);
+                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key3, true).getValue())
-                                    .isEqualTo(loadedValue3);
-                            assertThat(distributedPolicy.getFromMongo(key4, false).getValue())
-                                    .isEqualTo(loadedValue4);
-                            assertThat(distributedPolicy.getFromMongo(key4, true).getValue())
-                                    .isEqualTo(loadedValue4);
+                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
+                            assertThat(distributedPolicy.getFromMongo(key4, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue4));
+                            assertThat(distributedPolicy.getFromMongo(key4, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue4));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED, f -> f.isEqualTo(maximumSize), s -> s.isEqualTo(5)),
                                     Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(extendedMaximumSize), s -> s.isBetween(3L, 8L)));
@@ -3489,11 +3491,11 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key4)).isEqualTo(loadedValue4);
                             assertThat(distributedLoadingCacheB.getIfPresent(key3)).isEqualTo(loadedValue3);
                             assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true).getValue())
-                                    .isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true).getValue())
-                                    .isEqualTo(loadedValue2);
+                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
                             assertThat(distributedPolicy.getFromMongo(key3, true)).isNull();
                             assertThat(distributedPolicy.getFromMongo(key4, false)).isNull();
@@ -3519,7 +3521,7 @@ final class DistributedCaffeineIntegrationTests {
             doAnswer(invocation -> Value.of(invocation.<Key>getArgument(0).getId(), "loaded but not from store"))
                     .when(cacheLoader).load(any(Key.class));
 
-            Value loadedFromStoreValue = distributedPolicy.getFromMongo(key1, true).getValue();
+            Value loadedFromStoreValue = requireNonNull(distributedPolicy.getFromMongo(key1, true)).getValue();
             Value loadedButNotFromStoreValue = distributedLoadingCacheWithoutSpecialSemantics.get(key1);
             Value notFoundValue = distributedCacheWithoutSpecialSemantics.getIfPresent(key1);
 
@@ -3591,10 +3593,10 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false).getValue())
-                                    .isEqualTo(loadedValue1);
-                            assertThat(distributedPolicy.getFromMongo(key1, true).getValue())
-                                    .isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(0)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
@@ -3642,12 +3644,12 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
                             assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true).getValue())
-                                    .isEqualTo(loadedValue1);
-                            assertThat(distributedPolicy.getFromMongo(key2, false).getValue())
-                                    .isEqualTo(loadedValue2);
-                            assertThat(distributedPolicy.getFromMongo(key2, true).getValue())
-                                    .isEqualTo(loadedValue2);
+                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(1)),
                                     Count.of(EVICTED_TIME_EXTENDED, f -> f.isEqualTo(1), s -> s.isEqualTo(1)));
@@ -3657,8 +3659,8 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
                             assertThat(distributedLoadingCacheB.getIfPresent(key2)).isEqualTo(loadedValue2);
                             assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true).getValue())
-                                    .isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
                             assertThat(distributedPolicy.getFromMongo(key2, true)).isNull();
                             assertThatDataStoreHasCounts(
@@ -3699,13 +3701,13 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false).getValue())
-                                    .isEqualTo(loadedValue1);
-                            assertThat(distributedPolicy.getFromMongo(key1, true).getValue())
-                                    .isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true).getValue())
-                                    .isEqualTo(loadedValue2);
+                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(2)),
                                     Count.of(EVICTED_TIME_EXTENDED, f -> f.isEqualTo(1), s -> s.isEqualTo(3)));
@@ -3715,11 +3717,11 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true).getValue())
-                                    .isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true).getValue())
-                                    .isEqualTo(loadedValue2);
+                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
                                     Count.of(EVICTED_TIME_EXTENDED, f -> f.isEqualTo(2), s -> s.isEqualTo(0)));
                         }
@@ -3759,15 +3761,15 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
                             assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true).getValue())
-                                    .isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true).getValue())
-                                    .isEqualTo(loadedValue2);
-                            assertThat(distributedPolicy.getFromMongo(key3, false).getValue())
-                                    .isEqualTo(loadedValue3);
-                            assertThat(distributedPolicy.getFromMongo(key3, true).getValue())
-                                    .isEqualTo(loadedValue3);
+                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                            assertThat(distributedPolicy.getFromMongo(key3, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
+                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(3)),
                                     Count.of(EVICTED_TIME_EXTENDED, f -> f.isEqualTo(2), s -> s.isEqualTo(4)));
@@ -3777,11 +3779,11 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
                             assertThat(distributedLoadingCacheB.getIfPresent(key3)).isEqualTo(loadedValue3);
                             assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true).getValue())
-                                    .isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true).getValue())
-                                    .isEqualTo(loadedValue2);
+                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
                             assertThat(distributedPolicy.getFromMongo(key3, true)).isNull();
                             assertThatDataStoreHasCounts(
@@ -3825,16 +3827,16 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false).getValue())
-                                    .isEqualTo(loadedValue1);
-                            assertThat(distributedPolicy.getFromMongo(key1, true).getValue())
-                                    .isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true).getValue())
-                                    .isEqualTo(loadedValue2);
+                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key3, true).getValue())
-                                    .isEqualTo(loadedValue3);
+                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(4)),
                                     Count.of(EVICTED_TIME_EXTENDED, f -> f.isEqualTo(2), s -> s.isEqualTo(6)));
@@ -3844,14 +3846,14 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true).getValue())
-                                    .isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true).getValue())
-                                    .isEqualTo(loadedValue2);
+                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key3, true).getValue())
-                                    .isEqualTo(loadedValue3);
+                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
                                     Count.of(EVICTED_TIME_EXTENDED, f -> f.isEqualTo(3), s -> s.isEqualTo(1)));
                         }
@@ -3891,20 +3893,20 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key4)).isEqualTo(loadedValue4);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false).getValue())
-                                    .isEqualTo(loadedValue1);
-                            assertThat(distributedPolicy.getFromMongo(key1, true).getValue())
-                                    .isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true).getValue())
-                                    .isEqualTo(loadedValue2);
+                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key3, true).getValue())
-                                    .isEqualTo(loadedValue3);
-                            assertThat(distributedPolicy.getFromMongo(key4, false).getValue())
-                                    .isEqualTo(loadedValue4);
-                            assertThat(distributedPolicy.getFromMongo(key4, true).getValue())
-                                    .isEqualTo(loadedValue4);
+                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
+                            assertThat(distributedPolicy.getFromMongo(key4, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue4));
+                            assertThat(distributedPolicy.getFromMongo(key4, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue4));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(4)),
                                     Count.of(EVICTED_TIME_EXTENDED, f -> f.isEqualTo(2), s -> s.isEqualTo(6)));
@@ -3915,14 +3917,14 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedLoadingCacheA.getIfPresent(key4)).isEqualTo(loadedValue4);
                             assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true).getValue())
-                                    .isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true).getValue())
-                                    .isEqualTo(loadedValue2);
+                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key3, true).getValue())
-                                    .isEqualTo(loadedValue3);
+                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
                             assertThat(distributedPolicy.getFromMongo(key4, false)).isNull();
                             assertThat(distributedPolicy.getFromMongo(key4, true)).isNull();
                             assertThatDataStoreHasCounts(
@@ -3946,7 +3948,7 @@ final class DistributedCaffeineIntegrationTests {
             doAnswer(invocation -> Value.of(invocation.<Key>getArgument(0).getId(), "loaded but not from store"))
                     .when(cacheLoader).load(any(Key.class));
 
-            Value loadedFromStoreValue = distributedPolicy.getFromMongo(key2, true).getValue();
+            Value loadedFromStoreValue = requireNonNull(distributedPolicy.getFromMongo(key2, true)).getValue();
             Value loadedButNotFromStoreValue = distributedLoadingCacheWithoutSpecialSemantics.get(key2);
             Value notFoundValue = distributedCacheWithoutSpecialSemantics.getIfPresent(key2);
 
