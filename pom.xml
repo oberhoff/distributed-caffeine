@@ -15,9 +15,9 @@
         <caffeine.version>3.2.3</caffeine.version>
         <mongodb.version>5.6.1</mongodb.version>
         <fory.version>0.13.0</fory.version>
-        <jackson.version>2.20.0</jackson.version>
+        <jackson.version>2.20.1</jackson.version>
         <failsafe.version>3.3.2</failsafe.version>
-        <junit.version>5.14.0</junit.version>
+        <junit.version>5.14.1</junit.version>
         <mockito.version>5.20.0</mockito.version>
         <assertj.version>3.27.6</assertj.version>
         <testcontainers.version>1.21.3</testcontainers.version>
