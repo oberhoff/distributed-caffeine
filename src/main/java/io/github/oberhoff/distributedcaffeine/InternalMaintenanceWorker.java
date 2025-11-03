@@ -138,7 +138,7 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
             processToBeMarkedAsStale();
             processMaybeToBeMarkedAsStaleForExtendedPersistenceBySize();
             processToBeMarkedAsStaleForExtendedPersistenceBySize();
-            processOutdated();
+            processCleanUp();
         }
     }
 
@@ -179,7 +179,7 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
         }
     }
 
-    private void processOutdated() {
+    private void processCleanUp() {
         cacheManager.manageCleanUp(OUTDATED_DURATION);
     }
 }
