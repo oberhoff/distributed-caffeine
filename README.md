@@ -198,7 +198,7 @@ using the `getFromMongo(...)` or `getAllFromMongo(...)` methods flagged with `in
 
 ## Requirements
 
-* Java 11 or newer
+* Java 17 or newer
 * MongoDB 4.2 or newer (MongoDB 5.1 or newer is recommended due to change stream optimizations)
 * MongoDB must be configured to run as a replica set (single node replica set would be sufficient)
 

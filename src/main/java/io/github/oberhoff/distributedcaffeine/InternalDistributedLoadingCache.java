@@ -36,7 +36,6 @@ import static java.util.Collections.unmodifiableMap;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
-import static java.util.stream.Collectors.toList;
 
 class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, V>
         implements DistributedLoadingCache<K, V> {
@@ -80,7 +79,7 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
                                 ? getFailable(() -> cacheLoader.loadAllDelegated(mappedKeys), CompletionException::new)
                                 : mappedKeys.stream()
                                 .map(key -> entry(key, getOrCreateLoadOperation(key)))
-                                .collect(toList()).stream() // intermediate step to ensure concurrency
+                                .toList().stream() // intermediate step to ensure concurrency
                                 .map(entry -> entry(entry.getKey(), entry.getValue().join()))
                                 .collect(HashMap::new, (hashMap, entry) -> // allow null values
                                         hashMap.put(entry.getKey(), entry.getValue()), HashMap::putAll)));
@@ -104,7 +103,7 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
             Map<K, V> keyToNewValue = keySet.stream()
                     .map(key -> entry(key, policy.getIfPresentQuietly(key)))
                     .map(entry -> entry(entry.getKey(), getOrCreateRefreshOperation(entry.getKey(), entry.getValue())))
-                    .collect(toList()).stream() // intermediate step to ensure concurrency
+                    .toList().stream() // intermediate step to ensure concurrency
                     .map(entry -> entry(entry.getKey(), entry.getValue().join()))
                     .collect(HashMap::new, (hashMap, entry) -> // allow null values
                             hashMap.put(entry.getKey(), entry.getValue()), HashMap::putAll);

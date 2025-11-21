@@ -19,6 +19,7 @@ import java.time.Duration;
 
 import static java.util.Objects.nonNull;
 
+@SuppressWarnings("ClassCanBeRecord")
 class InternalExtendedPersistence {
 
     private final Integer extendedPersistenceSize;

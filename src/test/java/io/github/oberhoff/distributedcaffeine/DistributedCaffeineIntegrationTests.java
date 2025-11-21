@@ -141,7 +141,6 @@ import static java.lang.String.format;
 import static java.lang.System.getProperty;
 import static java.time.temporal.ChronoUnit.FOREVER;
 import static java.util.Objects.requireNonNull;
-import static java.util.stream.Collectors.toList;
 import static java.util.stream.Collectors.toMap;
 import static java.util.stream.Collectors.toSet;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -690,7 +689,7 @@ final class DistributedCaffeineIntegrationTests {
                 IntStream.rangeClosed(1, levelOfParallelism)
                         .mapToObj(i -> CompletableFuture.runAsync(() ->
                                 loadingCache.get(key1), executorService))
-                        .collect(toList()) // intermediate step to ensure concurrency
+                        .toList() // intermediate step to ensure concurrency
                         .forEach(CompletableFuture::join);
                 counter.set(0);
             });
@@ -1032,7 +1031,7 @@ final class DistributedCaffeineIntegrationTests {
                 loadingCache.invalidate(key1);
                 IntStream.rangeClosed(1, levelOfParallelism)
                         .mapToObj(i -> loadingCache.refresh(key1))
-                        .collect(toList()) // intermediate step to ensure concurrency
+                        .toList() // intermediate step to ensure concurrency
                         .forEach(CompletableFuture::join);
                 counter.set(0);
             });
@@ -1280,7 +1279,7 @@ final class DistributedCaffeineIntegrationTests {
                 loadingCache.invalidateAll(keys1);
                 IntStream.rangeClosed(1, levelOfParallelism)
                         .mapToObj(i -> loadingCache.refreshAll(keys1))
-                        .collect(toList()) // intermediate step to ensure concurrency
+                        .toList() // intermediate step to ensure concurrency
                         .forEach(CompletableFuture::join);
                 counter.set(0);
             });
@@ -1347,16 +1346,16 @@ final class DistributedCaffeineIntegrationTests {
             featureParityMaps.forEach(map -> assertThat(map).isNotEqualTo(null)); // cover 'instanceof' branch
             assertThat(featureParityMaps.stream()
                     .map(Object::hashCode)
-                    .collect(toList()))
+                    .toList())
                     .containsExactlyInAnyOrderElementsOf(featureParityMaps.stream()
                             .map(Object::hashCode)
-                            .collect(toList()));
+                            .toList());
             assertThat(featureParityMaps.stream()
                     .map(Object::toString)
-                    .collect(toList()))
+                    .toList())
                     .containsExactlyInAnyOrderElementsOf(featureParityMaps.stream()
                             .map(Object::toString)
-                            .collect(toList()));
+                            .toList());
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
@@ -4731,11 +4730,11 @@ final class DistributedCaffeineIntegrationTests {
             return distributedCaffeineConfigurations
                     .map(distributedCaffeineConfiguration -> {
                         CacheFactory<K, V> cacheFactory = (cacheBuilder, cacheConstructor) -> {
-                            CacheBuilder<K, V> aggregatedCacheBuilder = b -> distributedCaffeineConfiguration.getCacheBuilder()
+                            CacheBuilder<K, V> aggregatedCacheBuilder = b -> distributedCaffeineConfiguration.cacheBuilder()
                                     .apply(cacheBuilder.apply(b));
                             return createCache(aggregatedCacheBuilder, cacheConstructor);
                         };
-                        return Named.of(distributedCaffeineConfiguration.getDisplayName(), cacheFactory);
+                        return Named.of(distributedCaffeineConfiguration.displayName(), cacheFactory);
                     });
         }
 
@@ -4754,8 +4753,7 @@ final class DistributedCaffeineIntegrationTests {
             // speed up using parallel stream
             caches.stream().parallel().forEach(cache -> {
                 cache.cleanUp();
-                if (cache instanceof DistributedCache) {
-                    DistributedCache<K, V> distributedCache = (DistributedCache<K, V>) cache;
+                if (cache instanceof DistributedCache<K, V> distributedCache) {
                     DistributedCaffeine<K, V> distributedCaffeine = getDistributedCaffeine(distributedCache);
                     InternalMaintenanceWorker<K, V> maintenanceWorker = distributedCaffeine.getMaintenanceWorker();
                     Collection<ObjectId> toBeMarkedAsStale = readFieldValue(maintenanceWorker, InternalMaintenanceWorker.class,
@@ -4781,7 +4779,7 @@ final class DistributedCaffeineIntegrationTests {
                     .distributedPolicy()
                     .getMongoCollection();
             Map<Status, Count> statusToCount = Stream.of(counts)
-                    .collect(toMap(Count::getStatus, Function.identity()));
+                    .collect(toMap(Count::status, Function.identity()));
             String fresh = "fresh";
             String stale = "stale";
             Stream.of(Status.values())
@@ -4790,11 +4788,11 @@ final class DistributedCaffeineIntegrationTests {
                     .forEach(count -> List.of(fresh, stale).forEach(label -> {
                         boolean isStale = label.equals(stale);
                         Bson filter = Filters.and(
-                                Filters.eq(STATUS.toString(), count.getStatus().toString()),
+                                Filters.eq(STATUS.toString(), count.status().toString()),
                                 Filters.eq(STALE.toString(), isStale));
-                        (isStale ? count.getStale() : count.getFresh())
+                        (isStale ? count.stale() : count.fresh())
                                 .apply(assertThat(mongoCollection.countDocuments(filter))
-                                        .describedAs(format("%n --> count '%s' for '%s'", label, count.getStatus())));
+                                        .describedAs(format("%n --> count '%s' for '%s'", label, count.status())));
                     }));
         }
 
@@ -4809,14 +4807,14 @@ final class DistributedCaffeineIntegrationTests {
             Stream.of(countsGrouped).forEach(countGrouped -> List.of(fresh, stale).forEach(label -> {
                 boolean isStale = label.equals(stale);
                 Bson filter = Filters.and(
-                        Filters.in(STATUS.toString(), Stream.of(countGrouped.getStatuses())
+                        Filters.in(STATUS.toString(), Stream.of(countGrouped.statuses())
                                 .map(Objects::toString)
                                 .collect(toSet())),
                         Filters.eq(STALE.toString(), isStale));
-                (isStale ? countGrouped.getStale() : countGrouped.getFresh())
+                (isStale ? countGrouped.stale() : countGrouped.fresh())
                         .apply(assertThat(mongoCollection.countDocuments(filter))
                                 .describedAs(format("%n --> count '%s' for '%s'", label,
-                                        Arrays.toString(countGrouped.getStatuses()))));
+                                        Arrays.toString(countGrouped.statuses()))));
             }));
         }
 
@@ -4923,8 +4921,7 @@ final class DistributedCaffeineIntegrationTests {
                 int expireId = nextInt(cacheSize);
                 distributedCache.policy().expireVariably().orElseThrow().setExpiresAfter(Key.of(expireId), Duration.ZERO);
             });
-            if (distributedCache instanceof DistributedLoadingCache) {
-                DistributedLoadingCache<Key, Value> distributedLoadingCache = (DistributedLoadingCache<Key, Value>) distributedCache;
+            if (distributedCache instanceof DistributedLoadingCache<Key, Value> distributedLoadingCache) {
                 operations.add(() -> {
                     int loadId = nextInt(cacheSize, 2 * cacheSize);
                     distributedLoadingCache.get(Key.of(loadId));
@@ -5023,23 +5020,7 @@ final class DistributedCaffeineIntegrationTests {
                     : no;
         }
 
-        static class DistributedCaffeineConfiguration<K, V> {
-
-            private final String displayName;
-            private final CacheBuilder<K, V> cacheBuilder;
-
-            DistributedCaffeineConfiguration(String displayName, CacheBuilder<K, V> cacheBuilder) {
-                this.displayName = displayName;
-                this.cacheBuilder = cacheBuilder;
-            }
-
-            String getDisplayName() {
-                return displayName;
-            }
-
-            CacheBuilder<K, V> getCacheBuilder() {
-                return cacheBuilder;
-            }
+        record DistributedCaffeineConfiguration<K, V>(String displayName, CacheBuilder<K, V> cacheBuilder) {
         }
 
         static class EqualResult<K, V> {
@@ -5122,31 +5103,8 @@ final class DistributedCaffeineIntegrationTests {
             }
         }
 
-        static class Count {
-
-            private final Status status;
-            private final Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh;
-            private final Function<AbstractLongAssert<?>, AbstractLongAssert<?>> stale;
-
-            Count(Status status,
-                  Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh,
-                  Function<AbstractLongAssert<?>, AbstractLongAssert<?>> stale) {
-                this.status = status;
-                this.fresh = fresh;
-                this.stale = stale;
-            }
-
-            public Status getStatus() {
-                return status;
-            }
-
-            public Function<AbstractLongAssert<?>, AbstractLongAssert<?>> getFresh() {
-                return fresh;
-            }
-
-            public Function<AbstractLongAssert<?>, AbstractLongAssert<?>> getStale() {
-                return stale;
-            }
+        record Count(Status status, Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh,
+                     Function<AbstractLongAssert<?>, AbstractLongAssert<?>> stale) {
 
             static Count of(Status status,
                             Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh,
@@ -5159,31 +5117,8 @@ final class DistributedCaffeineIntegrationTests {
             }
         }
 
-        static class CountGrouped {
-
-            private final Status[] statuses;
-            private final Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh;
-            private final Function<AbstractLongAssert<?>, AbstractLongAssert<?>> stale;
-
-            CountGrouped(Status[] statuses,
-                         Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh,
-                         Function<AbstractLongAssert<?>, AbstractLongAssert<?>> stale) {
-                this.statuses = statuses;
-                this.fresh = fresh;
-                this.stale = stale;
-            }
-
-            public Status[] getStatuses() {
-                return statuses;
-            }
-
-            public Function<AbstractLongAssert<?>, AbstractLongAssert<?>> getFresh() {
-                return fresh;
-            }
-
-            public Function<AbstractLongAssert<?>, AbstractLongAssert<?>> getStale() {
-                return stale;
-            }
+        record CountGrouped(Status[] statuses, Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh,
+                            Function<AbstractLongAssert<?>, AbstractLongAssert<?>> stale) {
 
             static CountGrouped of(Status[] statuses,
                                    Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh,

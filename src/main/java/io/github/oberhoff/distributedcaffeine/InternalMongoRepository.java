@@ -86,7 +86,6 @@ import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.groupingBy;
 import static java.util.stream.Collectors.toCollection;
-import static java.util.stream.Collectors.toList;
 import static java.util.stream.Collectors.toMap;
 import static java.util.stream.Collectors.toSet;
 
@@ -124,9 +123,9 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
 
     void consumeCacheDocumentsGroupedByKeyInReverseOrder(
             Set<? extends K> keys, Consumer<Stream<Set<InternalCacheDocument<K, V>>>> streamConsumer) {
-        List<Integer> hashes = keys.stream()
+        Set<Integer> hashes = keys.stream()
                 .map(Objects::hashCode)
-                .collect(toList());
+                .collect(toSet());
         Bson filter = Filters.in(HASH.toString(), hashes);
         try (Stream<Set<InternalCacheDocument<K, V>>> stream = streamCacheDocumentsGroupedByKey(filter)
                 // only return requested keys, even if hash collisions occur

@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
 
+@SuppressWarnings("ClassCanBeRecord")
 class InternalRemovalListener<K, V> implements RemovalListener<K, V>, InternalLazyInitializer<K, V> {
 
     private final RemovalListener<K, V> removalListener;
