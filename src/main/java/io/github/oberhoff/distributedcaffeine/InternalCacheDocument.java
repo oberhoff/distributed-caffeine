@@ -16,7 +16,6 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import org.bson.types.ObjectId;
-import org.jspecify.annotations.NonNull;
 
 import java.lang.ref.WeakReference;
 import java.time.Duration;
@@ -320,7 +319,7 @@ class InternalCacheDocument<K, V> implements Comparable<InternalCacheDocument<K,
     }
 
     @Override
-    public int compareTo(@NonNull InternalCacheDocument<K, V> that) {
+    public int compareTo(InternalCacheDocument<K, V> that) {
         return Comparator.<InternalCacheDocument<K, V>, Instant>comparing(InternalCacheDocument::getTouched)
                 // unique id is used as tie-breaker if touched is equal
                 .thenComparing(InternalCacheDocument::getId)

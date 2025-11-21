@@ -15,8 +15,6 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.CacheLoader;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -59,8 +57,6 @@ import org.bson.BsonTimestamp;
 import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.bson.types.ObjectId;
-import org.jspecify.annotations.NonNull;
-import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -76,9 +72,11 @@ import org.junit.platform.commons.util.ReflectionUtils;
 import org.junit.platform.commons.util.ReflectionUtils.HierarchyTraversalMode;
 import org.slf4j.event.Level;
 import org.slf4j.event.LoggingEvent;
-import org.testcontainers.containers.MongoDBContainer;
 import org.testcontainers.images.PullPolicy;
+import org.testcontainers.mongodb.MongoDBContainer;
 import org.testcontainers.utility.DockerImageName;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.ObjectMapper;
 
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Inherited;
@@ -142,10 +140,7 @@ import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
 import static java.lang.String.format;
 import static java.lang.System.getProperty;
 import static java.time.temporal.ChronoUnit.FOREVER;
-import static java.util.Collections.singleton;
-import static java.util.Collections.singletonMap;
 import static java.util.Objects.requireNonNull;
-import static java.util.stream.Collectors.toList;
 import static java.util.stream.Collectors.toMap;
 import static java.util.stream.Collectors.toSet;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -155,7 +150,10 @@ import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assertions.assertThatNoException;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.HamcrestCondition.matching;
+import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.params.ParameterizedInvocationConstants.ARGUMENTS_WITH_NAMES_PLACEHOLDER;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -591,7 +589,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(@NonNull Key key) throws Exception {
+                public Value load(Key key) throws Exception {
                     throw new UnsupportedOperationException();
                 }
             });
@@ -691,7 +689,7 @@ final class DistributedCaffeineIntegrationTests {
                 IntStream.rangeClosed(1, levelOfParallelism)
                         .mapToObj(i -> CompletableFuture.runAsync(() ->
                                 loadingCache.get(key1), executorService))
-                        .collect(toList()) // intermediate step to ensure concurrency
+                        .toList() // intermediate step to ensure concurrency
                         .forEach(CompletableFuture::join);
                 counter.set(0);
             });
@@ -713,13 +711,13 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(@NonNull Key key) throws Exception {
+                public Value load(Key key) throws Exception {
                     throw new UnsupportedOperationException(); // ensure load() is never invoked
                 }
 
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public @NonNull Map<? extends Key, ? extends @NonNull Value> loadAll(@NonNull Set<? extends Key> keys) throws Exception {
+                public Map<? extends Key, ? extends Value> loadAll(Set<? extends Key> keys) throws Exception {
                     throw new UnsupportedOperationException(); // override loadAll() explicitly
                 }
             });
@@ -828,7 +826,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(@NonNull Key key) throws Exception {
+                public Value load(Key key) throws Exception {
                     throw new UnsupportedOperationException();
                 }
             });
@@ -1033,7 +1031,7 @@ final class DistributedCaffeineIntegrationTests {
                 loadingCache.invalidate(key1);
                 IntStream.rangeClosed(1, levelOfParallelism)
                         .mapToObj(i -> loadingCache.refresh(key1))
-                        .collect(toList()) // intermediate step to ensure concurrency
+                        .toList() // intermediate step to ensure concurrency
                         .forEach(CompletableFuture::join);
                 counter.set(0);
             });
@@ -1057,7 +1055,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(@NonNull Key key) throws Exception {
+                public Value load(Key key) throws Exception {
                     throw new UnsupportedOperationException();
                 }
             });
@@ -1281,7 +1279,7 @@ final class DistributedCaffeineIntegrationTests {
                 loadingCache.invalidateAll(keys1);
                 IntStream.rangeClosed(1, levelOfParallelism)
                         .mapToObj(i -> loadingCache.refreshAll(keys1))
-                        .collect(toList()) // intermediate step to ensure concurrency
+                        .toList() // intermediate step to ensure concurrency
                         .forEach(CompletableFuture::join);
                 counter.set(0);
             });
@@ -1334,6 +1332,7 @@ final class DistributedCaffeineIntegrationTests {
                 assertThatNullPointerException().isThrownBy(() -> map.putAll(_null()));
                 assertThatNullPointerException().isThrownBy(() -> map.putAll(_map(null, Value.of(0))));
                 assertThatNullPointerException().isThrownBy(() -> map.putAll(_map(Key.of(0), null)));
+                assertThatNullPointerException().isThrownBy(() -> map.get(null));
 
                 oldValue1x1.setValue(map.put(key1, value1));
                 oldValue1x2.setValue(map.put(key1, value1));
@@ -1347,16 +1346,16 @@ final class DistributedCaffeineIntegrationTests {
             featureParityMaps.forEach(map -> assertThat(map).isNotEqualTo(null)); // cover 'instanceof' branch
             assertThat(featureParityMaps.stream()
                     .map(Object::hashCode)
-                    .collect(toList()))
+                    .toList())
                     .containsExactlyInAnyOrderElementsOf(featureParityMaps.stream()
                             .map(Object::hashCode)
-                            .collect(toList()));
+                            .toList());
             assertThat(featureParityMaps.stream()
                     .map(Object::toString)
-                    .collect(toList()))
+                    .toList())
                     .containsExactlyInAnyOrderElementsOf(featureParityMaps.stream()
                             .map(Object::toString)
-                            .collect(toList()));
+                            .toList());
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
@@ -2780,7 +2779,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(@NonNull Key key) throws Exception {
+                public Value load(Key key) throws Exception {
                     throw new UnsupportedOperationException();
                 }
             });
@@ -2920,7 +2919,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(@NonNull Key key) throws Exception {
+                public Value load(Key key) throws Exception {
                     throw new UnsupportedOperationException();
                 }
             });
@@ -3140,7 +3139,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(@NonNull Key key) throws Exception {
+                public Value load(Key key) throws Exception {
                     throw new UnsupportedOperationException();
                 }
             });
@@ -3552,7 +3551,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(@NonNull Key key) throws Exception {
+                public Value load(Key key) throws Exception {
                     throw new UnsupportedOperationException();
                 }
             });
@@ -4036,12 +4035,10 @@ final class DistributedCaffeineIntegrationTests {
                     .untilAsserted(() -> {
                         assertThat(distributedCache.estimatedSize()).isEqualTo(2);
                         assertThat(syncedDistributedCache.estimatedSize()).isEqualTo(2);
-                        assertThat(distributedCache.asMap())
-                                .doesNotContain(syncedDistributedCache.asMap().entrySet()
-                                        .<Entry<Key, Value>>toArray(Entry[]::new));
-                        assertThat(syncedDistributedCache.asMap())
-                                .doesNotContain(distributedCache.asMap().entrySet()
-                                        .<Entry<Key, Value>>toArray(Entry[]::new));
+                        assertThat(distributedCache.asMap().entrySet())
+                                .has(matching(not(hasItems(syncedDistributedCache.asMap().entrySet()))));
+                        assertThat(syncedDistributedCache.asMap().entrySet())
+                                .has(matching(not(hasItems(distributedCache.asMap().entrySet()))));
                         assertThatDataStoreHasCounts(
                                 Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(1)));
                     });
@@ -4174,8 +4171,7 @@ final class DistributedCaffeineIntegrationTests {
                     .untilAsserted(() -> assertThatMaintenanceIsDone(distributedCache));
 
             // provoke failure
-            // noinspection unchecked
-            doThrow(new IllegalStateException()).when(cacheManager).manageInboundInsert(any(InternalCacheDocument.class), anyBoolean());
+            doThrow(new IllegalStateException()).when(cacheManager).manageInboundInsert(any(), anyBoolean());
 
             loggerDistributedCaffeine.stopCapturing();
             loggerDistributedCaffeine.startCapturing();
@@ -4196,8 +4192,7 @@ final class DistributedCaffeineIntegrationTests {
             loggerDistributedCaffeine.stopCapturing();
 
             // fix failure
-            // noinspection unchecked
-            doCallRealMethod().when(cacheManager).manageInboundInsert(any(InternalCacheDocument.class), anyBoolean());
+            doCallRealMethod().when(cacheManager).manageInboundInsert(any(), anyBoolean());
 
             await("cache manager maintenance")
                     .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure
@@ -4367,14 +4362,14 @@ final class DistributedCaffeineIntegrationTests {
 
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
-                public Value load(@NonNull Key key) {
+                public Value load(Key key) {
                     return nextInt(2) == 1
                             ? Value.of(key.getId(), nameWithMillisAndPrefixes("load"))
                             : null;
                 }
 
                 @Override
-                public @NonNull Map<? extends Key, ? extends @NonNull Value> loadAll(@NonNull Set<? extends Key> keys) {
+                public Map<? extends Key, ? extends Value> loadAll(Set<? extends Key> keys) {
                     return keys.stream()
                             .collect(toMap(Function.identity(),
                                     key -> Value.of(key.getId(), nameWithMillisAndPrefixes("load"))));
@@ -4503,7 +4498,7 @@ final class DistributedCaffeineIntegrationTests {
             int extendedMaximumSize = (int) (maximumSize * .5);
             Duration refreshAfterWrite = Duration.ofSeconds(10);
             int numberOfOperations = 10_000;
-            int levelOfParallelism = runsOnGitHub(3, 10);
+            int levelOfParallelism = runsOnGitHub(5, 10);
 
             @SuppressWarnings("unchecked")
             RemovalListener<Key, Value> removalListener = mock(RemovalListener.class);
@@ -4512,14 +4507,14 @@ final class DistributedCaffeineIntegrationTests {
 
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
-                public Value load(@NonNull Key key) {
+                public Value load(Key key) {
                     return nextInt(2) == 1
                             ? Value.of(key.getId(), nameWithMillisAndPrefixes("load"))
                             : null;
                 }
 
                 @Override
-                public @NonNull Map<? extends Key, ? extends @NonNull Value> loadAll(@NonNull Set<? extends Key> keys) {
+                public Map<? extends Key, ? extends Value> loadAll(Set<? extends Key> keys) {
                     return keys.stream()
                             .collect(toMap(Function.identity(),
                                     key -> Value.of(key.getId(), nameWithMillisAndPrefixes("load"))));
@@ -4566,8 +4561,7 @@ final class DistributedCaffeineIntegrationTests {
             await("synchronization between cache instances")
                     .atMost(EXTENDED_WAITING_DURATION)
                     .pollInterval(EXTENDED_POLL_INTERVAL)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCaches
-                            .<DistributedCache<Key, Value>>toArray(DistributedCache[]::new)))
+                    .failFast(() -> speedUpAssertions(distributedLoadingCaches))
                     .untilAsserted(() -> {
                         IntStream.range(0, distributedLoadingCaches.size() - 1).forEach(i ->
                                 assertThat(distributedLoadingCaches.get(i).asMap())
@@ -4583,8 +4577,7 @@ final class DistributedCaffeineIntegrationTests {
             await("cache manager maintenance")
                     .atMost(EXTENDED_WAITING_DURATION)
                     .pollInterval(EXTENDED_POLL_INTERVAL)
-                    .untilAsserted(() -> assertThatMaintenanceIsDone(distributedLoadingCaches
-                            .<DistributedCache<Key, Value>>toArray(DistributedCache[]::new)));
+                    .untilAsserted(() -> assertThatMaintenanceIsDone(distributedLoadingCaches));
 
             distributedLoadingCaches.forEach(distributedCache ->
                     completableFutures.add(CompletableFuture
@@ -4595,8 +4588,7 @@ final class DistributedCaffeineIntegrationTests {
             await("synchronization between cache instances")
                     .atMost(EXTENDED_WAITING_DURATION)
                     .pollInterval(EXTENDED_POLL_INTERVAL)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCaches.
-                            <DistributedCache<Key, Value>>toArray(DistributedCache[]::new)))
+                    .failFast(() -> speedUpAssertions(distributedLoadingCaches))
                     .untilAsserted(() -> {
                         assertThatCollection(distributedLoadingCaches)
                                 .allMatch(distributedCache -> distributedCache.estimatedSize() == 0);
@@ -4608,8 +4600,7 @@ final class DistributedCaffeineIntegrationTests {
             await("cache manager maintenance")
                     .atMost(EXTENDED_WAITING_DURATION)
                     .pollInterval(EXTENDED_POLL_INTERVAL)
-                    .untilAsserted(() -> assertThatMaintenanceIsDone(distributedLoadingCaches
-                            .<DistributedCache<Key, Value>>toArray(DistributedCache[]::new)));
+                    .untilAsserted(() -> assertThatMaintenanceIsDone(distributedLoadingCaches));
 
             verify(removalListener, atLeastOnce()).onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPLICIT));
             verify(removalListener, atLeastOnce()).onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.REPLACED));
@@ -4660,12 +4651,13 @@ final class DistributedCaffeineIntegrationTests {
                     .orElseThrow();
 
             this.mongoContainer = new MongoDBContainer(dockerImageName)
+                    .withReplicaSet()
                     .withCreateContainerCmdModifier(cmd -> cmd.withName(displayName))
                     .withImagePullPolicy(PullPolicy.alwaysPull());
             this.mongoContainer.start();
             this.mongoClient = MongoClients.create(MongoClientSettings.builder()
                     .applyConnectionString(new ConnectionString(mongoContainer.getReplicaSetUrl()))
-                    .applyToSocketSettings(builder -> builder
+                    .applyToSocketSettings(socketSettings -> socketSettings
                             .connectTimeout(30, TimeUnit.SECONDS)
                             .readTimeout(30, TimeUnit.SECONDS))
                     .build());
@@ -4738,11 +4730,11 @@ final class DistributedCaffeineIntegrationTests {
             return distributedCaffeineConfigurations
                     .map(distributedCaffeineConfiguration -> {
                         CacheFactory<K, V> cacheFactory = (cacheBuilder, cacheConstructor) -> {
-                            CacheBuilder<K, V> aggregatedCacheBuilder = b -> distributedCaffeineConfiguration.getCacheBuilder()
+                            CacheBuilder<K, V> aggregatedCacheBuilder = b -> distributedCaffeineConfiguration.cacheBuilder()
                                     .apply(cacheBuilder.apply(b));
                             return createCache(aggregatedCacheBuilder, cacheConstructor);
                         };
-                        return Named.of(distributedCaffeineConfiguration.getDisplayName(), cacheFactory);
+                        return Named.of(distributedCaffeineConfiguration.displayName(), cacheFactory);
                     });
         }
 
@@ -4761,8 +4753,7 @@ final class DistributedCaffeineIntegrationTests {
             // speed up using parallel stream
             caches.stream().parallel().forEach(cache -> {
                 cache.cleanUp();
-                if (cache instanceof DistributedCache) {
-                    DistributedCache<K, V> distributedCache = (DistributedCache<K, V>) cache;
+                if (cache instanceof DistributedCache<K, V> distributedCache) {
                     DistributedCaffeine<K, V> distributedCaffeine = getDistributedCaffeine(distributedCache);
                     InternalMaintenanceWorker<K, V> maintenanceWorker = distributedCaffeine.getMaintenanceWorker();
                     Collection<ObjectId> toBeMarkedAsStale = readFieldValue(maintenanceWorker, InternalMaintenanceWorker.class,
@@ -4788,7 +4779,7 @@ final class DistributedCaffeineIntegrationTests {
                     .distributedPolicy()
                     .getMongoCollection();
             Map<Status, Count> statusToCount = Stream.of(counts)
-                    .collect(toMap(Count::getStatus, Function.identity()));
+                    .collect(toMap(Count::status, Function.identity()));
             String fresh = "fresh";
             String stale = "stale";
             Stream.of(Status.values())
@@ -4797,11 +4788,11 @@ final class DistributedCaffeineIntegrationTests {
                     .forEach(count -> List.of(fresh, stale).forEach(label -> {
                         boolean isStale = label.equals(stale);
                         Bson filter = Filters.and(
-                                Filters.eq(STATUS.toString(), count.getStatus().toString()),
+                                Filters.eq(STATUS.toString(), count.status().toString()),
                                 Filters.eq(STALE.toString(), isStale));
-                        (isStale ? count.getStale() : count.getFresh())
+                        (isStale ? count.stale() : count.fresh())
                                 .apply(assertThat(mongoCollection.countDocuments(filter))
-                                        .describedAs(format("%n --> count '%s' for '%s'", label, count.getStatus())));
+                                        .describedAs(format("%n --> count '%s' for '%s'", label, count.status())));
                     }));
         }
 
@@ -4816,20 +4807,24 @@ final class DistributedCaffeineIntegrationTests {
             Stream.of(countsGrouped).forEach(countGrouped -> List.of(fresh, stale).forEach(label -> {
                 boolean isStale = label.equals(stale);
                 Bson filter = Filters.and(
-                        Filters.in(STATUS.toString(), Stream.of(countGrouped.getStatuses())
+                        Filters.in(STATUS.toString(), Stream.of(countGrouped.statuses())
                                 .map(Objects::toString)
                                 .collect(toSet())),
                         Filters.eq(STALE.toString(), isStale));
-                (isStale ? countGrouped.getStale() : countGrouped.getFresh())
+                (isStale ? countGrouped.stale() : countGrouped.fresh())
                         .apply(assertThat(mongoCollection.countDocuments(filter))
                                 .describedAs(format("%n --> count '%s' for '%s'", label,
-                                        Arrays.toString(countGrouped.getStatuses()))));
+                                        Arrays.toString(countGrouped.statuses()))));
             }));
         }
 
         @SafeVarargs
         final <K, V> void assertThatMaintenanceIsDone(DistributedCache<K, V>... distributedCaches) {
-            Stream.of(distributedCaches).parallel()
+            assertThatMaintenanceIsDone(Set.of(distributedCaches));
+        }
+
+        <K, V> void assertThatMaintenanceIsDone(Collection<? extends DistributedCache<K, V>> distributedCaches) {
+            distributedCaches.stream().parallel()
                     .forEach(distributedCache -> {
                         DistributedCaffeine<K, V> distributedCaffeine = getDistributedCaffeine(distributedCache);
                         InternalCacheManager<K, V> cacheManager = distributedCaffeine.getCacheManager();
@@ -4926,8 +4921,7 @@ final class DistributedCaffeineIntegrationTests {
                 int expireId = nextInt(cacheSize);
                 distributedCache.policy().expireVariably().orElseThrow().setExpiresAfter(Key.of(expireId), Duration.ZERO);
             });
-            if (distributedCache instanceof DistributedLoadingCache) {
-                DistributedLoadingCache<Key, Value> distributedLoadingCache = (DistributedLoadingCache<Key, Value>) distributedCache;
+            if (distributedCache instanceof DistributedLoadingCache<Key, Value> distributedLoadingCache) {
                 operations.add(() -> {
                     int loadId = nextInt(cacheSize, 2 * cacheSize);
                     distributedLoadingCache.get(Key.of(loadId));
@@ -4969,19 +4963,6 @@ final class DistributedCaffeineIntegrationTests {
             return prefix.isBlank()
                     ? millis
                     : String.join(delimiter, prefix, millis);
-        }
-
-        @SuppressWarnings("SameReturnValue")
-        <T> T _null() {
-            return null;
-        }
-
-        <T> Set<T> _set(@Nullable T element) {
-            return singleton(element);
-        }
-
-        <K, V> Map<K, V> _map(@Nullable K key, @Nullable V value) {
-            return singletonMap(key, value);
         }
 
         <T, R> R injectSpy(Object instanceObject, Class<T> instanceClass, String fieldName, Class<? super R> fieldClass) {
@@ -5039,23 +5020,7 @@ final class DistributedCaffeineIntegrationTests {
                     : no;
         }
 
-        static class DistributedCaffeineConfiguration<K, V> {
-
-            private final String displayName;
-            private final CacheBuilder<K, V> cacheBuilder;
-
-            DistributedCaffeineConfiguration(String displayName, CacheBuilder<K, V> cacheBuilder) {
-                this.displayName = displayName;
-                this.cacheBuilder = cacheBuilder;
-            }
-
-            String getDisplayName() {
-                return displayName;
-            }
-
-            CacheBuilder<K, V> getCacheBuilder() {
-                return cacheBuilder;
-            }
+        record DistributedCaffeineConfiguration<K, V>(String displayName, CacheBuilder<K, V> cacheBuilder) {
         }
 
         static class EqualResult<K, V> {
@@ -5138,31 +5103,8 @@ final class DistributedCaffeineIntegrationTests {
             }
         }
 
-        static class Count {
-
-            private final Status status;
-            private final Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh;
-            private final Function<AbstractLongAssert<?>, AbstractLongAssert<?>> stale;
-
-            Count(Status status,
-                  Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh,
-                  Function<AbstractLongAssert<?>, AbstractLongAssert<?>> stale) {
-                this.status = status;
-                this.fresh = fresh;
-                this.stale = stale;
-            }
-
-            public Status getStatus() {
-                return status;
-            }
-
-            public Function<AbstractLongAssert<?>, AbstractLongAssert<?>> getFresh() {
-                return fresh;
-            }
-
-            public Function<AbstractLongAssert<?>, AbstractLongAssert<?>> getStale() {
-                return stale;
-            }
+        record Count(Status status, Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh,
+                     Function<AbstractLongAssert<?>, AbstractLongAssert<?>> stale) {
 
             static Count of(Status status,
                             Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh,
@@ -5175,31 +5117,8 @@ final class DistributedCaffeineIntegrationTests {
             }
         }
 
-        static class CountGrouped {
-
-            private final Status[] statuses;
-            private final Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh;
-            private final Function<AbstractLongAssert<?>, AbstractLongAssert<?>> stale;
-
-            CountGrouped(Status[] statuses,
-                         Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh,
-                         Function<AbstractLongAssert<?>, AbstractLongAssert<?>> stale) {
-                this.statuses = statuses;
-                this.fresh = fresh;
-                this.stale = stale;
-            }
-
-            public Status[] getStatuses() {
-                return statuses;
-            }
-
-            public Function<AbstractLongAssert<?>, AbstractLongAssert<?>> getFresh() {
-                return fresh;
-            }
-
-            public Function<AbstractLongAssert<?>, AbstractLongAssert<?>> getStale() {
-                return stale;
-            }
+        record CountGrouped(Status[] statuses, Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh,
+                            Function<AbstractLongAssert<?>, AbstractLongAssert<?>> stale) {
 
             static CountGrouped of(Status[] statuses,
                                    Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh,

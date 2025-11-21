@@ -22,6 +22,7 @@ import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
 import org.awaitility.Awaitility;
 import org.awaitility.core.ConditionFactory;
 import org.bson.Document;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -34,9 +35,14 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
+
+import static java.util.Collections.singleton;
+import static java.util.Collections.singletonMap;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(MethodOrderer.MethodName.class)
@@ -95,6 +101,20 @@ public abstract class DistributedCaffeineCommonTestInstance {
         return Awaitility.await(alias)
                 .pollExecutorService(executorService);
     }
+
+    @SuppressWarnings("SameReturnValue")
+    protected <T> T _null() {
+        return null;
+    }
+
+    protected <T> Set<T> _set(@Nullable T element) {
+        return singleton(element);
+    }
+
+    protected <K, V> Map<K, V> _map(@Nullable K key, @Nullable V value) {
+        return singletonMap(key, value);
+    }
+
 
     @FunctionalInterface
     protected interface CacheBuilder<K, V> {

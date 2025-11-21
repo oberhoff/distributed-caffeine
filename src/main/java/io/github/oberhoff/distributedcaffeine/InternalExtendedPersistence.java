@@ -19,15 +19,16 @@ import java.time.Duration;
 
 import static java.util.Objects.nonNull;
 
+@SuppressWarnings("ClassCanBeRecord")
 class InternalExtendedPersistence {
 
     private final Integer extendedPersistenceSize;
     private final Duration extendedPersistenceTime;
-    private final boolean extendedPersistenceLoader;
+    private final Boolean extendedPersistenceLoader;
 
     InternalExtendedPersistence(Integer extendedPersistenceSize,
                                 Duration extendedPersistenceTime,
-                                boolean extendedPersistenceLoader) {
+                                Boolean extendedPersistenceLoader) {
         this.extendedPersistenceSize = extendedPersistenceSize;
         this.extendedPersistenceTime = extendedPersistenceTime;
         this.extendedPersistenceLoader = extendedPersistenceLoader;
@@ -54,6 +55,6 @@ class InternalExtendedPersistence {
     }
 
     public boolean hasExtendedPersistenceLoader() {
-        return extendedPersistenceLoader;
+        return Boolean.TRUE.equals(extendedPersistenceLoader);
     }
 }

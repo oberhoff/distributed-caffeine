@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.Cache;
+import org.jspecify.annotations.NullMarked;
 
 /**
  * Interface representing a distributed cache instance. Cache entries are added manually and remain in the cache until
@@ -25,6 +26,7 @@ import com.github.benmanes.caffeine.cache.Cache;
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
+@NullMarked
 public interface DistributedCache<K, V> extends Cache<K, V> {
 
     /**

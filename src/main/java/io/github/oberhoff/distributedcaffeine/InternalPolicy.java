@@ -17,7 +17,6 @@ package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.Policy;
 import org.jspecify.annotations.NonNull;
-import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
 import java.util.Map;
@@ -53,43 +52,43 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalLazyInitializer<K, V
     }
 
     @Override
-    public @Nullable V getIfPresentQuietly(@NonNull K key) {
+    public V getIfPresentQuietly(K key) {
         return policy.getIfPresentQuietly(key);
     }
 
     @Override
-    public CacheEntry<K, V> getEntryIfPresentQuietly(@NonNull K key) {
+    public CacheEntry<@NonNull K, @NonNull V> getEntryIfPresentQuietly(K key) {
         return policy.getEntryIfPresentQuietly(key);
     }
 
     @Override
-    public @NonNull Map<K, CompletableFuture<V>> refreshes() {
+    public Map<K, CompletableFuture<V>> refreshes() {
         return policy.refreshes();
     }
 
     @Override
-    public @NonNull Optional<Eviction<K, V>> eviction() {
+    public Optional<Eviction<K, V>> eviction() {
         return policy.eviction();
     }
 
     @Override
-    public @NonNull Optional<FixedExpiration<K, V>> expireAfterAccess() {
+    public Optional<FixedExpiration<K, V>> expireAfterAccess() {
         return policy.expireAfterAccess();
     }
 
     @Override
-    public @NonNull Optional<FixedExpiration<K, V>> expireAfterWrite() {
+    public Optional<FixedExpiration<K, V>> expireAfterWrite() {
         return policy.expireAfterWrite();
     }
 
     @Override
-    public @NonNull Optional<VarExpiration<K, V>> expireVariably() {
+    public Optional<VarExpiration<K, V>> expireVariably() {
         return policy.expireVariably()
                 .map(varExpiration -> new InternalExpiration<>(distributedCaffeine, policy, varExpiration));
     }
 
     @Override
-    public @NonNull Optional<FixedRefresh<K, V>> refreshAfterWrite() {
+    public Optional<FixedRefresh<K, V>> refreshAfterWrite() {
         return policy.refreshAfterWrite();
     }
 
@@ -110,7 +109,7 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalLazyInitializer<K, V
         }
 
         @Override
-        public V put(@NonNull K key, @NonNull V value, long duration, @NonNull TimeUnit unit) {
+        public V put(K key, V value, long duration, TimeUnit unit) {
             requireNonNull(key);
             requireNonNull(value);
             requireNonNull(unit);
@@ -119,7 +118,7 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalLazyInitializer<K, V
         }
 
         @Override
-        public @Nullable V putIfAbsent(@NonNull K key, @NonNull V value, long duration, @NonNull TimeUnit unit) {
+        public V putIfAbsent(K key, V value, long duration, TimeUnit unit) {
             requireNonNull(key);
             requireNonNull(value);
             requireNonNull(unit);
@@ -132,9 +131,8 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalLazyInitializer<K, V
         }
 
         @Override
-        public @Nullable V compute(@NonNull K key,
-                                   @NonNull BiFunction<? super K, ? super V, ? extends @Nullable V> remappingFunction,
-                                   @NonNull Duration duration) {
+        public V compute(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction,
+                         Duration duration) {
             requireNonNull(key);
             requireNonNull(remappingFunction);
             requireNonNull(duration);
@@ -153,32 +151,32 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalLazyInitializer<K, V
         }
 
         @Override
-        public @NonNull OptionalLong getExpiresAfter(@NonNull K key, @NonNull TimeUnit unit) {
+        public OptionalLong getExpiresAfter(K key, TimeUnit unit) {
             return varExpiration.getExpiresAfter(key, unit);
         }
 
         @Override
-        public void setExpiresAfter(@NonNull K key, long duration, @NonNull TimeUnit unit) {
+        public void setExpiresAfter(K key, long duration, TimeUnit unit) {
             varExpiration.setExpiresAfter(key, duration, unit);
         }
 
         @Override
-        public @NonNull Map<K, V> oldest(int limit) {
+        public Map<K, V> oldest(int limit) {
             return varExpiration.oldest(limit);
         }
 
         @Override
-        public <T> @NonNull T oldest(@NonNull Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
+        public <T> T oldest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
             return varExpiration.oldest(mappingFunction);
         }
 
         @Override
-        public @NonNull Map<K, V> youngest(int limit) {
+        public Map<K, V> youngest(int limit) {
             return varExpiration.youngest(limit);
         }
 
         @Override
-        public <T> @NonNull T youngest(@NonNull Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
+        public <T> T youngest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
             return varExpiration.youngest(mappingFunction);
         }
     }

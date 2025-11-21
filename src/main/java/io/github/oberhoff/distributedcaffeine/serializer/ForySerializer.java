@@ -20,6 +20,7 @@ import org.apache.fory.ThreadSafeFory;
 import org.apache.fory.config.Language;
 import org.apache.fory.logging.LogLevel;
 import org.apache.fory.logging.LoggerFactory;
+import org.jspecify.annotations.NullMarked;
 
 import java.util.stream.Stream;
 
@@ -30,6 +31,7 @@ import java.util.stream.Stream;
  * @author Andreas Oberhoff
  * @see <a href="https://github.com/apache/fory">Apache Fory on GitHub</a>
  */
+@NullMarked
 public class ForySerializer<T> implements ByteArraySerializer<T> {
 
     private final ThreadSafeFory fory;

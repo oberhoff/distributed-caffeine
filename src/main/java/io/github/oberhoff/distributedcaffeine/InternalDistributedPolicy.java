@@ -19,7 +19,6 @@ import com.mongodb.client.MongoCollection;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import org.bson.Document;
 import org.jspecify.annotations.NonNull;
-import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -50,7 +49,7 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
     }
 
     @Override
-    public @NonNull MongoCollection<Document> getMongoCollection() {
+    public MongoCollection<Document> getMongoCollection() {
         return distributedCaffeine.getMongoCollection();
     }
 
@@ -65,24 +64,23 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
     }
 
     @Override
-    public @NonNull Serializer<K, ?> getKeySerializer() {
+    public Serializer<K, ?> getKeySerializer() {
         return keySerializer;
     }
 
     @Override
-    public @NonNull Serializer<V, ?> getValueSerializer() {
+    public Serializer<V, ?> getValueSerializer() {
         return valueSerializer;
     }
 
     @Override
-    public @Nullable CacheEntry<K, V> getFromMongo(@NonNull K key, boolean includeEvicted) {
+    public CacheEntry<@NonNull K, @NonNull V> getFromMongo(K key, boolean includeEvicted) {
         requireNonNull(key);
         return getDistributed(key, includeEvicted);
     }
 
     @Override
-    public @NonNull List<CacheEntry<K, V>> getAllFromMongo(@NonNull Iterable<? extends K> keys,
-                                                           boolean includeEvicted) {
+    public List<CacheEntry<K, V>> getAllFromMongo(Iterable<? extends K> keys, boolean includeEvicted) {
         Set<K> keySet = requireNonNullIterable(keys);
         return getAllDistributed(keySet, includeEvicted);
     }
