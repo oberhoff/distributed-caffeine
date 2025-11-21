@@ -21,7 +21,7 @@ import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.bson.Document;
-import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
@@ -34,6 +34,7 @@ import java.util.List;
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
  */
+@NullMarked
 @SuppressWarnings("squid:S1452")
 public interface DistributedPolicy<K, V> {
 
@@ -42,7 +43,6 @@ public interface DistributedPolicy<K, V> {
      *
      * @return the mongo collection
      */
-    @NonNull
     MongoCollection<Document> getMongoCollection();
 
     /**
@@ -74,7 +74,6 @@ public interface DistributedPolicy<K, V> {
      *
      * @return the serializer for key objects
      */
-    @NonNull
     Serializer<K, ?> getKeySerializer();
 
     /**
@@ -89,7 +88,6 @@ public interface DistributedPolicy<K, V> {
      *
      * @return the serializer for value objects
      */
-    @NonNull
     Serializer<V, ?> getValueSerializer();
 
     /**
@@ -97,7 +95,7 @@ public interface DistributedPolicy<K, V> {
      * instance.
      * <p>
      * Already evicted cache entries with extended persistence can also be included, if extended persistence is
-     * configured using {@link DistributedCaffeine.Builder#withExtendedPersistence(Integer)} or
+     * configured using {@link DistributedCaffeine.Builder#withExtendedPersistence(int)} or
      * {@link DistributedCaffeine.Builder#withExtendedPersistence(Duration)}.
      *
      * @param key            the key whose associated cache entry is to be returned
@@ -105,15 +103,14 @@ public interface DistributedPolicy<K, V> {
      *                       {@code false} otherwise
      * @return the cache entry to which the specified key is mapped, or null if no mapping is found
      */
-    @Nullable
-    CacheEntry<K, V> getFromMongo(@NonNull K key, boolean includeEvicted);
+    @Nullable CacheEntry<K, V> getFromMongo(K key, boolean includeEvicted);
 
     /**
      * Get the cache entries mapped to the specified keys directly from the MongoDB collection bypassing this cache
      * instance.
      * <p>
      * Already evicted cache entries with extended persistence can also be included, if extended persistence is
-     * configured using {@link DistributedCaffeine.Builder#withExtendedPersistence(Integer)} or
+     * configured using {@link DistributedCaffeine.Builder#withExtendedPersistence(int)} or
      * {@link DistributedCaffeine.Builder#withExtendedPersistence(Duration)}.
      *
      * @param keys           the keys whose associated cache entries are to be returned
@@ -121,8 +118,7 @@ public interface DistributedPolicy<K, V> {
      *                       {@code false} otherwise
      * @return a list of cache entries to which the specified keys are mapped, keys without mapping are omitted
      */
-    @NonNull
-    List<CacheEntry<K, V>> getAllFromMongo(@NonNull Iterable<? extends K> keys, boolean includeEvicted);
+    List<CacheEntry<K, V>> getAllFromMongo(Iterable<? extends K> keys, boolean includeEvicted);
 
     /**
      * Interface representing a cache entry containing key and value along with some metadata.
@@ -130,6 +126,7 @@ public interface DistributedPolicy<K, V> {
      * @param <K> the key type of the cache
      * @param <V> the value type of the cache
      */
+    @NullMarked
     interface CacheEntry<K, V> {
 
         /**

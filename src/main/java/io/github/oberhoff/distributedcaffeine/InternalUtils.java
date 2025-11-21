@@ -41,21 +41,20 @@ class InternalUtils {
         }
     }
 
-    static <K, V> Map<K, V> requireNonNullMap(Map<K, V> map) {
-        return Map.copyOf(map);
-    }
-
     static <T> Set<T> requireNonNullIterable(Iterable<? extends T> iterable) {
         return StreamSupport.stream(iterable.spliterator(), false)
                 .collect(toUnmodifiableSet());
     }
 
+    static <K, V> Map<K, V> requireNonNullMap(Map<K, V> map) {
+        return Map.copyOf(map);
+    }
+
     static void runFailable(FailableRunnable failableRunnable) {
         getFailable(() -> {
-                    failableRunnable.run();
-                    return null;
-                },
-                RuntimeException::new);
+            failableRunnable.run();
+            return null;
+        }, RuntimeException::new);
     }
 
     static <T> T getFailable(FailableSupplier<T> failableSupplier) {

@@ -15,6 +15,8 @@
  */
 package io.github.oberhoff.distributedcaffeine.serializer;
 
+import org.jspecify.annotations.NullMarked;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -30,6 +32,7 @@ import java.io.ObjectOutputStream;
  * @see <a href="https://docs.oracle.com/en/java/javase/11/docs/specs/serialization/index.html">
  * Java Object Serialization Specification</a>
  */
+@NullMarked
 public class JavaObjectSerializer<T> implements ByteArraySerializer<T> {
 
     /**

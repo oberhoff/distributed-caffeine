@@ -15,12 +15,16 @@
  */
 package io.github.oberhoff.distributedcaffeine.serializer;
 
+import org.jspecify.annotations.NullMarked;
+
 /**
  * Interface to use when implementing a serializer with string representation.
  *
  * @param <T> the type of the object to serialize
  * @author Andreas Oberhoff
  */
+@NullMarked
+@SuppressWarnings("RedundantThrows")
 public interface StringSerializer<T> extends Serializer<T, String> {
 
     @Override

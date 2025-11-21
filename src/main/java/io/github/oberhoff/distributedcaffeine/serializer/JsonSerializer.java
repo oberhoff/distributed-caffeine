@@ -15,12 +15,15 @@
  */
 package io.github.oberhoff.distributedcaffeine.serializer;
 
+import org.jspecify.annotations.NullMarked;
+
 /**
  * Interface to use when implementing a serializer with JSON representation (encoded as String or BSON).
  *
  * @param <T> the type of the object to serialize
  * @author Andreas Oberhoff
  */
+@NullMarked
 public interface JsonSerializer<T> extends StringSerializer<T> {
 
     /**

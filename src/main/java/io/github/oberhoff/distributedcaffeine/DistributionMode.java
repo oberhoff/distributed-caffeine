@@ -15,6 +15,8 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import org.jspecify.annotations.NullMarked;
+
 /**
  * Modes for defining the scope of distributed synchronization. Each mode includes/excludes different types of cache
  * operations (population, invalidation, eviction) which are then considered or not considered for distributed
@@ -22,6 +24,7 @@ package io.github.oberhoff.distributedcaffeine;
  *
  * @author Andreas Oberhoff
  */
+@NullMarked
 public enum DistributionMode {
 
     /**
