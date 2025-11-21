@@ -15,6 +15,8 @@
  */
 package io.github.oberhoff.distributedcaffeine.serializer;
 
+import org.jspecify.annotations.NullMarked;
+
 /**
  * This is a marker interface only. Serializers must implement one of the following interfaces instead:
  * <ul>
@@ -27,6 +29,7 @@ package io.github.oberhoff.distributedcaffeine.serializer;
  * @param <U> the type of the value to deserialize
  * @author Andreas Oberhoff
  */
+@NullMarked
 @SuppressWarnings({"unused", "squid:S112"})
 public interface Serializer<T, U> {
 

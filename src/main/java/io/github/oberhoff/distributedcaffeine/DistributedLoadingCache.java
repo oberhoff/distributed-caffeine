@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.LoadingCache;
+import org.jspecify.annotations.NullMarked;
 
 /**
  * Interface representing a distributed loading cache instance. Cache entries are added manually or loaded automatically
@@ -25,5 +26,6 @@ import com.github.benmanes.caffeine.cache.LoadingCache;
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
+@NullMarked
 public interface DistributedLoadingCache<K, V> extends DistributedCache<K, V>, LoadingCache<K, V> {
 }

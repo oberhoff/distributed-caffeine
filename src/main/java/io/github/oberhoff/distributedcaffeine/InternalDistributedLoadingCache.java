@@ -15,8 +15,6 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-import org.jspecify.annotations.NonNull;
-
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.util.HashMap;
@@ -38,7 +36,6 @@ import static java.util.Collections.unmodifiableMap;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
-import static java.util.stream.Collectors.toList;
 
 class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, V>
         implements DistributedLoadingCache<K, V> {
@@ -65,7 +62,7 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
     }
 
     @Override
-    public V get(@NonNull K key) {
+    public V get(K key) {
         requireNonNull(key);
         // custom implementation to bypass problematic internal asynchronous handling and to share logic
         return handleFutureExceptions(() ->
@@ -73,7 +70,7 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
     }
 
     @Override
-    public @NonNull Map<K, V> getAll(@NonNull Iterable<? extends K> keys) {
+    public Map<K, V> getAll(Iterable<? extends K> keys) {
         Set<K> keySet = requireNonNullIterable(keys);
         // custom implementation to bypass problematic internal asynchronous handling and to share logic
         return handleFutureExceptions(() ->
@@ -82,14 +79,14 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
                                 ? getFailable(() -> cacheLoader.loadAllDelegated(mappedKeys), CompletionException::new)
                                 : mappedKeys.stream()
                                 .map(key -> entry(key, getOrCreateLoadOperation(key)))
-                                .collect(toList()).stream() // intermediate step to ensure concurrency
+                                .toList().stream() // intermediate step to ensure concurrency
                                 .map(entry -> entry(entry.getKey(), entry.getValue().join()))
                                 .collect(HashMap::new, (hashMap, entry) -> // allow null values
                                         hashMap.put(entry.getKey(), entry.getValue()), HashMap::putAll)));
     }
 
     @Override
-    public @NonNull CompletableFuture<V> refresh(@NonNull K key) {
+    public CompletableFuture<V> refresh(K key) {
         requireNonNull(key);
         // custom implementation to bypass problematic internal asynchronous handling
         // accepted drawback: no mapping of in-flight refresh operations in policy.refreshes()
@@ -98,7 +95,7 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
     }
 
     @Override
-    public @NonNull CompletableFuture<Map<K, V>> refreshAll(@NonNull Iterable<? extends K> keys) {
+    public CompletableFuture<Map<K, V>> refreshAll(Iterable<? extends K> keys) {
         Set<K> keySet = requireNonNullIterable(keys);
         // custom implementation to bypass problematic internal asynchronous handling
         // accepted drawback: no mapping of in-flight refresh operations in policy.refreshes()
@@ -106,7 +103,7 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
             Map<K, V> keyToNewValue = keySet.stream()
                     .map(key -> entry(key, policy.getIfPresentQuietly(key)))
                     .map(entry -> entry(entry.getKey(), getOrCreateRefreshOperation(entry.getKey(), entry.getValue())))
-                    .collect(toList()).stream() // intermediate step to ensure concurrency
+                    .toList().stream() // intermediate step to ensure concurrency
                     .map(entry -> entry(entry.getKey(), entry.getValue().join()))
                     .collect(HashMap::new, (hashMap, entry) -> // allow null values
                             hashMap.put(entry.getKey(), entry.getValue()), HashMap::putAll);
@@ -133,38 +130,37 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
         return loadOperations.compute(key, (k, loadOperation) -> {
             if (isNull(loadOperation)) {
                 return CompletableFuture.supplyAsync(() -> getFailable(() ->
-                                        cacheLoader.loadDelegated(key), CompletionException::new),
-                                executor)
-                        // retain the 'exceptions are forwarded' semantics
-                        .whenCompleteAsync((v, e) -> loadOperations.remove(key));
+                                cacheLoader.loadDelegated(key), CompletionException::new), executor)
+                        // async because map must not be modified during computation
+                        .whenCompleteAsync((v, e) ->
+                                // retain the 'exceptions are forwarded' semantics
+                                loadOperations.remove(key), executor);
             } else {
                 return loadOperation;
             }
         });
     }
 
-    @SuppressWarnings("unchecked")
     private CompletableFuture<V> getOrCreateRefreshOperation(K key, V oldValue) {
         // retain the original 'only one concurrent refresh operation per key' semantics
         return refreshOperations.compute(key, (k, refreshOperation) -> {
             if (isNull(refreshOperation)) {
                 return (isNull(oldValue)
-                        ? (CompletableFuture<V>) getFailable(() ->
+                        ? getFailable(() ->
                                 cacheLoader.asyncLoadDelegated(key, executor),
                         CompletionException::new)
-                        : (CompletableFuture<V>) getFailable(() ->
+                        : getFailable(() ->
                                 cacheLoader.asyncReloadDelegated(key, oldValue, executor),
                         CompletionException::new))
+                        // async because map must not be modified during computation
                         .whenCompleteAsync((v, e) -> {
                             refreshOperations.remove(key);
                             if (nonNull(e)) {
-                                // retain the original 'log exception and swallow' semantics
-                                // strange: exceptions are still thrown, so this behavior is mimicked
-                                logger.log(Level.WARNING,
-                                        format("Exception thrown during refresh for %s",
-                                                key), e);
+                                // intention: retain the original 'log exception and swallow' semantics
+                                // but strange: exceptions are still thrown, so this behavior is imitated
+                                logger.log(Level.WARNING, format("Exception thrown during refresh for %s", key), e);
                             }
-                        });
+                        }, executor);
             } else {
                 return refreshOperation;
             }

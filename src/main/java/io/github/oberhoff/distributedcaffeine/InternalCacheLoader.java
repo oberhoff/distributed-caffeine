@@ -16,7 +16,6 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.CacheLoader;
-import org.jspecify.annotations.NonNull;
 
 import java.lang.reflect.Method;
 import java.util.HashMap;
@@ -54,35 +53,34 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
     }
 
     @Override // should never be invoked due to custom implementation (loadDelegated() must be used)
-    public V load(@NonNull K key) throws Exception {
+    public V load(K key) throws Exception {
         throw new IllegalAccessException();
     }
 
     @Override // should never be invoked due to custom implementation (loadAllDelegated() must be used)
-    public @NonNull Map<? extends K, ? extends V> loadAll(@NonNull Set<? extends K> keys) throws Exception {
+    public Map<? extends K, ? extends V> loadAll(Set<? extends K> keys) throws Exception {
         throw new IllegalAccessException();
     }
 
     @Override // should never be invoked due to custom implementation (asyncLoadDelegated() must be used)
-    public @NonNull CompletableFuture<? extends V> asyncLoad(@NonNull K key, @NonNull Executor executor)
+    public CompletableFuture<? extends V> asyncLoad(K key, Executor executor)
             throws Exception {
         throw new IllegalAccessException();
     }
 
     @Override // should never be invoked due to custom implementation (asyncLoadAllDelegated() must be used)
-    public @NonNull CompletableFuture<? extends Map<? extends K, ? extends V>> asyncLoadAll(
-            @NonNull Set<? extends K> keys, @NonNull Executor executor) throws Exception {
+    public CompletableFuture<? extends Map<? extends K, ? extends V>> asyncLoadAll(
+            Set<? extends K> keys, Executor executor) throws Exception {
         throw new IllegalAccessException();
     }
 
     @Override // should never be invoked due to custom implementation (reloadDelegated() must be used)
-    public V reload(@NonNull K key, @NonNull V oldValue) throws Exception {
+    public V reload(K key, V oldValue) throws Exception {
         throw new IllegalAccessException();
     }
 
     @Override // only invoked internally if expireAfterWrite is used (special handling needed)
-    public @NonNull CompletableFuture<? extends V> asyncReload(@NonNull K key, @NonNull V oldValue,
-                                                               @NonNull Executor executor) throws Exception {
+    public CompletableFuture<? extends V> asyncReload(K key, V oldValue, Executor executor) throws Exception {
         return cacheLoader.asyncReload(key, oldValue, executor)
                 .thenApply(newValue -> {
                     // retain the original 'remove if null' semantics
@@ -123,42 +121,34 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
         }
     }
 
-    @NonNull // invoked by custom implementation
+    // invoked by custom implementation
     @SuppressWarnings("unchecked")
-    CompletableFuture<? extends V> asyncLoadDelegated(@NonNull K key, @NonNull Executor executor) throws Exception {
+    CompletableFuture<V> asyncLoadDelegated(K key, Executor executor) throws Exception {
         if (extendedPersistence.hasExtendedPersistenceLoader()) {
             return CompletableFuture.supplyAsync(() -> loadExtendedFromMongo(key), executor)
-                    .thenCompose(newValue -> {
-                        if (nonNull(newValue)) {
-                            return CompletableFuture.completedFuture(newValue);
-                        } else {
-                            return (CompletableFuture<V>) getFailable(() ->
-                                            cacheLoader.asyncLoad(key, executor),
-                                    CompletionException::new);
-                        }
-                    });
+                    .thenCompose(newValue -> nonNull(newValue)
+                            ? CompletableFuture.completedFuture(newValue)
+                            : (CompletableFuture<V>) getFailable(() ->
+                                    cacheLoader.asyncLoad(key, executor),
+                            CompletionException::new));
         } else {
-            return cacheLoader.asyncLoad(key, executor);
+            return (CompletableFuture<V>) cacheLoader.asyncLoad(key, executor);
         }
     }
 
-    @NonNull // invoked by custom implementation
+    // invoked by custom implementation
     @SuppressWarnings("unchecked")
-    CompletableFuture<? extends V> asyncReloadDelegated(@NonNull K key, @NonNull V oldValue, @NonNull Executor executor)
+    CompletableFuture<V> asyncReloadDelegated(K key, V oldValue, Executor executor)
             throws Exception {
         if (extendedPersistence.hasExtendedPersistenceLoader()) {
             return CompletableFuture.supplyAsync(() -> loadExtendedFromMongo(key), executor)
-                    .thenCompose(newValue -> {
-                        if (nonNull(newValue)) {
-                            return CompletableFuture.completedFuture(newValue);
-                        } else {
-                            return (CompletableFuture<V>) getFailable(() ->
-                                            cacheLoader.asyncReload(key, oldValue, executor),
-                                    CompletionException::new);
-                        }
-                    });
+                    .thenCompose(newValue -> nonNull(newValue)
+                            ? CompletableFuture.completedFuture(newValue)
+                            : (CompletableFuture<V>) getFailable(() ->
+                                    cacheLoader.asyncReload(key, oldValue, executor),
+                            CompletionException::new));
         } else {
-            return cacheLoader.asyncReload(key, oldValue, executor);
+            return (CompletableFuture<V>) cacheLoader.asyncReload(key, oldValue, executor);
         }
     }
 

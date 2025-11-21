@@ -18,8 +18,6 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
-import org.jspecify.annotations.NonNull;
-import org.jspecify.annotations.Nullable;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -57,12 +55,12 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
     }
 
     @Override
-    public @Nullable V getIfPresent(@NonNull K key) {
+    public V getIfPresent(K key) {
         return cache.getIfPresent(key);
     }
 
     @Override
-    public V get(@NonNull K key, @NonNull Function<? super K, ? extends V> mappingFunction) {
+    public V get(K key, Function<? super K, ? extends V> mappingFunction) {
         requireNonNull(key);
         requireNonNull(mappingFunction);
         // custom implementation to share logic
@@ -70,14 +68,14 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
     }
 
     @Override
-    public @NonNull Map<K, V> getAllPresent(@NonNull Iterable<? extends K> keys) {
+    public Map<K, V> getAllPresent(Iterable<? extends K> keys) {
         return cache.getAllPresent(keys);
     }
 
     @Override
-    public @NonNull Map<K, V> getAll(@NonNull Iterable<? extends K> keys,
-                                     @NonNull Function<? super Set<? extends K>,
-                                             ? extends Map<? extends K, ? extends V>> mappingFunction) {
+    public Map<K, V> getAll(Iterable<? extends K> keys,
+                            Function<? super Set<? extends K>,
+                                    ? extends Map<? extends K, ? extends V>> mappingFunction) {
         Set<K> keySet = requireNonNullIterable(keys);
         requireNonNull(mappingFunction);
         // custom implementation to share logic
@@ -85,7 +83,7 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
     }
 
     @Override
-    public void put(@NonNull K key, @NonNull V value) {
+    public void put(K key, V value) {
         requireNonNull(key);
         requireNonNull(value);
         synchronizationLock.runLocked(() ->
@@ -93,21 +91,21 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
     }
 
     @Override
-    public void putAll(@NonNull Map<? extends K, ? extends V> map) {
+    public void putAll(Map<? extends K, ? extends V> map) {
         requireNonNullMap(map);
         synchronizationLock.runLocked(() ->
                 cache.putAll(cacheManager.putAllDistributed(map)));
     }
 
     @Override
-    public void invalidate(@NonNull K key) {
+    public void invalidate(K key) {
         requireNonNull(key);
         synchronizationLock.runLocked(() ->
                 cache.invalidate(cacheManager.invalidateDistributed(key)));
     }
 
     @Override
-    public void invalidateAll(@NonNull Iterable<? extends K> keys) {
+    public void invalidateAll(Iterable<? extends K> keys) {
         Set<K> keySet = requireNonNullIterable(keys);
         synchronizationLock.runLocked(() ->
                 cache.invalidateAll(cacheManager.invalidateAllDistributed(keySet)));
@@ -128,7 +126,7 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
     }
 
     @Override
-    public @NonNull CacheStats stats() {
+    public CacheStats stats() {
         return cache.stats();
     }
 
@@ -138,14 +136,14 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
     }
 
     @Override
-    public @NonNull ConcurrentMap<K, V> asMap() {
+    public ConcurrentMap<K, V> asMap() {
         InternalConcurrentMap<K, V> internalConcurrentMap = new InternalConcurrentMap<>();
         internalConcurrentMap.initialize(distributedCaffeine);
         return internalConcurrentMap;
     }
 
     @Override
-    public @NonNull Policy<K, V> policy() {
+    public Policy<K, V> policy() {
         InternalPolicy<K, V> internalPolicy = new InternalPolicy<>();
         internalPolicy.initialize(distributedCaffeine);
         return internalPolicy;

@@ -15,7 +15,6 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-import com.mongodb.MongoBulkWriteException;
 import com.mongodb.bulk.BulkWriteResult;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoCursor;
@@ -31,8 +30,6 @@ import com.mongodb.client.model.Sorts;
 import com.mongodb.client.model.UpdateOneModel;
 import com.mongodb.client.model.UpdateOptions;
 import com.mongodb.client.model.Updates;
-import dev.failsafe.Failsafe;
-import dev.failsafe.RetryPolicy;
 import io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field;
 import org.bson.BsonDocument;
 import org.bson.BsonObjectId;
@@ -89,7 +86,6 @@ import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.groupingBy;
 import static java.util.stream.Collectors.toCollection;
-import static java.util.stream.Collectors.toList;
 import static java.util.stream.Collectors.toMap;
 import static java.util.stream.Collectors.toSet;
 
@@ -127,9 +123,9 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
 
     void consumeCacheDocumentsGroupedByKeyInReverseOrder(
             Set<? extends K> keys, Consumer<Stream<Set<InternalCacheDocument<K, V>>>> streamConsumer) {
-        List<Integer> hashes = keys.stream()
+        Set<Integer> hashes = keys.stream()
                 .map(Objects::hashCode)
-                .collect(toList());
+                .collect(toSet());
         Bson filter = Filters.in(HASH.toString(), hashes);
         try (Stream<Set<InternalCacheDocument<K, V>>> stream = streamCacheDocumentsGroupedByKey(filter)
                 // only return requested keys, even if hash collisions occur
@@ -153,39 +149,28 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
 
     Set<InternalCacheDocument<K, V>> insert(Map<? extends K, ? extends V> map, Status status) {
         if (!map.isEmpty()) {
-            Map<K, ObjectId> keyToObjectId = new HashMap<>();
             List<UpdateOneModel<Document>> updates = new ArrayList<>();
-            Map<Integer, K> indexToKey = new HashMap<>();
             AtomicInteger index = new AtomicInteger(0);
-            Failsafe.with(RetryPolicy.ofDefaults())
-                    .run(context -> {
-                        if (context.getLastException() instanceof MongoBulkWriteException) {
-                            MongoBulkWriteException mongoBulkWriteException = context.getLastException();
-                            BulkWriteResult bulkWriteResult = mongoBulkWriteException.getWriteResult();
-                            keyToObjectId.putAll(evaluateBulkWriteResult(indexToKey, bulkWriteResult));
-                        }
-                        updates.clear();
-                        indexToKey.clear();
-                        index.set(0);
-                        map.keySet().stream()
-                                .filter(key -> !keyToObjectId.containsKey(key))
-                                .forEach(key -> {
-                                    V value = map.get(key);
-                                    requireNonNull(key, "key cannot be null");
-                                    if (!status.isInvalidated()) {
-                                        requireNonNull(value, "value cannot be null");
-                                    }
-                                    // perform upsert to be able to use $currentTime (which is an update operator only)
-                                    Bson filter = Filters.eq(_ID.toString(), generateObjectId());
-                                    Bson update = toMongoUpdate(key, value, status);
-                                    UpdateOptions updateOptions = new UpdateOptions().upsert(true);
-                                    updates.add(new UpdateOneModel<>(filter, update, updateOptions));
-                                    indexToKey.put(index.getAndIncrement(), key);
-                                });
-                        BulkWriteOptions bulkWriteOptions = new BulkWriteOptions().ordered(true);
-                        BulkWriteResult bulkWriteResult = mongoCollection.bulkWrite(updates, bulkWriteOptions);
-                        keyToObjectId.putAll(evaluateBulkWriteResult(indexToKey, bulkWriteResult));
-                    });
+            Map<Integer, K> indexToKey = new HashMap<>();
+            map.keySet().forEach(key -> {
+                V value = map.get(key);
+                requireNonNull(key, "key cannot be null");
+                if (!status.isInvalidated()) {
+                    requireNonNull(value, "value cannot be null");
+                }
+                // perform upsert to be able to use $currentTime (which is an update operator only)
+                Bson filter = Filters.eq(_ID.toString(), generateObjectId());
+                Bson update = toMongoUpdate(key, value, status);
+                UpdateOptions updateOptions = new UpdateOptions().upsert(true);
+                updates.add(new UpdateOneModel<>(filter, update, updateOptions));
+                indexToKey.put(index.getAndIncrement(), key);
+            });
+            BulkWriteOptions bulkWriteOptions = new BulkWriteOptions().ordered(true);
+            BulkWriteResult bulkWriteResult = mongoCollection.bulkWrite(updates, bulkWriteOptions);
+            Map<K, ObjectId> keyToObjectId = new HashMap<>(bulkWriteResult.getUpserts().stream()
+                    .filter(bulkWriteUpsert -> nonNull(indexToKey.get(bulkWriteUpsert.getIndex())))
+                    .collect(toMap(bulkWriteUpsert -> indexToKey.get(bulkWriteUpsert.getIndex()),
+                            bulkWriteUpsert -> extractObjectId(bulkWriteUpsert.getId()))));
             return keyToObjectId.entrySet().stream()
                     .map(entry -> new InternalCacheDocument<K, V>()
                             .setId(entry.getValue())
@@ -201,16 +186,13 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
 
     void markAsStale(Set<ObjectId> objectIds) {
         if (!objectIds.isEmpty()) {
-            Failsafe.with(RetryPolicy.ofDefaults())
-                    .run(() -> {
-                        Bson filter = Filters.and(
-                                Filters.in(_ID.toString(), objectIds),
-                                Filters.eq(STALE.toString(), false));
-                        Bson update = Updates.combine(
-                                Updates.set(STALE.toString(), true),
-                                Updates.currentDate(EXPIRES.toString()));
-                        mongoCollection.updateMany(filter, update);
-                    });
+            Bson filter = Filters.and(
+                    Filters.in(_ID.toString(), objectIds),
+                    Filters.eq(STALE.toString(), false));
+            Bson update = Updates.combine(
+                    Updates.set(STALE.toString(), true),
+                    Updates.currentDate(EXPIRES.toString()));
+            mongoCollection.updateMany(filter, update);
         }
     }
 
@@ -445,19 +427,6 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
-    }
-
-    private Map<K, ObjectId> evaluateBulkWriteResult(Map<Integer, K> indexToKey, BulkWriteResult bulkWriteResult) {
-        Map<K, ObjectId> keyToObjectId = new HashMap<>();
-        keyToObjectId.putAll(bulkWriteResult.getInserts().stream()
-                .filter(bulkWriteInsert -> nonNull(indexToKey.get(bulkWriteInsert.getIndex())))
-                .collect(toMap(bulkWriteInsert -> indexToKey.get(bulkWriteInsert.getIndex()),
-                        bulkWriteInsert -> extractObjectId(bulkWriteInsert.getId()))));
-        keyToObjectId.putAll(bulkWriteResult.getUpserts().stream()
-                .filter(bulkWriteUpsert -> nonNull(indexToKey.get(bulkWriteUpsert.getIndex())))
-                .collect(toMap(bulkWriteUpsert -> indexToKey.get(bulkWriteUpsert.getIndex()),
-                        bulkWriteUpsert -> extractObjectId(bulkWriteUpsert.getId()))));
-        return keyToObjectId;
     }
 
     private ObjectId extractObjectId(BsonValue bsonValue) {

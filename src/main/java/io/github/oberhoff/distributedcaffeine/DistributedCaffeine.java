@@ -15,8 +15,6 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.CacheLoader;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -32,6 +30,10 @@ import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.bson.Document;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.ObjectMapper;
 
 import java.lang.System.Logger;
 import java.lang.reflect.Field;
@@ -76,19 +78,20 @@ import static java.util.stream.Collectors.joining;
  * @author Andreas Oberhoff
  * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
  */
-@SuppressWarnings("squid:S1452")
+@NullMarked
 public final class DistributedCaffeine<K, V> {
 
     private final Logger logger;
 
     private final MongoCollection<Document> mongoCollection;
-    private final DistributionMode distributionMode;
-    private final Serializer<K, ?> keySerializer;
-    private final Serializer<V, ?> valueSerializer;
-    private final InternalExtendedPersistence extendedPersistence;
-    private final InternalCacheLoader<K, V> cacheLoader;
-    private final Executor executor;
-    private final Cache<K, V> cache;
+
+    private final @Nullable DistributionMode distributionMode;
+    private final @Nullable Serializer<K, ?> keySerializer;
+    private final @Nullable Serializer<V, ?> valueSerializer;
+    private final @Nullable InternalExtendedPersistence extendedPersistence;
+    private final @Nullable InternalCacheLoader<K, V> cacheLoader;
+    private final @Nullable Executor executor;
+    private final @Nullable Cache<K, V> cache;
 
     private final InternalDocumentConverter<K, V> documentConverter;
     private final InternalMongoRepository<K, V> mongoRepository;
@@ -102,6 +105,7 @@ public final class DistributedCaffeine<K, V> {
         this.logger = System.getLogger(getClass().getName());
 
         this.mongoCollection = builder.mongoCollection;
+
         this.distributionMode = builder.distributionMode;
         this.keySerializer = builder.keySerializer;
         this.valueSerializer = builder.valueSerializer;
@@ -158,23 +162,24 @@ public final class DistributedCaffeine<K, V> {
      * @param <K> the key type of the cache
      * @param <V> the value type of the cache
      */
+    @NullMarked
     public static final class Builder<K, V> {
 
         private final MongoCollection<Document> mongoCollection;
 
-        private Caffeine<Object, Object> caffeineBuilder;
-        private DistributionMode distributionMode;
-        private Serializer<K, ?> keySerializer;
-        private Serializer<V, ?> valueSerializer;
-        private Integer extendedPersistenceSize;
-        private Duration extendedPersistenceTime;
-        private boolean extendedPersistenceLoader;
-        private Cache<K, V> cache;
+        private @Nullable Caffeine<Object, Object> caffeineBuilder;
+        private @Nullable DistributionMode distributionMode;
+        private @Nullable Serializer<K, ?> keySerializer;
+        private @Nullable Serializer<V, ?> valueSerializer;
+        private @Nullable Integer extendedPersistenceSize;
+        private @Nullable Duration extendedPersistenceTime;
+        private @Nullable Boolean extendedPersistenceLoader;
+        private @Nullable Cache<K, V> cache;
 
-        private InternalRemovalListener<K, V> removalListener;
-        private InternalEvictionListener<K, V> evictionListener;
-        private Executor executor;
-        private InternalCacheLoader<K, V> cacheLoader;
+        private @Nullable InternalRemovalListener<K, V> removalListener;
+        private @Nullable InternalEvictionListener<K, V> evictionListener;
+        private @Nullable Executor executor;
+        private @Nullable InternalCacheLoader<K, V> cacheLoader;
 
         private Builder(MongoCollection<Document> mongoCollection) {
             requireNonNull(mongoCollection, "mongoCollection cannot be null");
@@ -242,6 +247,7 @@ public final class DistributedCaffeine<K, V> {
          * @return a builder instance for chaining additional methods
          */
         public Builder<K, V> withForySerializer(Class<?>... registerClasses) {
+            requireNonNull(registerClasses, "registerClasses cannot be null");
             this.keySerializer = new ForySerializer<>(registerClasses);
             this.valueSerializer = new ForySerializer<>(registerClasses);
             return this;
@@ -436,8 +442,7 @@ public final class DistributedCaffeine<K, V> {
          * @param maximumSize the maximum size for the extended persistence (must be positive)
          * @return a builder instance for chaining additional methods
          */
-        public Builder<K, V> withExtendedPersistence(Integer maximumSize) {
-            requireNonNull(maximumSize, "maximumSize cannot be null");
+        public Builder<K, V> withExtendedPersistence(int maximumSize) {
             if (maximumSize <= 0) {
                 throw new IllegalArgumentException("maximumSize must be positive");
             }
@@ -508,7 +513,7 @@ public final class DistributedCaffeine<K, V> {
         /**
          * Constructs a variant of a {@link DistributedLoadingCache} (extends {@link LoadingCache}) instance with
          * special semantics regarding extended persistence which can be configured by size using
-         * {@link #withExtendedPersistence(Integer)} or by time using {@link #withExtendedPersistence(Duration)}.
+         * {@link #withExtendedPersistence(int)} or by time using {@link #withExtendedPersistence(Duration)}.
          * <p>
          * Special semantics means that a provided {@link CacheLoader} is only invoked to obtain missing cache entries
          * if these could not be reloaded from the MongoDB collection beforehand.
@@ -530,7 +535,7 @@ public final class DistributedCaffeine<K, V> {
         /**
          * Constructs a variant of a {@link DistributedLoadingCache} (extends {@link LoadingCache}) instance with
          * special semantics regarding extended persistence which can be configured by size using
-         * {@link #withExtendedPersistence(Integer)} or by time using {@link #withExtendedPersistence(Duration)}.
+         * {@link #withExtendedPersistence(int)} or by time using {@link #withExtendedPersistence(Duration)}.
          * <p>
          * Special semantics means that a provided {@link CacheLoader} is only invoked to obtain missing cache entries
          * if these could not be reloaded from the MongoDB collection beforehand.
@@ -688,10 +693,12 @@ public final class DistributedCaffeine<K, V> {
         return requireNonNull(distributionMode);
     }
 
+    @SuppressWarnings("squid:S1452")
     Serializer<K, ?> getKeySerializer() {
         return requireNonNull(keySerializer);
     }
 
+    @SuppressWarnings("squid:S1452")
     Serializer<V, ?> getValueSerializer() {
         return requireNonNull(valueSerializer);
     }

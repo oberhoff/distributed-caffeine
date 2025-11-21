@@ -15,9 +15,10 @@
  */
 package io.github.oberhoff.distributedcaffeine.serializer;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.ObjectMapper;
 
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
@@ -29,11 +30,12 @@ import static java.util.Objects.requireNonNull;
  * @author Andreas Oberhoff
  * @see <a href="https://github.com/FasterXML/jackson">Jackson on GitHub</a>
  */
+@NullMarked
 public class JacksonSerializer<T> implements JsonSerializer<T> {
 
     private final ObjectMapper objectMapper;
-    private final Class<T> typeClass;
-    private final TypeReference<T> typeReference;
+    private final @Nullable Class<T> typeClass;
+    private final @Nullable TypeReference<T> typeReference;
     private final boolean storeAsBinaryJson;
 
     /**
@@ -89,12 +91,12 @@ public class JacksonSerializer<T> implements JsonSerializer<T> {
     }
 
     @Override
-    public String serialize(T object) throws JsonProcessingException {
+    public String serialize(T object) {
         return objectMapper.writeValueAsString(object);
     }
 
     @Override
-    public T deserialize(String value) throws JsonProcessingException {
+    public T deserialize(String value) {
         if (nonNull(typeClass)) {
             return objectMapper.readValue(value, typeClass);
         } else {
