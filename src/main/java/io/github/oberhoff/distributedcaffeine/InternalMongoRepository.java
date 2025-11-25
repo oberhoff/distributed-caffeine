@@ -60,6 +60,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.Spliterator;
 import java.util.Spliterators;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -302,13 +303,20 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
                 new IndexOptions()
                         .unique(false)
                         .background(true));
+        IndexModel indexExpires = new IndexModel(
+                Indexes.ascending(EXPIRES.toString()),
+                new IndexOptions()
+                        .unique(false)
+                        .background(true)
+                        .expireAfter(1L, TimeUnit.MINUTES));
 
         List<IndexModel> indexes = List.of(
                 indexHashDiscriminator,
                 indexHashStatusDiscriminator,
                 indexStatusTouchedId,
                 indexIdStale,
-                indexStatusStale);
+                indexStatusStale,
+                indexExpires);
 
         mongoCollection.createIndexes(indexes);
 
@@ -316,7 +324,7 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
         Set<BsonDocument> indexKeys = indexes.stream()
                 .map(IndexModel::getKeys)
                 .map(Bson::toBsonDocument)
-                .collect(toCollection(HashSet::new));
+                .collect(Collectors.toSet());
         // add keys for default index
         indexKeys.add(new Document(_ID.toString(), 1).toBsonDocument());
 
