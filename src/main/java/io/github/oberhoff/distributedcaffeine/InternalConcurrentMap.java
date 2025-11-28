@@ -368,7 +368,7 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
         return concurrentMap.toString();
     }
 
-    @SuppressWarnings("squid:S2160")
+    @SuppressWarnings("java:S2160")
     private static final class WriteThroughEntry<K, V> extends SimpleEntry<K, V> {
 
         private final transient Map<K, V> map;

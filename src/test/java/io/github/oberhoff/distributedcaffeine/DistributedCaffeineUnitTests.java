@@ -57,7 +57,7 @@ final class DistributedCaffeineUnitTests {
 
         @DisplayName("that arguments and states are checked")
         @Test
-        @SuppressWarnings({"unchecked", "squid:S5778", "squid:S5961"})
+        @SuppressWarnings({"unchecked", "java:S5778", "java:S5961"})
         void test_Builder_checks_on_arguments_and_states() {
             @SuppressWarnings("unchecked")
             MongoCollection<Document> mongoCollection = mock(MongoCollection.class);
@@ -278,7 +278,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test Caffeine")
-    @SuppressWarnings("squid:S5838")
+    @SuppressWarnings("java:S5838")
     final class CaffeineUnit extends DistributedCaffeineUnitTestInstance {
 
         @DisplayName("that removal listener is not invoked if refresh returns old value")

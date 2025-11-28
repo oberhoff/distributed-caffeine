@@ -35,7 +35,7 @@ import java.util.List;
  * @param <V> the value type of the cache
  */
 @NullMarked
-@SuppressWarnings("squid:S1452")
+@SuppressWarnings("java:S1452")
 public interface DistributedPolicy<K, V> {
 
     /**

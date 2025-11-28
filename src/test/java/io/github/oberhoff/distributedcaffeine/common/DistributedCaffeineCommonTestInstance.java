@@ -62,6 +62,7 @@ public abstract class DistributedCaffeineCommonTestInstance {
     @AfterAll
     void afterAll() {
         this.executorService.shutdown();
+        Runtime.getRuntime().gc();
     }
 
     @BeforeEach

@@ -118,7 +118,6 @@ import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATI
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION_AND_EVICTION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.EXPIRES;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.HASH;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STALE;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STATUS;
@@ -245,7 +244,7 @@ final class DistributedCaffeineIntegrationTests {
     final class Mongo_8_latest extends DistributedCaffeineIntegration {
     }
 
-    @SuppressWarnings({"squid:S5838", "squid:S5778", "squid:S5961"})
+    @SuppressWarnings({"java:S5838", "java:S5778", "java:S5961"})
     abstract static class DistributedCaffeineIntegration extends DistributedCaffeineIntegrationTestInstance {
 
         @DisplayName("Test put() and getIfPresent()")
@@ -3982,10 +3981,10 @@ final class DistributedCaffeineIntegrationTests {
             distributedCache.distributedPolicy().getMongoCollection().updateMany(Filters.empty(),
                     Updates.combine(
                             Updates.set(STATUS.toString(), CACHED.toString()),
-                            Updates.set(EXPIRES.toString(), null)));
+                            Updates.set(STALE.toString(), false)));
 
             assertThatDataStoreHasCounts(
-                    Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(1)));
+                    Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(0)));
 
             // corrects inconsistencies in relation to not stale cache entries implicitly
             DistributedCache<Key, Value> syncedDistributedCache = createCache(

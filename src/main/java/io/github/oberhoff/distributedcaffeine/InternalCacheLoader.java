@@ -29,7 +29,6 @@ import java.util.concurrent.Executor;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static java.util.Objects.nonNull;
 
-@SuppressWarnings("squid:S1452")
 class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitializer<K, V> {
 
     private static final String LOAD_ALL = "loadAll";
@@ -109,6 +108,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
     }
 
     // invoked by custom implementation
+    @SuppressWarnings("java:S1452")
     Map<? extends K, ? extends V> loadAllDelegated(Set<? extends K> keys) throws Exception {
         if (extendedPersistence.hasExtendedPersistenceLoader()) {
             HashMap<K, V> keyToNewValue = new HashMap<>(loadAllExtendedFromMongo(keys));

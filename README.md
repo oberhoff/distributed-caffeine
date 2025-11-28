@@ -116,24 +116,27 @@ modes are provided:
 * `INVALIDATION`: Includes invalidation (explicit removal), but excludes population (manual or loading) and eviction
   (size- or time-based removal).
 
-#### Configuration of JSON (or BSON) serialization
+#### Configuration of serialization
 
 ```java
 DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(mongoCollection)
+        // .withForySerializer() // default, can be omitted
+        // .withJavaObjectSerializer() // classic 'Java Object Serialization'
         .withJsonSerializer(new ObjectMapper(), Key.class, Value.class, storeAsBinaryJson)
+        // .withJsonSerializer(new ObjectMapper(), new TypeReference<>(){}, new TypeReference<>(){}, storeAsBinaryJson) // type references
         .build();
 ```
 
 Keys and values of cache entries must be serialized to store them in the MongoDB collection and deserialized when they
 are loaded back into the cache instances. By default, these objects are stored in binary format using
-[Apache Fory](https://github.com/apache/fory). However, storage in JSON format sometimes makes more sense: The JSON
-format is more readable and can even be converted into MongoDB's own BSON format. JSON serialization is done internally
-using [Jackson](https://github.com/FasterXML/jackson). A customized object mapper can be passed if required, but can
-also be omitted if a default object mapper is sufficient. In addition, either the object classes or type references of
-the key and the value objects of a cache entry must be provided. The boolean flag `storeAsBinaryJson` indicates if the JSON
-data should be converted to BSON or stored as a string. Furthermore, the classic
-[Java Object Serialization](https://docs.oracle.com/en/java/javase/11/docs/specs/serialization/index.html) can also be
-configured for serialization.
+[Apache Fory](https://github.com/apache/fory). Binary format is also used if classic
+[Java Object Serialization](https://docs.oracle.com/en/java/javase/17/docs/specs/serialization/index.html) is
+configured. However, storage in JSON format sometimes makes more sense: The JSON format is more readable and can even be
+converted into MongoDB's own BSON format. JSON serialization is done internally using
+[Jackson](https://github.com/FasterXML/jackson). If required, a customized object mapper can be passed, but it can be
+omitted if the default object mapper is sufficient. Additionally, the object classes or type references of the key and
+value objects of a cache entry must be provided. The boolean flag `storeAsBinaryJson` indicates whether the JSON data
+should be converted to BSON or stored as a string.
 
 #### Configuration of custom serialization
 
@@ -144,8 +147,9 @@ DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(m
         .build();
 ```
 
-Serialization can be customized (also independently for keys and values) by implementing one of the
-`ByteArraySerializer`, `StringSerializer` or `JsonSerializer` interfaces.
+Serialization can be customized (also independently for keys and values) by extending `ForySerializer`,
+`JavaObjectSerializer` or `JacksonSerializer` classes or by implementing one of the `ByteArraySerializer`,
+`StringSerializer` or `JsonSerializer` interfaces.
 
 #### Configuration of extended persistence
 

@@ -58,12 +58,11 @@ import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
 
 /**
- * Distributed Caffeine is a {@link Caffeine}-based distributed cache using MongoDB change streams for near real-time
- * synchronization between multiple cache instances, especially across different machines.
+ * Starting point for configuring and constructing cache instances using a {@link Builder} returned by
+ * {@link #newBuilder(MongoCollection)}.
  * <p>
- * Cache instances can be configured and constructed using a builder returned by
- * {@link #newBuilder(MongoCollection)}. A cache instance can be of type {@link DistributedCache}
- * (extends {@link Cache}) or of type {@link DistributedLoadingCache} (extends {@link LoadingCache}).
+ * Cache instances can be of type {@link DistributedCache} (extends {@link Cache}) or of type
+ * {@link DistributedLoadingCache} (extends {@link LoadingCache}).
  * <p>
  * <b>Attention:</b> To ensure the integrity of distributed synchronization between cache instances, the following
  * minor restrictions apply:
@@ -368,13 +367,24 @@ public final class DistributedCaffeine<K, V> {
         }
 
         /**
-         * Specifies a custom serializer to be used for serializing key objects. Custom serializers must implement one
-         * of the following interfaces:
+         * Specifies a custom serializer to be used for serializing key objects.
+         * <p>
+         * Distributed Caffeine already has build-in serializers:
          * <ul>
-         *     <li>{@link ByteArraySerializer} for serializing an object to a byte array representation</li>
-         *     <li>{@link StringSerializer} for serializing an object to a string representation</li>
-         *     <li>{@link JsonSerializer} for serializing an object to a JSON representation (encoded as String or BSON)
-         *     </li>
+         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.ForySerializer}</li>
+         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer}</li>
+         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JavaObjectSerializer}</li>
+         * </ul>
+         * <p>
+         * If custom serializers are required, they must implement one of the following interfaces (or extend one of the
+         * above serializers):
+         * <ul>
+         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer} for serializing an object to a
+         *      byte array representation</li>
+         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.StringSerializer} for serializing an object to a
+         *      string representation</li>
+         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer} for serializing an object to a JSON
+         *      representation (encoded as String or BSON)</li>
          * </ul>
          * <p>
          * <b>Note:</b> A serializer with byte array representation using <i>Apache Fory</i> is the default serializer
@@ -391,13 +401,24 @@ public final class DistributedCaffeine<K, V> {
         }
 
         /**
-         * Specifies a custom serializer to be used for serializing value objects. Custom serializers must implement one
-         * of the following interfaces:
+         * Specifies a custom serializer to be used for serializing value objects.
+         * <p>
+         * Distributed Caffeine already has build-in serializers:
          * <ul>
-         *     <li>{@link ByteArraySerializer} for serializing an object to a byte array representation</li>
-         *     <li>{@link StringSerializer} for serializing an object to a string representation</li>
-         *     <li>{@link JsonSerializer} for serializing an object to a JSON representation (encoded as String or BSON)
-         *     </li>
+         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.ForySerializer}</li>
+         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer}</li>
+         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JavaObjectSerializer}</li>
+         * </ul>
+         * <p>
+         * If custom serializers are required, they must implement one of the following interfaces (or extend one of the
+         * above serializers):
+         * <ul>
+         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer} for serializing an object to a
+         *      byte array representation</li>
+         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.StringSerializer} for serializing an object to a
+         *      string representation</li>
+         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer} for serializing an object to a JSON
+         *      representation (encoded as String or BSON)</li>
          * </ul>
          * <p>
          * <b>Note:</b> A serializer with byte array representation using <i>Apache Fory</i> is the default serializer
@@ -568,7 +589,7 @@ public final class DistributedCaffeine<K, V> {
             return (DistributedLoadingCache<K1, V1>) distributedLoadingCache;
         }
 
-        @SuppressWarnings({"unchecked", "squid:S3011"})
+        @SuppressWarnings({"unchecked", "java:S3011"})
         private DistributedCaffeine<K, V> buildCommon(Function<Caffeine<Object, Object>, Cache<K, V>> build) {
             // use default Caffeine builder if no customized builder is set
             Caffeine<Object, Object> caffeine = Optional.ofNullable(this.caffeineBuilder)
@@ -693,12 +714,12 @@ public final class DistributedCaffeine<K, V> {
         return requireNonNull(distributionMode);
     }
 
-    @SuppressWarnings("squid:S1452")
+    @SuppressWarnings("java:S1452")
     Serializer<K, ?> getKeySerializer() {
         return requireNonNull(keySerializer);
     }
 
-    @SuppressWarnings("squid:S1452")
+    @SuppressWarnings("java:S1452")
     Serializer<V, ?> getValueSerializer() {
         return requireNonNull(valueSerializer);
     }

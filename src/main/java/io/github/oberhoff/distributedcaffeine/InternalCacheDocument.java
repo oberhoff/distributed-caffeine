@@ -42,7 +42,7 @@ import static java.util.Objects.isNull;
 
 class InternalCacheDocument<K, V> implements Comparable<InternalCacheDocument<K, V>> {
 
-    @SuppressWarnings("squid:S115")
+    @SuppressWarnings("java:S115")
     enum Field {
 
         _ID,

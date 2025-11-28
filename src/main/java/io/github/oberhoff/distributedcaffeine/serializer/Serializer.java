@@ -30,7 +30,7 @@ import org.jspecify.annotations.NullMarked;
  * @author Andreas Oberhoff
  */
 @NullMarked
-@SuppressWarnings({"unused", "squid:S112"})
+@SuppressWarnings({"unused", "java:S112"})
 public interface Serializer<T, U> {
 
     /**

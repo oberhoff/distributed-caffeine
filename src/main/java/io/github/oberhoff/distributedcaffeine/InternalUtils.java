@@ -86,14 +86,14 @@ class InternalUtils {
     @FunctionalInterface
     interface FailableRunnable {
 
-        @SuppressWarnings("squid:S112")
+        @SuppressWarnings("java:S112")
         void run() throws Throwable;
     }
 
     @FunctionalInterface
     interface FailableSupplier<T> {
 
-        @SuppressWarnings("squid:S112")
+        @SuppressWarnings("java:S112")
         T get() throws Throwable;
     }
 }

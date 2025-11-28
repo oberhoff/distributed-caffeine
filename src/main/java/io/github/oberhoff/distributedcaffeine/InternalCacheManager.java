@@ -58,7 +58,7 @@ import static java.util.Objects.nonNull;
 import static java.util.stream.Collectors.toCollection;
 import static java.util.stream.Collectors.toSet;
 
-@SuppressWarnings("squid:S1452")
+@SuppressWarnings("java:S1452")
 class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
 
     private final AtomicBoolean isActivated;
@@ -182,7 +182,7 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
         }
     }
 
-    @SuppressWarnings("squid:S3776")
+    @SuppressWarnings("java:S3776")
     void evictDistributed(K key, V value, RemovalCause removalCause) {
         // special handling (activated, eviction support, async, conditional replacement, origin independence)
         if (isActivated() && (removalCause.equals(RemovalCause.SIZE) || removalCause.equals(RemovalCause.EXPIRED))) {
@@ -278,7 +278,7 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
         }
     }
 
-    @SuppressWarnings("squid:S3776")
+    @SuppressWarnings("java:S3776")
     void manageInboundInsert(InternalCacheDocument<K, V> inboundCacheDocument, boolean eventBased) {
         if (isActivated() && inboundCacheDocument.getStatus().isConsideredBy(distributionMode)) {
             boolean manage = distributionMode.isPopulationConsidered();
