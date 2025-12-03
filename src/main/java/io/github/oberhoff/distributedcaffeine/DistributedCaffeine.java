@@ -32,8 +32,6 @@ import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.bson.Document;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
-import tools.jackson.core.type.TypeReference;
-import tools.jackson.databind.ObjectMapper;
 
 import java.lang.System.Logger;
 import java.lang.reflect.Field;
@@ -237,163 +235,30 @@ public final class DistributedCaffeine<K, V> {
         }
 
         /**
-         * Specifies that cache entries are serialized with byte array representation using <i>Apache Fory</i> when
-         * stored in the MongoDB collection.
+         * Specifies a serializer to be used for serializing key objects.
          * <p>
-         * <b>Note:</b> This is the default serializer if builder methods for serializers are skipped.
-         *
-         * @param registerClasses optional class of the object (with additional classes of nested objects) to serialize
-         * @return a builder instance for chaining additional methods
-         */
-        public Builder<K, V> withForySerializer(Class<?>... registerClasses) {
-            requireNonNull(registerClasses, "registerClasses cannot be null");
-            this.keySerializer = new ForySerializer<>(registerClasses);
-            this.valueSerializer = new ForySerializer<>(registerClasses);
-            return this;
-        }
-
-        /**
-         * Specifies that cache entries are serialized with byte array representation using <i>Java Object
-         * Serialization</i> when stored in the MongoDB collection. Objects to serialize must implement the
-         * {@link java.io.Serializable} interface.
-         * <p>
-         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fory</i> is the default serializer
-         * if builder methods for serializers are skipped.
-         *
-         * @return a builder instance for chaining additional methods
-         */
-        public Builder<K, V> withJavaObjectSerializer() {
-            this.keySerializer = new JavaObjectSerializer<>();
-            this.valueSerializer = new JavaObjectSerializer<>();
-            return this;
-        }
-
-        /**
-         * Specifies that cache entries are serialized with JSON representation (encoded as String or BSON) using
-         * <i>Jackson</i> when stored in the MongoDB collection. If a default object mapper is sufficient,
-         * {@link Builder#withJsonSerializer(Class, Class, boolean)} can be used instead.
-         * <p>
-         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fory</i> is the default serializer
-         * if builder methods for serializers are skipped.
-         *
-         * @param objectMapper      the customized object mapper
-         * @param keyClass          the class of the key object to serialize
-         * @param valueClass        the class of the value object to serialize
-         * @param storeAsBinaryJson {@code true} for BSON encoding or {@code false} for string encoding
-         * @return a builder instance for chaining additional methods
-         */
-        public Builder<K, V> withJsonSerializer(ObjectMapper objectMapper,
-                                                Class<K> keyClass,
-                                                Class<V> valueClass,
-                                                boolean storeAsBinaryJson) {
-            requireNonNull(objectMapper, "objectMapper cannot be null");
-            requireNonNull(keyClass, "keyClass cannot be null");
-            requireNonNull(valueClass, "valueClass cannot be null");
-            this.keySerializer = new JacksonSerializer<>(objectMapper, keyClass, storeAsBinaryJson);
-            this.valueSerializer = new JacksonSerializer<>(objectMapper, valueClass, storeAsBinaryJson);
-            return this;
-        }
-
-        /**
-         * Specifies that cache entries are serialized with JSON representation (encoded as String or BSON) using
-         * <i>Jackson</i> when stored in the MongoDB collection. If a default object mapper is sufficient,
-         * {@link Builder#withJsonSerializer(TypeReference, TypeReference, boolean)} can be used instead.
-         * <p>
-         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fory</i> is the default serializer
-         * if builder methods for serializers are skipped.
-         *
-         * @param objectMapper       the customized object mapper
-         * @param keyTypeReference   the type reference of the key object
-         * @param valueTypeReference the type reference of the value object
-         * @param storeAsBinaryJson  {@code true} for BSON encoding or {@code false} for string encoding
-         * @return a builder instance for chaining additional methods
-         */
-        public Builder<K, V> withJsonSerializer(ObjectMapper objectMapper,
-                                                TypeReference<K> keyTypeReference,
-                                                TypeReference<V> valueTypeReference,
-                                                boolean storeAsBinaryJson) {
-            requireNonNull(objectMapper, "objectMapper cannot be null");
-            requireNonNull(keyTypeReference, "keyTypeReference cannot be null");
-            requireNonNull(valueTypeReference, "valueTypeReference cannot be null");
-            this.keySerializer = new JacksonSerializer<>(objectMapper, keyTypeReference, storeAsBinaryJson);
-            this.valueSerializer = new JacksonSerializer<>(objectMapper, valueTypeReference, storeAsBinaryJson);
-            return this;
-        }
-
-        /**
-         * Specifies that cache entries are serialized with JSON representation (encoded as String or BSON) using
-         * <i>Jackson</i> when stored in the MongoDB collection. If a customized object mapper is required,
-         * {@link Builder#withJsonSerializer(ObjectMapper, Class, Class, boolean)} can be used instead.
-         * <p>
-         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fory</i> is the default serializer
-         * if builder methods for serializers are skipped.
-         *
-         * @param keyClass          the class of the key object to serialize
-         * @param valueClass        the class of the value object to serialize
-         * @param storeAsBinaryJson {@code true} for BSON encoding or {@code false} for string encoding
-         * @return a builder instance for chaining additional methods
-         */
-        public Builder<K, V> withJsonSerializer(Class<K> keyClass,
-                                                Class<V> valueClass,
-                                                boolean storeAsBinaryJson) {
-            requireNonNull(keyClass, "keyClass cannot be null");
-            requireNonNull(valueClass, "valueClass cannot be null");
-            this.keySerializer = new JacksonSerializer<>(keyClass, storeAsBinaryJson);
-            this.valueSerializer = new JacksonSerializer<>(valueClass, storeAsBinaryJson);
-            return this;
-        }
-
-        /**
-         * Specifies that cache entries are serialized with JSON representation (encoded as String or BSON) using
-         * <i>Jackson</i> when stored in the MongoDB collection. If a customized object mapper is required,
-         * {@link Builder#withJsonSerializer(ObjectMapper, TypeReference, TypeReference, boolean)} can be used instead.
-         * <p>
-         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fory</i> is the default serializer
-         * if builder methods for serializers are skipped.
-         *
-         * @param keyTypeReference   the type reference of the key object
-         * @param valueTypeReference the type reference of the value object
-         * @param storeAsBinaryJson  {@code true} for BSON encoding or {@code false} for string encoding
-         * @return a builder instance for chaining additional methods
-         */
-        public Builder<K, V> withJsonSerializer(TypeReference<K> keyTypeReference,
-                                                TypeReference<V> valueTypeReference,
-                                                boolean storeAsBinaryJson) {
-            requireNonNull(keyTypeReference, "keyTypeReference cannot be null");
-            requireNonNull(valueTypeReference, "valueTypeReference cannot be null");
-            this.keySerializer = new JacksonSerializer<>(keyTypeReference, storeAsBinaryJson);
-            this.valueSerializer = new JacksonSerializer<>(valueTypeReference, storeAsBinaryJson);
-            return this;
-        }
-
-        /**
-         * Specifies a custom serializer to be used for serializing key objects.
-         * <p>
-         * Distributed Caffeine already has build-in serializers:
+         * Distributed Caffeine already has built-in serializers:
          * <ul>
-         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.ForySerializer}</li>
-         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer}</li>
-         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JavaObjectSerializer}</li>
+         *      <li>{@link ForySerializer}</li>
+         *      <li>{@link JacksonSerializer}</li>
+         *      <li>{@link JavaObjectSerializer}</li>
          * </ul>
          * <p>
-         * If custom serializers are required, they must implement one of the following interfaces (or extend one of the
-         * above serializers):
+         * If custom serializers are required, they must either extend one of the aforementioned serializers or
+         * implement one of the following interfaces:
          * <ul>
-         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer} for serializing an object to a
-         *      byte array representation</li>
-         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.StringSerializer} for serializing an object to a
-         *      string representation</li>
-         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer} for serializing an object to a JSON
-         *      representation (encoded as String or BSON)</li>
+         *      <li>{@link ByteArraySerializer} for serializing an object to a byte array representation</li>
+         *      <li>{@link StringSerializer} for serializing an object to a string representation</li>
+         *      <li>{@link JsonSerializer} for serializing an object to a JSON representation (encoded as String or
+         *      BSON)</li>
          * </ul>
          * <p>
-         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fory</i> is the default serializer
-         * if builder methods for serializers are skipped.
+         * <b>Note:</b> {@link ForySerializer} is used as default if this method ist skipped.
          *
          * @param keySerializer the custom serializer for key objects
          * @return a builder instance for chaining additional methods
          */
-        public Builder<K, V> withCustomKeySerializer(Serializer<K, ?> keySerializer) {
+        public Builder<K, V> withSerializerForKeys(Serializer<K, ?> keySerializer) {
             requireNonNull(keySerializer, "keySerializer cannot be null");
             ensureInstanceOfSerializer(keySerializer);
             this.keySerializer = keySerializer;
@@ -401,33 +266,32 @@ public final class DistributedCaffeine<K, V> {
         }
 
         /**
-         * Specifies a custom serializer to be used for serializing value objects.
+         * Specifies a serializer to be used for serializing value objects.
          * <p>
-         * Distributed Caffeine already has build-in serializers:
+         * Distributed Caffeine already has built-in serializers:
          * <ul>
-         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.ForySerializer}</li>
-         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer}</li>
-         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JavaObjectSerializer}</li>
+         *      <li>{@link ForySerializer}</li>
+         *      <li>{@link JacksonSerializer}</li>
+         *      <li>{@link JavaObjectSerializer}</li>
          * </ul>
          * <p>
-         * If custom serializers are required, they must implement one of the following interfaces (or extend one of the
-         * above serializers):
+         * If custom serializers are required, they must either extend one of the aforementioned serializers or
+         * implement one of the following interfaces:
          * <ul>
-         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer} for serializing an object to a
+         *      <li>{@link ByteArraySerializer} for serializing an object to a
          *      byte array representation</li>
-         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.StringSerializer} for serializing an object to a
+         *      <li>{@link StringSerializer} for serializing an object to a
          *      string representation</li>
-         *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer} for serializing an object to a JSON
+         *      <li>{@link JsonSerializer} for serializing an object to a JSON
          *      representation (encoded as String or BSON)</li>
          * </ul>
          * <p>
-         * <b>Note:</b> A serializer with byte array representation using <i>Apache Fory</i> is the default serializer
-         * if builder methods for serializers are skipped.
+         * <b>Note:</b> {@link ForySerializer} is used as default if this method ist skipped.
          *
          * @param valueSerializer the custom serializer for value objects
          * @return a builder instance for chaining additional methods
          */
-        public Builder<K, V> withCustomValueSerializer(Serializer<V, ?> valueSerializer) {
+        public Builder<K, V> withSerializerForValues(Serializer<V, ?> valueSerializer) {
             requireNonNull(valueSerializer, "valueSerializer cannot be null");
             ensureInstanceOfSerializer(valueSerializer);
             this.valueSerializer = valueSerializer;
