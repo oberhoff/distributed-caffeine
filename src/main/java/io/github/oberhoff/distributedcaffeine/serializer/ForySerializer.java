@@ -24,6 +24,8 @@ import org.jspecify.annotations.NullMarked;
 
 import java.util.stream.Stream;
 
+import static java.util.Objects.requireNonNull;
+
 /**
  * Implementation of a serializer with byte array representation based on <i>Apache Fory</i>.
  *
@@ -47,6 +49,7 @@ public class ForySerializer<T> implements ByteArraySerializer<T> {
      * @param registerClasses optional class of the object (with additional classes of nested objects) to serialize
      */
     public ForySerializer(Class<?>... registerClasses) {
+        requireNonNull(registerClasses, "registerClasses cannot be null");
         this.fory = Fory.builder()
                 .withLanguage(Language.JAVA)
                 .requireClassRegistration(false)

@@ -50,6 +50,8 @@ import io.github.oberhoff.distributedcaffeine.common.logging.CaptureLogger;
 import io.github.oberhoff.distributedcaffeine.common.logging.CaptureLoggerFactory;
 import io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.ForySerializer;
+import io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer;
+import io.github.oberhoff.distributedcaffeine.serializer.JavaObjectSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.assertj.core.api.AbstractLongAssert;
@@ -76,7 +78,6 @@ import org.testcontainers.images.PullPolicy;
 import org.testcontainers.mongodb.MongoDBContainer;
 import org.testcontainers.utility.DockerImageName;
 import tools.jackson.core.type.TypeReference;
-import tools.jackson.databind.ObjectMapper;
 
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Inherited;
@@ -4685,36 +4686,35 @@ final class DistributedCaffeineIntegrationTests {
             return Stream.of(
                     new DistributedCaffeineConfiguration<>(
                             "with Fory Serializer",
-                            Builder::withForySerializer),
+                            CacheBuilder.identity()),
                     new DistributedCaffeineConfiguration<>(
                             "with Fory Serializer (Class)",
-                            b -> b.withCustomKeySerializer(new ForySerializer<>(Key.class))
-                                    .withCustomValueSerializer(new ForySerializer<>(Value.class))),
+                            b -> b.withSerializerForKeys(new ForySerializer<>(Key.class))
+                                    .withSerializerForValues(new ForySerializer<>(Value.class))),
                     new DistributedCaffeineConfiguration<>(
                             "with Java Object Serializer",
-                            Builder::withJavaObjectSerializer),
+                            b -> b.withSerializerForKeys(new JavaObjectSerializer<>())
+                                    .withSerializerForValues(new JavaObjectSerializer<>())),
                     new DistributedCaffeineConfiguration<>(
                             "with Jackson Serializer (BSON, Class)",
-                            b -> b.withJsonSerializer(Key.class, Value.class, true)),
+                            b -> b.withSerializerForKeys(new JacksonSerializer<>(Key.class, true))
+                                    .withSerializerForValues(new JacksonSerializer<>(Value.class, true))),
                     new DistributedCaffeineConfiguration<>(
                             "with Jackson Serializer (JSON, Class)",
-                            b -> b.withJsonSerializer(new ObjectMapper(), Key.class, Value.class, false)),
+                            b -> b.withSerializerForKeys(new JacksonSerializer<>(Key.class, false))
+                                    .withSerializerForValues(new JacksonSerializer<>(Value.class, false))),
                     new DistributedCaffeineConfiguration<>(
                             "with Jackson Serializer (BSON, TypeReference)",
-                            b -> b.withJsonSerializer(
-                                    new TypeReference<>() {
-                                    },
-                                    new TypeReference<>() {
-                                    },
-                                    true)),
+                            b -> b.withSerializerForKeys(new JacksonSerializer<>(new TypeReference<>() {
+                                    }, true))
+                                    .withSerializerForValues(new JacksonSerializer<>(new TypeReference<>() {
+                                    }, true))),
                     new DistributedCaffeineConfiguration<>(
                             "with Jackson Serializer (JSON, TypeReference)",
-                            b -> b.withJsonSerializer(new ObjectMapper(),
-                                    new TypeReference<>() {
-                                    },
-                                    new TypeReference<>() {
-                                    },
-                                    false))
+                            b -> b.withSerializerForKeys(new JacksonSerializer<>(new TypeReference<>() {
+                                    }, false))
+                                    .withSerializerForValues(new JacksonSerializer<>(new TypeReference<>() {
+                                    }, false)))
             );
         }
 

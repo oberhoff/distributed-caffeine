@@ -29,7 +29,7 @@ import java.io.ObjectOutputStream;
  *
  * @param <T> the type of the object to serialize
  * @author Andreas Oberhoff
- * @see <a href="https://docs.oracle.com/en/java/javase/11/docs/specs/serialization/index.html">
+ * @see <a href="https://docs.oracle.com/en/java/javase/17/docs/specs/serialization/index.html">
  * Java Object Serialization Specification</a>
  */
 @NullMarked

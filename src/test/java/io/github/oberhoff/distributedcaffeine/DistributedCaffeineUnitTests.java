@@ -29,8 +29,6 @@ import org.bson.Document;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import tools.jackson.core.type.TypeReference;
-import tools.jackson.databind.ObjectMapper;
 
 import java.time.Duration;
 import java.util.Set;
@@ -83,100 +81,21 @@ final class DistributedCaffeineUnitTests {
 
             assertThatThrownBy(() ->
                     createCache(mongoCollection,
-                            b -> b.withForySerializer(_null()),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("registerClasses cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(_null(), _null(), (Class<Object>) _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("objectMapper cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(new ObjectMapper(), _null(), (Class<Object>) _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("keyClass cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(new ObjectMapper(), Object.class, _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("valueClass cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(_null(), _null(), (TypeReference<Object>) _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("objectMapper cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(new ObjectMapper(), _null(), (TypeReference<Object>) _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("keyTypeReference cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(new ObjectMapper(), new TypeReference<>() {
-                            }, _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("valueTypeReference cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(_null(), (Class<Object>) _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("keyClass cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(Object.class, _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("valueClass cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(_null(), (TypeReference<Object>) _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("keyTypeReference cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(new TypeReference<>() {
-                            }, _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("valueTypeReference cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withCustomKeySerializer(_null()),
+                            b -> b.withSerializerForKeys(_null()),
                             DistributedCaffeine.Builder::build))
                     .isInstanceOf(NullPointerException.class)
                     .hasMessage("keySerializer cannot be null");
 
             assertThatThrownBy(() ->
                     createCache(mongoCollection,
-                            b -> b.withCustomValueSerializer(_null()),
+                            b -> b.withSerializerForValues(_null()),
                             DistributedCaffeine.Builder::build))
                     .isInstanceOf(NullPointerException.class)
                     .hasMessage("valueSerializer cannot be null");
 
             assertThatThrownBy(() ->
                     createCache(mongoCollection,
-                            b -> b.withCustomKeySerializer(new Serializer<>() {
+                            b -> b.withSerializerForKeys(new Serializer<>() {
                                 @Override
                                 public Object serialize(Object object) {
                                     return null;
@@ -194,7 +113,7 @@ final class DistributedCaffeineUnitTests {
 
             assertThatThrownBy(() ->
                     createCache(mongoCollection,
-                            b -> b.withCustomValueSerializer(new Serializer<>() {
+                            b -> b.withSerializerForValues(new Serializer<>() {
                                 @Override
                                 public Object serialize(Object object) {
                                     return null;

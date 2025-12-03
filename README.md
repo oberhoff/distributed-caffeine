@@ -39,14 +39,14 @@ in the MongoDB collection.
 As mentioned above, the scope of distributed synchronization depends on the configured distribution mode, so cache
 entries may or may not be persisted in the MongoDB collection. Therefore, when a new cache is instantiated, previously
 persisted cache entries that have not yet been invalidated or evicted may be loaded for initial synchronization. At the
-same time, the cache instance establishes continuous distributed synchronization (within the mentioned scope) between
-all related cache instances.
+same time, the cache instance establishes continuous distributed synchronization (within the aforementioned scope)
+between all related cache instances.
 
 Regardless of the configured distribution mode, persistence can be extended for evicted cache entries (passivation), so
 that even if they are no longer held in-memory by any cache instance, they remain in the MongoDB collection (also
-limitable by size and time) and may be reloaded on demand. Therefore, extended persistence can provide an adjustable mix
-of in-memory (also known as first-level, L1 or client-side) caching and database (also known as second-level, L2 or
-server-side) caching.
+limitable by size and time) and may be reloaded on demand (activation). Therefore, extended persistence can provide an
+adjustable mix of in-memory (also known as first-level, L1 or client-side) caching and database (also known as
+second-level, L2 or server-side) caching.
 
 To summarize some advantages: Distributed Caffeine combines established and widely used technologies that many
 developers are already familiar with or that are already in the tech stack of many applications. This combination
@@ -120,36 +120,20 @@ modes are provided:
 
 ```java
 DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(mongoCollection)
-        // .withForySerializer() // default, can be omitted
-        // .withJavaObjectSerializer() // classic 'Java Object Serialization'
-        .withJsonSerializer(new ObjectMapper(), Key.class, Value.class, storeAsBinaryJson)
-        // .withJsonSerializer(new ObjectMapper(), new TypeReference<>(){}, new TypeReference<>(){}, storeAsBinaryJson) // type references
+        .withSerializerForKeys(new JacksonSerializer<>(Key.class, storeAsBinaryJson))
+        .withSerializerForValues(new JacksonSerializer<>(Value.class, storeAsBinaryJson))
         .build();
 ```
 
 Keys and values of cache entries must be serialized to store them in the MongoDB collection and deserialized when they
-are loaded back into the cache instances. By default, these objects are stored in binary format using
-[Apache Fory](https://github.com/apache/fory). Binary format is also used if classic
-[Java Object Serialization](https://docs.oracle.com/en/java/javase/17/docs/specs/serialization/index.html) is
-configured. However, storage in JSON format sometimes makes more sense: The JSON format is more readable and can even be
-converted into MongoDB's own BSON format. JSON serialization is done internally using
-[Jackson](https://github.com/FasterXML/jackson). If required, a customized object mapper can be passed, but it can be
-omitted if the default object mapper is sufficient. Additionally, the object classes or type references of the key and
-value objects of a cache entry must be provided. The boolean flag `storeAsBinaryJson` indicates whether the JSON data
-should be converted to BSON or stored as a string.
-
-#### Configuration of custom serialization
-
-```java
-DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(mongoCollection)
-        .withCustomKeySerializer(new CustomSerializer())
-        .withCustomValueSerializer(new CustomSerializer())
-        .build();
-```
-
-Serialization can be customized (also independently for keys and values) by extending `ForySerializer`,
-`JavaObjectSerializer` or `JacksonSerializer` classes or by implementing one of the `ByteArraySerializer`,
-`StringSerializer` or `JsonSerializer` interfaces.
+are loaded back into the cache instances. Already built-in serializers are `ForySerializer` (default, no explicit
+configuration needed, stores objects in binary format using [Apache Fory](https://github.com/apache/fory)),
+`JavaObjectSerializer` (stores objects in binary format using classic
+[Java Object Serialization](https://docs.oracle.com/en/java/javase/17/docs/specs/serialization/index.html)) and
+`JacksonSerializer` (stores objects as JSON or BSON for better readability/accessibility using
+[Jackson](https://github.com/FasterXML/jackson)). Serialization can be customized by extending the aforementioned
+built-in serializers or by implementing one of the `ByteArraySerializer`, `StringSerializer` or `JsonSerializer`
+interfaces.
 
 #### Configuration of extended persistence
 

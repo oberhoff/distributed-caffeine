@@ -18,15 +18,15 @@
  * This package contains classes and interfaces that provide serializing/deserializing functionality for Distributed
  * Caffeine cache instances.
  * <p>
- * Distributed Caffeine already has build-in serializers:
+ * Distributed Caffeine already has built-in serializers:
  * <ul>
  *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.ForySerializer}</li>
  *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer}</li>
  *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JavaObjectSerializer}</li>
  * </ul>
  * <p>
- * If custom serializers are required, they must implement one of the following interfaces (or extend one of the
- * above serializers):
+ * If custom serializers are required, they must either extend one of the aforementioned serializers or implement one of
+ * the following interfaces:
  * <ul>
  *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer} for serializing an object to a
  *      byte array representation</li>
