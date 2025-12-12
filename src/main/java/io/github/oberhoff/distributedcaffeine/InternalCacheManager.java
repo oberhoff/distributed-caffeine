@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,8 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.RemovalCause;
-import com.mongodb.client.model.Filters;
-import org.bson.conversions.Bson;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.ExtendedPersistenceConfigurer;
 import org.bson.types.ObjectId;
 
 import java.time.Duration;
@@ -40,10 +39,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
 
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STALE;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STATUS;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED_LOADED;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED_REFRESHED;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED_REFRESHED_AFTER_WRITE;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_SIZE;
@@ -69,7 +67,7 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
     private Cache<K, V> cache;
     private Policy<K, V> policy;
     private DistributionMode distributionMode;
-    private InternalExtendedPersistence extendedPersistence;
+    private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
     private InternalMongoRepository<K, V> mongoRepository;
     private InternalMaintenanceWorker<K, V> maintenanceWorker;
     private InternalSynchronizationLock synchronizationLock;
@@ -90,7 +88,7 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
         this.cache = distributedCaffeine.getCache();
         this.policy = distributedCaffeine.getCache().policy();
         this.distributionMode = distributedCaffeine.getDistributionMode();
-        this.extendedPersistence = distributedCaffeine.getExtendedPersistence();
+        this.extendedPersistenceConfigurer = distributedCaffeine.getExtendedPersistenceConfigurer();
         this.mongoRepository = distributedCaffeine.getMongoRepository();
         this.maintenanceWorker = distributedCaffeine.getMaintenanceWorker();
         this.synchronizationLock = distributedCaffeine.getSynchronizationLock();
@@ -123,6 +121,16 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
 
     Map<? extends K, ? extends V> putAllDistributed(Map<? extends K, ? extends V> map) {
         manageOutboundInsert(map, CACHED, true);
+        return map;
+    }
+
+    V putDistributedLoaded(K key, V value) {
+        putAllDistributedLoaded(Map.of(key, value));
+        return value;
+    }
+
+    Map<? extends K, ? extends V> putAllDistributedLoaded(Map<? extends K, ? extends V> map) {
+        manageOutboundInsert(map, CACHED_LOADED, true);
         return map;
     }
 
@@ -189,7 +197,7 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
             // run asynchronous
             CompletableFuture.runAsync(() -> {
                 Status status;
-                if (extendedPersistence.hasExtendedPersistence()) {
+                if (extendedPersistenceConfigurer.isConfigured()) {
                     status = removalCause.equals(RemovalCause.SIZE)
                             ? EVICTED_SIZE_EXTENDED
                             : EVICTED_TIME_EXTENDED;
@@ -214,12 +222,7 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
 
     void synchronizeCacheFromStore() {
         if (distributionMode.isPopulationConsidered()) {
-            Bson filter = Filters.or(
-                    Filters.and(
-                            Filters.eq(STATUS.toString(), CACHED.toString()),
-                            Filters.eq(STALE.toString(), false)),
-                    Filters.ne(STATUS.toString(), CACHED.toString()));
-            mongoRepository.consumeCacheDocumentsGroupedByKeyInReverseOrder(filter, stream ->
+            mongoRepository.consumeCacheDocumentsGroupedByKeyInReverseOrder(null, stream ->
                     stream.forEach(cacheDocuments -> {
                         // newest cache entry must be treated in the same way as a distributed inbound insert
                         cacheDocuments.stream()

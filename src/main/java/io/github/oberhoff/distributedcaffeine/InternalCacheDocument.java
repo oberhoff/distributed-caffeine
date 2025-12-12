@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import java.lang.ref.WeakReference;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -71,6 +72,7 @@ class InternalCacheDocument<K, V> implements Comparable<InternalCacheDocument<K,
     enum Status {
 
         CACHED,
+        CACHED_LOADED,
         CACHED_REFRESHED,
         CACHED_REFRESHED_AFTER_WRITE,
         INVALIDATED,
@@ -81,7 +83,8 @@ class InternalCacheDocument<K, V> implements Comparable<InternalCacheDocument<K,
         EVICTED_SIZE_EXTENDED,
         EVICTED_TIME_EXTENDED;
 
-        static final Status[] CACHED_GROUP = new Status[]{CACHED, CACHED_REFRESHED, CACHED_REFRESHED_AFTER_WRITE};
+        static final Status[] CACHED_GROUP = new Status[]{CACHED, CACHED_LOADED, CACHED_REFRESHED,
+                CACHED_REFRESHED_AFTER_WRITE};
         static final Status[] INVALIDATED_GROUP = new Status[]{INVALIDATED, INVALIDATED_REFRESHED,
                 INVALIDATED_REFRESHED_AFTER_WRITE};
         static final Status[] EVICTED_GROUP = new Status[]{EVICTED_SIZE, EVICTED_TIME, EVICTED_SIZE_EXTENDED,
@@ -123,13 +126,7 @@ class InternalCacheDocument<K, V> implements Comparable<InternalCacheDocument<K,
         }
 
         private boolean isMemberOf(Status[] statuses) {
-            // for-loop is fastest
-            for (Status status : statuses) {
-                if (status.equals(this)) {
-                    return true;
-                }
-            }
-            return false;
+            return List.of(statuses).contains(this);
         }
 
         @Override

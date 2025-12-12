@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,9 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import com.github.benmanes.caffeine.cache.LoadingCache;
+import com.github.benmanes.caffeine.cache.stats.StatsCounter;
+
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.util.HashMap;
@@ -29,7 +32,6 @@ import java.util.concurrent.Executor;
 
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.entry;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
-import static io.github.oberhoff.distributedcaffeine.InternalUtils.handleFutureExceptions;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullIterable;
 import static java.lang.String.format;
 import static java.util.Collections.unmodifiableMap;
@@ -40,15 +42,15 @@ import static java.util.Objects.requireNonNull;
 class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, V>
         implements DistributedLoadingCache<K, V> {
 
-    private final ConcurrentMap<K, CompletableFuture<V>> loadOperations;
     private final ConcurrentMap<K, CompletableFuture<V>> refreshOperations;
 
     private Logger logger;
+    private LoadingCache<K, V> loadingCache;
     private InternalCacheLoader<K, V> cacheLoader;
     private Executor executor;
+    private StatsCounter statsCounter;
 
     InternalDistributedLoadingCache() {
-        this.loadOperations = new ConcurrentHashMap<>();
         this.refreshOperations = new ConcurrentHashMap<>();
         // see also initialize()
     }
@@ -57,32 +59,24 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
     public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
         super.initialize(distributedCaffeine);
         this.logger = distributedCaffeine.getLogger();
+        this.loadingCache = (LoadingCache<K, V>) cache;
         this.cacheLoader = distributedCaffeine.getCacheLoader();
         this.executor = distributedCaffeine.getExecutor();
+        this.statsCounter = distributedCaffeine.getStatsCounter();
     }
 
     @Override
     public V get(K key) {
         requireNonNull(key);
-        // custom implementation to bypass problematic internal asynchronous handling and to share logic
-        return handleFutureExceptions(() ->
-                getCommon(key, mappingKey -> getOrCreateLoadOperation(mappingKey).join()));
+        return synchronizationLock.getLocked(() ->
+                loadingCache.get(key));
     }
 
     @Override
     public Map<K, V> getAll(Iterable<? extends K> keys) {
         Set<K> keySet = requireNonNullIterable(keys);
-        // custom implementation to bypass problematic internal asynchronous handling and to share logic
-        return handleFutureExceptions(() ->
-                getAllCommon(keySet, mappedKeys ->
-                        cacheLoader.hasLoadAll() // retain 'use loadAll() if overridden' semantics
-                                ? getFailable(() -> cacheLoader.loadAllDelegated(mappedKeys), CompletionException::new)
-                                : mappedKeys.stream()
-                                .map(key -> entry(key, getOrCreateLoadOperation(key)))
-                                .toList().stream() // intermediate step to ensure concurrency
-                                .map(entry -> entry(entry.getKey(), entry.getValue().join()))
-                                .collect(HashMap::new, (hashMap, entry) -> // allow null values
-                                        hashMap.put(entry.getKey(), entry.getValue()), HashMap::putAll)));
+        return synchronizationLock.getLocked(() ->
+                loadingCache.getAll(keySet));
     }
 
     @Override
@@ -98,7 +92,7 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
     public CompletableFuture<Map<K, V>> refreshAll(Iterable<? extends K> keys) {
         Set<K> keySet = requireNonNullIterable(keys);
         // custom implementation to bypass problematic internal asynchronous handling
-        // accepted drawback: no mapping of in-flight refresh operations in policy.refreshes()
+        // accepted drawback: no mapping of in-flight refresh operations in 'policy.refreshes()'
         return CompletableFuture.supplyAsync(() -> {
             Map<K, V> keyToNewValue = keySet.stream()
                     .map(key -> entry(key, policy.getIfPresentQuietly(key)))
@@ -125,40 +119,28 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
         }, executor);
     }
 
-    private CompletableFuture<V> getOrCreateLoadOperation(K key) {
-        // retain the original 'only one concurrent load operation per key' semantics
-        return loadOperations.compute(key, (k, loadOperation) -> {
-            if (isNull(loadOperation)) {
-                return CompletableFuture.supplyAsync(() -> getFailable(() ->
-                                cacheLoader.loadDelegated(key), CompletionException::new), executor)
-                        // async because map must not be modified during computation
-                        .whenCompleteAsync((v, e) ->
-                                // retain the 'exceptions are forwarded' semantics
-                                loadOperations.remove(key), executor);
-            } else {
-                return loadOperation;
-            }
-        });
-    }
-
     private CompletableFuture<V> getOrCreateRefreshOperation(K key, V oldValue) {
         // retain the original 'only one concurrent refresh operation per key' semantics
         return refreshOperations.compute(key, (k, refreshOperation) -> {
-            if (isNull(refreshOperation)) {
+            if (isNull(refreshOperation) || refreshOperation.isCompletedExceptionally()) {
+                // retain the original 'load if null, reload if not null' semantics
                 return (isNull(oldValue)
-                        ? getFailable(() ->
-                                cacheLoader.asyncLoadDelegated(key, executor),
+                        ? getFailable(() -> cacheLoader.asyncLoadDelegated(key, executor),
                         CompletionException::new)
-                        : getFailable(() ->
-                                cacheLoader.asyncReloadDelegated(key, oldValue, executor),
+                        : getFailable(() -> cacheLoader.asyncReloadDelegated(key, oldValue, executor),
                         CompletionException::new))
-                        // async because map must not be modified during computation
+                        // intention: retain the original 'log exception and swallow' semantics
+                        // but strange: exceptions are still thrown, so this behavior is imitated
+                        // asynchronous because refreshOperations must not be modified during computation
+                        // additionally count stats due to custom implementation
                         .whenCompleteAsync((v, e) -> {
                             refreshOperations.remove(key);
-                            if (nonNull(e)) {
-                                // intention: retain the original 'log exception and swallow' semantics
-                                // but strange: exceptions are still thrown, so this behavior is imitated
-                                logger.log(Level.WARNING, format("Exception thrown during refresh for %s", key), e);
+                            if (isNull(e)) {
+                                statsCounter.recordLoadSuccess(1);
+                            } else {
+                                statsCounter.recordLoadFailure(1);
+                                logger.log(Level.WARNING,
+                                        format("Exception thrown during refresh for %s", key), e);
                             }
                         }, executor);
             } else {

@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,22 +27,23 @@ import dev.failsafe.spi.Scheduler;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 class InternalTaskPolicy<R> implements Policy<R> {
 
-    private final List<Runnable> postExecutionTasks;
+    private final List<Consumer<ExecutionResult<R>>> postExecutionTasks;
 
     InternalTaskPolicy() {
         this.postExecutionTasks = new ArrayList<>();
     }
 
-    InternalTaskPolicy<R> withPostExecutionTask(Runnable task) {
+    InternalTaskPolicy<R> withPostExecutionTask(Consumer<ExecutionResult<R>> task) {
         postExecutionTasks.add(task);
         return this;
     }
 
-    private void processPostExecutionTasks() {
-        postExecutionTasks.forEach(Runnable::run);
+    private void processPostExecutionTasks(ExecutionResult<R> result) {
+        postExecutionTasks.forEach(task -> task.accept(result));
     }
 
     @Override
@@ -57,7 +58,7 @@ class InternalTaskPolicy<R> implements Policy<R> {
 
             @Override
             public ExecutionResult<R> postExecute(ExecutionInternal<R> execution, ExecutionResult<R> result) {
-                processPostExecutionTasks();
+                processPostExecutionTasks(result);
                 return super.postExecute(execution, result);
             }
 
@@ -65,7 +66,7 @@ class InternalTaskPolicy<R> implements Policy<R> {
             protected synchronized CompletableFuture<ExecutionResult<R>> postExecuteAsync(
                     AsyncExecutionInternal<R> execution, ExecutionResult<R> result, Scheduler scheduler,
                     FailsafeFuture<R> future) {
-                processPostExecutionTasks();
+                processPostExecutionTasks(result);
                 return super.postExecuteAsync(execution, result, scheduler, future);
             }
         };

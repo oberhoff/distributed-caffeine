@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.SerializersConfigurer;
 import io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field;
 import io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status;
 import io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer;
@@ -42,8 +43,7 @@ import static java.util.Objects.isNull;
 
 class InternalDocumentConverter<K, V> implements InternalLazyInitializer<K, V> {
 
-    private Serializer<K, ?> keySerializer;
-    private Serializer<V, ?> valueSerializer;
+    private SerializersConfigurer<K, V> serializersConfigurer;
 
     InternalDocumentConverter() {
         // see also initialize()
@@ -51,21 +51,20 @@ class InternalDocumentConverter<K, V> implements InternalLazyInitializer<K, V> {
 
     @Override
     public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
-        this.keySerializer = distributedCaffeine.getKeySerializer();
-        this.valueSerializer = distributedCaffeine.getValueSerializer();
+        this.serializersConfigurer = distributedCaffeine.getSerializersConfigurer();
     }
 
     Object toMongoKey(K key) throws Exception {
-        return serialize(keySerializer, key);
+        return serialize(serializersConfigurer.getKeySerializer(), key);
     }
 
     Object toMongoValue(V value) throws Exception {
-        return serialize(valueSerializer, value);
+        return serialize(serializersConfigurer.getValueSerializer(), value);
     }
 
     InternalCacheDocument<K, V> toCacheDocument(Document document, Field... validationFields) throws Exception {
-        K deserializedKey = deserialize(keySerializer, KEY, document);
-        V deserializedValue = deserialize(valueSerializer, VALUE, document);
+        K deserializedKey = deserialize(serializersConfigurer.getKeySerializer(), KEY, document);
+        V deserializedValue = deserialize(serializersConfigurer.getValueSerializer(), VALUE, document);
         return new InternalCacheDocument<K, V>()
                 .setId(document.getObjectId(_ID.toString()))
                 .setDiscriminator(document.getString(DISCRIMINATOR.toString()))
