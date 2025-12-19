@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package io.github.oberhoff.distributedcaffeine;
 
 import dev.failsafe.Failsafe;
 import dev.failsafe.RetryPolicy;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.ExtendedPersistenceConfigurer;
 import org.bson.types.ObjectId;
 
 import java.lang.System.Logger;
@@ -49,7 +50,7 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
     private String mongoCollectionName;
     private InternalMongoRepository<K, V> mongoRepository;
     private InternalCacheManager<K, V> cacheManager;
-    private InternalExtendedPersistence extendedPersistence;
+    private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
     private CompletableFuture<Void> maintenanceCompletableFuture;
 
     InternalMaintenanceWorker() {
@@ -67,7 +68,7 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
         this.mongoCollectionName = distributedCaffeine.getMongoCollection().getNamespace().getCollectionName();
         this.mongoRepository = distributedCaffeine.getMongoRepository();
         this.cacheManager = distributedCaffeine.getCacheManager();
-        this.extendedPersistence = distributedCaffeine.getExtendedPersistence();
+        this.extendedPersistenceConfigurer = distributedCaffeine.getExtendedPersistenceConfigurer();
     }
 
     void activate() {
@@ -75,9 +76,9 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
         Optional.ofNullable(maintenanceCompletableFuture)
                 .ifPresent(CompletableFuture::join);
 
-        scheduleMaintenanceWork();
-
         isActivated.set(true);
+
+        scheduleMaintenanceWork();
     }
 
     void deactivate() {
@@ -102,12 +103,12 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
 
     void queueActivity(Set<InternalCacheDocument<K, V>> cacheDocuments) {
         if (isActivated()) {
-            if (extendedPersistence.hasExtendedPersistence()) {
+            if (extendedPersistenceConfigurer.isConfigured()) {
                 maybeToBeMarkedAsStaleForExtendedPersistence.addAll(cacheDocuments.stream()
                         .map(InternalCacheDocument::getHash)
                         .collect(toSet()));
             }
-            if (extendedPersistence.hasExtendedPersistenceBySize()) {
+            if (extendedPersistenceConfigurer.getMaximumSize().isPresent()) {
                 checkToBeMarkedAsStaleForExtendedPersistenceBySize.set(true);
             }
         }
@@ -127,7 +128,7 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
                 .build();
         ExecutorService executorService = Executors.newSingleThreadExecutor();
         InternalTaskPolicy<Void> taskPolicy = new InternalTaskPolicy<Void>()
-                .withPostExecutionTask(executorService::shutdown);
+                .withPostExecutionTask(result -> executorService.shutdown());
         maintenanceCompletableFuture = Failsafe.with(taskPolicy, retryPolicy)
                 .with(executorService)
                 .runAsync(this::processMaintenance);
@@ -136,7 +137,7 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
     private void processMaintenance() {
         if (isActivated()) {
             processToBeMarkedAsStale();
-            processMaybeToBeMarkedAsStaleForExtendedPersistenceBySize();
+            processMaybeToBeMarkedAsStaleForExtendedPersistence();
             processToBeMarkedAsStaleForExtendedPersistenceBySize();
             processCleanUp();
         }
@@ -153,9 +154,9 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
         }
     }
 
-    private void processMaybeToBeMarkedAsStaleForExtendedPersistenceBySize() {
+    private void processMaybeToBeMarkedAsStaleForExtendedPersistence() {
         // avoid unnecessary work
-        if (extendedPersistence.hasExtendedPersistence()
+        if (extendedPersistenceConfigurer.isConfigured()
                 && toBeMarkedAsStale.isEmpty()) {
             // traversing must be synchronized additionally (see documentation of synchronizedSet())
             synchronized (maybeToBeMarkedAsStaleForExtendedPersistence) {
@@ -170,7 +171,7 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
 
     private void processToBeMarkedAsStaleForExtendedPersistenceBySize() {
         // avoid unnecessary work
-        if (extendedPersistence.hasExtendedPersistenceBySize()
+        if (extendedPersistenceConfigurer.getMaximumSize().isPresent()
                 && toBeMarkedAsStale.isEmpty()
                 && maybeToBeMarkedAsStaleForExtendedPersistence.isEmpty()
                 && checkToBeMarkedAsStaleForExtendedPersistenceBySize.get()) {

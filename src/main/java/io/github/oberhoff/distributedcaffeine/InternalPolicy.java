@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -136,18 +136,17 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalLazyInitializer<K, V
             requireNonNull(key);
             requireNonNull(remappingFunction);
             requireNonNull(duration);
-            return synchronizationLock.getLocked(() -> {
-                BiFunction<K, V, V> distributedRemappingFunction = (k, v) -> {
-                    V newValue = remappingFunction.apply(k, v);
-                    if (isNull(newValue)) {
-                        cacheManager.invalidateDistributed(k);
-                    } else {
-                        cacheManager.putDistributed(k, newValue);
-                    }
-                    return newValue;
-                };
-                return varExpiration.compute(key, distributedRemappingFunction, duration);
-            });
+            BiFunction<K, V, V> distributedRemapping = (remappingKey, remappingValue) -> {
+                V value = remappingFunction.apply(remappingKey, remappingValue);
+                if (isNull(value)) {
+                    cacheManager.invalidateDistributed(remappingKey);
+                } else {
+                    cacheManager.putDistributed(remappingKey, value);
+                }
+                return value;
+            };
+            return synchronizationLock.getLocked(() ->
+                    varExpiration.compute(key, distributedRemapping, duration));
         }
 
         @Override

@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,12 +13,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 /**
  * This package contains classes and interfaces that provide serializing/deserializing functionality for Distributed
  * Caffeine cache instances.
  * <p>
- * Distributed Caffeine already has built-in serializers:
+ * Already built-in serializers:
  * <ul>
  *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.ForySerializer}</li>
  *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer}</li>

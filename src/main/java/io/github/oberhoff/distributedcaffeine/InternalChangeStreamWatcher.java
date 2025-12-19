@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -163,7 +163,7 @@ class InternalChangeStreamWatcher<K, V> implements InternalLazyInitializer<K, V>
                 .build();
         ExecutorService executorService = Executors.newSingleThreadExecutor();
         InternalTaskPolicy<Void> taskPolicy = new InternalTaskPolicy<Void>()
-                .withPostExecutionTask(executorService::shutdown);
+                .withPostExecutionTask(result -> executorService.shutdown());
         watcherCompletableFuture = Failsafe.with(taskPolicy, retryPolicy)
                 .with(executorService)
                 .runAsync(this::processChangeStreams);

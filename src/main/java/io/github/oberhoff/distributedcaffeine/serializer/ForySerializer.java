@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,8 +15,8 @@
  */
 package io.github.oberhoff.distributedcaffeine.serializer;
 
-import org.apache.fory.Fory;
 import org.apache.fory.ThreadSafeFory;
+import org.apache.fory.config.ForyBuilder;
 import org.apache.fory.config.Language;
 import org.apache.fory.logging.LogLevel;
 import org.apache.fory.logging.LoggerFactory;
@@ -43,17 +43,37 @@ public class ForySerializer<T> implements ByteArraySerializer<T> {
     }
 
     /**
+     * Constructs a serializer with byte array representation based on <i>Apache Fory</i>.
+     */
+    public ForySerializer() {
+        this(new Class<?>[0]);
+    }
+
+    /**
      * Constructs a serializer with byte array representation based on <i>Apache Fory</i> along with optional
      * class-based type information.
      *
      * @param registerClasses optional class of the object (with additional classes of nested objects) to serialize
      */
     public ForySerializer(Class<?>... registerClasses) {
+        this(new ForyBuilder()
+                        .withLanguage(Language.JAVA)
+                        .requireClassRegistration(false)
+                        .suppressClassRegistrationWarnings(true),
+                registerClasses);
+    }
+
+    /**
+     * Constructs a serializer with byte array representation based on <i>Apache Fory</i> along with a customizable
+     * Fory builder and optional class-based type information.
+     *
+     * @param foryBuilder     customizable Fory builder used to construct Fory instance internally
+     * @param registerClasses optional class of the object (with additional classes of nested objects) to serialize
+     */
+    public ForySerializer(ForyBuilder foryBuilder, Class<?>... registerClasses) {
+        requireNonNull(foryBuilder, "foryBuilder cannot be null");
         requireNonNull(registerClasses, "registerClasses cannot be null");
-        this.fory = Fory.builder()
-                .withLanguage(Language.JAVA)
-                .requireClassRegistration(false)
-                .suppressClassRegistrationWarnings(true)
+        this.fory = foryBuilder
                 .buildThreadSafeFory();
         Stream.of(registerClasses)
                 .forEach(fory::register);

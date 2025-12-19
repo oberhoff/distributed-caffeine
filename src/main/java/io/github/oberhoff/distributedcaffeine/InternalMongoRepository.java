@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@ import com.mongodb.client.model.Sorts;
 import com.mongodb.client.model.UpdateOneModel;
 import com.mongodb.client.model.UpdateOptions;
 import com.mongodb.client.model.Updates;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.ExtendedPersistenceConfigurer;
 import io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field;
 import org.bson.BsonDocument;
 import org.bson.BsonObjectId;
@@ -37,6 +38,7 @@ import org.bson.BsonValue;
 import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.bson.types.ObjectId;
+import org.jspecify.annotations.Nullable;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -63,7 +65,6 @@ import java.util.Spliterators;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
@@ -83,6 +84,7 @@ import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Statu
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_SIZE_EXTENDED;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_TIME_EXTENDED;
 import static java.lang.String.format;
+import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.groupingBy;
@@ -100,7 +102,7 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
     private Logger logger;
     private MongoCollection<Document> mongoCollection;
     private InternalDocumentConverter<K, V> documentConverter;
-    private InternalExtendedPersistence extendedPersistence;
+    private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
     private Long origin;
 
     InternalMongoRepository() {
@@ -116,34 +118,25 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
         this.logger = distributedCaffeine.getLogger();
         this.mongoCollection = distributedCaffeine.getMongoCollection();
         this.documentConverter = distributedCaffeine.getDocumentConverter();
-        this.extendedPersistence = distributedCaffeine.getExtendedPersistence();
+        this.extendedPersistenceConfigurer = distributedCaffeine.getExtendedPersistenceConfigurer();
         this.origin = distributedCaffeine.getOrigin();
 
         ensureIndexes();
     }
 
     void consumeCacheDocumentsGroupedByKeyInReverseOrder(
-            Set<? extends K> keys, Consumer<Stream<Set<InternalCacheDocument<K, V>>>> streamConsumer) {
-        Set<Integer> hashes = keys.stream()
+            @Nullable Set<? extends K> keys, Consumer<Stream<Set<InternalCacheDocument<K, V>>>> streamConsumer) {
+        Bson filter = isNull(keys)
+                ? Filters.empty()
+                : Filters.in(HASH.toString(), keys.stream()
                 .map(Objects::hashCode)
-                .collect(toSet());
-        Bson filter = Filters.in(HASH.toString(), hashes);
+                .collect(toSet()));
         try (Stream<Set<InternalCacheDocument<K, V>>> stream = streamCacheDocumentsGroupedByKey(filter)
                 // only return requested keys, even if hash collisions occur
-                .filter(entry -> keys.contains(entry.getKey()))
+                .filter(entry -> isNull(keys) || keys.contains(entry.getKey()))
                 .map(entry -> entry.getValue().stream()
                         .sorted(Comparator.reverseOrder())
                         .collect(toCollection(LinkedHashSet::new)))) {
-            streamConsumer.accept(stream);
-        }
-    }
-
-    void consumeCacheDocumentsGroupedByKeyInReverseOrder(
-            Bson filter, Consumer<Stream<Set<InternalCacheDocument<K, V>>>> streamConsumer) {
-        try (Stream<Set<InternalCacheDocument<K, V>>> stream = streamCacheDocumentsGroupedByKey(filter)
-                .map(entry -> entry.getValue().stream()
-                        .sorted(Comparator.reverseOrder())
-                        .collect(Collectors.toCollection(LinkedHashSet::new)))) {
             streamConsumer.accept(stream);
         }
     }
@@ -224,7 +217,7 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
                                 objectIds.addAll(documents.stream()
                                         .map(document -> toCacheDocumentOrNull(document, _ID, KEY, STATUS, TOUCHED))
                                         .filter(Objects::nonNull)
-                                        // retain "hashCode -> bucket -> equals" semantics
+                                        // ensure 'hashCode -> bucket -> equals' semantics
                                         .collect(groupingBy(InternalCacheDocument::getKey))
                                         .entrySet()
                                         .stream()
@@ -254,7 +247,7 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
             stream.map(document -> toCacheDocumentOrNull(document, _ID, KEY, STATUS))
                     .filter(Objects::nonNull)
                     .forEach(cacheDocument -> {
-                        if (extendedCounter.get() < extendedPersistence.getExtendedPersistenceSize()
+                        if (extendedCounter.get() < extendedPersistenceConfigurer.getMaximumSize().orElseThrow()
                                 && !newestKeys.contains(cacheDocument.getKey())) {
                             newestKeys.add(cacheDocument.getKey());
                             if (cacheDocument.isEvictedExtended()) {
@@ -324,7 +317,7 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
         Set<BsonDocument> indexKeys = indexes.stream()
                 .map(IndexModel::getKeys)
                 .map(Bson::toBsonDocument)
-                .collect(Collectors.toSet());
+                .collect(toSet());
         // add keys for default index
         indexKeys.add(new Document(_ID.toString(), 1).toBsonDocument());
 
@@ -358,7 +351,7 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
                                 keyToCacheDocuments.putAll(foundCacheDocuments.stream()
                                         .filter(cacheDocument ->
                                                 Objects.equals(hash, cacheDocument.getHash()))
-                                        // retain "hashCode -> bucket -> equals" semantics
+                                        // ensure 'hashCode -> bucket -> equals' semantics
                                         .collect(groupingBy(InternalCacheDocument::getKey, toSet())));
                                 hashes.remove(hash);
                                 foundCacheDocuments.removeIf(cacheDocument ->
@@ -390,7 +383,7 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
     }
 
     private Bson toMongoUpdate(K key, V value, Status status) {
-        if (extendedPersistence.hasExtendedPersistence()
+        if (extendedPersistenceConfigurer.isConfigured()
                 && status.isEvicted() && !status.isEvictedExtended()) {
             throw new IllegalStateException(format("Status must be '%s' or '%s'",
                     EVICTED_SIZE_EXTENDED, EVICTED_TIME_EXTENDED));
@@ -407,9 +400,9 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
                 stale = false;
                 Instant maximumInstant = LocalDateTime.of(9999, 1, 1, 0, 0)
                         .toInstant(ZoneOffset.UTC);
-                if (extendedPersistence.hasExtendedPersistenceByTime()) {
+                if (extendedPersistenceConfigurer.getMaximumTime().isPresent()) {
                     Instant now = Instant.now();
-                    Duration extendedDuration = extendedPersistence.getExtendedPersistenceTime();
+                    Duration extendedDuration = extendedPersistenceConfigurer.getMaximumTime().orElseThrow();
                     Duration maximumDuration = Duration.between(now, maximumInstant);
                     Instant extendedInstant = now.plus(extendedDuration.compareTo(maximumDuration) < 0
                             ? extendedDuration

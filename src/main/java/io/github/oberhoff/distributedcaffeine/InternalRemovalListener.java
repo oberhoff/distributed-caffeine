@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
 
-@SuppressWarnings("ClassCanBeRecord")
 class InternalRemovalListener<K, V> implements RemovalListener<K, V>, InternalLazyInitializer<K, V> {
 
     private final RemovalListener<K, V> removalListener;

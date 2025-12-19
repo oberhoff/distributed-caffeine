@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.mongodb.client.MongoCollection;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.SerializersConfigurer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import org.bson.Document;
 import org.jspecify.annotations.NonNull;
@@ -32,8 +33,7 @@ import static java.util.Objects.requireNonNull;
 class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, InternalLazyInitializer<K, V> {
 
     private DistributedCaffeine<K, V> distributedCaffeine;
-    private Serializer<K, ?> keySerializer;
-    private Serializer<V, ?> valueSerializer;
+    private SerializersConfigurer<K, V> serializersConfigurer;
     private InternalMongoRepository<K, V> mongoRepository;
 
     InternalDistributedPolicy() {
@@ -43,8 +43,7 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
     @Override
     public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
         this.distributedCaffeine = distributedCaffeine;
-        this.keySerializer = distributedCaffeine.getKeySerializer();
-        this.valueSerializer = distributedCaffeine.getValueSerializer();
+        this.serializersConfigurer = distributedCaffeine.getSerializersConfigurer();
         this.mongoRepository = distributedCaffeine.getMongoRepository();
     }
 
@@ -65,12 +64,12 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
 
     @Override
     public Serializer<K, ?> getKeySerializer() {
-        return keySerializer;
+        return serializersConfigurer.getKeySerializer();
     }
 
     @Override
     public Serializer<V, ?> getValueSerializer() {
-        return valueSerializer;
+        return serializersConfigurer.getValueSerializer();
     }
 
     @Override

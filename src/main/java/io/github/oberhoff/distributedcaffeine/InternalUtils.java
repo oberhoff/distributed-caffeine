@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,12 +18,8 @@ package io.github.oberhoff.distributedcaffeine;
 import java.util.AbstractMap.SimpleEntry;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.CancellationException;
-import java.util.concurrent.CompletionException;
 import java.util.function.Function;
-import java.util.function.Supplier;
 import java.util.stream.StreamSupport;
 
 import static java.util.Objects.requireNonNull;
@@ -54,7 +50,7 @@ class InternalUtils {
         getFailable(() -> {
             failableRunnable.run();
             return null;
-        }, RuntimeException::new);
+        });
     }
 
     static <T> T getFailable(FailableSupplier<T> failableSupplier) {
@@ -69,17 +65,6 @@ class InternalUtils {
             throw e;
         } catch (Throwable t) {
             throw runtimeExceptionFactory.apply(t);
-        }
-    }
-
-    static <T> T handleFutureExceptions(Supplier<T> supplier) {
-        try {
-            return supplier.get();
-        } catch (CompletionException | CancellationException e) {
-            throw Optional.ofNullable(e.getCause())
-                    .filter(RuntimeException.class::isInstance)
-                    .map(RuntimeException.class::cast)
-                    .orElse(e);
         }
     }
 

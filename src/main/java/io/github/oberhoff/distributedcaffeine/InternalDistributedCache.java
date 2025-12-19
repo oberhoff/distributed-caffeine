@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,8 +19,6 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
@@ -28,8 +26,6 @@ import java.util.function.Function;
 
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullIterable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullMap;
-import static java.util.Collections.unmodifiableMap;
-import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
@@ -56,30 +52,40 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
 
     @Override
     public V getIfPresent(K key) {
+        requireNonNull(key);
         return cache.getIfPresent(key);
+    }
+
+    @Override
+    public Map<K, V> getAllPresent(Iterable<? extends K> keys) {
+        Set<K> keySet = requireNonNullIterable(keys);
+        return cache.getAllPresent(keySet);
     }
 
     @Override
     public V get(K key, Function<? super K, ? extends V> mappingFunction) {
         requireNonNull(key);
         requireNonNull(mappingFunction);
-        // custom implementation to share logic
-        return getCommon(key, mappingFunction);
+        Function<K, V> distributedMapping = mappingKey -> {
+            V value = mappingFunction.apply(mappingKey);
+            if (nonNull(value)) {
+                cacheManager.putDistributed(mappingKey, value);
+            }
+            return value;
+        };
+        return synchronizationLock.getLocked(() ->
+                cache.get(key, distributedMapping));
     }
 
     @Override
-    public Map<K, V> getAllPresent(Iterable<? extends K> keys) {
-        return cache.getAllPresent(keys);
-    }
-
-    @Override
-    public Map<K, V> getAll(Iterable<? extends K> keys,
-                            Function<? super Set<? extends K>,
-                                    ? extends Map<? extends K, ? extends V>> mappingFunction) {
+    public Map<K, V> getAll(Iterable<? extends K> keys, Function<? super Set<? extends K>,
+            ? extends Map<? extends K, ? extends V>> mappingFunction) {
         Set<K> keySet = requireNonNullIterable(keys);
         requireNonNull(mappingFunction);
-        // custom implementation to share logic
-        return getAllCommon(keySet, mappingFunction);
+        Function<? super Set<? extends K>, ? extends Map<? extends K, ? extends V>> distributedMapping = mappingKeys ->
+                cacheManager.putAllDistributed(requireNonNullMap(mappingFunction.apply(mappingKeys)));
+        return synchronizationLock.getLocked(() ->
+                cache.getAll(keySet, distributedMapping));
     }
 
     @Override
@@ -154,41 +160,5 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
         InternalDistributedPolicy<K, V> internalDistributedPolicy = new InternalDistributedPolicy<>();
         internalDistributedPolicy.initialize(distributedCaffeine);
         return internalDistributedPolicy;
-    }
-
-    protected V getCommon(K key, Function<? super K, ? extends V> mappingFunction) {
-        V oldValue = policy.getIfPresentQuietly(key);
-        if (isNull(oldValue)) {
-            V newValue = mappingFunction.apply(key);
-            if (nonNull(newValue)) {
-                synchronizationLock.runLocked(() ->
-                        cache.put(key, cacheManager.putDistributed(key, newValue)));
-            }
-            return newValue;
-        }
-        return oldValue;
-    }
-
-    protected Map<K, V> getAllCommon(Set<K> keys, Function<? super Set<? extends K>,
-            ? extends Map<? extends K, ? extends V>> mappingFunction) {
-        Set<K> keysWithNullValues = new HashSet<>();
-        Map<K, V> keyToOldValue = new HashMap<>();
-        keys.forEach(key -> {
-            V oldValue = policy.getIfPresentQuietly(key);
-            if (isNull(oldValue)) {
-                keysWithNullValues.add(key);
-            } else {
-                keyToOldValue.put(key, oldValue);
-            }
-        });
-        // take existing entries into account (might be overwritten by loaded entries)
-        Map<K, V> keyToNewValue = new HashMap<>(keyToOldValue);
-        // retain 'all returned entries will be cached' semantics
-        keyToNewValue.putAll(requireNonNullMap(mappingFunction.apply(keysWithNullValues))); // key/value null check
-        synchronizationLock.runLocked(() ->
-                cache.putAll(cacheManager.putAllDistributed(keyToNewValue)));
-        // retain 'only the entries for keys will be returned' semantics
-        keyToNewValue.keySet().removeIf(key -> !keys.contains(key));
-        return unmodifiableMap(keyToNewValue);
     }
 }
