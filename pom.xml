@@ -15,7 +15,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <caffeine.version>3.2.3</caffeine.version>
         <mongodb.version>5.6.2</mongodb.version>
-        <fory.version>0.14.0</fory.version>
+        <fory.version>0.14.1</fory.version>
         <jackson.version>3.0.3</jackson.version>
         <failsafe.version>3.3.2</failsafe.version>
         <junit.version>6.0.1</junit.version>
