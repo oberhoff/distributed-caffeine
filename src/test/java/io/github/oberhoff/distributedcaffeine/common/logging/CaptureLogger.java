@@ -35,7 +35,7 @@ public class CaptureLogger extends AbstractLogger {
     public CaptureLogger(String name) {
         this.name = name;
         this.capturing = false;
-        this.loggingEvents = new ArrayList<>();
+        this.loggingEvents = Collections.synchronizedList(new ArrayList<>());
     }
 
     public void startCapturing() {

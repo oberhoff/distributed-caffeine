@@ -79,6 +79,11 @@ public abstract class DistributedCaffeineCommonTestInstance {
                 distributedCache.distributedPolicy().stopSynchronization());
         // invalidate all cache entries (only after synchronization is already stopped for all caches)
         this.distributedCacheInstances.forEach(Cache::invalidateAll);
+        // drop collection
+        this.distributedCacheInstances.stream()
+                .findFirst()
+                .ifPresent(distributedCache ->
+                        distributedCache.distributedPolicy().getMongoCollection().drop());
         this.distributedCacheInstances.clear();
     }
 

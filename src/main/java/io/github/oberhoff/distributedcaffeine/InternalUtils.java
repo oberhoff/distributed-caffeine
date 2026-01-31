@@ -16,12 +16,16 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import java.util.AbstractMap.SimpleEntry;
+import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.stream.IntStream;
 import java.util.stream.StreamSupport;
 
+import static java.lang.Math.min;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toUnmodifiableSet;
 
@@ -66,6 +70,14 @@ class InternalUtils {
         } catch (Throwable t) {
             throw runtimeExceptionFactory.apply(t);
         }
+    }
+
+    static <T> List<Set<T>> splitIntoPartitions(Collection<T> collection, int partitionSize) {
+        List<T> list = List.copyOf(collection);
+        return IntStream.range(0, list.size())
+                .filter(i -> i % partitionSize == 0)
+                .mapToObj(i -> Set.copyOf(list.subList(i, min(i + partitionSize, list.size()))))
+                .toList();
     }
 
     @FunctionalInterface

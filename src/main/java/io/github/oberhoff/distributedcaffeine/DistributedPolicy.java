@@ -26,7 +26,7 @@ import org.bson.Document;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 
-import java.util.List;
+import java.util.Set;
 
 /**
  * Interface representing an access point for inspecting and performing low-level operations on the cache instance
@@ -116,9 +116,9 @@ public interface DistributedPolicy<K, V> {
      * @param keys           the keys whose associated cache entries are to be returned
      * @param includeEvicted {@code true} if evicted cache entries with extended persistence should also be included,
      *                       {@code false} otherwise
-     * @return a list of cache entries to which the specified keys are mapped, keys without mapping are omitted
+     * @return a set of cache entries to which the specified keys are mapped, keys without mapping are omitted
      */
-    List<CacheEntry<K, V>> getAllFromMongo(Iterable<? extends K> keys, boolean includeEvicted);
+    Set<CacheEntry<K, V>> getAllFromMongo(Iterable<? extends K> keys, boolean includeEvicted);
 
     /**
      * Interface representing a cache entry containing key and value along with some metadata.

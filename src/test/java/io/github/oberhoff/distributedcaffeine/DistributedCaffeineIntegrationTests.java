@@ -97,7 +97,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.NoSuchElementException;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -141,12 +140,12 @@ import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Statu
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.INVALIDATED_REFRESHED_AFTER_WRITE;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.entry;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
+import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.lang.System.getProperty;
 import static java.time.temporal.ChronoUnit.FOREVER;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toMap;
-import static java.util.stream.Collectors.toSet;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCollection;
 import static org.assertj.core.api.Assertions.assertThatException;
@@ -1222,7 +1221,10 @@ final class DistributedCaffeineIntegrationTests {
         @MethodSource("provideCacheFactoriesWithDifferentSerializers")
         @ResourceLock(LOGGER_RESOURCE_LOCK)
         void test_DistributedLoadingCache_refreshAfterWrite_with_cache_loader(CacheFactory<Key, Value> cacheFactory) throws Exception {
+            AtomicLong ticker = new AtomicLong(0);
+
             Caffeine<Object, Object> caffeineBuilder = Caffeine.newBuilder()
+                    .ticker(ticker::get)
                     .refreshAfterWrite(Duration.ofNanos(1));
 
             CacheBuilder<Key, Value> cacheBuilder =
@@ -1287,6 +1289,9 @@ final class DistributedCaffeineIntegrationTests {
                 loadingCache.put(keyChecked, valueChecked);
                 loadingCache.put(keyUnchecked, valueUnchecked);
 
+                // set ticker to start triggering refreshAfterWrite
+                ticker.addAndGet(Duration.ofHours(1).toNanos());
+
                 // trigger refresh after write
                 getValue1.setValue(loadingCache.getIfPresent(key1));
                 getValue2.setValue(loadingCache.getIfPresent(key2));
@@ -1299,6 +1304,9 @@ final class DistributedCaffeineIntegrationTests {
                         .atMost(WAITING_DURATION)
                         .untilAsserted(() -> assertThat(loggerBoundedLocalCache.getLoggingEvents().size()).isEven());
             });
+
+            // reset ticker to stop triggering refreshAfterWrite
+            ticker.set(0);
 
             await("interactions")
                     .atMost(WAITING_DURATION)
@@ -1315,18 +1323,17 @@ final class DistributedCaffeineIntegrationTests {
                     .untilAsserted(() -> {
                         allCaches.forEach(loadingCache -> {
                             assertThat(loadingCache.estimatedSize()).isEqualTo(3);
-                            // get value quietly to not trigger refresh
-                            assertThat(loadingCache.policy().getIfPresentQuietly(key1))
+                            assertThat(loadingCache.getIfPresent(key1))
                                     .isNotNull()
                                     .isNotEqualTo(value1)
                                     .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("reloaded"));
-                            assertThat(loadingCache.policy().getIfPresentQuietly(key2)).isNull();
+                            assertThat(loadingCache.getIfPresent(key2)).isNull();
                             assertThat(getValue1.getValue()).isEqualTo(value1);
                             assertThat(getValue2.getValue()).isEqualTo(value2);
-                            assertThat(loadingCache.policy().getIfPresentQuietly(keyChecked))
+                            assertThat(loadingCache.getIfPresent(keyChecked))
                                     .isEqualTo(valueChecked)
                                     .isEqualTo(getValueChecked.getValue());
-                            assertThat(loadingCache.policy().getIfPresentQuietly(keyUnchecked))
+                            assertThat(loadingCache.getIfPresent(keyUnchecked))
                                     .isEqualTo(valueUnchecked)
                                     .isEqualTo(getValueUnchecked.getValue());
                         });
@@ -1361,11 +1368,11 @@ final class DistributedCaffeineIntegrationTests {
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentSerializers")
         void test_DistributedLoadingCache_stats(CacheFactory<Key, Value> cacheFactory) throws Exception {
-            AtomicLong ticker = new AtomicLong();
+            AtomicLong ticker = new AtomicLong(0);
 
             Caffeine<Object, Object> caffeineBuilder = Caffeine.newBuilder()
-                    .recordStats()
                     .ticker(ticker::get)
+                    .recordStats()
                     .refreshAfterWrite(Duration.ofNanos(1));
 
             CacheBuilder<Key, Value> cacheBuilder =
@@ -1456,13 +1463,13 @@ final class DistributedCaffeineIntegrationTests {
                 loadingCache.refresh(key6).join();
                 assertThatException().isThrownBy(() -> loadingCache.refresh(Key.of(0)).join());
                 loadingCache.refreshAll(Set.of(key6, key7)).join();
-                assertThatNoException().isThrownBy(() -> loadingCache.refreshAll(Set.of(Key.of(0))));
+                assertThatException().isThrownBy(() -> loadingCache.refreshAll(Set.of(Key.of(0))).join());
                 // set ticker to start triggering refreshAfterWrite
                 ticker.addAndGet(Duration.ofHours(1).toNanos());
                 loadingCache.getIfPresent(key1); // loadFailureCount + 1
                 loadingCache.getIfPresent(key7); // loadSuccessCount + 1
                 // reset ticker to stop triggering refreshAfterWrite
-                ticker.addAndGet(-1 * Duration.ofHours(1).toNanos());
+                ticker.set(0);
 
                 await("asynchronous count of stats")
                         .atMost(WAITING_DURATION)
@@ -3131,8 +3138,11 @@ final class DistributedCaffeineIntegrationTests {
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
         void test_DistributionMode_refresh_after_write(CacheFactory<Key, Value> cacheFactory) throws Exception {
+            AtomicLong ticker = new AtomicLong(0);
+
             CacheBuilder<Key, Value> cacheBuilder =
                     b -> b.withCaffeineBuilder(Caffeine.newBuilder()
+                            .ticker(ticker::get)
                             .refreshAfterWrite(Duration.ofNanos(1)));
 
             @SuppressWarnings("Convert2Lambda")
@@ -3171,20 +3181,18 @@ final class DistributedCaffeineIntegrationTests {
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(2);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(2);
-                            // get value quietly to not trigger refresh
-                            assertThat(distributedLoadingCacheA.policy().getIfPresentQuietly(key1)).isEqualTo(value1);
-                            assertThat(distributedLoadingCacheA.policy().getIfPresentQuietly(key2)).isEqualTo(value2);
-                            assertThat(distributedLoadingCacheB.policy().getIfPresentQuietly(key1)).isEqualTo(value1);
-                            assertThat(distributedLoadingCacheB.policy().getIfPresentQuietly(key2)).isEqualTo(value2);
+                            assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(value1);
+                            assertThat(distributedLoadingCacheA.getIfPresent(key2)).isEqualTo(value2);
+                            assertThat(distributedLoadingCacheB.getIfPresent(key1)).isEqualTo(value1);
+                            assertThat(distributedLoadingCacheB.getIfPresent(key2)).isEqualTo(value2);
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(0)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
-                            // get value quietly to not trigger refresh
-                            assertThat(distributedLoadingCacheA.policy().getIfPresentQuietly(key1)).isEqualTo(value1);
-                            assertThat(distributedLoadingCacheB.policy().getIfPresentQuietly(key2)).isEqualTo(value2);
+                            assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(value1);
+                            assertThat(distributedLoadingCacheB.getIfPresent(key2)).isEqualTo(value2);
                             assertThatDataStoreHasCounts(Count.isEmpty());
                         }
                     });
@@ -3192,8 +3200,14 @@ final class DistributedCaffeineIntegrationTests {
             doAnswer(invocation -> Value.of(invocation.<Key>getArgument(0).getId(), "refreshed"))
                     .when(cacheLoader).load(any(Key.class));
 
+            // set ticker to start triggering refreshAfterWrite
+            ticker.addAndGet(Duration.ofHours(1).toNanos());
+
             distributedLoadingCacheA.getIfPresent(key1);
             distributedLoadingCacheB.getIfPresent(key2);
+
+            // reset ticker to stop triggering refreshAfterWrite
+            ticker.set(0);
 
             await("asynchronous refreshes")
                     .atMost(WAITING_DURATION)
@@ -3208,23 +3222,22 @@ final class DistributedCaffeineIntegrationTests {
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(2);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(2);
-                            // get value quietly to not trigger refresh
-                            assertThat(requireNonNull(distributedLoadingCacheA.policy().getIfPresentQuietly(key1)))
+                            assertThat(requireNonNull(distributedLoadingCacheA.getIfPresent(key1)))
                                     .satisfies(value -> {
                                         assertThat(requireNonNull(value).getId()).isEqualTo(key1.getId());
                                         assertThat(value.getName()).isEqualTo("refreshed");
                                     });
-                            assertThat(requireNonNull(distributedLoadingCacheA.policy().getIfPresentQuietly(key2)))
+                            assertThat(requireNonNull(distributedLoadingCacheA.getIfPresent(key2)))
                                     .satisfies(value -> {
                                         assertThat(requireNonNull(value).getId()).isEqualTo(key2.getId());
                                         assertThat(value.getName()).isEqualTo("refreshed");
                                     });
-                            assertThat(requireNonNull(distributedLoadingCacheB.policy().getIfPresentQuietly(key1)))
+                            assertThat(requireNonNull(distributedLoadingCacheB.getIfPresent(key1)))
                                     .satisfies(value -> {
                                         assertThat(requireNonNull(value).getId()).isEqualTo(key1.getId());
                                         assertThat(value.getName()).isEqualTo("refreshed");
                                     });
-                            assertThat(requireNonNull(distributedLoadingCacheB.policy().getIfPresentQuietly(key2)))
+                            assertThat(requireNonNull(distributedLoadingCacheB.getIfPresent(key2)))
                                     .satisfies(value -> {
                                         assertThat(requireNonNull(value).getId()).isEqualTo(key2.getId());
                                         assertThat(value.getName()).isEqualTo("refreshed");
@@ -3236,15 +3249,14 @@ final class DistributedCaffeineIntegrationTests {
                                 || distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
-                            // get value quietly to not trigger refresh
-                            assertThat(requireNonNull(distributedLoadingCacheA.policy().getIfPresentQuietly(key1)))
+                            assertThat(requireNonNull(distributedLoadingCacheA.getIfPresent(key1)))
                                     .satisfies(value -> {
                                         assertThat(requireNonNull(value).getId()).isEqualTo(key1.getId());
                                         assertThat(value.getName()).isEqualTo("refreshed");
                                     });
-                            assertThat(distributedLoadingCacheA.policy().getIfPresentQuietly(key2)).isNull();
-                            assertThat(distributedLoadingCacheB.policy().getIfPresentQuietly(key1)).isNull();
-                            assertThat(requireNonNull(distributedLoadingCacheB.policy().getIfPresentQuietly(key2)))
+                            assertThat(distributedLoadingCacheA.getIfPresent(key2)).isNull();
+                            assertThat(distributedLoadingCacheB.getIfPresent(key1)).isNull();
+                            assertThat(requireNonNull(distributedLoadingCacheB.getIfPresent(key2)))
                                     .satisfies(value -> {
                                         assertThat(requireNonNull(value).getId()).isEqualTo(key2.getId());
                                         assertThat(value.getName()).isEqualTo("refreshed");
@@ -3256,8 +3268,14 @@ final class DistributedCaffeineIntegrationTests {
             doAnswer(invocation -> null)
                     .when(cacheLoader).load(any(Key.class));
 
+            // set ticker to start triggering refreshAfterWrite
+            ticker.addAndGet(Duration.ofHours(2).toNanos());
+
             distributedLoadingCacheA.getIfPresent(key1);
             distributedLoadingCacheB.getIfPresent(key2);
+
+            // reset ticker to stop triggering refreshAfterWrite
+            ticker.set(0);
 
             await("asynchronous refreshes")
                     .atMost(WAITING_DURATION)
@@ -3694,8 +3712,7 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNull();
                             assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
                             assertThat(distributedPolicy.getFromMongo(key3, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
@@ -4454,7 +4471,18 @@ final class DistributedCaffeineIntegrationTests {
                     .untilAsserted(() -> assertThatDataStoreHasCounts(
                             Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(1))));
 
-            // create inconsistencies in relation to not stale cache entries but prevent instant replace by cache manager
+            // check that 'expires' is set on datastore level for stale cache entries
+            Set<InternalCacheDocument<Key, Value>> cacheDocuments = new HashSet<>();
+            getDistributedCaffeine(distributedCache).getMongoRepository()
+                    .consumeCacheDocumentsGroupedByKeyNewestFirstForKeys(
+                            Set.of(key1), null,
+                            null, null,
+                            stream -> stream.forEach(cacheDocuments::addAll));
+            assertThat(cacheDocuments)
+                    .satisfiesOnlyOnce(cacheDocument -> assertThat(cacheDocument.getExpires()).isNull())
+                    .satisfiesOnlyOnce(cacheDocument -> assertThat(cacheDocument.getExpires()).isNotNull());
+
+            // create inconsistencies in relation to not stale cache entries but prevent instant correction by cache manager
             getDistributedCaffeine(distributedCache).getCacheManager().manageCleanUp(Duration.ZERO);
             distributedCache.put(key2, value2);
 
@@ -4573,7 +4601,7 @@ final class DistributedCaffeineIntegrationTests {
         @Test
         void stress_test_DistributedCaffeine_synchronization_from_data_store() throws Exception {
             int maximumSize = runsOnGitHub(10_000, 100_000);
-            int extendedMaximumSize = maximumSize / 2;
+            int extendedMaximumSize = maximumSize / 10;
             int numberOfOperations = 10_000;
 
             @SuppressWarnings("unchecked")
@@ -4719,7 +4747,6 @@ final class DistributedCaffeineIntegrationTests {
         void stress_test_DistributedCaffeine_multiple_threads() throws Exception {
             int maximumSize = 1000;
             int extendedMaximumSize = maximumSize / 2;
-            Duration refreshAfterWrite = Duration.ofSeconds(10);
             int numberOfOperations = 10_000;
             int levelOfParallelism = runsOnGitHub(5, 10);
 
@@ -4744,15 +4771,16 @@ final class DistributedCaffeineIntegrationTests {
                 }
             });
 
-            Supplier<DistributedLoadingCache<Key, Value>> cacheSupplier = () -> {
+            Function<AtomicLong, DistributedLoadingCache<Key, Value>> cacheSupplier = ticker -> {
                 DistributedCache<Key, Value> cache = createCache(
                         b -> b.withCaffeineBuilder(Caffeine.newBuilder()
+                                        .ticker(ticker::get)
                                         .removalListener(removalListener)
                                         .evictionListener(evictionListener)
                                         .executor(executorService)
                                         .maximumSize(maximumSize)
                                         .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration()))
-                                        .refreshAfterWrite(refreshAfterWrite))
+                                        .refreshAfterWrite(Duration.ofNanos(1)))
                                 .withExtendedPersistence(configurer -> configurer
                                         .withMaximumSize(extendedMaximumSize)
                                         .withLoadingStrategy(true)),
@@ -4761,24 +4789,30 @@ final class DistributedCaffeineIntegrationTests {
             };
 
             // first cache only watches passively
-            DistributedLoadingCache<Key, Value> firstDistributedLoadingCache = cacheSupplier.get();
+            DistributedLoadingCache<Key, Value> firstDistributedLoadingCache =
+                    cacheSupplier.apply(new AtomicLong(0));
             List<DistributedLoadingCache<Key, Value>> distributedLoadingCaches =
                     new ArrayList<>(List.of(firstDistributedLoadingCache));
             List<CompletableFuture<Void>> completableFutures = new ArrayList<>();
 
             IntStream.rangeClosed(1, levelOfParallelism).forEach(cacheIndex ->
                     completableFutures.add(CompletableFuture.runAsync(() -> {
-                        await(Duration.ofMillis(1_000).multipliedBy(Math.min(10, cacheIndex)));
-                        DistributedLoadingCache<Key, Value> distributedLoadingCache = cacheSupplier.get();
+                        await(Duration.ofMillis(1_000).multipliedBy(min(10, cacheIndex)));
+                        AtomicLong ticker = new AtomicLong(0);
+                        DistributedLoadingCache<Key, Value> distributedLoadingCache = cacheSupplier.apply(ticker);
                         distributedLoadingCaches.add(distributedLoadingCache);
                         IntStream.rangeClosed(1, numberOfOperations).forEach(operationIndex -> {
                             executeRandomOperation(distributedLoadingCache, maximumSize);
                             if (operationIndex == numberOfOperations / 2) {
                                 distributedLoadingCache.distributedPolicy().stopSynchronization();
-                                await(Duration.ofMillis(1_000).multipliedBy(Math.min(10, cacheIndex)));
+                                await(Duration.ofMillis(1_000).multipliedBy(min(10, cacheIndex)));
                                 distributedLoadingCache.distributedPolicy().startSynchronization();
+                                // set ticker to start triggering refreshAfterWrite
+                                ticker.addAndGet(Duration.ofHours(1).toNanos());
                             }
                         });
+                        // reset ticker to stop triggering refreshAfterWrite
+                        ticker.set(0);
                     }, executorService)));
 
             CompletableFuture.allOf(completableFutures.toArray(CompletableFuture[]::new)).join();
@@ -5003,11 +5037,10 @@ final class DistributedCaffeineIntegrationTests {
         }
 
         void assertThatDataStoreHasCounts(Count... counts) {
-            MongoCollection<Document> mongoCollection = distributedCacheInstances.stream()
+            InternalMongoRepository<?, ?> mongoRepository = getDistributedCaffeine(distributedCacheInstances.stream()
                     .findFirst()
-                    .orElseThrow()
-                    .distributedPolicy()
-                    .getMongoCollection();
+                    .orElseThrow())
+                    .getMongoRepository();
             Map<Status, Count> statusToCount = Stream.of(counts)
                     .collect(toMap(Count::status, Function.identity()));
             String fresh = "fresh";
@@ -5017,32 +5050,23 @@ final class DistributedCaffeineIntegrationTests {
                             Count.of(status, f -> f.isEqualTo(0), s -> s.isEqualTo(0))))
                     .forEach(count -> List.of(fresh, stale).forEach(label -> {
                         boolean isStale = label.equals(stale);
-                        Bson filter = Filters.and(
-                                Filters.eq(STATUS.toString(), count.status().toString()),
-                                Filters.eq(STALE.toString(), isStale));
                         (isStale ? count.stale() : count.fresh())
-                                .apply(assertThat(mongoCollection.countDocuments(filter))
+                                .apply(assertThat(mongoRepository.count(Set.of(count.status()), isStale))
                                         .describedAs(format("%n --> count '%s' for '%s'", label, count.status())));
                     }));
         }
 
         void assertThatDataStoreHasCounts(CountGrouped... countsGrouped) {
-            MongoCollection<Document> mongoCollection = distributedCacheInstances.stream()
+            InternalMongoRepository<?, ?> mongoRepository = getDistributedCaffeine(distributedCacheInstances.stream()
                     .findFirst()
-                    .orElseThrow()
-                    .distributedPolicy()
-                    .getMongoCollection();
+                    .orElseThrow())
+                    .getMongoRepository();
             String fresh = "fresh";
             String stale = "stale";
             Stream.of(countsGrouped).forEach(countGrouped -> List.of(fresh, stale).forEach(label -> {
                 boolean isStale = label.equals(stale);
-                Bson filter = Filters.and(
-                        Filters.in(STATUS.toString(), Stream.of(countGrouped.statuses())
-                                .map(Objects::toString)
-                                .collect(toSet())),
-                        Filters.eq(STALE.toString(), isStale));
                 (isStale ? countGrouped.stale() : countGrouped.fresh())
-                        .apply(assertThat(mongoCollection.countDocuments(filter))
+                        .apply(assertThat(mongoRepository.count(Set.of(countGrouped.statuses()), isStale))
                                 .describedAs(format("%n --> count '%s' for '%s'", label,
                                         Arrays.toString(countGrouped.statuses()))));
             }));
@@ -5233,11 +5257,13 @@ final class DistributedCaffeineIntegrationTests {
                     .map(this::getDistributedCaffeine)
                     .map(DistributedCaffeine::getMongoRepository)
                     .orElseThrow()
-                    .consumeCacheDocumentsGroupedByKeyInReverseOrder(null, stream -> stream
-                            .flatMap(Set::stream)
-                            .sorted()
-                            .forEach(cacheDocument ->
-                                    System.out.printf("%05d %s%n", counter.incrementAndGet(), cacheDocument)));
+                    .consumeCacheDocumentsGroupedByKeyNewestFirstForHashes(null, null,
+                            null, null,
+                            stream -> stream
+                                    .flatMap(Set::stream)
+                                    .sorted()
+                                    .forEach(cacheDocument ->
+                                            System.out.printf("%05d %s%n", counter.incrementAndGet(), cacheDocument)));
         }
 
         <T> T runsOnGitHub(T yes, T no) {

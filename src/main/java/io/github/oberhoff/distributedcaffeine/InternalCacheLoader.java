@@ -163,9 +163,13 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
 
     private Map<? extends K, ? extends V> loadAllExtendedFromMongo(Set<? extends K> keys) {
         Map<K, V> keyToValue = new HashMap<>();
-        mongoRepository.consumeCacheDocumentsGroupedByKeyInReverseOrder(keys, stream ->
-                stream.forEach(cacheDocuments -> cacheDocuments.stream()
+        // no data store filter on status and stale because the newest cache entry is needed
+        mongoRepository.consumeCacheDocumentsGroupedByKeyNewestFirstForKeys(
+                keys, null,
+                null, null,
+                stream -> stream.forEach(cacheDocuments -> cacheDocuments.stream()
                         .findFirst()
+                        .filter(cacheDocument -> !cacheDocument.isStale())
                         .filter(InternalCacheDocument::isEvictedExtended)
                         .ifPresent(cacheDocument ->
                                 keyToValue.put(cacheDocument.getKey(), cacheDocument.getValue()))));
