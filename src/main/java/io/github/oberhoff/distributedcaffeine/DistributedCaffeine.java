@@ -159,6 +159,7 @@ public final class DistributedCaffeine<K, V> {
      *
      * @param <K> the key type of the cache
      * @param <V> the value type of the cache
+     * @author Andreas Oberhoff
      */
     @NullMarked
     public static final class Builder<K, V> {
@@ -414,7 +415,7 @@ public final class DistributedCaffeine<K, V> {
      * @author Andreas Oberhoff
      */
     @NullMarked
-    public static class SerializersConfigurer<K, V> {
+    public static final class SerializersConfigurer<K, V> {
 
         private Serializer<K, ?> keySerializer;
         private Serializer<V, ?> valueSerializer;
@@ -517,7 +518,7 @@ public final class DistributedCaffeine<K, V> {
      * @author Andreas Oberhoff
      */
     @NullMarked
-    public static class ExtendedPersistenceConfigurer {
+    public static final class ExtendedPersistenceConfigurer {
 
         private @Nullable Integer maximumSize;
         private @Nullable Duration maximumTime;

@@ -21,8 +21,7 @@ import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import org.bson.Document;
 import org.jspecify.annotations.NonNull;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.HashSet;
 import java.util.Objects;
 import java.util.Set;
 
@@ -75,27 +74,23 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
     @Override
     public CacheEntry<@NonNull K, @NonNull V> getFromMongo(K key, boolean includeEvicted) {
         requireNonNull(key);
-        return getDistributed(key, includeEvicted);
-    }
-
-    @Override
-    public List<CacheEntry<K, V>> getAllFromMongo(Iterable<? extends K> keys, boolean includeEvicted) {
-        Set<K> keySet = requireNonNullIterable(keys);
-        return getAllDistributed(keySet, includeEvicted);
-    }
-
-    private CacheEntry<K, V> getDistributed(K key, boolean includeEvicted) {
-        return getAllDistributed(Set.of(key), includeEvicted).stream()
+        return getAllFromMongo(Set.of(key), includeEvicted).stream()
                 .filter(cacheEntry -> cacheEntry.getKey().equals(key))
                 .findFirst()
                 .orElse(null);
     }
 
-    private List<CacheEntry<K, V>> getAllDistributed(Set<? extends K> keys, boolean includeEvicted) {
-        List<CacheEntry<K, V>> cacheEntries = new ArrayList<>();
-        mongoRepository.consumeCacheDocumentsGroupedByKeyInReverseOrder(keys, stream ->
-                stream.forEach(cacheDocuments -> cacheDocuments.stream()
+    @Override
+    public Set<CacheEntry<K, V>> getAllFromMongo(Iterable<? extends K> keys, boolean includeEvicted) {
+        Set<K> keySet = requireNonNullIterable(keys);
+        Set<CacheEntry<K, V>> cacheEntries = new HashSet<>();
+        // no data store filter on status and stale because the newest cache entry is needed
+        mongoRepository.consumeCacheDocumentsGroupedByKeyNewestFirstForKeys(
+                keySet, null,
+                null, null,
+                stream -> stream.forEach(cacheDocuments -> cacheDocuments.stream()
                         .findFirst()
+                        .filter(cacheDocument -> !cacheDocument.isStale())
                         .filter(cacheDocument -> cacheDocument.isCached()
                                 || (includeEvicted && cacheDocument.isEvictedExtended()))
                         .map(this::toCacheEntry)

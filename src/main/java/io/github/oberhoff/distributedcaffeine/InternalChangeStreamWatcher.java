@@ -39,6 +39,7 @@ import org.bson.types.ObjectId;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -50,26 +51,11 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import static com.mongodb.client.model.changestream.OperationType.INSERT;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.DISCRIMINATOR;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.EXPIRES;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.HASH;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.KEY;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.ORIGIN;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STALE;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STATUS;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.TOUCHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.VALUE;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field._ID;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status;
+import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
-import static org.bson.BsonType.BOOLEAN;
-import static org.bson.BsonType.DATE_TIME;
-import static org.bson.BsonType.INT32;
-import static org.bson.BsonType.INT64;
-import static org.bson.BsonType.OBJECT_ID;
-import static org.bson.BsonType.STRING;
 
 class InternalChangeStreamWatcher<K, V> implements InternalLazyInitializer<K, V> {
 
@@ -84,7 +70,6 @@ class InternalChangeStreamWatcher<K, V> implements InternalLazyInitializer<K, V>
     private final AtomicReference<BsonTimestamp> operationTime;
 
     private Logger logger;
-    private DistributionMode distributionMode;
     private MongoCollection<Document> mongoCollection;
     private InternalCacheManager<K, V> cacheManager;
     private InternalDocumentConverter<K, V> documentConverter;
@@ -100,7 +85,6 @@ class InternalChangeStreamWatcher<K, V> implements InternalLazyInitializer<K, V>
     @Override
     public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
         this.logger = distributedCaffeine.getLogger();
-        this.distributionMode = distributedCaffeine.getDistributionMode();
         this.mongoCollection = distributedCaffeine.getMongoCollection();
         this.cacheManager = distributedCaffeine.getCacheManager();
         this.documentConverter = distributedCaffeine.getDocumentConverter();
@@ -154,7 +138,7 @@ class InternalChangeStreamWatcher<K, V> implements InternalLazyInitializer<K, V>
                 })
                 .withMaxAttempts(-1)
                 .withDelay(WATCHER_INTERVAL)
-                .withDelayFnOn(context -> WATCHER_INTERVAL.multipliedBy(Math.min(context.getAttemptCount(), 10)),
+                .withDelayFnOn(context -> WATCHER_INTERVAL.multipliedBy(min(context.getAttemptCount(), 10)),
                         Throwable.class)
                 .onRetryScheduled(event -> Optional.ofNullable(event.getLastException())
                         .ifPresent(throwable -> logger.log(Level.WARNING,
@@ -219,99 +203,24 @@ class InternalChangeStreamWatcher<K, V> implements InternalLazyInitializer<K, V>
     }
 
     private List<Bson> getAggregationPipeline() {
-        // watch only change stream documents of interest (specific operation types, fields or values)
+        List<String> projectionFields = new ArrayList<>();
+        projectionFields.add(DOCUMENT_KEY);
+        projectionFields.add(CLUSTER_TIME);
+        projectionFields.add(OPERATION_TYPE);
+        projectionFields.addAll(Stream.of(Field.values())
+                .map(this::fullDocument)
+                .toList());
         return List.of(
                 Aggregates.match(
                         Filters.and(
-                                Filters.eq(OPERATION_TYPE, INSERT.getValue()),
-                                Filters.exists(FULL_DOCUMENT),
-                                Filters.ne(FULL_DOCUMENT, null),
-                                Filters.exists(fullDocument(_ID)),
-                                Filters.type(fullDocument(_ID), OBJECT_ID),
-                                Filters.ne(fullDocument(_ID), null),
-                                Filters.exists(fullDocument(DISCRIMINATOR)),
-                                Filters.or(
-                                        Filters.eq(fullDocument(DISCRIMINATOR), null),
-                                        Filters.and(
-                                                Filters.ne(fullDocument(DISCRIMINATOR), null),
-                                                Filters.type(fullDocument(DISCRIMINATOR), STRING))),
-                                Filters.exists(fullDocument(ORIGIN)),
-                                Filters.type(fullDocument(ORIGIN), INT64),
-                                Filters.ne(fullDocument(ORIGIN), null),
-                                Filters.exists(fullDocument(HASH)),
-                                Filters.type(fullDocument(HASH), INT32),
-                                Filters.ne(fullDocument(HASH), null),
-                                Filters.exists(fullDocument(KEY)),
-                                Filters.ne(fullDocument(KEY), null),
-                                Filters.exists(fullDocument(VALUE)),
-                                Filters.or(
-                                        Filters.and(
-                                                Filters.ne(fullDocument(VALUE), null),
-                                                Filters.in(fullDocument(STATUS),
-                                                        aggregateStatusesToStrings(
-                                                                Status.CACHED_GROUP,
-                                                                Status.EVICTED_GROUP))),
-                                        Filters.and(
-                                                Filters.eq(fullDocument(VALUE), null),
-                                                Filters.in(fullDocument(STATUS),
-                                                        aggregateStatusesToStrings(
-                                                                Status.INVALIDATED_GROUP)))),
-                                Filters.exists(fullDocument(STATUS)),
-                                Filters.type(fullDocument(STATUS), STRING),
-                                Filters.in(fullDocument(STATUS),
-                                        filterStatuses(aggregateStatuses(
-                                                Status.CACHED_GROUP,
-                                                Status.INVALIDATED_GROUP,
-                                                Status.EVICTED_GROUP))),
-                                Filters.exists(fullDocument(STALE)),
-                                Filters.type(fullDocument(STALE), BOOLEAN),
-                                Filters.ne(fullDocument(STALE), null),
-                                Filters.exists(fullDocument(TOUCHED)),
-                                Filters.type(fullDocument(TOUCHED), DATE_TIME),
-                                Filters.ne(fullDocument(TOUCHED), null),
-                                Filters.exists(fullDocument(EXPIRES)),
-                                Filters.or(
-                                        Filters.and(
-                                                Filters.eq(fullDocument(EXPIRES), null),
-                                                Filters.in(fullDocument(STATUS),
-                                                        aggregateStatusesToStrings(
-                                                                Status.CACHED_GROUP))),
-                                        Filters.and(
-                                                Filters.ne(fullDocument(EXPIRES), null),
-                                                Filters.type(fullDocument(EXPIRES), DATE_TIME),
-                                                Filters.in(fullDocument(STATUS),
-                                                        aggregateStatusesToStrings(
-                                                                Status.INVALIDATED_GROUP,
-                                                                Status.EVICTED_GROUP)))))),
+                                // TODO add discriminator to filter (depending of connection/watcher is shared)
+                                Filters.eq(OPERATION_TYPE, INSERT.getValue()))),
                 Aggregates.project(
                         Projections.fields(
-                                Projections.include(DOCUMENT_KEY, CLUSTER_TIME, OPERATION_TYPE,
-                                        fullDocument(_ID), fullDocument(DISCRIMINATOR), fullDocument(ORIGIN),
-                                        fullDocument(HASH), fullDocument(KEY), fullDocument(VALUE),
-                                        fullDocument(STATUS), fullDocument(STALE), fullDocument(TOUCHED),
-                                        fullDocument(EXPIRES)))));
+                                Projections.include(projectionFields))));
     }
 
     private String fullDocument(Field field) {
         return format("%s.%s", FULL_DOCUMENT, field.toString());
-    }
-
-    private Status[] aggregateStatuses(Status[]... statuses) {
-        return Stream.of(statuses)
-                .flatMap(Stream::of)
-                .toArray(Status[]::new);
-    }
-
-    private String[] aggregateStatusesToStrings(Status[]... statuses) {
-        return Stream.of(aggregateStatuses(statuses))
-                .map(Status::toString)
-                .toArray(String[]::new);
-    }
-
-    private String[] filterStatuses(Status... statuses) {
-        return Stream.of(statuses)
-                .filter(status -> status.isConsideredBy(distributionMode))
-                .map(Status::toString)
-                .toArray(String[]::new);
     }
 }

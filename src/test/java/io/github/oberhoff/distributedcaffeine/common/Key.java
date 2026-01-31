@@ -69,7 +69,6 @@ public class Key implements Serializable {
         Key that = (Key) obj;
         return Objects.equals(this.id, that.id)
                 && Objects.equals(this.name, that.name);
-
     }
 
     @Override
