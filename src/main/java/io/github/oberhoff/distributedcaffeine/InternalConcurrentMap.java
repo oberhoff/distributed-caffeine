@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -368,7 +368,7 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
         return concurrentMap.toString();
     }
 
-    @SuppressWarnings("squid:S2160")
+    @SuppressWarnings("java:S2160")
     private static final class WriteThroughEntry<K, V> extends SimpleEntry<K, V> {
 
         private final transient Map<K, V> map;

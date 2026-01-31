@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
 import com.mongodb.client.MongoCollection;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Builder;
 import io.github.oberhoff.distributedcaffeine.common.DistributedCaffeineCommonTestInstance;
 import io.github.oberhoff.distributedcaffeine.common.Key;
 import io.github.oberhoff.distributedcaffeine.common.Value;
@@ -29,8 +30,6 @@ import org.bson.Document;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import tools.jackson.core.type.TypeReference;
-import tools.jackson.databind.ObjectMapper;
 
 import java.time.Duration;
 import java.util.Set;
@@ -52,12 +51,12 @@ import static org.mockito.Mockito.verifyNoInteractions;
 final class DistributedCaffeineUnitTests {
 
     @Nested
-    @DisplayName("Test Builder")
+    @DisplayName("Test builder and configurers")
     final class BuilderUnit extends DistributedCaffeineUnitTestInstance {
 
         @DisplayName("that arguments and states are checked")
         @Test
-        @SuppressWarnings({"unchecked", "squid:S5778", "squid:S5961"})
+        @SuppressWarnings({"unchecked", "java:S5778", "java:S5961"})
         void test_Builder_checks_on_arguments_and_states() {
             @SuppressWarnings("unchecked")
             MongoCollection<Document> mongoCollection = mock(MongoCollection.class);
@@ -70,166 +69,115 @@ final class DistributedCaffeineUnitTests {
             assertThatThrownBy(() ->
                     createCache(mongoCollection,
                             b -> b.withCaffeineBuilder(_null()),
-                            DistributedCaffeine.Builder::build))
+                            Builder::build))
                     .isInstanceOf(NullPointerException.class)
                     .hasMessage("caffeineBuilder cannot be null");
 
             assertThatThrownBy(() ->
                     createCache(mongoCollection,
                             b -> b.withDistributionMode(_null()),
-                            DistributedCaffeine.Builder::build))
+                            Builder::build))
                     .isInstanceOf(NullPointerException.class)
                     .hasMessage("distributionMode cannot be null");
 
             assertThatThrownBy(() ->
                     createCache(mongoCollection,
-                            b -> b.withForySerializer(_null()),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("registerClasses cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(_null(), _null(), (Class<Object>) _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("objectMapper cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(new ObjectMapper(), _null(), (Class<Object>) _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("keyClass cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(new ObjectMapper(), Object.class, _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("valueClass cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(_null(), _null(), (TypeReference<Object>) _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("objectMapper cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(new ObjectMapper(), _null(), (TypeReference<Object>) _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("keyTypeReference cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(new ObjectMapper(), new TypeReference<>() {
-                            }, _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("valueTypeReference cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(_null(), (Class<Object>) _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("keyClass cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(Object.class, _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("valueClass cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(_null(), (TypeReference<Object>) _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("keyTypeReference cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withJsonSerializer(new TypeReference<>() {
-                            }, _null(), true),
-                            DistributedCaffeine.Builder::build))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("valueTypeReference cannot be null");
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withCustomKeySerializer(_null()),
-                            DistributedCaffeine.Builder::build))
+                            b -> b.withSerializers(configurer -> configurer
+                                    .withKeySerializer(_null())),
+                            Builder::build))
                     .isInstanceOf(NullPointerException.class)
                     .hasMessage("keySerializer cannot be null");
 
             assertThatThrownBy(() ->
                     createCache(mongoCollection,
-                            b -> b.withCustomValueSerializer(_null()),
-                            DistributedCaffeine.Builder::build))
+                            b -> b.withSerializers(configurer -> configurer
+                                    .withValueSerializer(_null())),
+                            Builder::build))
                     .isInstanceOf(NullPointerException.class)
                     .hasMessage("valueSerializer cannot be null");
 
             assertThatThrownBy(() ->
                     createCache(mongoCollection,
-                            b -> b.withCustomKeySerializer(new Serializer<>() {
-                                @Override
-                                public Object serialize(Object object) {
-                                    return null;
-                                }
+                            b -> b.withSerializers(configurer ->
+                                    configurer.withKeySerializer(new Serializer<>() {
+                                        @Override
+                                        public Object serialize(Object object) {
+                                            return null;
+                                        }
 
-                                @Override
-                                public Object deserialize(Object value) {
-                                    return null;
-                                }
-                            }),
-                            DistributedCaffeine.Builder::build))
+                                        @Override
+                                        public Object deserialize(Object value) {
+                                            return null;
+                                        }
+                                    })),
+                            Builder::build))
                     .isInstanceOf(IllegalArgumentException.class)
-                    .hasMessage("Custom serializer must implement one of the following interfaces: "
+                    .hasMessage("Serializers must implement one of the following interfaces: "
                             .concat("ByteArraySerializer, StringSerializer, JsonSerializer"));
 
             assertThatThrownBy(() ->
                     createCache(mongoCollection,
-                            b -> b.withCustomValueSerializer(new Serializer<>() {
-                                @Override
-                                public Object serialize(Object object) {
-                                    return null;
-                                }
+                            b -> b.withSerializers(configurer ->
+                                    configurer.withValueSerializer(new Serializer<>() {
+                                        @Override
+                                        public Object serialize(Object object) {
+                                            return null;
+                                        }
 
-                                @Override
-                                public Object deserialize(Object value) {
-                                    return null;
-                                }
-                            }),
-                            DistributedCaffeine.Builder::build))
+                                        @Override
+                                        public Object deserialize(Object value) {
+                                            return null;
+                                        }
+                                    })),
+                            Builder::build))
                     .isInstanceOf(IllegalArgumentException.class)
-                    .hasMessage("Custom serializer must implement one of the following interfaces: "
+                    .hasMessage("Serializers must implement one of the following interfaces: "
                             .concat("ByteArraySerializer, StringSerializer, JsonSerializer"));
 
             assertThatThrownBy(() ->
                     createCache(mongoCollection,
-                            b -> b.withExtendedPersistence(0),
-                            DistributedCaffeine.Builder::build))
+                            b -> b.withExtendedPersistence(configurer -> configurer
+                                    .withMaximumSize(0)),
+                            Builder::build))
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessage("maximumSize must be positive");
 
             assertThatThrownBy(() ->
                     createCache(mongoCollection,
-                            b -> b.withExtendedPersistence(_null()),
-                            DistributedCaffeine.Builder::build))
+                            b -> b.withExtendedPersistence(configurer -> configurer
+                                    .withMaximumTime(_null())),
+                            Builder::build))
                     .isInstanceOf(NullPointerException.class)
                     .hasMessage("maximumTime cannot be null");
 
             assertThatThrownBy(() ->
                     createCache(mongoCollection,
-                            b -> b.withExtendedPersistence(Duration.ZERO),
-                            DistributedCaffeine.Builder::build))
+                            b -> b.withExtendedPersistence(configurer -> configurer
+                                    .withMaximumTime(Duration.ZERO)),
+                            Builder::build))
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessage("maximumTime must be positive");
+
+            Stream.<CacheConstructor<Key, Value>>of(Builder::build, b -> b.build(key -> null))
+                    .forEach(cacheConstructor -> assertThatThrownBy(() ->
+                            createCache(mongoCollection,
+                                    b -> b.withExtendedPersistence(configurer -> configurer
+                                            .withMaximumSize(1)),
+                                    cacheConstructor))
+                            .isInstanceOf(IllegalStateException.class)
+                            .hasMessage("If extended persistence is configured, at least one eviction strategy must be set"));
+
+            assertThatThrownBy(() ->
+                    createCache(mongoCollection,
+                            b -> b.withCaffeineBuilder(Caffeine.newBuilder()
+                                            .maximumSize(1))
+                                    .withExtendedPersistence(configurer -> configurer
+                                            .withMaximumSize(1)
+                                            .withLoadingStrategy(true)),
+                            Builder::build))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("If extended persistence is configured and loading strategy for cache loader is enabled, "
+                            .concat("cache must be build as loading cache"));
 
             assertThatThrownBy(() ->
                     createCache(mongoCollection,
@@ -238,47 +186,20 @@ final class DistributedCaffeineUnitTests {
                     .isInstanceOf(NullPointerException.class)
                     .hasMessage("cacheLoader cannot be null");
 
-            Stream.<CacheConstructor<Key, Value>>of(DistributedCaffeine.Builder::buildWithExtendedPersistence,
-                            b -> b.buildWithExtendedPersistence(key -> null))
-                    .forEach(cacheConstructor -> assertThatThrownBy(() ->
-                            createCache(mongoCollection,
-                                    CacheBuilder.identity(),
-                                    DistributedCaffeine.Builder::buildWithExtendedPersistence))
-                            .isInstanceOf(IllegalStateException.class)
-                            .hasMessage("If no extended persistence size and no extended persistence time is set, "
-                                    .concat("'build(...)' must be used")));
-
-            assertThatThrownBy(() ->
-                    createCache(mongoCollection,
-                            b -> b.withExtendedPersistence(1),
-                            b -> b.buildWithExtendedPersistence(_null())))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("cacheLoader cannot be null");
-
             assertThatThrownBy(() ->
                     createCache(mongoCollection,
                             b -> b.withCaffeineBuilder(Caffeine.newBuilder()
                                     .weakKeys()
                                     .weakValues()),
-                            DistributedCaffeine.Builder::build))
+                            Builder::build))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessage("The use of weak or soft references is not supported");
-
-            Stream.<CacheConstructor<Key, Value>>of(DistributedCaffeine.Builder::build, b -> b.build(key -> null),
-                            DistributedCaffeine.Builder::buildWithExtendedPersistence, b -> b.buildWithExtendedPersistence(key -> null))
-                    .forEach(cacheConstructor -> assertThatThrownBy(() ->
-                            createCache(mongoCollection,
-                                    b -> b.withExtendedPersistence(1),
-                                    cacheConstructor))
-                            .isInstanceOf(IllegalStateException.class)
-                            .hasMessage("If an extended persistence size or an extended persistence time is set, "
-                                    .concat("at least one eviction policy must be configured.")));
         }
     }
 
     @Nested
     @DisplayName("Test Caffeine")
-    @SuppressWarnings("squid:S5838")
+    @SuppressWarnings("java:S5838")
     final class CaffeineUnit extends DistributedCaffeineUnitTestInstance {
 
         @DisplayName("that removal listener is not invoked if refresh returns old value")

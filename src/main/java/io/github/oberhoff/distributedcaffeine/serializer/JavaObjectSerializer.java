@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,7 +29,7 @@ import java.io.ObjectOutputStream;
  *
  * @param <T> the type of the object to serialize
  * @author Andreas Oberhoff
- * @see <a href="https://docs.oracle.com/en/java/javase/11/docs/specs/serialization/index.html">
+ * @see <a href="https://docs.oracle.com/en/java/javase/17/docs/specs/serialization/index.html">
  * Java Object Serialization Specification</a>
  */
 @NullMarked

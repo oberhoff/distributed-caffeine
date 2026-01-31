@@ -39,14 +39,14 @@ in the MongoDB collection.
 As mentioned above, the scope of distributed synchronization depends on the configured distribution mode, so cache
 entries may or may not be persisted in the MongoDB collection. Therefore, when a new cache is instantiated, previously
 persisted cache entries that have not yet been invalidated or evicted may be loaded for initial synchronization. At the
-same time, the cache instance establishes continuous distributed synchronization (within the mentioned scope) between
-all related cache instances.
+same time, the cache instance establishes continuous distributed synchronization (within the aforementioned scope)
+between all related cache instances.
 
 Regardless of the configured distribution mode, persistence can be extended for evicted cache entries (passivation), so
 that even if they are no longer held in-memory by any cache instance, they remain in the MongoDB collection (also
-limitable by size and time) and may be reloaded on demand. Therefore, extended persistence can provide an adjustable mix
-of in-memory (also known as first-level, L1 or client-side) caching and database (also known as second-level, L2 or
-server-side) caching.
+limitable by size and time) and may be reloaded on demand (activation). Therefore, extended persistence can provide an
+adjustable mix of in-memory (also known as first-level, L1 or client-side) caching and database (also known as
+second-level, L2 or server-side) caching.
 
 To summarize some advantages: Distributed Caffeine combines established and widely used technologies that many
 developers are already familiar with or that are already in the tech stack of many applications. This combination
@@ -68,24 +68,24 @@ and ends with finalizing the builder by invoking one of the `build...(...)` meth
 
 ```java
 DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(mongoCollection)
-        .build();
+    .build();
 ```
 
 #### Minimal configuration of a distributed loading cache
 
 ```java
 DistributedLoadingCache<Key, Value> distributedLoadingCache = DistributedCaffeine.newBuilder(mongoCollection)
-        .build(key -> loadExpensiveValue(key));
+    .build(key -> loadExpensiveValue(key));
 ```
 
 #### Configuration of the Caffeine cache used internally
 
 ```java
 DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(mongoCollection)
-        .withCaffeineBuilder(Caffeine.newBuilder()
-                .maximumSize(10_000)
-                .expireAfterWrite(Duration.ofMinutes(10)))
-        .build();
+    .withCaffeineBuilder(Caffeine.newBuilder()
+        .maximumSize(10_000)
+        .expireAfterWrite(Duration.ofMinutes(10)))
+    .build();
 ```
 
 Please note that the configuration of the Caffeine cache used internally also starts with a builder returned by invoking
@@ -98,8 +98,8 @@ Caffeine cache is skipped, a default (empty) configuration is used. Please refer
 
 ```java
 DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(mongoCollection)
-        .withDistributionMode(DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION)
-        .build();
+    .withDistributionMode(DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION)
+    .build();
 ```
 
 Distribution modes include/exclude different types of cache operations (population, invalidation, eviction) which are
@@ -116,47 +116,38 @@ modes are provided:
 * `INVALIDATION`: Includes invalidation (explicit removal), but excludes population (manual or loading) and eviction
   (size- or time-based removal).
 
-#### Configuration of JSON (or BSON) serialization
+#### Configuration of serialization
 
 ```java
 DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(mongoCollection)
-        .withJsonSerializer(new ObjectMapper(), Key.class, Value.class, storeAsBinaryJson)
-        .build();
+    .withSerializers(configurer -> configurer
+        .withKeySerializer(new JacksonSerializer<>(Key.class, storeAsBinaryJson))
+        .withValueSerializer(new JacksonSerializer<>(Value.class, storeAsBinaryJson)))
+    .build();
 ```
 
 Keys and values of cache entries must be serialized to store them in the MongoDB collection and deserialized when they
-are loaded back into the cache instances. By default, these objects are stored in binary format using
-[Apache Fory](https://github.com/apache/fory). However, storage in JSON format sometimes makes more sense: The JSON
-format is more readable and can even be converted into MongoDB's own BSON format. JSON serialization is done internally
-using [Jackson](https://github.com/FasterXML/jackson). A customized object mapper can be passed if required, but can
-also be omitted if a default object mapper is sufficient. In addition, either the object classes or type references of
-the key and the value objects of a cache entry must be provided. The boolean flag `storeAsBinaryJson` indicates if the JSON
-data should be converted to BSON or stored as a string. Furthermore, the classic
-[Java Object Serialization](https://docs.oracle.com/en/java/javase/11/docs/specs/serialization/index.html) can also be
-configured for serialization.
-
-#### Configuration of custom serialization
-
-```java
-DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(mongoCollection)
-        .withCustomKeySerializer(new CustomSerializer())
-        .withCustomValueSerializer(new CustomSerializer())
-        .build();
-```
-
-Serialization can be customized (also independently for keys and values) by implementing one of the
-`ByteArraySerializer`, `StringSerializer` or `JsonSerializer` interfaces.
+are loaded back into the cache instances. Already built-in serializers are `ForySerializer` (default, no explicit
+configuration needed, stores objects in binary format using [Apache Fory](https://github.com/apache/fory)),
+`JavaObjectSerializer` (stores objects in binary format using classic
+[Java Object Serialization](https://docs.oracle.com/en/java/javase/17/docs/specs/serialization/index.html)) and
+`JacksonSerializer` (stores objects as JSON or BSON for better readability/accessibility using
+[Jackson](https://github.com/FasterXML/jackson)). Serialization can be customized by extending the aforementioned
+built-in serializers or by implementing one of the `ByteArraySerializer`, `StringSerializer` or `JsonSerializer`
+interfaces.
 
 #### Configuration of extended persistence
 
 ```java
 DistributedLoadingCache<Key, Value> distributedLoadingCache = DistributedCaffeine.newBuilder(mongoCollection)
-        .withCaffeineBuilder(Caffeine.newBuilder()
-                .maximumSize(10_000)
-                .expireAfterWrite(Duration.ofMinutes(10)))
-        .withExtendedPersistence(1_000_000) // by size
-        .withExtendedPersistence(Duration.ofDays(10)) // by time
-        .buildWithExtendedPersistence(key -> loadExpensiveValue(key)); // special semantics
+    .withCaffeineBuilder(Caffeine.newBuilder()
+        .maximumSize(10_000)
+        .expireAfterWrite(Duration.ofMinutes(10)))
+    .withExtendedPersistence(configurer -> configurer
+        .withMaximumSize(1_000_000) // by size
+        .withMaximumTime(Duration.ofDays(10))) // by time
+        .withLoadingStrategy(cacheLoaderStrategyEnabled) // loading strategy
+    .build(key -> loadExpensiveValue(key)); // cache loader
 ```
 
 Persistence can be extended for evicted cache entries (regardless of whether the configured distribution mode includes
@@ -165,14 +156,13 @@ collection and may be reloaded on demand. Extended persistence can also be limit
 number of evicted cache entries that will remain) and time (configuring the maximum amount of time that evicted cache
 entries will remain).
 
-If extended persistence is configured, one of the `buildWithExtendedPersistence(...)` methods can be used to construct a
-variant of a loading cache instance with special semantics. This means that a provided cache loader is only invoked to
-obtain missing cache entries if these could not be reloaded from the MongoDB collection beforehand.
+Reloading of those cache entries can be configured by enabling loading strategies. Using the loading strategy for cache
+loader means that a provided cache loader is only invoked to obtain missing cache entries if these could not be reloaded
+from the MongoDB collection beforehand.
 
-If the variant with special semantics is not required, the default `build(...)` methods can be used instead, as cache
-entries with extended persistence can be retrieved directly from the MongoDB collection bypassing the cache instance
-using the `getFromMongo(...)` or `getAllFromMongo(...)` methods flagged with `includeEvicted=true` (via
-`cacheInstance.distributedPolicy()`).
+Alternatively, the `getFromMongo(...)` or `getAllFromMongo(...)` methods flagged with `includeEvicted=true` (via
+`cacheInstance.distributedPolicy()`) can be used to load those cache entries directly from the MongoDB collection
+bypassing the cache instance.
 
 ## Remarks
 

@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,7 +40,8 @@ public class JacksonSerializer<T> implements JsonSerializer<T> {
 
     /**
      * Constructs a serializer with JSON representation based on <i>Jackson</i> along with class-based type
-     * information.
+     * information. If a customized object mapper is required, {@link #JacksonSerializer(ObjectMapper, Class, boolean)}
+     * can be used instead.
      *
      * @param typeClass         the class of the object to serialize
      * @param storeAsBinaryJson {@code true} for BSON encoding or {@code false} for string encoding
@@ -50,8 +51,9 @@ public class JacksonSerializer<T> implements JsonSerializer<T> {
     }
 
     /**
-     * Constructs a serializer with JSON representation based on <i>Jackson</i> along with reference-based
-     * type information.
+     * Constructs a serializer with JSON representation based on <i>Jackson</i> along with reference-based type
+     * information. If a customized object mapper is required,
+     * {@link #JacksonSerializer(ObjectMapper, TypeReference, boolean)} can be used instead.
      *
      * @param typeReference     the type reference of the object to serialize
      * @param storeAsBinaryJson {@code true} for BSON encoding or {@code false} for string encoding
@@ -61,32 +63,34 @@ public class JacksonSerializer<T> implements JsonSerializer<T> {
     }
 
     /**
-     * Constructs a serializer with JSON representation based on <i>Jackson</i> along with a customizable
-     * object mapper and class-based type information.
+     * Constructs a serializer with JSON representation based on <i>Jackson</i> along with a customizable object mapper
+     * and class-based type information. If a default object mapper is sufficient,
+     * {@link #JacksonSerializer(Class, boolean)} can be used instead.
      *
      * @param objectMapper      the customized object mapper
      * @param typeClass         the class of the object to serialize
      * @param storeAsBinaryJson {@code true} for BSON encoding or {@code false} for string encoding
      */
     public JacksonSerializer(ObjectMapper objectMapper, Class<T> typeClass, boolean storeAsBinaryJson) {
-        this.objectMapper = requireNonNull(objectMapper);
-        this.typeClass = requireNonNull(typeClass);
+        this.objectMapper = requireNonNull(objectMapper, "objectMapper cannot be null");
+        this.typeClass = requireNonNull(typeClass, "typeClass cannot be null");
         this.typeReference = null;
         this.storeAsBinaryJson = storeAsBinaryJson;
     }
 
     /**
-     * Constructs a serializer with JSON representation based on <i>Jackson</i> along with a customizable
-     * object mapper and reference-based type information.
+     * Constructs a serializer with JSON representation based on <i>Jackson</i> along with a customizable object mapper
+     * and reference-based type information. If a default object mapper is sufficient,
+     * {@link #JacksonSerializer(TypeReference, boolean)} can be used instead.
      *
      * @param objectMapper      the customized object mapper
      * @param typeReference     the type reference of the object to serialize
      * @param storeAsBinaryJson {@code true} for BSON encoding or {@code false} for string encoding
      */
     public JacksonSerializer(ObjectMapper objectMapper, TypeReference<T> typeReference, boolean storeAsBinaryJson) {
-        this.objectMapper = requireNonNull(objectMapper);
+        this.objectMapper = requireNonNull(objectMapper, "objectMapper cannot be null");
         this.typeClass = null;
-        this.typeReference = requireNonNull(typeReference);
+        this.typeReference = requireNonNull(typeReference, "typeReference cannot be null");
         this.storeAsBinaryJson = storeAsBinaryJson;
     }
 

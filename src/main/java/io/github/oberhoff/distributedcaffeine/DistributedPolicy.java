@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,8 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.mongodb.client.MongoCollection;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Builder;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Configurer;
 import io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
@@ -24,8 +26,7 @@ import org.bson.Document;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 
-import java.time.Duration;
-import java.util.List;
+import java.util.Set;
 
 /**
  * Interface representing an access point for inspecting and performing low-level operations on the cache instance
@@ -33,9 +34,10 @@ import java.util.List;
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
+ * @author Andreas Oberhoff
  */
 @NullMarked
-@SuppressWarnings("squid:S1452")
+@SuppressWarnings("java:S1452")
 public interface DistributedPolicy<K, V> {
 
     /**
@@ -95,8 +97,7 @@ public interface DistributedPolicy<K, V> {
      * instance.
      * <p>
      * Already evicted cache entries with extended persistence can also be included, if extended persistence is
-     * configured using {@link DistributedCaffeine.Builder#withExtendedPersistence(int)} or
-     * {@link DistributedCaffeine.Builder#withExtendedPersistence(Duration)}.
+     * configured using {@link Builder#withExtendedPersistence(Configurer)}.
      *
      * @param key            the key whose associated cache entry is to be returned
      * @param includeEvicted {@code true} if evicted cache entries with extended persistence should also be included,
@@ -110,15 +111,14 @@ public interface DistributedPolicy<K, V> {
      * instance.
      * <p>
      * Already evicted cache entries with extended persistence can also be included, if extended persistence is
-     * configured using {@link DistributedCaffeine.Builder#withExtendedPersistence(int)} or
-     * {@link DistributedCaffeine.Builder#withExtendedPersistence(Duration)}.
+     * configured using {@link Builder#withExtendedPersistence(Configurer)}.
      *
      * @param keys           the keys whose associated cache entries are to be returned
      * @param includeEvicted {@code true} if evicted cache entries with extended persistence should also be included,
      *                       {@code false} otherwise
-     * @return a list of cache entries to which the specified keys are mapped, keys without mapping are omitted
+     * @return a set of cache entries to which the specified keys are mapped, keys without mapping are omitted
      */
-    List<CacheEntry<K, V>> getAllFromMongo(Iterable<? extends K> keys, boolean includeEvicted);
+    Set<CacheEntry<K, V>> getAllFromMongo(Iterable<? extends K> keys, boolean includeEvicted);
 
     /**
      * Interface representing a cache entry containing key and value along with some metadata.

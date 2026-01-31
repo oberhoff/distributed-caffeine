@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,18 +13,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 /**
  * This package contains the main classes and interfaces for configuring, constructing and using Distributed Caffeine
  * cache instances.
  * <p>
- * Distributed Caffeine is a {@link com.github.benmanes.caffeine.cache.Caffeine}-based distributed cache using MongoDB
- * change streams for near real-time synchronization between multiple cache instances, especially across different
- * machines.
+ * {@link io.github.oberhoff.distributedcaffeine.DistributedCaffeine} is the starting point for configuring and
+ * constructing cache instances using a {@link io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Builder}
+ * returned by {@link io.github.oberhoff.distributedcaffeine.DistributedCaffeine#newBuilder(MongoCollection)}.
  * <p>
- * Cache instances can be configured and constructed using a builder returned by
- * {@link io.github.oberhoff.distributedcaffeine.DistributedCaffeine#newBuilder(MongoCollection)}. A cache instance can
- * be of type {@link io.github.oberhoff.distributedcaffeine.DistributedCache} (extends
+ * Cache instances can be of type {@link io.github.oberhoff.distributedcaffeine.DistributedCache} (extends
  * {@link com.github.benmanes.caffeine.cache.Cache}) or of type
  * {@link io.github.oberhoff.distributedcaffeine.DistributedLoadingCache} (extends
  * {@link com.github.benmanes.caffeine.cache.LoadingCache}).

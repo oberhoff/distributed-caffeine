@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,8 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.RemovalCause;
-import com.mongodb.client.model.Filters;
-import org.bson.conversions.Bson;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.ExtendedPersistenceConfigurer;
 import org.bson.types.ObjectId;
 
 import java.time.Duration;
@@ -40,17 +39,23 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
 
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STALE;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STATUS;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.HASH;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.KEY;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.TOUCHED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field._ID;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED_GROUP;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED_LOADED;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED_REFRESHED;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED_REFRESHED_AFTER_WRITE;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_SIZE;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_SIZE_EXTENDED;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_TIME;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_TIME_EXTENDED;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.INVALIDATED;
+import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.INVALIDATED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.INVALIDATED_REFRESHED;
 import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.INVALIDATED_REFRESHED_AFTER_WRITE;
 import static java.util.Objects.isNull;
@@ -58,7 +63,7 @@ import static java.util.Objects.nonNull;
 import static java.util.stream.Collectors.toCollection;
 import static java.util.stream.Collectors.toSet;
 
-@SuppressWarnings("squid:S1452")
+@SuppressWarnings("java:S1452")
 class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
 
     private final AtomicBoolean isActivated;
@@ -69,7 +74,7 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
     private Cache<K, V> cache;
     private Policy<K, V> policy;
     private DistributionMode distributionMode;
-    private InternalExtendedPersistence extendedPersistence;
+    private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
     private InternalMongoRepository<K, V> mongoRepository;
     private InternalMaintenanceWorker<K, V> maintenanceWorker;
     private InternalSynchronizationLock synchronizationLock;
@@ -90,7 +95,7 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
         this.cache = distributedCaffeine.getCache();
         this.policy = distributedCaffeine.getCache().policy();
         this.distributionMode = distributedCaffeine.getDistributionMode();
-        this.extendedPersistence = distributedCaffeine.getExtendedPersistence();
+        this.extendedPersistenceConfigurer = distributedCaffeine.getExtendedPersistenceConfigurer();
         this.mongoRepository = distributedCaffeine.getMongoRepository();
         this.maintenanceWorker = distributedCaffeine.getMaintenanceWorker();
         this.synchronizationLock = distributedCaffeine.getSynchronizationLock();
@@ -123,6 +128,16 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
 
     Map<? extends K, ? extends V> putAllDistributed(Map<? extends K, ? extends V> map) {
         manageOutboundInsert(map, CACHED, true);
+        return map;
+    }
+
+    V putDistributedLoaded(K key, V value) {
+        putAllDistributedLoaded(Map.of(key, value));
+        return value;
+    }
+
+    Map<? extends K, ? extends V> putAllDistributedLoaded(Map<? extends K, ? extends V> map) {
+        manageOutboundInsert(map, CACHED_LOADED, true);
         return map;
     }
 
@@ -182,14 +197,14 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
         }
     }
 
-    @SuppressWarnings("squid:S3776")
+    @SuppressWarnings("java:S3776")
     void evictDistributed(K key, V value, RemovalCause removalCause) {
         // special handling (activated, eviction support, async, conditional replacement, origin independence)
         if (isActivated() && (removalCause.equals(RemovalCause.SIZE) || removalCause.equals(RemovalCause.EXPIRED))) {
             // run asynchronous
             CompletableFuture.runAsync(() -> {
                 Status status;
-                if (extendedPersistence.hasExtendedPersistence()) {
+                if (extendedPersistenceConfigurer.isConfigured()) {
                     status = removalCause.equals(RemovalCause.SIZE)
                             ? EVICTED_SIZE_EXTENDED
                             : EVICTED_TIME_EXTENDED;
@@ -214,25 +229,36 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
 
     void synchronizeCacheFromStore() {
         if (distributionMode.isPopulationConsidered()) {
-            Bson filter = Filters.or(
-                    Filters.and(
-                            Filters.eq(STATUS.toString(), CACHED.toString()),
-                            Filters.eq(STALE.toString(), false)),
-                    Filters.ne(STATUS.toString(), CACHED.toString()));
-            mongoRepository.consumeCacheDocumentsGroupedByKeyInReverseOrder(filter, stream ->
-                    stream.forEach(cacheDocuments -> {
-                        // newest cache entry must be treated in the same way as a distributed inbound insert
-                        cacheDocuments.stream()
-                                .findFirst()
-                                .filter(InternalCacheDocument::isCached)
-                                .ifPresent(cacheDocument ->
-                                        manageInboundInsert(cacheDocument, false));
-                        // correct any inconsistencies (if any) in relation to (not yet) stale cache entries
-                        cacheDocuments.stream()
-                                .skip(1)
-                                .forEach(maintenanceWorker::queueReplacement);
-                    }));
-            // remove cache entries which are not managed (e.g., if synchronization is started after it was stopped)
+            Map<K, InternalCacheDocument<K, V>> cacheDocuments = new HashMap<>();
+            // collect all entries which are cached but not yet stale (newest only)
+            Set<Status> cachedStatuses = Set.of(CACHED_GROUP);
+            mongoRepository.consumeCacheDocumentsGroupedByKeyNewestFirstForHashes(
+                    null, cachedStatuses,
+                    false, null,
+                    stream -> stream.forEach(groupedCacheDocuments ->
+                            groupedCacheDocuments.stream()
+                                    .findFirst()
+                                    .ifPresent(cacheDocument ->
+                                            cacheDocuments.put(cacheDocument.getKey(), cacheDocument))));
+            // remove entries which are not cached anymore (due to newer invalidations/evictions)
+            Set<Status> notCachedStatuses = Stream.of(INVALIDATED_GROUP, EVICTED_GROUP)
+                    .flatMap(Stream::of)
+                    .collect(toSet());
+            mongoRepository.consumeCacheDocumentsGroupedByKeyNewestFirstForKeys(
+                    cacheDocuments.keySet(), notCachedStatuses,
+                    null, Set.of(_ID, HASH, KEY, TOUCHED),
+                    stream -> stream.forEach(groupedCacheDocuments ->
+                            groupedCacheDocuments.stream()
+                                    .findFirst()
+                                    .ifPresent(notCached -> {
+                                        InternalCacheDocument<K, V> cached = cacheDocuments.get(notCached.getKey());
+                                        if (nonNull(cached) && notCached.isNewer(cached)) {
+                                            cacheDocuments.remove(notCached.getKey());
+                                        }
+                                    })));
+            // manage remaining entries (populate cache)
+            cacheDocuments.values().forEach(cacheDocument -> manageInboundInsert(cacheDocument, false));
+            // remove entries from cache which are not managed (e.g., if cache was populated while not active)
             synchronizationLock.runLocked(() -> {
                 if (isActivated()) {
                     Set<K> keys = latest.entrySet().stream()
@@ -278,7 +304,7 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
         }
     }
 
-    @SuppressWarnings("squid:S3776")
+    @SuppressWarnings("java:S3776")
     void manageInboundInsert(InternalCacheDocument<K, V> inboundCacheDocument, boolean eventBased) {
         if (isActivated() && inboundCacheDocument.getStatus().isConsideredBy(distributionMode)) {
             boolean manage = distributionMode.isPopulationConsidered();
@@ -352,7 +378,7 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
                 .collect(HashMap::new, (hashMap, entry) -> // allow null values
                         hashMap.put(entry.getKey(), entry.getValue()), HashMap::putAll);
         Set<InternalCacheDocument<K, V>> outboundCacheDocuments = mongoRepository.insert(filteredMap, status);
-        maintenanceWorker.queueActivity(outboundCacheDocuments);
+        maintenanceWorker.queueOutboundActivity(outboundCacheDocuments);
         return outboundCacheDocuments;
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -62,6 +62,7 @@ public abstract class DistributedCaffeineCommonTestInstance {
     @AfterAll
     void afterAll() {
         this.executorService.shutdown();
+        Runtime.getRuntime().gc();
     }
 
     @BeforeEach
@@ -78,6 +79,11 @@ public abstract class DistributedCaffeineCommonTestInstance {
                 distributedCache.distributedPolicy().stopSynchronization());
         // invalidate all cache entries (only after synchronization is already stopped for all caches)
         this.distributedCacheInstances.forEach(Cache::invalidateAll);
+        // drop collection
+        this.distributedCacheInstances.stream()
+                .findFirst()
+                .ifPresent(distributedCache ->
+                        distributedCache.distributedPolicy().getMongoCollection().drop());
         this.distributedCacheInstances.clear();
     }
 

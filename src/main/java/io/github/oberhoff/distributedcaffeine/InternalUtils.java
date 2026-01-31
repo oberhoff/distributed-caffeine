@@ -1,5 +1,5 @@
 /*
- * Copyright © 2023-2025 Dr. Andreas Oberhoff (All rights reserved)
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,16 +16,16 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import java.util.AbstractMap.SimpleEntry;
+import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.CancellationException;
-import java.util.concurrent.CompletionException;
 import java.util.function.Function;
-import java.util.function.Supplier;
+import java.util.stream.IntStream;
 import java.util.stream.StreamSupport;
 
+import static java.lang.Math.min;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toUnmodifiableSet;
 
@@ -54,7 +54,7 @@ class InternalUtils {
         getFailable(() -> {
             failableRunnable.run();
             return null;
-        }, RuntimeException::new);
+        });
     }
 
     static <T> T getFailable(FailableSupplier<T> failableSupplier) {
@@ -72,28 +72,25 @@ class InternalUtils {
         }
     }
 
-    static <T> T handleFutureExceptions(Supplier<T> supplier) {
-        try {
-            return supplier.get();
-        } catch (CompletionException | CancellationException e) {
-            throw Optional.ofNullable(e.getCause())
-                    .filter(RuntimeException.class::isInstance)
-                    .map(RuntimeException.class::cast)
-                    .orElse(e);
-        }
+    static <T> List<Set<T>> splitIntoPartitions(Collection<T> collection, int partitionSize) {
+        List<T> list = List.copyOf(collection);
+        return IntStream.range(0, list.size())
+                .filter(i -> i % partitionSize == 0)
+                .mapToObj(i -> Set.copyOf(list.subList(i, min(i + partitionSize, list.size()))))
+                .toList();
     }
 
     @FunctionalInterface
     interface FailableRunnable {
 
-        @SuppressWarnings("squid:S112")
+        @SuppressWarnings("java:S112")
         void run() throws Throwable;
     }
 
     @FunctionalInterface
     interface FailableSupplier<T> {
 
-        @SuppressWarnings("squid:S112")
+        @SuppressWarnings("java:S112")
         T get() throws Throwable;
     }
 }
