@@ -78,9 +78,8 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
     private InternalMongoRepository<K, V> mongoRepository;
     private InternalMaintenanceWorker<K, V> maintenanceWorker;
     private InternalSynchronizationLock synchronizationLock;
-    private Executor executor;
     private Long origin;
-    private boolean hasEvictionPolicyByTime;
+    private Executor executor;
 
     InternalCacheManager() {
         this.isActivated = new AtomicBoolean(false);
@@ -99,11 +98,8 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
         this.mongoRepository = distributedCaffeine.getMongoRepository();
         this.maintenanceWorker = distributedCaffeine.getMaintenanceWorker();
         this.synchronizationLock = distributedCaffeine.getSynchronizationLock();
-        this.executor = distributedCaffeine.getExecutor();
         this.origin = distributedCaffeine.getOrigin();
-        this.hasEvictionPolicyByTime = Stream
-                .of(policy.expireAfterAccess(), policy.expireAfterWrite(), policy.expireVariably())
-                .anyMatch(Optional::isPresent);
+        this.executor = distributedCaffeine.getExecutor();
     }
 
     void activate() {
@@ -147,10 +143,12 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
     }
 
     V putDistributedRefreshAfterWrite(K key, V newValue, V oldValue) {
-        // special handling (activated, old value, origin independence)
+        // special handling (activated, async, old value, origin independence)
         if (isActivated()) {
             if (distributionMode.isPopulationConsidered()) {
-                manageOutboundInsert(Map.of(key, newValue), CACHED_REFRESHED_AFTER_WRITE, false);
+                CompletableFuture.runAsync(() ->
+                                manageOutboundInsert(Map.of(key, newValue), CACHED_REFRESHED_AFTER_WRITE, false),
+                        executor);
                 // return old value which does not change the cache and does not trigger the removal listeners
                 return oldValue;
             } else {
@@ -181,12 +179,14 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
     }
 
     V invalidateDistributedRefreshAfterWrite(K key, V oldValue) {
-        // special handling (activated, old value, origin independence)
+        // special handling (activated, async, old value, origin independence)
         if (isActivated()) {
             if (distributionMode.isInvalidationConsidered()) {
                 Map<K, V> map = new HashMap<>(); // allow null values
                 map.put(key, null);
-                manageOutboundInsert(map, INVALIDATED_REFRESHED_AFTER_WRITE, false);
+                CompletableFuture.runAsync(() ->
+                                manageOutboundInsert(map, INVALIDATED_REFRESHED_AFTER_WRITE, false),
+                        executor);
                 // return old value which does not change the cache and does not trigger the removal listener
                 return oldValue;
             } else {
@@ -199,9 +199,9 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
 
     @SuppressWarnings("java:S3776")
     void evictDistributed(K key, V value, RemovalCause removalCause) {
-        // special handling (activated, eviction support, async, conditional replacement, origin independence)
+        // special handling (activated, eviction support, async, join, conditional replacement, origin independence)
         if (isActivated() && (removalCause.equals(RemovalCause.SIZE) || removalCause.equals(RemovalCause.EXPIRED))) {
-            // run asynchronous
+            // run asynchronous to prevent deadlocks
             CompletableFuture.runAsync(() -> {
                 Status status;
                 if (extendedPersistenceConfigurer.isConfigured()) {
@@ -284,23 +284,8 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V> {
             Predicate<InternalCacheDocument<K, V>> outdated = cacheDocument ->
                     !cacheDocument.isCached() && cacheDocument.isOlderThan(outdatedDuration);
             latest.values().removeIf(outdated);
-            // trigger pending time-based eviction explicitly (to be more prompt)
-            if (distributionMode.isEvictionConsidered() && hasEvictionPolicyByTime) {
-                cache.cleanUp();
-                // workaround as cleanUp() does not seem to trigger all pending time-based evictions reliably
-                synchronizationLock.runLocked(() -> latest.values().stream()
-                        .filter(InternalCacheDocument::isCached)
-                        // preserve weakened key while streaming
-                        .map(cacheDocument -> cacheDocument.setKey(cacheDocument.getKey()))
-                        .filter(cacheDocument -> nonNull(cacheDocument.getKey()))
-                        .filter(cacheDocument -> isNull(policy.getIfPresentQuietly(cacheDocument.getKey())))
-                        .forEach(cacheDocument -> {
-                            // this should trigger a pending eviction
-                            cache.invalidate(cacheDocument.getKey());
-                            // weaken the key again
-                            cacheDocument.weakened();
-                        }));
-            }
+            // just for the case (especially eviction)
+            cache.cleanUp();
         }
     }
 
