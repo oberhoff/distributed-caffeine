@@ -71,6 +71,7 @@ import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.platform.commons.util.ReflectionUtils;
 import org.junit.platform.commons.util.ReflectionUtils.HierarchyTraversalMode;
 import org.slf4j.event.Level;
@@ -104,6 +105,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -154,11 +158,13 @@ import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assertions.assertThatNoException;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.params.ParameterizedInvocationConstants.ARGUMENTS_WITH_NAMES_PLACEHOLDER;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.atMost;
@@ -945,7 +951,7 @@ final class DistributedCaffeineIntegrationTests {
             AtomicInteger counter = new AtomicInteger(0);
 
             doAnswer(invocation -> {
-                await(Duration.ofMillis(100));
+                sleep(Duration.ofMillis(100));
                 return Value.of(counter.incrementAndGet(), "counted");
             }).when(cacheLoader).load(key1);
 
@@ -1193,7 +1199,7 @@ final class DistributedCaffeineIntegrationTests {
             AtomicInteger counter = new AtomicInteger(0);
 
             doAnswer(invocation -> {
-                await(Duration.ofMillis(100));
+                sleep(Duration.ofMillis(100));
                 return Value.of(counter.incrementAndGet(), "counted");
             }).when(cacheLoader).load(key1);
 
@@ -1269,11 +1275,11 @@ final class DistributedCaffeineIntegrationTests {
             EqualResult<Key, Value> getValueUnchecked = new EqualResult<>();
 
             doAnswer(invocation -> {
-                await(Duration.ofMillis(100));
+                sleep(Duration.ofMillis(100));
                 return Value.of(invocation.<Key>getArgument(0).getId(), "reloaded");
             }).when(cacheLoader).load(key1);
             doAnswer(invocation -> {
-                await(Duration.ofMillis(100));
+                sleep(Duration.ofMillis(100));
                 return null;
             }).when(cacheLoader).load(key2);
             doThrow(new Exception("checked"))
@@ -1289,7 +1295,7 @@ final class DistributedCaffeineIntegrationTests {
                 loadingCache.put(keyChecked, valueChecked);
                 loadingCache.put(keyUnchecked, valueUnchecked);
 
-                // set ticker to start triggering refreshAfterWrite
+                // set ticker to start triggering expiration/refreshing
                 ticker.addAndGet(Duration.ofHours(1).toNanos());
 
                 // trigger refresh after write
@@ -1305,7 +1311,7 @@ final class DistributedCaffeineIntegrationTests {
                         .untilAsserted(() -> assertThat(loggerBoundedLocalCache.getLoggingEvents().size()).isEven());
             });
 
-            // reset ticker to stop triggering refreshAfterWrite
+            // reset ticker to stop triggering expiration/refreshing
             ticker.set(0);
 
             await("interactions")
@@ -1464,11 +1470,11 @@ final class DistributedCaffeineIntegrationTests {
                 assertThatException().isThrownBy(() -> loadingCache.refresh(Key.of(0)).join());
                 loadingCache.refreshAll(Set.of(key6, key7)).join();
                 assertThatException().isThrownBy(() -> loadingCache.refreshAll(Set.of(Key.of(0))).join());
-                // set ticker to start triggering refreshAfterWrite
+                // set ticker to start triggering expiration/refreshing
                 ticker.addAndGet(Duration.ofHours(1).toNanos());
                 loadingCache.getIfPresent(key1); // loadFailureCount + 1
                 loadingCache.getIfPresent(key7); // loadSuccessCount + 1
-                // reset ticker to stop triggering refreshAfterWrite
+                // reset ticker to stop triggering expiration/refreshing
                 ticker.set(0);
 
                 await("asynchronous count of stats")
@@ -3200,13 +3206,13 @@ final class DistributedCaffeineIntegrationTests {
             doAnswer(invocation -> Value.of(invocation.<Key>getArgument(0).getId(), "refreshed"))
                     .when(cacheLoader).load(any(Key.class));
 
-            // set ticker to start triggering refreshAfterWrite
+            // set ticker to start triggering expiration/refreshing
             ticker.addAndGet(Duration.ofHours(1).toNanos());
 
             distributedLoadingCacheA.getIfPresent(key1);
             distributedLoadingCacheB.getIfPresent(key2);
 
-            // reset ticker to stop triggering refreshAfterWrite
+            // reset ticker to stop triggering expiration/refreshing
             ticker.set(0);
 
             await("asynchronous refreshes")
@@ -3268,13 +3274,13 @@ final class DistributedCaffeineIntegrationTests {
             doAnswer(invocation -> null)
                     .when(cacheLoader).load(any(Key.class));
 
-            // set ticker to start triggering refreshAfterWrite
+            // set ticker to start triggering expiration/refreshing
             ticker.addAndGet(Duration.ofHours(2).toNanos());
 
             distributedLoadingCacheA.getIfPresent(key1);
             distributedLoadingCacheB.getIfPresent(key2);
 
-            // reset ticker to stop triggering refreshAfterWrite
+            // reset ticker to stop triggering expiration/refreshing
             ticker.set(0);
 
             await("asynchronous refreshes")
@@ -3779,6 +3785,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheBuilder<Key, Value> cacheBuilder =
                     b -> b.withCaffeineBuilder(Caffeine.newBuilder()
                                     .evictionListener(evictionListener)
+                                    // variable expiration policy provides more control over evictions
                                     .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration())))
                             .withExtendedPersistence(configurer -> configurer
                                     .withMaximumTime(FOREVER.getDuration())
@@ -4722,14 +4729,14 @@ final class DistributedCaffeineIntegrationTests {
                     .pollInterval(EXTENDED_POLL_INTERVAL)
                     .untilAsserted(() -> assertThatMaintenanceIsDone(distributedLoadingCache, syncedDistributedLoadingCache));
 
-            verify(removalListener, atLeastOnce()).onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPLICIT));
-            verify(removalListener, atLeastOnce()).onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.REPLACED));
-            verify(removalListener, atLeastOnce()).onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.SIZE));
-            verify(removalListener, atLeastOnce()).onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
+            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPLICIT));
+            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.REPLACED));
+            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.SIZE));
+            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPIRED));
             verifyNoMoreInteractions(removalListener);
 
-            verify(evictionListener, atLeastOnce()).onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.SIZE));
-            verify(evictionListener, atLeastOnce()).onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
+            verify(evictionListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.SIZE));
+            verify(evictionListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPIRED));
             verifyNoMoreInteractions(evictionListener);
 
             verify(cacheLoader, atLeastOnce()).load(any(Key.class));
@@ -4740,6 +4747,131 @@ final class DistributedCaffeineIntegrationTests {
             verify(cacheLoader, atLeast(0)).reload(any(Key.class), any(Value.class));
             verify(cacheLoader, atLeast(0)).asyncReload(any(Key.class), any(Value.class), any(Executor.class));
             verifyNoMoreInteractions(cacheLoader);
+        }
+
+        @DisplayName("Stress test thread safety")
+        @ParameterizedTest(name = "with {0}-executor")
+        @ValueSource(strings = {"common pool", "cached thread pool", "work stealing thread pool"})
+        void stress_test_DistributedCaffeine_thread_safety(String valueSource) throws Exception {
+            int maximumSize = 100;
+            int extendedMaximumSize = maximumSize / 2;
+            int numberOfOperations = 1000;
+            int levelOfParallelism = runsOnGitHub(5, 10);
+
+            @SuppressWarnings("unchecked")
+            RemovalListener<Key, Value> removalListener = mock(RemovalListener.class);
+            @SuppressWarnings("unchecked")
+            RemovalListener<Key, Value> evictionListener = mock(RemovalListener.class);
+
+            CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
+                @Override
+                public Value load(Key key) {
+                    return nextInt(10) == 0
+                            ? null
+                            : Value.of(key.getId(), nameWithMillisAndPrefixes("load"));
+                }
+
+                @Override
+                public Map<? extends Key, ? extends Value> loadAll(Set<? extends Key> keys) {
+                    return keys.stream()
+                            .collect(toMap(Function.identity(),
+                                    key -> Value.of(key.getId(), nameWithMillisAndPrefixes("load"))));
+                }
+            });
+
+            List<Executor> executors = new ArrayList<>();
+            Supplier<Executor> executorSupplier = () -> {
+                Executor executor = switch (valueSource) {
+                    case "common pool" -> ForkJoinPool.commonPool();
+                    case "cached thread pool" -> Executors.newCachedThreadPool();
+                    case "work stealing thread pool" -> Executors.newWorkStealingPool(levelOfParallelism);
+                    default -> throw new NoSuchElementException();
+                };
+                executors.add(executor);
+                return executor;
+            };
+
+            Function<AtomicLong, DistributedLoadingCache<Key, Value>> cacheSupplier = ticker -> {
+                DistributedCache<Key, Value> cache = createCache(
+                        b -> b.withCaffeineBuilder(Caffeine.newBuilder()
+                                        .ticker(ticker::get)
+                                        .removalListener(removalListener)
+                                        .evictionListener(evictionListener)
+                                        .executor(executorSupplier.get())
+                                        .maximumSize(maximumSize)
+                                        .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration()))
+                                        .refreshAfterWrite(Duration.ofNanos(1)))
+                                .withExtendedPersistence(configurer -> configurer
+                                        .withMaximumSize(extendedMaximumSize)
+                                        .withLoadingStrategy(true)),
+                        b -> b.build(cacheLoader));
+                return (DistributedLoadingCache<Key, Value>) cache;
+            };
+
+            AtomicLong ticker = new AtomicLong();
+            DistributedLoadingCache<Key, Value> distributedLoadingCache =
+                    cacheSupplier.apply(ticker);
+            DistributedLoadingCache<Key, Value> syncedDistributedLoadingCache =
+                    cacheSupplier.apply(new AtomicLong(0));
+
+            List<CompletableFuture<Void>> completableFutures = new ArrayList<>();
+
+            IntStream.rangeClosed(1, levelOfParallelism).forEach(threadIndex ->
+                    completableFutures.add(CompletableFuture.runAsync(() -> {
+                        IntStream.rangeClosed(1, numberOfOperations).forEach(operationIndex -> {
+                            executeRandomOperation(distributedLoadingCache, maximumSize);
+                            if (threadIndex == levelOfParallelism / 2 && operationIndex == numberOfOperations / 2) {
+                                distributedLoadingCache.distributedPolicy().stopSynchronization();
+                                sleep(Duration.ofMillis(1_000));
+                                distributedLoadingCache.distributedPolicy().startSynchronization();
+                                // set ticker to start triggering expiration/refreshing
+                                ticker.addAndGet(Duration.ofHours(1).toNanos());
+                            }
+                        });
+                        // reset ticker to stop triggering expiration/refreshing
+                        ticker.set(0);
+                    }, executorService)));
+
+            CompletableFuture.allOf(completableFutures.toArray(CompletableFuture[]::new)).join();
+
+            await("synchronization between cache instances")
+                    .atMost(EXTENDED_WAITING_DURATION)
+                    .pollInterval(EXTENDED_POLL_INTERVAL)
+                    .failFast(() -> speedUpAssertions(distributedLoadingCache, syncedDistributedLoadingCache))
+                    .untilAsserted(() -> {
+                        assertThat(distributedLoadingCache.asMap())
+                                .containsExactlyInAnyOrderEntriesOf(syncedDistributedLoadingCache.asMap());
+                        assertThatDataStoreHasCounts(
+                                CountGrouped.of(CACHED_GROUP, f -> f.isEqualTo(distributedLoadingCache.estimatedSize()), s -> s.isGreaterThanOrEqualTo(0)),
+                                CountGrouped.of(EVICTED_EXTENDED_GROUP, f -> f.isBetween(1L, (long) extendedMaximumSize), s -> s.isGreaterThanOrEqualTo(0)));
+                    });
+
+            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPLICIT));
+            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.REPLACED));
+            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.SIZE));
+            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPIRED));
+            // pending invocations are accepted, so no verifyNoMoreInteractions()
+
+            verify(evictionListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.SIZE));
+            verify(evictionListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPIRED));
+            // pending invocations are accepted, so no verifyNoMoreInteractions()
+
+            verify(cacheLoader, atLeastOnce()).load(any(Key.class));
+            verify(cacheLoader, atLeastOnce()).loadAll(anySet());
+            verify(cacheLoader, atLeastOnce()).asyncLoad(any(Key.class), any(Executor.class));
+            verify(cacheLoader, never()).asyncLoadAll(anySet(), any(Executor.class));
+            verify(cacheLoader, atLeastOnce()).reload(any(Key.class), any(Value.class));
+            verify(cacheLoader, atLeastOnce()).asyncReload(any(Key.class), any(Value.class), any(Executor.class));
+            // pending invocations are accepted, so no verifyNoMoreInteractions()
+
+            // delayed shutdown of executors to prevent pending error logs
+            CompletableFuture.runAsync(() -> {
+                sleep(WAITING_DURATION);
+                executors.stream()
+                        .filter(ExecutorService.class::isInstance)
+                        .map(ExecutorService.class::cast)
+                        .forEach(ExecutorService::shutdown);
+            }, executorService);
         }
 
         @DisplayName("Stress test with multiple threads")
@@ -4797,7 +4929,7 @@ final class DistributedCaffeineIntegrationTests {
 
             IntStream.rangeClosed(1, levelOfParallelism).forEach(cacheIndex ->
                     completableFutures.add(CompletableFuture.runAsync(() -> {
-                        await(Duration.ofMillis(1_000).multipliedBy(min(10, cacheIndex)));
+                        sleep(Duration.ofMillis(1_000).multipliedBy(min(10, cacheIndex)));
                         AtomicLong ticker = new AtomicLong(0);
                         DistributedLoadingCache<Key, Value> distributedLoadingCache = cacheSupplier.apply(ticker);
                         distributedLoadingCaches.add(distributedLoadingCache);
@@ -4805,13 +4937,13 @@ final class DistributedCaffeineIntegrationTests {
                             executeRandomOperation(distributedLoadingCache, maximumSize);
                             if (operationIndex == numberOfOperations / 2) {
                                 distributedLoadingCache.distributedPolicy().stopSynchronization();
-                                await(Duration.ofMillis(1_000).multipliedBy(min(10, cacheIndex)));
+                                sleep(Duration.ofMillis(1_000).multipliedBy(min(10, cacheIndex)));
                                 distributedLoadingCache.distributedPolicy().startSynchronization();
-                                // set ticker to start triggering refreshAfterWrite
+                                // set ticker to start triggering expiration/refreshing
                                 ticker.addAndGet(Duration.ofHours(1).toNanos());
                             }
                         });
-                        // reset ticker to stop triggering refreshAfterWrite
+                        // reset ticker to stop triggering expiration/refreshing
                         ticker.set(0);
                     }, executorService)));
 
@@ -4861,14 +4993,14 @@ final class DistributedCaffeineIntegrationTests {
                     .pollInterval(EXTENDED_POLL_INTERVAL)
                     .untilAsserted(() -> assertThatMaintenanceIsDone(distributedLoadingCaches));
 
-            verify(removalListener, atLeastOnce()).onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPLICIT));
-            verify(removalListener, atLeastOnce()).onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.REPLACED));
-            verify(removalListener, atLeastOnce()).onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.SIZE));
-            verify(removalListener, atLeastOnce()).onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
+            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPLICIT));
+            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.REPLACED));
+            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.SIZE));
+            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPIRED));
             verifyNoMoreInteractions(removalListener);
 
-            verify(evictionListener, atLeastOnce()).onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.SIZE));
-            verify(evictionListener, atLeastOnce()).onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
+            verify(evictionListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.SIZE));
+            verify(evictionListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPIRED));
             verifyNoMoreInteractions(evictionListener);
 
             verify(cacheLoader, atLeastOnce()).load(any(Key.class));
@@ -5100,9 +5232,12 @@ final class DistributedCaffeineIntegrationTests {
                         distributedCaffeine.getCacheManager().manageCleanUp(Duration.ZERO);
                         // assertions
                         if (distributedCaffeine.getDistributionMode().isPopulationConsidered()) {
-                            // workaround as comparing by size does not seem to work reliably with time-based evictions
-                            boolean hasEvictionPolicyByTime = readFieldValue(cacheManager, InternalCacheManager.class,
-                                    "hasEvictionPolicyByTime", Boolean.class);
+                            // workaround as comparing by size does not work reliably with time-based evictions
+                            // evicted cache entries are never returned even if removal (eviction listener) is delayed
+                            Policy<K, V> policy = distributedCache.policy();
+                            boolean hasEvictionPolicyByTime = Stream
+                                    .of(policy.expireAfterAccess(), policy.expireAfterWrite(), policy.expireVariably())
+                                    .anyMatch(Optional::isPresent);
                             if (hasEvictionPolicyByTime) {
                                 assertThat(latest.entrySet().stream()
                                         .collect(toMap(Entry::getKey, entry -> entry.getValue().getValue())))

@@ -21,6 +21,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.RemovalListener;
+import com.github.benmanes.caffeine.cache.Scheduler;
 import com.github.benmanes.caffeine.cache.stats.StatsCounter;
 import com.mongodb.client.MongoCollection;
 import io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer;
@@ -53,6 +54,7 @@ import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
 import static java.lang.String.format;
+import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
@@ -367,6 +369,18 @@ public final class DistributedCaffeine<K, V> {
             runFailable(() -> evictionListenerField.set(caffeine, evictionListener));
             removalListenerField.setAccessible(false);
             evictionListenerField.setAccessible(false);
+
+            // inject scheduler if not set or disabled (necessary for eviction listener reliability)
+            Field schedulerField = getFailable(() ->
+                    caffeine.getClass().getDeclaredField("scheduler"));
+            schedulerField.setAccessible(true);
+            Scheduler caffeineScheduler = getFailable(() ->
+                    (Scheduler) schedulerField.get(caffeine));
+            Scheduler scheduler = (isNull(caffeineScheduler) || caffeineScheduler == Scheduler.disabledScheduler())
+                    ? Scheduler.systemScheduler()
+                    : caffeineScheduler;
+            runFailable(() -> schedulerField.set(caffeine, new InternalScheduler(scheduler)));
+            schedulerField.setAccessible(false);
 
             // extract executor
             Field executorField = getFailable(() ->

@@ -119,7 +119,7 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
             @Nullable Set<? extends K> keys, @Nullable Set<Status> statuses, @Nullable Boolean stale,
             @Nullable Set<Field> fields,
             Consumer<Stream<Set<InternalCacheDocument<K, V>>>> streamConsumer) {
-        if (allNotEmptyButNullAllowed(keys, statuses)) {
+        if (allNotEmptyButNullAllowed(keys, statuses, fields)) {
             Set<Integer> hashes = isNull(keys)
                     ? null
                     : keys.stream()
@@ -139,7 +139,7 @@ class InternalMongoRepository<K, V> implements InternalLazyInitializer<K, V> {
             @Nullable Set<Integer> hashes, @Nullable Set<Status> statuses, @Nullable Boolean stale,
             @Nullable Set<Field> fields,
             Consumer<Stream<Set<InternalCacheDocument<K, V>>>> streamConsumer) {
-        if (allNotEmptyButNullAllowed(hashes, statuses)) {
+        if (allNotEmptyButNullAllowed(hashes, statuses, fields)) {
             try (Stream<Set<InternalCacheDocument<K, V>>> stream =
                          streamCacheDocumentsGroupedByKey(hashes, statuses, stale, fields)
                                  .map(entry -> entry.getValue().stream()

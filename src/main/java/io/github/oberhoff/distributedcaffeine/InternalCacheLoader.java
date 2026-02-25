@@ -110,22 +110,25 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
         throw new IllegalAccessException();
     }
 
-    // only invoked internally if expireAfterWrite is used (special handling needed)
+    // only invoked internally if refreshAfterWrite is used (special handling needed)
     @Override
     @SuppressWarnings("unchecked")
     public CompletableFuture<? extends V> asyncReload(K key, V oldValue, Executor executor) {
         return (extendedPersistenceConfigurer.hasCacheLoaderStrategy()
                 ? CompletableFuture.supplyAsync(() -> loadExtendedFromMongo(key), executor)
                 : CompletableFuture.completedFuture((V) null))
-                .thenCompose(newValue -> nonNull(newValue)
-                        ? CompletableFuture.completedFuture(newValue)
-                        : (CompletableFuture<V>) getFailable(() -> cacheLoader.asyncReload(key, oldValue, executor)))
+                .thenComposeAsync(newValue -> nonNull(newValue)
+                                ? CompletableFuture.completedFuture(newValue)
+                                : (CompletableFuture<V>) getFailable(() ->
+                                cacheLoader.asyncReload(key, oldValue, executor)),
+                        executor)
                 // retain the original 'remove if null' semantics
-                .thenApply(newValue -> nonNull(newValue)
-                        // special handling, no lock required
-                        ? cacheManager.putDistributedRefreshAfterWrite(key, newValue, oldValue)
-                        // special handling, no lock required
-                        : cacheManager.invalidateDistributedRefreshAfterWrite(key, oldValue));
+                .thenApplyAsync(newValue -> nonNull(newValue)
+                                // special handling, no lock required
+                                ? cacheManager.putDistributedRefreshAfterWrite(key, newValue, oldValue)
+                                // special handling, no lock required
+                                : cacheManager.invalidateDistributedRefreshAfterWrite(key, oldValue),
+                        executor);
     }
 
     // invoked by custom implementation
@@ -134,9 +137,11 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
         return (extendedPersistenceConfigurer.hasCacheLoaderStrategy()
                 ? CompletableFuture.supplyAsync(() -> loadExtendedFromMongo(key), executor)
                 : CompletableFuture.completedFuture((V) null))
-                .thenCompose(newValue -> nonNull(newValue)
-                        ? CompletableFuture.completedFuture(newValue)
-                        : (CompletableFuture<V>) getFailable(() -> cacheLoader.asyncLoad(key, executor)));
+                .thenComposeAsync(newValue -> nonNull(newValue)
+                                ? CompletableFuture.completedFuture(newValue)
+                                : (CompletableFuture<V>) getFailable(() ->
+                                cacheLoader.asyncLoad(key, executor)),
+                        executor);
     }
 
     // invoked by custom implementation
@@ -145,9 +150,11 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
         return (extendedPersistenceConfigurer.hasCacheLoaderStrategy()
                 ? CompletableFuture.supplyAsync(() -> loadExtendedFromMongo(key), executor)
                 : CompletableFuture.completedFuture((V) null))
-                .thenCompose(newValue -> nonNull(newValue)
-                        ? CompletableFuture.completedFuture(newValue)
-                        : (CompletableFuture<V>) getFailable(() -> cacheLoader.asyncReload(key, oldValue, executor)));
+                .thenComposeAsync(newValue -> nonNull(newValue)
+                                ? CompletableFuture.completedFuture(newValue)
+                                : (CompletableFuture<V>) getFailable(() ->
+                                cacheLoader.asyncReload(key, oldValue, executor)),
+                        executor);
     }
 
     // based on com.github.benmanes.caffeine.cache.LocalLoadingCache.hasLoadAll()
