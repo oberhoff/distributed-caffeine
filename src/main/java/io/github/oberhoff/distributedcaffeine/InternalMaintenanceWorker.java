@@ -32,6 +32,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -68,6 +69,7 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
     private InternalMongoRepository<K, V> mongoRepository;
     private InternalCacheManager<K, V> cacheManager;
     private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
+    private Executor executor;
     private CompletableFuture<Void> maintenanceCompletableFuture;
 
     InternalMaintenanceWorker() {
@@ -87,6 +89,7 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
         this.mongoRepository = distributedCaffeine.getMongoRepository();
         this.cacheManager = distributedCaffeine.getCacheManager();
         this.extendedPersistenceConfigurer = distributedCaffeine.getExtendedPersistenceConfigurer();
+        this.executor = distributedCaffeine.getExecutor();
     }
 
     void activate() {
@@ -242,6 +245,7 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
                                             cacheDocuments.stream()
                                                     .findFirst()
                                                     .filter(InternalCacheDocument::isEvictedExtended)
+                                                    .map(InternalCacheDocument::weakened)
                                                     .ifPresent(sortedCacheDocuments::add))));
                     if (sortedCacheDocuments.size() > maximumSize) {
                         int limit = sortedCacheDocuments.size() - maximumSize;
@@ -278,7 +282,7 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
                                         groupedCacheDocuments.stream()
                                                 .skip(1)
                                                 .forEach(this::queueReplacement))));
-            });
+            }, executor);
             // process only once per activation
             checkForInconsistencies.set(false);
             // TODO logging on exception?

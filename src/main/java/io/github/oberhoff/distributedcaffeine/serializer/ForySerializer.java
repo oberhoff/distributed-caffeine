@@ -74,7 +74,7 @@ public class ForySerializer<T> implements ByteArraySerializer<T> {
         requireNonNull(foryBuilder, "foryBuilder cannot be null");
         requireNonNull(registerClasses, "registerClasses cannot be null");
         this.fory = foryBuilder
-                .buildThreadSafeFory();
+                .buildThreadSafeForyPool(0, Integer.MAX_VALUE);
         Stream.of(registerClasses)
                 .forEach(fory::register);
     }

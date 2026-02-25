@@ -23,12 +23,14 @@ import java.lang.System.Logger.Level;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
+import java.util.stream.Collectors;
 
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.entry;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
@@ -85,7 +87,7 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
         // custom implementation to bypass problematic internal asynchronous handling
         // accepted drawback: no mapping of in-flight refresh operations in policy.refreshes()
         return refreshAll(Set.of(key))
-                .thenApply(map -> map.get(key));
+                .thenApplyAsync(map -> map.get(key), executor);
     }
 
     @Override
@@ -93,59 +95,60 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
         Set<K> keySet = requireNonNullIterable(keys);
         // custom implementation to bypass problematic internal asynchronous handling
         // accepted drawback: no mapping of in-flight refresh operations in 'policy.refreshes()'
-        return CompletableFuture.supplyAsync(() -> {
-            Map<K, V> keyToNewValue = keySet.stream()
-                    .map(key -> entry(key, policy.getIfPresentQuietly(key)))
-                    .map(entry -> entry(entry.getKey(), getOrCreateRefreshOperation(entry.getKey(), entry.getValue())))
-                    .toList().stream() // intermediate step to ensure concurrency
-                    .map(entry -> entry(entry.getKey(), entry.getValue().join()))
-                    .collect(HashMap::new, (hashMap, entry) -> // allow null values
-                            hashMap.put(entry.getKey(), entry.getValue()), HashMap::putAll);
-            // retain the original 'remove if null' semantics
-            Map<K, V> keysWithNewValues = new HashMap<>();
-            Set<K> keysWithNullValues = new HashSet<>();
-            keyToNewValue.forEach((key, newValue) -> {
-                if (nonNull(newValue)) {
-                    keysWithNewValues.put(key, newValue);
-                } else {
-                    keysWithNullValues.add(key);
-                }
-            });
-            synchronizationLock.runLocked(() -> {
-                cache.putAll(cacheManager.putAllDistributedRefresh(keysWithNewValues));
-                cache.invalidateAll(cacheManager.invalidateAllDistributedRefresh(keysWithNullValues));
-            });
-            return unmodifiableMap(keysWithNewValues);
-        }, executor);
+        Map<K, CompletableFuture<V>> keyToCompletableFutureOfValues = keySet.stream()
+                .map(key -> entry(key, policy.getIfPresentQuietly(key)))
+                .collect(Collectors.toMap(Entry::getKey, entry ->
+                        getOrCreateRefreshOperation(entry.getKey(), entry.getValue())));
+        return CompletableFuture.allOf(keyToCompletableFutureOfValues.values().toArray(new CompletableFuture[0]))
+                .thenApplyAsync(ignored -> {
+                    Map<K, V> keyToNewValue = keyToCompletableFutureOfValues.entrySet().stream()
+                            .map(entry -> entry(entry.getKey(), entry.getValue().join()))
+                            .collect(HashMap::new, (hashMap, entry) -> // allow null values
+                                    hashMap.put(entry.getKey(), entry.getValue()), HashMap::putAll);
+                    // retain the original 'remove if null' semantics
+                    Map<K, V> keysWithNewValues = new HashMap<>();
+                    Set<K> keysWithNullValues = new HashSet<>();
+                    keyToNewValue.forEach((key, newValue) -> {
+                        if (nonNull(newValue)) {
+                            keysWithNewValues.put(key, newValue);
+                        } else {
+                            keysWithNullValues.add(key);
+                        }
+                    });
+                    synchronizationLock.runLocked(() -> {
+                        cache.putAll(cacheManager.putAllDistributedRefresh(keysWithNewValues));
+                        cache.invalidateAll(cacheManager.invalidateAllDistributedRefresh(keysWithNullValues));
+                    });
+                    return unmodifiableMap(keysWithNewValues);
+                }, executor);
     }
 
     private CompletableFuture<V> getOrCreateRefreshOperation(K key, V oldValue) {
         // retain the original 'only one concurrent refresh operation per key' semantics
         return refreshOperations.compute(key, (k, refreshOperation) -> {
-            if (isNull(refreshOperation) || refreshOperation.isCompletedExceptionally()) {
-                // retain the original 'load if null, reload if not null' semantics
-                return (isNull(oldValue)
-                        ? getFailable(() -> cacheLoader.asyncLoadDelegated(key, executor),
-                        CompletionException::new)
-                        : getFailable(() -> cacheLoader.asyncReloadDelegated(key, oldValue, executor),
-                        CompletionException::new))
-                        // intention: retain the original 'log exception and swallow' semantics
-                        // but strange: exceptions are still thrown, so this behavior is imitated
-                        // asynchronous because refreshOperations must not be modified during computation
-                        // additionally count stats due to custom implementation
-                        .whenCompleteAsync((v, e) -> {
-                            refreshOperations.remove(key);
-                            if (isNull(e)) {
-                                statsCounter.recordLoadSuccess(1);
-                            } else {
-                                statsCounter.recordLoadFailure(1);
-                                logger.log(Level.WARNING,
-                                        format("Exception thrown during refresh for %s", key), e);
-                            }
-                        }, executor);
-            } else {
-                return refreshOperation;
-            }
-        });
+                    if (isNull(refreshOperation) || refreshOperation.isDone()) {
+                        // retain the original 'load if null, reload if not null' semantics
+                        return (isNull(oldValue)
+                                ? getFailable(() -> cacheLoader.asyncLoadDelegated(key, executor),
+                                CompletionException::new)
+                                : getFailable(() -> cacheLoader.asyncReloadDelegated(key, oldValue, executor),
+                                CompletionException::new));
+                    } else {
+                        return refreshOperation;
+                    }
+                })
+                // intention: retain the original 'log exception and swallow' semantics
+                // but strange: exceptions are still thrown, so this behavior is imitated
+                // additionally count stats due to custom implementation and clean up completed refresh operations
+                .whenCompleteAsync((v, e) -> {
+                    if (isNull(e)) {
+                        statsCounter.recordLoadSuccess(1);
+                    } else {
+                        statsCounter.recordLoadFailure(1);
+                        logger.log(Level.WARNING,
+                                format("Exception thrown during refresh for %s", key), e);
+                    }
+                    refreshOperations.remove(key);
+                }, executor);
     }
 }

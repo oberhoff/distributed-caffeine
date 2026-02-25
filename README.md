@@ -57,8 +57,8 @@ more complex or more expensive tools with comparable features.
 
 Distributed Caffeine cache instances are represented by `DistributedCache` and `DistributedLoadingCache` interfaces
 which are derived from Caffeine's `Cache` and `LoadingCache` interfaces and therefore offer almost the same usage and
-integration options. Please refer to the official [Caffeine documentation](https://github.com/ben-manes/caffeine/wiki)
-for more details on use and integration.
+integration options (drop-in replacement possible). Please refer to the official
+[Caffeine documentation](https://github.com/ben-manes/caffeine/wiki) for more details on use and integration.
 
 The configuration of a cache always starts with a builder returned by invoking the `newBuilder(mongoCollection)` method
 and ends with finalizing the builder by invoking one of the `build...(...)` methods to construct the cache instance. The
@@ -173,6 +173,8 @@ bypassing the cache instance.
   [weak or soft references for keys or values](https://github.com/ben-manes/caffeine/wiki/Eviction#reference-based) is
   not supported. Even when using Caffeine (stand-alone), it is advisable to use the more predictable size- or time-based
   eviction instead.
+* Any custom objects used as keys for cache entries should implement the `hashCode()` method, keeping in mind the
+  importance of good value distribution and low collision rates (`Objects.hash(...)` method might be helpful).
 * Manipulating cache entries or their metadata directly in the MongoDB collection should be done with caution.
   Corresponding cache instances might attempt to reflect certain changes immediately, which may fail if the changed data
   cannot be interpreted correctly anymore.

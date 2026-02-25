@@ -19,8 +19,6 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.mongodb.client.MongoCollection;
 import io.github.oberhoff.distributedcaffeine.DistributedCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
-import org.awaitility.Awaitility;
-import org.awaitility.core.ConditionFactory;
 import org.bson.Document;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterAll;
@@ -96,16 +94,13 @@ public abstract class DistributedCaffeineCommonTestInstance {
         return distributedCache;
     }
 
-    protected void await(Duration duration) {
-        await("duration")
-                .pollInterval(duration)
-                .timeout(duration.plusSeconds(1)) // timeout must be greater than the poll delay
-                .until(() -> true);
-    }
-
-    protected ConditionFactory await(String alias) {
-        return Awaitility.await(alias)
-                .pollExecutorService(executorService);
+    @SuppressWarnings("java:S2925")
+    protected void sleep(Duration duration) {
+        try {
+            Thread.sleep(duration.toMillis());
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @SuppressWarnings("SameReturnValue")
