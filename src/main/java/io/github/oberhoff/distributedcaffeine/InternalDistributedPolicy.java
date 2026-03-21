@@ -15,25 +15,33 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-import com.mongodb.client.MongoCollection;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.SerializersConfigurer;
+import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
+import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
+import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
+import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
-import org.bson.Document;
 import org.jspecify.annotations.NonNull;
 
 import java.util.HashSet;
-import java.util.Objects;
 import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullIterable;
-import static java.lang.String.format;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_GROUP;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_EXTENDED_GROUP;
 import static java.util.Objects.requireNonNull;
 
+@SuppressWarnings("java:S1450")
 class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, InternalLazyInitializer<K, V> {
 
     private DistributedCaffeine<K, V> distributedCaffeine;
+    private Adapter<K, V> adapter;
     private SerializersConfigurer<K, V> serializersConfigurer;
-    private InternalMongoRepository<K, V> mongoRepository;
+    private Repository<K, V> repository;
+    private InternalHasher<K> hasher;
 
     InternalDistributedPolicy() {
         // see also initialize()
@@ -42,13 +50,15 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
     @Override
     public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
         this.distributedCaffeine = distributedCaffeine;
+        this.adapter = distributedCaffeine.getAdapter();
         this.serializersConfigurer = distributedCaffeine.getSerializersConfigurer();
-        this.mongoRepository = distributedCaffeine.getMongoRepository();
+        this.repository = distributedCaffeine.getAdapter().getRepository();
+        this.hasher = distributedCaffeine.getHasher();
     }
 
     @Override
-    public MongoCollection<Document> getMongoCollection() {
-        return distributedCaffeine.getMongoCollection();
+    public Adapter<K, V> getAdapter() {
+        return adapter;
     }
 
     @Override
@@ -72,73 +82,30 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
     }
 
     @Override
-    public CacheEntry<@NonNull K, @NonNull V> getFromMongo(K key, boolean includeEvicted) {
+    public CacheEntry<@NonNull K, @NonNull V> getFromStore(K key, boolean includeEvicted) {
         requireNonNull(key);
-        return getAllFromMongo(Set.of(key), includeEvicted).stream()
-                .filter(cacheEntry -> cacheEntry.getKey().equals(key))
+        return getAllFromStore(Set.of(key), includeEvicted).stream()
+                .filter(cacheEntry -> key.equals(cacheEntry.getKey()))
                 .findFirst()
                 .orElse(null);
     }
 
     @Override
-    public Set<CacheEntry<K, V>> getAllFromMongo(Iterable<? extends K> keys, boolean includeEvicted) {
+    public Set<CacheEntry<K, V>> getAllFromStore(Iterable<? extends K> keys, boolean includeEvicted) {
         Set<K> keySet = requireNonNullIterable(keys);
-        Set<CacheEntry<K, V>> cacheEntries = new HashSet<>();
-        // no data store filter on status and stale because the newest cache entry is needed
-        mongoRepository.consumeCacheDocumentsGroupedByKeyNewestFirstForKeys(
-                keySet, null,
-                null, null,
-                stream -> stream.forEach(cacheDocuments -> cacheDocuments.stream()
-                        .findFirst()
-                        .filter(cacheDocument -> !cacheDocument.isStale())
-                        .filter(cacheDocument -> cacheDocument.isCached()
-                                || (includeEvicted && cacheDocument.isEvictedExtended()))
-                        .map(this::toCacheEntry)
-                        .ifPresent(cacheEntries::add)));
-        return cacheEntries;
-    }
-
-    private CacheEntry<K, V> toCacheEntry(InternalCacheDocument<K, V> cacheDocument) {
-        return new CacheEntry<>() {
-            @Override
-            public String getId() {
-                return cacheDocument.getId().toString();
-            }
-
-            @Override
-            public K getKey() {
-                return cacheDocument.getKey();
-            }
-
-            @Override
-            public V getValue() {
-                return cacheDocument.getValue();
-            }
-
-            @Override
-            public boolean isEvicted() {
-                return cacheDocument.isEvicted();
-            }
-
-            @Override
-            public boolean equals(Object object) {
-                if (this == object) return true;
-                if (object == null || getClass() != object.getClass()) return false;
-                CacheEntry<?, ?> that = (CacheEntry<?, ?>) object;
-                return Objects.equals(this.getKey(), that.getKey())
-                        && Objects.equals(this.getValue(), that.getValue());
-            }
-
-            @Override
-            public int hashCode() {
-                return Objects.hash(getKey(), getValue());
-            }
-
-            @Override
-            public String toString() {
-                return format("CacheEntry{id=%s, key=%s, value=%s, isEvicted=%s}",
-                        getId(), getKey(), getValue(), isEvicted());
-            }
-        };
+        Set<Status> statuses = new HashSet<>(CACHED_GROUP);
+        if (includeEvicted) {
+            statuses.addAll(EVICTED_EXTENDED_GROUP);
+        }
+        // TODO discriminator
+        try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
+                null,
+                hasher.getHashes(keySet),
+                statuses,
+                null,
+                false))) {
+            return cacheEntryStream
+                    .collect(Collectors.toSet());
+        }
     }
 }

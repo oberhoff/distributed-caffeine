@@ -15,13 +15,17 @@
  */
 package io.github.oberhoff.distributedcaffeine.common;
 
+import io.github.oberhoff.distributedcaffeine.hasher.Hashable;
+import io.github.oberhoff.distributedcaffeine.hasher.Hasher;
+
 import java.io.Serializable;
 import java.util.Objects;
+import java.util.function.Supplier;
 
 import static java.lang.String.format;
 
 @SuppressWarnings("unused")
-public class Key implements Serializable {
+public class Key implements Hashable, Serializable {
 
     private Integer id;
     private String name;
@@ -60,6 +64,14 @@ public class Key implements Serializable {
     public Key setData(String data) {
         this.data = data;
         return this;
+    }
+
+    @Override
+    public String getHash(Supplier<Hasher> hasher) {
+        return hasher.get()
+                .putInt(id)
+                .putString(name)
+                .getHash();
     }
 
     @Override

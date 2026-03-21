@@ -27,23 +27,16 @@ import com.github.benmanes.caffeine.cache.RemovalListener;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import com.github.benmanes.caffeine.cache.stats.StatsCounter;
 import com.mongodb.ConnectionString;
-import com.mongodb.MongoClientException;
 import com.mongodb.MongoClientSettings;
-import com.mongodb.MongoCommandException;
-import com.mongodb.ReadConcern;
-import com.mongodb.ReadConcernLevel;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
-import com.mongodb.client.MongoCollection;
-import com.mongodb.client.MongoDatabase;
-import com.mongodb.client.model.Filters;
-import com.mongodb.client.model.IndexModel;
-import com.mongodb.client.model.IndexOptions;
-import com.mongodb.client.model.Indexes;
-import com.mongodb.client.model.Updates;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Builder;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.DockerImage;
-import io.github.oberhoff.distributedcaffeine.DistributedPolicy.CacheEntry;
+import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
+import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
+import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
+import io.github.oberhoff.distributedcaffeine.adapter.Repository;
+import io.github.oberhoff.distributedcaffeine.adapter.Retriever;
+import io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoAdapter;
 import io.github.oberhoff.distributedcaffeine.common.DistributedCaffeineCommonTestInstance;
 import io.github.oberhoff.distributedcaffeine.common.Key;
 import io.github.oberhoff.distributedcaffeine.common.Value;
@@ -56,10 +49,6 @@ import io.github.oberhoff.distributedcaffeine.serializer.JavaObjectSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.assertj.core.api.AbstractLongAssert;
-import org.bson.BsonTimestamp;
-import org.bson.Document;
-import org.bson.conversions.Bson;
-import org.bson.types.ObjectId;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -75,7 +64,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.platform.commons.util.ReflectionUtils;
 import org.junit.platform.commons.util.ReflectionUtils.HierarchyTraversalMode;
 import org.slf4j.event.Level;
-import org.slf4j.event.LoggingEvent;
 import org.testcontainers.images.PullPolicy;
 import org.testcontainers.mongodb.MongoDBContainer;
 import org.testcontainers.utility.DockerImageName;
@@ -89,8 +77,8 @@ import java.lang.annotation.Target;
 import java.lang.reflect.Field;
 import java.security.SecureRandom;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -100,7 +88,6 @@ import java.util.Map.Entry;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentMap;
@@ -112,7 +99,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -120,30 +106,29 @@ import java.util.function.UnaryOperator;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.DockerImage;
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.RUNS_ON_GITHUB;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION_AND_EVICTION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.HASH;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STALE;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field.STATUS;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED_GROUP;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED_LOADED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED_REFRESHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.CACHED_REFRESHED_AFTER_WRITE;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_EXTENDED_GROUP;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_SIZE;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_SIZE_EXTENDED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_TIME;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.EVICTED_TIME_EXTENDED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.INVALIDATED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.INVALIDATED_REFRESHED;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Status.INVALIDATED_REFRESHED_AFTER_WRITE;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.entry;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_GROUP;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_LOADED;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_REFRESHED;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_REFRESHED_AFTER_WRITE;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_EXTENDED_GROUP;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_SIZE;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_SIZE_EXTENDED;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_TIME;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_TIME_EXTENDED;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED_AFTER_WRITE;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.SHORT_LIVING_GROUP;
 import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.lang.System.getProperty;
@@ -151,7 +136,6 @@ import static java.time.temporal.ChronoUnit.FOREVER;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toMap;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCollection;
 import static org.assertj.core.api.Assertions.assertThatException;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
@@ -161,7 +145,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.params.ParameterizedInvocationConstants.ARGUMENTS_WITH_NAMES_PLACEHOLDER;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
@@ -169,7 +152,6 @@ import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.atMost;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -251,7 +233,7 @@ final class DistributedCaffeineIntegrationTests {
     final class Mongo_8_latest extends DistributedCaffeineIntegration {
     }
 
-    @SuppressWarnings({"java:S5838", "java:S5778", "java:S5961"})
+    @SuppressWarnings({"java:S5838", "java:S5778", "java:S5961", "ResultOfMethodCallIgnored"})
     abstract static class DistributedCaffeineIntegration extends DistributedCaffeineIntegrationTestInstance {
 
         @DisplayName("Test put() and getIfPresent()")
@@ -283,7 +265,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(cache -> {
                             assertThat(cache.estimatedSize()).isEqualTo(1);
@@ -291,8 +272,13 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(cache.getIfPresent(Key.of(0))).isNull();
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(0)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
                     });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
         }
 
         @DisplayName("Test putAll() and getAllPresent()")
@@ -327,7 +313,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(cache -> {
                             assertThat(cache.estimatedSize()).isEqualTo(2);
@@ -338,8 +323,13 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(cache.getAllPresent(Set.of(Key.of(0)))).isEmpty();
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(0)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
                     });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
         }
 
         @DisplayName("Test get() and getAll()")
@@ -398,7 +388,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(cache -> {
                             assertThat(cache.estimatedSize()).isEqualTo(7);
@@ -428,8 +417,13 @@ final class DistributedCaffeineIntegrationTests {
                                     .allSatisfy(value -> assertThat(value.getName()).isEqualTo("computed"));
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(7), s -> s.isEqualTo(0)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(7)));
                     });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(7)));
         }
 
         @DisplayName("Test invalidate() and invalidateAll()")
@@ -469,7 +463,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(cache -> {
                             assertThat(cache.estimatedSize()).isEqualTo(5);
@@ -480,7 +473,7 @@ final class DistributedCaffeineIntegrationTests {
                                     .containsAllEntriesOf(map4to5);
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(5), s -> s.isEqualTo(0)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(5)));
                     });
 
             featureParityCaches.forEach(cache ->
@@ -488,7 +481,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(cache -> {
                             assertThat(cache.estimatedSize()).isEqualTo(4);
@@ -499,8 +491,8 @@ final class DistributedCaffeineIntegrationTests {
                                     .containsAllEntriesOf(map4to5);
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(4), s -> s.isEqualTo(1)),
-                                Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(1)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(4)),
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(1)));
                     });
 
             featureParityCaches.forEach(cache ->
@@ -508,7 +500,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(cache -> {
                             assertThat(cache.estimatedSize()).isEqualTo(2);
@@ -518,15 +509,14 @@ final class DistributedCaffeineIntegrationTests {
                                     .containsAllEntriesOf(map4to5);
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(3)),
-                                Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(3)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(2)),
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(3)));
                     });
 
             featureParityCaches.forEach(Cache::invalidateAll);
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(cache -> {
                             assertThat(cache.estimatedSize()).isEqualTo(0);
@@ -535,9 +525,13 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(cache.getAllPresent(map4to5.keySet())).isEmpty();
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(0), s -> s.isEqualTo(5)),
-                                Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(5)));
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(5)));
                     });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.empty());
         }
 
         @DisplayName("Test get() with cache loader")
@@ -614,7 +608,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(loadingCache -> {
                             assertThat(loadingCache.estimatedSize()).isEqualTo(3);
@@ -630,8 +623,13 @@ final class DistributedCaffeineIntegrationTests {
                                     .allSatisfy(value -> assertThat(value.getName()).isEqualTo("loaded"));
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED_LOADED, f -> f.isEqualTo(3), s -> s.isEqualTo(0)));
+                                Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(3)));
                     });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(3)));
         }
 
         @DisplayName("Test getAll() with cache loader")
@@ -715,7 +713,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(loadingCache -> {
                             assertThat(loadingCache.estimatedSize()).isEqualTo(6);
@@ -741,8 +738,13 @@ final class DistributedCaffeineIntegrationTests {
                                     .allSatisfy(value -> assertThat(value.getName()).isEqualTo("loaded"));
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED_LOADED, f -> f.isEqualTo(6), s -> s.isEqualTo(0)));
+                                Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(6)));
                     });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(6)));
         }
 
         @DisplayName("Test refresh() with cache loader")
@@ -815,7 +817,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(loadingCache -> {
                             assertThat(loadingCache.estimatedSize()).isEqualTo(1);
@@ -845,7 +846,7 @@ final class DistributedCaffeineIntegrationTests {
                                     });
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED_REFRESHED, f -> f.isEqualTo(1), s -> s.isEqualTo(0)));
+                                Count.of(CACHED_REFRESHED, assertion -> assertion.isEqualTo(1)));
                     });
 
             loggerDistributedCaffeine.stopCapturing();
@@ -882,7 +883,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(loadingCache -> {
                             assertThat(loadingCache.estimatedSize()).isEqualTo(1);
@@ -910,9 +910,8 @@ final class DistributedCaffeineIntegrationTests {
                                     });
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)),
-                                Count.of(CACHED_REFRESHED, f -> f.isEqualTo(1), s -> s.isEqualTo(1)),
-                                Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)));
+                                Count.of(CACHED_REFRESHED, assertion -> assertion.isEqualTo(1)),
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2)));
                     });
 
             loggerDistributedCaffeine.stopCapturing();
@@ -933,7 +932,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(loadingCache -> {
                             assertThat(loadingCache.estimatedSize()).isEqualTo(0);
@@ -941,12 +939,16 @@ final class DistributedCaffeineIntegrationTests {
                                     .isNull();
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)),
-                                Count.of(CACHED_REFRESHED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)),
-                                Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)),
-                                Count.of(INVALIDATED_REFRESHED, f -> f.isEqualTo(0), s -> s.isEqualTo(1)));
+                                Count.of(INVALIDATED_REFRESHED, assertion -> assertion.isEqualTo(1)),
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2)));
                     });
 
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.empty());
+
+            // test sharing of refresh operations
             int levelOfParallelism = 10;
             AtomicInteger counter = new AtomicInteger(0);
 
@@ -966,10 +968,10 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() ->
                             allCaches.forEach(loadingCache ->
-                                    assertThat(loadingCache.getIfPresent(key1)).isNotNull()
+                                    assertThat(loadingCache.getIfPresent(key1))
+                                            .isNotNull()
                                             .satisfies(value -> assertThat(requireNonNull(value).getId()).isLessThan(levelOfParallelism))
                                             .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("counted"))));
         }
@@ -1047,7 +1049,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(loadingCache -> {
                             assertThat(loadingCache.estimatedSize()).isEqualTo(1);
@@ -1083,7 +1084,7 @@ final class DistributedCaffeineIntegrationTests {
                                     });
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED_REFRESHED, f -> f.isEqualTo(1), s -> s.isEqualTo(0)));
+                                Count.of(CACHED_REFRESHED, assertion -> assertion.isEqualTo(1)));
                     });
 
             loggerDistributedCaffeine.stopCapturing();
@@ -1120,7 +1121,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(loadingCache -> {
                             assertThat(loadingCache.estimatedSize()).isEqualTo(1);
@@ -1156,9 +1156,8 @@ final class DistributedCaffeineIntegrationTests {
                                     });
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)),
-                                Count.of(CACHED_REFRESHED, f -> f.isEqualTo(1), s -> s.isEqualTo(1)),
-                                Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)));
+                                Count.of(CACHED_REFRESHED, assertion -> assertion.isEqualTo(1)),
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2)));
                     });
 
             loggerDistributedCaffeine.stopCapturing();
@@ -1179,7 +1178,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(loadingCache -> {
                             assertThat(loadingCache.estimatedSize()).isEqualTo(0);
@@ -1189,12 +1187,16 @@ final class DistributedCaffeineIntegrationTests {
                                     .isEmpty();
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)),
-                                Count.of(CACHED_REFRESHED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)),
-                                Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)),
-                                Count.of(INVALIDATED_REFRESHED, f -> f.isEqualTo(0), s -> s.isEqualTo(1)));
+                                Count.of(INVALIDATED_REFRESHED, assertion -> assertion.isEqualTo(1)),
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2)));
                     });
 
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.empty());
+
+            // test sharing of refresh operations
             int levelOfParallelism = 10;
             AtomicInteger counter = new AtomicInteger(0);
 
@@ -1214,7 +1216,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() ->
                             allCaches.forEach(loadingCache ->
                                     assertThat(loadingCache.getIfPresent(key1)).isNotNull()
@@ -1305,6 +1306,7 @@ final class DistributedCaffeineIntegrationTests {
                 await("logging") // workaround due to logging interference
                         .atMost(WAITING_DURATION)
                         .untilAsserted(() -> assertThat(loggerBoundedLocalCache.getLoggingEvents().size()).isOdd());
+                sleep(Duration.ofMillis(100));
                 getValueUnchecked.setValue(loadingCache.getIfPresent(keyUnchecked));
                 await("logging") // workaround due to logging interference
                         .atMost(WAITING_DURATION)
@@ -1325,7 +1327,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(loadingCache -> {
                             assertThat(loadingCache.estimatedSize()).isEqualTo(3);
@@ -1362,10 +1363,16 @@ final class DistributedCaffeineIntegrationTests {
                                             .hasMessage("java.lang.IllegalStateException: unchecked");
                                 });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(2)),
-                                Count.of(CACHED_REFRESHED_AFTER_WRITE, f -> f.isEqualTo(1), s -> s.isEqualTo(0)),
-                                Count.of(INVALIDATED_REFRESHED_AFTER_WRITE, f -> f.isEqualTo(0), s -> s.isEqualTo(1)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(2)),
+                                Count.of(CACHED_REFRESHED_AFTER_WRITE, assertion -> assertion.isEqualTo(1)),
+                                Count.of(INVALIDATED_REFRESHED_AFTER_WRITE, assertion -> assertion.isEqualTo(1)));
                     });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(2)),
+                    Count.of(CACHED_REFRESHED_AFTER_WRITE, assertion -> assertion.isEqualTo(1)));
 
             loggerBoundedLocalCache.stopCapturing();
         }
@@ -1373,6 +1380,7 @@ final class DistributedCaffeineIntegrationTests {
         @DisplayName("Test stats()")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentSerializers")
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
         void test_DistributedLoadingCache_stats(CacheFactory<Key, Value> cacheFactory) throws Exception {
             AtomicLong ticker = new AtomicLong(0);
 
@@ -1470,10 +1478,13 @@ final class DistributedCaffeineIntegrationTests {
                 assertThatException().isThrownBy(() -> loadingCache.refresh(Key.of(0)).join());
                 loadingCache.refreshAll(Set.of(key6, key7)).join();
                 assertThatException().isThrownBy(() -> loadingCache.refreshAll(Set.of(Key.of(0))).join());
+
                 // set ticker to start triggering expiration/refreshing
                 ticker.addAndGet(Duration.ofHours(1).toNanos());
+
                 loadingCache.getIfPresent(key1); // loadFailureCount + 1
                 loadingCache.getIfPresent(key7); // loadSuccessCount + 1
+
                 // reset ticker to stop triggering expiration/refreshing
                 ticker.set(0);
 
@@ -1484,7 +1495,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(loadingCache -> {
                             CacheStats stats = statsResult.getObject();
@@ -1499,11 +1509,19 @@ final class DistributedCaffeineIntegrationTests {
                                     key5, value5, key6, value6, key7, value7));
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(3), s -> s.isEqualTo(0)),
-                                Count.of(CACHED_LOADED, f -> f.isEqualTo(1), s -> s.isEqualTo(1)),
-                                Count.of(CACHED_REFRESHED, f -> f.isEqualTo(2), s -> s.isEqualTo(2)),
-                                Count.of(CACHED_REFRESHED_AFTER_WRITE, f -> f.isEqualTo(1), s -> s.isEqualTo(0)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(3)),
+                                Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
+                                Count.of(CACHED_REFRESHED, assertion -> assertion.isEqualTo(2)),
+                                Count.of(CACHED_REFRESHED_AFTER_WRITE, assertion -> assertion.isEqualTo(1)));
                     });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(3)),
+                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
+                    Count.of(CACHED_REFRESHED, assertion -> assertion.isEqualTo(2)),
+                    Count.of(CACHED_REFRESHED_AFTER_WRITE, assertion -> assertion.isEqualTo(1)));
 
             StatsCounter statsCounter = getDistributedCaffeine(distributedLoadingCache).getStatsCounter();
 
@@ -1539,7 +1557,6 @@ final class DistributedCaffeineIntegrationTests {
             Cache<Key, Value> caffeineCache = Caffeine.newBuilder()
                     .build();
 
-            Set<Cache<Key, Value>> allCaches = Set.of(distributedCache, syncedDistributedCache, caffeineCache);
             List<ConcurrentMap<Key, Value>> allMaps = List.of(distributedCache.asMap(), syncedDistributedCache.asMap(), caffeineCache.asMap());
             List<ConcurrentMap<Key, Value>> featureParityMaps = List.of(distributedCache.asMap(), caffeineCache.asMap());
 
@@ -1591,7 +1608,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allMaps.forEach(map -> {
                             assertThat(map).hasSize(4);
@@ -1604,8 +1620,13 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(map).containsAllEntriesOf(keyValueMap);
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(4), s -> s.isEqualTo(1)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(4)));
                     });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(4)));
         }
 
         @DisplayName("Test replace()")
@@ -1621,7 +1642,6 @@ final class DistributedCaffeineIntegrationTests {
             Cache<Key, Value> caffeineCache = Caffeine.newBuilder()
                     .build();
 
-            Set<Cache<Key, Value>> allCaches = Set.of(distributedCache, syncedDistributedCache, caffeineCache);
             List<ConcurrentMap<Key, Value>> allMaps = List.of(distributedCache.asMap(), syncedDistributedCache.asMap(), caffeineCache.asMap());
             List<ConcurrentMap<Key, Value>> featureParityMaps = List.of(distributedCache.asMap(), caffeineCache.asMap());
 
@@ -1655,7 +1675,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allMaps.forEach(map -> {
                             assertThat(map).hasSize(2);
@@ -1670,8 +1689,13 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(replacedBool2x3.<Boolean>getObject()).isFalse();
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(2)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
                     });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
         }
 
         @DisplayName("Test remove(), contains*() and clear()")
@@ -1687,7 +1711,6 @@ final class DistributedCaffeineIntegrationTests {
             Cache<Key, Value> caffeineCache = Caffeine.newBuilder()
                     .build();
 
-            Set<Cache<Key, Value>> allCaches = Set.of(distributedCache, syncedDistributedCache, caffeineCache);
             List<ConcurrentMap<Key, Value>> allMaps = List.of(distributedCache.asMap(), syncedDistributedCache.asMap(), caffeineCache.asMap());
             List<ConcurrentMap<Key, Value>> featureParityMaps = List.of(distributedCache.asMap(), caffeineCache.asMap());
 
@@ -1734,7 +1757,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allMaps.forEach(map -> {
                             assertThat(map).hasSize(1);
@@ -1750,22 +1772,25 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(containsValueBool3x2.<Boolean>getObject()).isTrue();
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(2)),
-                                Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2)));
                     });
 
             featureParityMaps.forEach(Map::clear);
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allMaps.forEach(map ->
                                 assertThat(map).isEmpty());
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(0), s -> s.isEqualTo(3)),
-                                Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(3)));
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(3)));
                     });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.empty());
         }
 
         @DisplayName("Test keySet()")
@@ -1781,7 +1806,6 @@ final class DistributedCaffeineIntegrationTests {
             Cache<Key, Value> caffeineCache = Caffeine.newBuilder()
                     .build();
 
-            Set<Cache<Key, Value>> allCaches = Set.of(distributedCache, syncedDistributedCache, caffeineCache);
             List<ConcurrentMap<Key, Value>> allMaps = List.of(distributedCache.asMap(), syncedDistributedCache.asMap(), caffeineCache.asMap());
             List<ConcurrentMap<Key, Value>> featureParityMaps = List.of(distributedCache.asMap(), caffeineCache.asMap());
 
@@ -1809,6 +1833,7 @@ final class DistributedCaffeineIntegrationTests {
             EqualResult<Key, Value> nextKey5 = new EqualResult<>();
 
             featureParityMaps.forEach(map -> {
+                assertThatExceptionOfType(UnsupportedOperationException.class).isThrownBy(() -> map.keySet().add(Key.of(0)));
                 assertThatExceptionOfType(UnsupportedOperationException.class).isThrownBy(() -> map.keySet().add(null));
                 assertThatExceptionOfType(UnsupportedOperationException.class).isThrownBy(() -> map.keySet().addAll(_set(null)));
                 // noinspection SuspiciousMethodCalls
@@ -1845,7 +1870,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allMaps.forEach(map -> {
                             assertThat(map.keySet()).hasSize(1);
@@ -1861,8 +1885,8 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(nextKey5.getKey()).isEqualTo(key5);
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(5)),
-                                Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(5)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(5)));
                     });
 
             // noinspection All
@@ -1871,14 +1895,17 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allMaps.forEach(map ->
                                 assertThat(map.keySet()).isEmpty());
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(0), s -> s.isEqualTo(6)),
-                                Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(6)));
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(6)));
                     });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.empty());
         }
 
         @DisplayName("Test values()")
@@ -1894,7 +1921,6 @@ final class DistributedCaffeineIntegrationTests {
             Cache<Key, Value> caffeineCache = Caffeine.newBuilder()
                     .build();
 
-            Set<Cache<Key, Value>> allCaches = Set.of(distributedCache, syncedDistributedCache, caffeineCache);
             List<ConcurrentMap<Key, Value>> allMaps = List.of(distributedCache.asMap(), syncedDistributedCache.asMap(), caffeineCache.asMap());
             List<ConcurrentMap<Key, Value>> featureParityMaps = List.of(distributedCache.asMap(), caffeineCache.asMap());
 
@@ -1922,6 +1948,7 @@ final class DistributedCaffeineIntegrationTests {
             EqualResult<Key, Value> nextValue5 = new EqualResult<>();
 
             featureParityMaps.forEach(map -> {
+                assertThatExceptionOfType(UnsupportedOperationException.class).isThrownBy(() -> map.values().add(Value.of(0)));
                 assertThatExceptionOfType(UnsupportedOperationException.class).isThrownBy(() -> map.values().add(null));
                 assertThatExceptionOfType(UnsupportedOperationException.class).isThrownBy(() -> map.values().addAll(_set(null)));
                 // noinspection SuspiciousMethodCalls
@@ -1956,7 +1983,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allMaps.forEach(map -> {
                             assertThat(map.values()).hasSize(1);
@@ -1972,8 +1998,8 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(nextValue5.getValue()).isEqualTo(value5);
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(5)),
-                                Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(5)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(5)));
                     });
 
             // noinspection All
@@ -1982,14 +2008,17 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allMaps.forEach(map ->
                                 assertThat(map.values()).isEmpty());
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(0), s -> s.isEqualTo(6)),
-                                Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(6)));
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(6)));
                     });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.empty());
         }
 
         @DisplayName("Test entrySet()")
@@ -2005,7 +2034,6 @@ final class DistributedCaffeineIntegrationTests {
             Cache<Key, Value> caffeineCache = Caffeine.newBuilder()
                     .build();
 
-            Set<Cache<Key, Value>> allCaches = Set.of(distributedCache, syncedDistributedCache, caffeineCache);
             List<ConcurrentMap<Key, Value>> allMaps = List.of(distributedCache.asMap(), syncedDistributedCache.asMap(), caffeineCache.asMap());
             List<ConcurrentMap<Key, Value>> featureParityMaps = List.of(distributedCache.asMap(), caffeineCache.asMap());
 
@@ -2061,7 +2089,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allMaps.forEach(map -> {
                             assertThat(map.entrySet()).hasSize(1);
@@ -2077,8 +2104,8 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(nextEntry5.getEntry()).isEqualTo(entry5);
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(5)),
-                                Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(5)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(5)));
                     });
 
             featureParityMaps.forEach(map ->
@@ -2086,13 +2113,12 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allMaps.forEach(map ->
                                 assertThat(map.get(entry6.getKey())).isEqualTo(Value.of(6, "write through")));
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(6)),
-                                Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(5)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(5)));
                     });
 
             // noinspection All
@@ -2101,14 +2127,17 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allMaps.forEach(map ->
                                 assertThat(map.entrySet()).isEmpty());
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(0), s -> s.isEqualTo(7)),
-                                Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(6)));
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(6)));
                     });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.empty());
         }
 
         @DisplayName("Test policy()")
@@ -2188,7 +2217,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(cache ->
                                 assertThat(cache.estimatedSize()).isEqualTo(3));
@@ -2209,7 +2237,7 @@ final class DistributedCaffeineIntegrationTests {
                                     .isPositive();
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(3), s -> s.isEqualTo(1)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(3)));
                     });
 
             computedValue3.reset();
@@ -2223,7 +2251,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(cache ->
                                 assertThat(cache.estimatedSize()).isEqualTo(0));
@@ -2234,9 +2261,8 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(computedValue3.getValue()).isNull();
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(0), s -> s.isEqualTo(4)),
-                                Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(1)),
-                                Count.of(EVICTED_TIME, f -> f.isEqualTo(0), s -> s.isEqualTo(6)));
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(1)),
+                                Count.of(EVICTED_TIME, assertion -> assertion.isEqualTo(2)));
                     });
 
             featureParityPolicies.forEach(policy -> {
@@ -2251,17 +2277,21 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(allCaches))
                     .untilAsserted(() -> {
                         allCaches.forEach(cache ->
                                 assertThat(cache.estimatedSize()).isEqualTo(1));
                         allPolicies.forEach(policy ->
                                 assertThat(policy.getIfPresentQuietly(key1)).isEqualTo(value1));
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(4)),
-                                Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(1)),
-                                Count.of(EVICTED_TIME, f -> f.isEqualTo(0), s -> s.isEqualTo(6)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(1)),
+                                Count.of(EVICTED_TIME, assertion -> assertion.isEqualTo(1)));
                     });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
         }
 
         @DisplayName("Test distributedPolicy()")
@@ -2280,32 +2310,31 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(distributedPolicy.getValueSerializer())
                     .isInstanceOfAny(ByteArraySerializer.class, StringSerializer.class, JsonSerializer.class);
 
-            Key manipulatedKey = Key.of(0);
-            Value manipulatedValue = Value.of(0); //will never be returned
             Key key1 = Key.of(1);
             Value value1 = Value.of(1);
             Key key2 = Key.of(2);
             Value value2 = Value.of(2);
 
-            assertThatNullPointerException().isThrownBy(() -> distributedPolicy.getFromMongo(_null(), true));
-            assertThatNullPointerException().isThrownBy(() -> distributedPolicy.getAllFromMongo(_null(), true));
-            assertThatNullPointerException().isThrownBy(() -> distributedPolicy.getAllFromMongo(_set(null), true));
+            assertThatNullPointerException().isThrownBy(() -> distributedPolicy.getFromStore(_null(), true));
+            assertThatNullPointerException().isThrownBy(() -> distributedPolicy.getAllFromStore(_null(), true));
+            assertThatNullPointerException().isThrownBy(() -> distributedPolicy.getAllFromStore(_set(null), true));
 
             VarExpiration<Key, Value> varExpiration = distributedCache.policy().expireVariably().orElseThrow();
 
-            varExpiration.put(manipulatedKey, manipulatedValue, Duration.ofHours(1));
-
-            // create inconsistencies in relation to hash values
-            distributedPolicy.getMongoCollection()
-                    .updateMany(Filters.empty(), Updates.set(HASH.toString(), key1.hashCode()));
-
-            varExpiration.put(key1, value1, Duration.ofHours(1));
             varExpiration.put(key1, value1, Duration.ofHours(1));
             varExpiration.put(key2, value2, Duration.ZERO); // fast eviction
 
+            await("eviction")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() ->
+                            assertThatDataStoreHasCounts(
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(1))));
+
             // test equals() and hashCode() and toString()
-            CacheEntry<Key, Value> cacheEntry1 = distributedPolicy.getFromMongo(key1, true);
-            CacheEntry<Key, Value> cacheEntry2 = distributedPolicy.getFromMongo(key2, true);
+            CacheEntry<Key, Value> cacheEntry1 = distributedPolicy.getFromStore(key1, true);
+            CacheEntry<Key, Value> cacheEntry2 = distributedPolicy.getFromStore(key2, true);
             assertThat(cacheEntry1).isNotNull();
             assertThat(cacheEntry2).isNotNull();
             // noinspection ConstantValue
@@ -2320,26 +2349,37 @@ final class DistributedCaffeineIntegrationTests {
 
             await("eviction")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCache))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
-                        assertThat(distributedPolicy.getFromMongo(key1, false)).isNotNull();
-                        assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull();
-                        assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                        assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull();
-                        assertThat(distributedPolicy.getAllFromMongo(Set.of(key1, key2), false))
+                        assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull();
+                        assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull();
+                        assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                        assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull();
+                        assertThat(distributedPolicy.getAllFromStore(Set.of(key1, key2), false))
                                 .containsOnly(cacheEntry1)
-                                .allSatisfy(entry -> assertThat(entry.getId()).isNotBlank())
+                                .allSatisfy(entry -> assertThat(entry.getDiscriminator()).isNull())
+                                .allSatisfy(entry -> assertThat(entry.getHash()).isNotBlank())
+                                .allSatisfy(entry -> assertThat(entry.getOperation()).isNotNull())
                                 .allSatisfy(entry -> assertThat(entry.getKey()).isEqualTo(key1))
                                 .allSatisfy(entry -> assertThat(entry.getValue()).isEqualTo(value1))
-                                .allSatisfy(entry -> assertThat(entry.isEvicted()).isFalse());
-                        assertThat(distributedPolicy.getAllFromMongo(Set.of(key1, key2), true))
+                                .allSatisfy(entry -> assertThat(entry.getStatus()).isEqualTo(CACHED))
+                                .allSatisfy(entry -> assertThat(entry.isCached()).isTrue())
+                                .allSatisfy(entry -> assertThat(entry.isInvalidated()).isFalse())
+                                .allSatisfy(entry -> assertThat(entry.isEvicted()).isFalse())
+                                .allSatisfy(entry -> assertThat(entry.isEvictedExtended()).isFalse());
+                        assertThat(distributedPolicy.getAllFromStore(Set.of(key1, key2), true))
                                 .containsOnly(cacheEntry1, cacheEntry2);
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(2)),
-                                Count.of(EVICTED_TIME_EXTENDED, f -> f.isEqualTo(1), s -> s.isEqualTo(0)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
+                                Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(1)));
                     });
-        }
 
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
+                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(1)));
+        }
 
         @DisplayName("Test population")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
@@ -2364,7 +2404,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -2375,14 +2414,15 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(0)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(1);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(1);
                             assertThat(distributedCacheA.getIfPresent(key1)).isEqualTo(value1);
                             assertThat(distributedCacheB.getIfPresent(key2)).isEqualTo(value2);
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
@@ -2391,7 +2431,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -2402,7 +2441,7 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(2)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(2);
@@ -2411,13 +2450,22 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.getIfPresent(key2)).isEqualTo(value2);
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
-            await("cache manager maintenance")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThatMaintenanceIsDone(distributedCacheA, distributedCacheB));
+            processMaintenance();
+
+            if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                    || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
+                assertThatDataStoreHasCounts(
+                        Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
+            } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
+                    || distributionMode.equals(INVALIDATION)) {
+                assertThatDataStoreHasCounts(
+                        Count.empty());
+            }
         }
 
         @DisplayName("Test invalidation")
@@ -2452,7 +2500,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -2463,14 +2510,15 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(0)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(1);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(1);
                             assertThat(distributedCacheA.getIfPresent(key1)).isEqualTo(value1);
                             assertThat(distributedCacheB.getIfPresent(key2)).isEqualTo(value2);
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
@@ -2479,7 +2527,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("invalidation")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -2493,22 +2540,21 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(0);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(0);
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)),
-                                    Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)));
+                                    Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(1);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(1);
                             assertThat(distributedCacheA.getIfPresent(key1)).isEqualTo(value1);
                             assertThat(distributedCacheB.getIfPresent(key2)).isEqualTo(value2);
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
@@ -2517,7 +2563,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("invalidation")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -2532,27 +2577,26 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(0);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(0);
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)),
-                                    Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)));
+                                    Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(0);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(0);
                             assertThatDataStoreHasCounts(
-                                    Count.of(INVALIDATED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)));
+                                    Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2)));
                         }
                     });
 
-            await("cache manager maintenance")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThatMaintenanceIsDone(distributedCacheA, distributedCacheB));
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.empty());
         }
 
         @DisplayName("Test eviction by size")
@@ -2589,7 +2633,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -2599,13 +2643,14 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(0)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(0);
                             assertThat(distributedCacheA.getIfPresent(key1)).isEqualTo(value1);
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
@@ -2613,7 +2658,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("eviction")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -2629,7 +2674,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(maximumSize);
@@ -2638,8 +2683,8 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(1)),
-                                    Count.of(EVICTED_SIZE, f -> f.isEqualTo(0), s -> s.isBetween(1L, 2L)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_SIZE, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(POPULATION_AND_INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(maximumSize);
@@ -2647,14 +2692,15 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(1)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedCacheA.getIfPresent(key1)).isEqualTo(value1);
                             assertThat(distributedCacheB.getIfPresent(key2)).isEqualTo(value2);
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
@@ -2662,7 +2708,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("eviction")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -2679,7 +2725,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(maximumSize);
@@ -2688,8 +2734,8 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(2)),
-                                    Count.of(EVICTED_SIZE, f -> f.isEqualTo(0), s -> s.isBetween(1L, 2L)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_SIZE, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(POPULATION_AND_INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(1);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(1);
@@ -2697,7 +2743,7 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(2)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(maximumSize);
@@ -2705,14 +2751,15 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_SIZE, f -> f.isEqualTo(0), s -> s.isEqualTo(1)));
+                                    Count.of(EVICTED_SIZE, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedCacheA.getIfPresent(key2)).isEqualTo(value2);
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
@@ -2720,7 +2767,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("eviction")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -2739,7 +2786,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(maximumSize);
@@ -2748,8 +2795,8 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(3)),
-                                    Count.of(EVICTED_SIZE, f -> f.isEqualTo(0), s -> s.isBetween(2L, 4L)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_SIZE, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(POPULATION_AND_INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(maximumSize);
@@ -2757,25 +2804,36 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(3)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(0);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedCacheB.getIfPresent(key1)).isEqualTo(value1);
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_SIZE, f -> f.isEqualTo(0), s -> s.isEqualTo(2)));
+                                    Count.of(EVICTED_SIZE, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedCacheA.getIfPresent(key2)).isEqualTo(value2);
                             assertThat(distributedCacheB.getIfPresent(key1)).isEqualTo(value1);
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
-            await("cache manager maintenance")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThatMaintenanceIsDone(distributedCacheA, distributedCacheB));
+            processMaintenance();
+
+            if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)) {
+                assertThatDataStoreHasCounts(
+                        Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
+            } else if (distributionMode.equals(POPULATION_AND_INVALIDATION)) {
+                assertThatDataStoreHasCounts(
+                        Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
+            } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
+                    || distributionMode.equals(INVALIDATION)) {
+                assertThatDataStoreHasCounts(
+                        Count.empty());
+            }
         }
 
         @DisplayName("Test eviction by time")
@@ -2813,7 +2871,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -2823,13 +2881,14 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(0)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(1);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(0);
                             assertThat(distributedCacheA.getIfPresent(key1)).isEqualTo(value1);
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
@@ -2840,7 +2899,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("eviction")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -2855,7 +2914,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(1);
@@ -2864,8 +2923,8 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(1)),
-                                    Count.of(EVICTED_TIME, f -> f.isEqualTo(0), s -> s.isEqualTo(2)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_TIME, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(POPULATION_AND_INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(1);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(1);
@@ -2873,18 +2932,19 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(1)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(0);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(1);
                             assertThat(distributedCacheB.getIfPresent(key2)).isEqualTo(value2);
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_TIME, f -> f.isEqualTo(0), s -> s.isEqualTo(1)));
+                                    Count.of(EVICTED_TIME, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(0);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(1);
                             assertThat(distributedCacheB.getIfPresent(key2)).isEqualTo(value2);
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
@@ -2892,7 +2952,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("eviction")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -2907,7 +2967,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(1);
@@ -2916,8 +2976,8 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(2)),
-                                    Count.of(EVICTED_TIME, f -> f.isEqualTo(0), s -> s.isEqualTo(2)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_TIME, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(POPULATION_AND_INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(1);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(1);
@@ -2925,7 +2985,7 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(2)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(1);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(1);
@@ -2933,14 +2993,15 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_TIME, f -> f.isEqualTo(0), s -> s.isEqualTo(1)));
+                                    Count.of(EVICTED_TIME, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(1);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(1);
                             assertThat(distributedCacheA.getIfPresent(key2)).isEqualTo(value2);
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
@@ -2951,7 +3012,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("eviction")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -2966,7 +3027,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(1);
@@ -2975,8 +3036,8 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(3)),
-                                    Count.of(EVICTED_TIME, f -> f.isEqualTo(0), s -> s.isEqualTo(4)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_TIME, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(POPULATION_AND_INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(1);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(1);
@@ -2984,24 +3045,35 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(3)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(0);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(1);
                             assertThat(distributedCacheB.getIfPresent(key1)).isEqualTo(value1);
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_TIME, f -> f.isEqualTo(0), s -> s.isEqualTo(3)));
+                                    Count.of(EVICTED_TIME, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(0);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(1);
                             assertThat(distributedCacheB.getIfPresent(key1)).isEqualTo(value1);
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
-            await("cache manager maintenance")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThatMaintenanceIsDone(distributedCacheA, distributedCacheB));
+            processMaintenance();
+
+            if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)) {
+                assertThatDataStoreHasCounts(
+                        Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
+            } else if (distributionMode.equals(POPULATION_AND_INVALIDATION)) {
+                assertThatDataStoreHasCounts(
+                        Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
+            } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
+                    || distributionMode.equals(INVALIDATION)) {
+                assertThatDataStoreHasCounts(
+                        Count.empty());
+            }
         }
 
         @DisplayName("Test refresh")
@@ -3039,7 +3111,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3052,7 +3123,7 @@ final class DistributedCaffeineIntegrationTests {
                                     .values()
                                     .allSatisfy(value -> assertThat(value.getName()).isEqualTo("loaded"));
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_REFRESHED, f -> f.isEqualTo(2), s -> s.isEqualTo(0)));
+                                    Count.of(CACHED_REFRESHED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
@@ -3061,7 +3132,8 @@ final class DistributedCaffeineIntegrationTests {
                                     .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("loaded"));
                             assertThat(distributedLoadingCacheB.getIfPresent(key2)).isEqualTo(loadedValue2)
                                     .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("loaded"));
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
@@ -3077,7 +3149,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3090,7 +3161,7 @@ final class DistributedCaffeineIntegrationTests {
                                     .values()
                                     .allSatisfy(value -> assertThat(value.getName()).isEqualTo("reloaded"));
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_REFRESHED, f -> f.isEqualTo(2), s -> s.isEqualTo(2)));
+                                    Count.of(CACHED_REFRESHED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(2);
@@ -3103,7 +3174,8 @@ final class DistributedCaffeineIntegrationTests {
                                     .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("reloaded"));
                             assertThat(distributedLoadingCacheB.getIfPresent(key2)).isEqualTo(loadedValue2)
                                     .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("loaded"));
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
@@ -3117,27 +3189,26 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(0);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_REFRESHED, f -> f.isEqualTo(0), s -> s.isEqualTo(4)),
-                                    Count.of(INVALIDATED_REFRESHED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)));
+                                    Count.of(INVALIDATED_REFRESHED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(0);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
                             assertThatDataStoreHasCounts(
-                                    Count.of(INVALIDATED_REFRESHED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)));
+                                    Count.of(INVALIDATED_REFRESHED, assertion -> assertion.isEqualTo(2)));
                         }
                     });
 
-            await("cache manager maintenance")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThatMaintenanceIsDone(distributedLoadingCacheA, distributedLoadingCacheB));
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.empty());
         }
 
         @DisplayName("Test refresh after write")
@@ -3181,7 +3252,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3192,14 +3262,15 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheB.getIfPresent(key1)).isEqualTo(value1);
                             assertThat(distributedLoadingCacheB.getIfPresent(key2)).isEqualTo(value2);
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(0)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(value1);
                             assertThat(distributedLoadingCacheB.getIfPresent(key2)).isEqualTo(value2);
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
@@ -3222,7 +3293,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3249,8 +3319,7 @@ final class DistributedCaffeineIntegrationTests {
                                         assertThat(value.getName()).isEqualTo("refreshed");
                                     });
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)),
-                                    Count.of(CACHED_REFRESHED_AFTER_WRITE, f -> f.isEqualTo(2), s -> s.isEqualTo(0)));
+                                    Count.of(CACHED_REFRESHED_AFTER_WRITE, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
@@ -3267,7 +3336,8 @@ final class DistributedCaffeineIntegrationTests {
                                         assertThat(requireNonNull(value).getId()).isEqualTo(key2.getId());
                                         assertThat(value.getName()).isEqualTo("refreshed");
                                     });
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
@@ -3290,28 +3360,20 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(0);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(0), s -> s.isEqualTo(2)),
-                                    Count.of(CACHED_REFRESHED_AFTER_WRITE, f -> f.isEqualTo(0), s -> s.isEqualTo(2)),
-                                    Count.of(INVALIDATED_REFRESHED_AFTER_WRITE, f -> f.isEqualTo(0), s -> s.isEqualTo(2)));
-                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
-                                || distributionMode.equals(INVALIDATION)) {
-                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(0);
-                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
-                            assertThatDataStoreHasCounts(
-                                    Count.of(INVALIDATED_REFRESHED_AFTER_WRITE, f -> f.isEqualTo(0), s -> s.isEqualTo(2)));
+                                    Count.of(INVALIDATED_REFRESHED_AFTER_WRITE, assertion -> assertion.isEqualTo(2)));
                         }
                     });
 
-            await("cache manager maintenance")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThatMaintenanceIsDone(distributedLoadingCacheA, distributedLoadingCacheB));
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.empty());
         }
 
         @DisplayName("Test synchronization")
@@ -3338,7 +3400,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCacheA, distributedCacheB))
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3347,18 +3408,27 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedCacheB.asMap());
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(0)));
+                                    Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedCacheA.estimatedSize()).isEqualTo(2);
                             assertThat(distributedCacheB.estimatedSize()).isEqualTo(0);
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
-            await("cache manager maintenance")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThatMaintenanceIsDone(distributedCacheA, distributedCacheB));
+            processMaintenance();
+
+            if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                    || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
+                assertThatDataStoreHasCounts(
+                        Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
+            } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
+                    || distributionMode.equals(INVALIDATION)) {
+                assertThatDataStoreHasCounts(
+                        Count.empty());
+            }
         }
 
         @DisplayName("Test extended persistence by size")
@@ -3415,7 +3485,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3424,20 +3494,21 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_LOADED, f -> f.isEqualTo(maximumSize), s -> s.isEqualTo(0)));
+                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNull();
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNull();
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
@@ -3447,7 +3518,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("eviction")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3463,7 +3534,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3472,27 +3543,28 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key2)).isEqualTo(loadedValue2);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_LOADED, f -> f.isEqualTo(maximumSize), s -> s.isEqualTo(1)),
-                                    Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(1), s -> s.isBetween(0L, 1L)));
+                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedLoadingCacheB.getIfPresent(key2)).isEqualTo(loadedValue2);
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNull();
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNull();
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
@@ -3503,7 +3575,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("eviction")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3519,7 +3591,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3528,27 +3600,28 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_LOADED, f -> f.isEqualTo(maximumSize), s -> s.isEqualTo(2)),
-                                    Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(1), s -> s.isBetween(1L, 3L)));
+                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedLoadingCacheB.getIfPresent(key2)).isEqualTo(loadedValue2);
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNull();
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNull();
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
@@ -3558,7 +3631,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("eviction")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3575,7 +3648,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3584,47 +3657,44 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheB.getIfPresent(key3)).isEqualTo(loadedValue3);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromMongo(key3, false)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key3, false)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
-                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_LOADED, f -> f.isEqualTo(maximumSize), s -> s.isEqualTo(3)),
-                                    Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(extendedMaximumSize), s -> s.isBetween(1L, 4L)));
+                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedLoadingCacheB.getIfPresent(key3)).isEqualTo(loadedValue3);
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, true)).isNull();
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(1), s -> s.isEqualTo(0)));
+                                    Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(1)));
                         }
                     });
 
-            // create inconsistencies in relation to not stale cache entries but prevent instant replace by cache manager
-            getDistributedCaffeine(distributedLoadingCacheA).getCacheManager().manageCleanUp(Duration.ZERO);
-            getDistributedCaffeine(distributedLoadingCacheB).getCacheManager().manageCleanUp(Duration.ZERO);
             distributedLoadingCacheA.get(key1); // implicit eviction
 
             verifyNoMoreInteractions(cacheLoader);
 
             await("eviction")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3641,7 +3711,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3650,34 +3720,34 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_LOADED, f -> f.isEqualTo(maximumSize), s -> s.isEqualTo(4)),
-                                    Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(extendedMaximumSize), s -> s.isBetween(2L, 6L)));
+                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedLoadingCacheB.getIfPresent(key3)).isEqualTo(loadedValue3);
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, true)).isNull();
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(1), s -> s.isEqualTo(0)));
+                                    Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(1)));
                         }
                     });
 
@@ -3688,7 +3758,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("eviction")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3705,7 +3775,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3714,47 +3784,57 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key4)).isEqualTo(loadedValue4);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
-                            assertThat(distributedPolicy.getFromMongo(key4, false)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key4, false)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue4));
-                            assertThat(distributedPolicy.getFromMongo(key4, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key4, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue4));
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_LOADED, f -> f.isEqualTo(maximumSize), s -> s.isEqualTo(5)),
-                                    Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(extendedMaximumSize), s -> s.isBetween(3L, 8L)));
+                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(3)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(maximumSize);
                             assertThat(distributedLoadingCacheA.getIfPresent(key4)).isEqualTo(loadedValue4);
                             assertThat(distributedLoadingCacheB.getIfPresent(key3)).isEqualTo(loadedValue3);
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key4, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key4, true)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, true)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key4, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key4, true)).isNull();
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(extendedMaximumSize), s -> s.isEqualTo(0)));
+                                    Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(2)));
                         }
                     });
 
-            await("cache manager maintenance")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThatMaintenanceIsDone(distributedLoadingCacheA, distributedLoadingCacheB));
+            processMaintenance();
 
-            // test cach without loading strategy
+            if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                    || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
+                assertThatDataStoreHasCounts(
+                        Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
+                        Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(extendedMaximumSize)));
+            } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
+                    distributionMode.equals(INVALIDATION)) {
+                assertThatDataStoreHasCounts(
+                        Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(extendedMaximumSize)));
+            }
+
+            // test cache without loading strategy
             DistributedLoadingCache<Key, Value> distributedLoadingCacheWithoutLoadingStrategy = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     b -> b.withExtendedPersistence(configurer -> configurer
                             .withLoadingStrategy(false)),
@@ -3763,7 +3843,7 @@ final class DistributedCaffeineIntegrationTests {
             doAnswer(invocation -> Value.of(invocation.<Key>getArgument(0).getId(), "loaded but not from store"))
                     .when(cacheLoader).load(any(Key.class));
 
-            Value loadedFromStoreValue = requireNonNull(distributedPolicy.getFromMongo(key1, true)).getValue();
+            Value loadedFromStoreValue = requireNonNull(distributedPolicy.getFromStore(key1, true)).getValue();
             Value notFoundValue = distributedLoadingCacheWithoutLoadingStrategy.getIfPresent(key1);
             Value loadedButNotFromStoreValue = distributedLoadingCacheWithoutLoadingStrategy.get(key1);
 
@@ -3829,7 +3909,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3838,20 +3918,21 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_LOADED, f -> f.isEqualTo(1), s -> s.isEqualTo(0)));
+                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNull();
-                            assertThatDataStoreHasCounts(Count.isEmpty());
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNull();
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
                         }
                     });
 
@@ -3864,7 +3945,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("eviction")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3879,7 +3960,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3888,28 +3969,28 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key2)).isEqualTo(loadedValue2);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_LOADED, f -> f.isEqualTo(1), s -> s.isEqualTo(1)),
-                                    Count.of(EVICTED_TIME_EXTENDED, f -> f.isEqualTo(1), s -> s.isEqualTo(1)));
+                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(0);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
                             assertThat(distributedLoadingCacheB.getIfPresent(key2)).isEqualTo(loadedValue2);
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNull();
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_TIME_EXTENDED, f -> f.isEqualTo(1), s -> s.isEqualTo(0)));
+                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(1)));
                         }
                     });
 
@@ -3923,7 +4004,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("eviction")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3938,7 +4019,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3947,29 +4028,29 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_LOADED, f -> f.isEqualTo(1), s -> s.isEqualTo(2)),
-                                    Count.of(EVICTED_TIME_EXTENDED, f -> f.isEqualTo(1), s -> s.isEqualTo(3)));
+                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_TIME_EXTENDED, f -> f.isEqualTo(2), s -> s.isEqualTo(0)));
+                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(2)));
                         }
                     });
 
@@ -3982,7 +4063,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("eviction")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -3997,7 +4078,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -4006,40 +4087,37 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheB.getIfPresent(key3)).isEqualTo(loadedValue3);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromMongo(key3, false)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key3, false)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
-                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_LOADED, f -> f.isEqualTo(1), s -> s.isEqualTo(3)),
-                                    Count.of(EVICTED_TIME_EXTENDED, f -> f.isEqualTo(2), s -> s.isEqualTo(4)));
+                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(0);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
                             assertThat(distributedLoadingCacheB.getIfPresent(key3)).isEqualTo(loadedValue3);
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, true)).isNull();
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_TIME_EXTENDED, f -> f.isEqualTo(2), s -> s.isEqualTo(1)));
+                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(2)));
                         }
                     });
 
-            // create inconsistencies in relation to not stale cache entries but prevent instant replace by cache manager
-            getDistributedCaffeine(distributedLoadingCacheA).getCacheManager().manageCleanUp(Duration.ZERO);
-            getDistributedCaffeine(distributedLoadingCacheB).getCacheManager().manageCleanUp(Duration.ZERO);
             distributedLoadingCacheA.get(key1);
             // explicit eviction
             varExpirationA.setExpiresAfter(key3, Duration.ZERO);
@@ -4049,7 +4127,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("eviction")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -4064,7 +4142,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -4073,35 +4151,35 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_LOADED, f -> f.isEqualTo(1), s -> s.isEqualTo(4)),
-                                    Count.of(EVICTED_TIME_EXTENDED, f -> f.isEqualTo(2), s -> s.isEqualTo(6)));
+                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_TIME_EXTENDED, f -> f.isEqualTo(3), s -> s.isEqualTo(1)));
+                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(3)));
                         }
                     });
 
@@ -4114,7 +4192,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("eviction")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -4129,7 +4207,7 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCacheA, distributedLoadingCacheB))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
@@ -4139,50 +4217,59 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key4)).isEqualTo(loadedValue4);
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
-                            assertThat(distributedPolicy.getFromMongo(key4, false)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key4, false)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue4));
-                            assertThat(distributedPolicy.getFromMongo(key4, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key4, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue4));
                             assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_LOADED, f -> f.isEqualTo(2), s -> s.isEqualTo(4)),
-                                    Count.of(EVICTED_TIME_EXTENDED, f -> f.isEqualTo(2), s -> s.isEqualTo(6)));
+                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(2)),
+                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(2);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedLoadingCacheA.getIfPresent(key4)).isEqualTo(loadedValue4);
-                            assertThat(distributedPolicy.getFromMongo(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key1, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromMongo(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key2, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromMongo(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key3, true)).isNotNull()
+                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
                                     .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
-                            assertThat(distributedPolicy.getFromMongo(key4, false)).isNull();
-                            assertThat(distributedPolicy.getFromMongo(key4, true)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key4, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key4, true)).isNull();
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_TIME_EXTENDED, f -> f.isEqualTo(3), s -> s.isEqualTo(1)));
+                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(3)));
                         }
                     });
 
-            await("cache manager maintenance")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThatMaintenanceIsDone(distributedLoadingCacheA, distributedLoadingCacheB));
+            processMaintenance();
 
-            // test cach without loading strategy
+            if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                    || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
+                assertThatDataStoreHasCounts(
+                        Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(2)),
+                        Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(2)));
+            } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
+                    || distributionMode.equals(INVALIDATION)) {
+                assertThatDataStoreHasCounts(
+                        Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(3)));
+            }
+
+            // test cache without loading strategy
             DistributedLoadingCache<Key, Value> distributedLoadingCacheWithoutLoadingStrategy = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     b -> b.withExtendedPersistence(configurer -> configurer
                             .withLoadingStrategy(false)),
@@ -4191,7 +4278,7 @@ final class DistributedCaffeineIntegrationTests {
             doAnswer(invocation -> Value.of(invocation.<Key>getArgument(0).getId(), "loaded but not from store"))
                     .when(cacheLoader).load(any(Key.class));
 
-            Value loadedFromStoreValue = requireNonNull(distributedPolicy.getFromMongo(key2, true)).getValue();
+            Value loadedFromStoreValue = requireNonNull(distributedPolicy.getFromStore(key2, true)).getValue();
             Value notFoundValue = distributedLoadingCacheWithoutLoadingStrategy.getIfPresent(key2);
             Value loadedButNotFromStoreValue = distributedLoadingCacheWithoutLoadingStrategy.get(key2);
 
@@ -4212,70 +4299,49 @@ final class DistributedCaffeineIntegrationTests {
 
             Key key1 = Key.of(1);
             Value value1 = Value.of(1);
+            Key key2 = Key.of(2);
+            Value value2 = Value.of(2);
+            Key key3 = Key.of(3);
+            Value value3 = Value.of(3);
+
             distributedCache.put(key1, value1);
-            // create stale cache entry
-            distributedCache.put(key1, value1);
 
-            await("maintenance")
-                    .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCache))
-                    .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(1))));
-
-            // create inconsistencies in relation to not stale cache entries
-            distributedCache.distributedPolicy().getMongoCollection().updateMany(Filters.empty(),
-                    Updates.combine(
-                            Updates.set(STATUS.toString(), CACHED.toString()),
-                            Updates.set(STALE.toString(), false)));
-
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(0)));
-
-            // corrects inconsistencies in relation to not stale cache entries implicitly
             DistributedCache<Key, Value> syncedDistributedCache = createCache(
                     CacheBuilder.identity(),
                     Builder::build);
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCache, syncedDistributedCache))
                     .untilAsserted(() -> {
                         assertThat(distributedCache.estimatedSize()).isEqualTo(1);
                         assertThat(syncedDistributedCache.estimatedSize()).isEqualTo(1);
                         assertThat(distributedCache.asMap())
                                 .containsExactlyInAnyOrderEntriesOf(syncedDistributedCache.asMap());
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(1)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
                     });
 
-            Key key2 = Key.of(2);
-            Value value2 = Value.of(2);
             distributedCache.put(key2, value2);
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCache, syncedDistributedCache))
                     .untilAsserted(() -> {
                         assertThat(distributedCache.estimatedSize()).isEqualTo(2);
                         assertThat(syncedDistributedCache.estimatedSize()).isEqualTo(2);
                         assertThat(distributedCache.asMap())
                                 .containsExactlyInAnyOrderEntriesOf(syncedDistributedCache.asMap());
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(1)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
                     });
 
             syncedDistributedCache.distributedPolicy().stopSynchronization();
 
-            Value overwrittenValue = Value.of(1, "overwritten");
-            Key key3 = Key.of(3);
-            Value value3 = Value.of(3);
-            syncedDistributedCache.put(key1, overwrittenValue);
+            syncedDistributedCache.put(key1, Value.of(1, "overwritten"));
             syncedDistributedCache.invalidate(key2);
             syncedDistributedCache.put(key3, value3);
 
             await("no synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCache, syncedDistributedCache))
                     .untilAsserted(() -> {
                         assertThat(distributedCache.estimatedSize()).isEqualTo(2);
                         assertThat(syncedDistributedCache.estimatedSize()).isEqualTo(2);
@@ -4284,22 +4350,26 @@ final class DistributedCaffeineIntegrationTests {
                         assertThat(syncedDistributedCache.asMap().entrySet())
                                 .doesNotContainAnyElementsOf(distributedCache.asMap().entrySet());
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(1)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
                     });
 
             syncedDistributedCache.distributedPolicy().startSynchronization();
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCache, syncedDistributedCache))
                     .untilAsserted(() -> {
                         assertThat(distributedCache.estimatedSize()).isEqualTo(2);
                         assertThat(syncedDistributedCache.estimatedSize()).isEqualTo(2);
                         assertThat(distributedCache.asMap())
                                 .containsExactlyInAnyOrderEntriesOf(syncedDistributedCache.asMap());
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(1)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
                     });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
         }
 
         @DisplayName("Test same value instance handling and invalidation of already absent value")
@@ -4319,7 +4389,6 @@ final class DistributedCaffeineIntegrationTests {
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCache, syncedDistributedCache))
                     .untilAsserted(() -> {
                         assertThat(distributedCache.estimatedSize()).isEqualTo(1);
                         assertThat(syncedDistributedCache.estimatedSize()).isEqualTo(1);
@@ -4331,20 +4400,132 @@ final class DistributedCaffeineIntegrationTests {
                         assertThat(distributedCache.getIfPresent(key1)).isSameAs(value1);
                         assertThat(syncedDistributedCache.getIfPresent(key1)).isNotSameAs(value1);
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(0)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
                     });
 
-            distributedCache.put(key1, value1); // same value instance but should create stale entry
+            Instant timestamp = requireNonNull(distributedCache.distributedPolicy()
+                    .getFromStore(key1, false)).getTimestamp();
+
+            distributedCache.put(key1, value1); // same value instance should produce new timestamp
             distributedCache.invalidate(Key.of(0, "not present"));
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
-                    .failFast(() -> speedUpAssertions(distributedCache))
-                    .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(1))));
+                    .untilAsserted(() -> {
+                        assertThat(distributedCache.estimatedSize()).isEqualTo(1);
+                        assertThat(syncedDistributedCache.estimatedSize()).isEqualTo(1);
+                        assertThat(distributedCache.getIfPresent(key1)).isEqualTo(value1);
+                        assertThat(syncedDistributedCache.getIfPresent(key1)).isEqualTo(value1);
+                        assertThat(distributedCache.getIfPresent(Key.of(0, "not present"))).isNull();
+                        assertThat(syncedDistributedCache.getIfPresent(Key.of(0, "not present"))).isNull();
+                        // identity checks
+                        assertThat(distributedCache.getIfPresent(key1)).isSameAs(value1);
+                        assertThat(syncedDistributedCache.getIfPresent(key1)).isNotSameAs(value1);
+                        assertThat(requireNonNull(distributedCache.distributedPolicy()
+                                .getFromStore(key1, false)).getTimestamp())
+                                .isAfter(timestamp);
+                        assertThatDataStoreHasCounts(
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
+                    });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
         }
 
-        @DisplayName("Test ChangeStreamWatcher")
+        @DisplayName("Test Adapter")
+        @Test
+        void test_Adapter() throws Exception {
+            Set<io.github.oberhoff.distributedcaffeine.adapter.CacheEntry<Key, Value>> retrievedCacheEntries = new HashSet<>();
+            @SuppressWarnings({"Convert2Lambda", "Anonymous2MethodRef"})
+            Retriever<Key, Value> retriever = spy(new Retriever<Key, Value>() {
+                @Override
+                public void retrieveCacheEntries(Collection<io.github.oberhoff.distributedcaffeine.adapter.CacheEntry<Key, Value>> cacheEntries) {
+                    retrievedCacheEntries.addAll(cacheEntries);
+                }
+            });
+            MongoAdapter<Key, Value> mongoAdapter = new MongoAdapter<>(mongoClient, DATABASE_NAME, getCollectionName());
+            mongoAdapter.setKeySerializer(new ForySerializer<>());
+            mongoAdapter.setValueSerializer(new ForySerializer<>());
+            mongoAdapter.setRetriever(retriever);
+            Repository<Key, Value> repository = mongoAdapter.getRepository();
+
+            mongoAdapter.activate();
+            assertThat(mongoAdapter.isActivated()).isTrue();
+
+            CacheEntry<Key, Value> insertCacheEntry1 = CacheEntry.of(
+                    "discriminator",
+                    "hash1",
+                    1,
+                    Key.of(1),
+                    Value.of(1),
+                    CACHED,
+                    Instant.now());
+            CacheEntry<Key, Value> insertCacheEntry2 = CacheEntry.of(
+                    "discriminator",
+                    "hash2",
+                    2,
+                    Key.of(2),
+                    Value.of(2),
+                    CACHED,
+                    Instant.now());
+
+            repository.upsertCacheEntries(Set.of(insertCacheEntry1, insertCacheEntry2));
+
+            CacheEntry<Key, Value> updateCacheEntry1 = CacheEntry.of(
+                    insertCacheEntry1.getDiscriminator(),
+                    insertCacheEntry1.getHash(),
+                    insertCacheEntry1.getOperation(),
+                    insertCacheEntry1.getKey(),
+                    insertCacheEntry1.getValue(),
+                    insertCacheEntry1.getStatus(),
+                    Instant.now());
+            CacheEntry<Key, Value> updateCacheEntry2 = CacheEntry.of(
+                    insertCacheEntry2.getDiscriminator(),
+                    insertCacheEntry2.getHash(),
+                    insertCacheEntry2.getOperation(),
+                    insertCacheEntry2.getKey(),
+                    insertCacheEntry2.getValue(),
+                    insertCacheEntry2.getStatus(),
+                    Instant.now());
+
+            repository.upsertCacheEntries(Set.of(updateCacheEntry1, updateCacheEntry2));
+
+            List<io.github.oberhoff.distributedcaffeine.adapter.CacheEntry<Key, Value>> foundCacheEntries = new ArrayList<>();
+            try (Stream<io.github.oberhoff.distributedcaffeine.adapter.CacheEntry<Key, Value>> stream =
+                         repository.streamCacheEntries("discriminator", null, null, null, false)) {
+                stream.forEach(foundCacheEntries::add);
+            }
+
+            await("retrieving")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        verify(retriever, times(4))
+                                .retrieveCacheEntries(anySet());
+                        assertThat(retrievedCacheEntries)
+                                .containsExactlyInAnyOrder(
+                                        insertCacheEntry1, insertCacheEntry2,
+                                        updateCacheEntry1, updateCacheEntry2);
+                    });
+
+
+            assertThat(foundCacheEntries).hasSize(2)
+                    .containsExactlyInAnyOrder(updateCacheEntry1, updateCacheEntry2);
+            assertThat(repository.countCacheEntries("discriminator", null))
+                    .isEqualTo(2);
+
+            repository.deleteCacheEntries("discriminator", null, null, null);
+
+            assertThat(repository.countCacheEntries("discriminator", null))
+                    .isEqualTo(0);
+
+            mongoAdapter.deactivate();
+            assertThat(mongoAdapter.isActivated()).isFalse();
+        }
+
+        // TODO
+        /* @DisplayName("Test ChangeStreamWatcher")
         @Test
         @ResourceLock(LOGGER_RESOURCE_LOCK)
         void test_ChangeStreamWatcher_fails_and_retries() {
@@ -4441,9 +4622,10 @@ final class DistributedCaffeineIntegrationTests {
             await("cache manager maintenance")
                     .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure
                     .untilAsserted(() -> assertThatMaintenanceIsDone(distributedCache));
-        }
+        } */
 
-        @DisplayName("Test MaintenanceWorker")
+        // TODO
+        /* @DisplayName("Test MaintenanceWorker")
         @Test
         @ResourceLock(LOGGER_RESOURCE_LOCK)
         void test_MaintenanceWorker_fails_and_retries() {
@@ -4476,7 +4658,7 @@ final class DistributedCaffeineIntegrationTests {
             await("maintenance")
                     .atMost(WAITING_DURATION)
                     .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(1))));
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(1), s -> s.isEqualTo(1))));
 
             // check that 'expires' is set on datastore level for stale cache entries
             Set<InternalCacheDocument<Key, Value>> cacheDocuments = new HashSet<>();
@@ -4496,8 +4678,8 @@ final class DistributedCaffeineIntegrationTests {
             await("maintenance")
                     .atMost(WAITING_DURATION)
                     .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(2)),
-                            Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(1), s -> s.isEqualTo(0))));
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(1), s -> s.isEqualTo(2)),
+                            Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(1), s -> s.isEqualTo(0))));
 
             // create more cache entries (extended by size) than the maximum size allows
             distributedCache.put(key1, value1);
@@ -4505,8 +4687,8 @@ final class DistributedCaffeineIntegrationTests {
             await("maintenance")
                     .atMost(WAITING_DURATION)
                     .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(3)),
-                            Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(1), s -> s.isEqualTo(1))));
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(1), s -> s.isEqualTo(3)),
+                            Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(1), s -> s.isEqualTo(1))));
 
             loggerDistributedCaffeine.startCapturing();
 
@@ -4532,8 +4714,8 @@ final class DistributedCaffeineIntegrationTests {
             await("maintenance")
                     .atMost(WAITING_DURATION)
                     .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, f -> f.isEqualTo(2), s -> s.isEqualTo(3)),
-                            Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(1), s -> s.isEqualTo(1))));
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(2), s -> s.isEqualTo(3)),
+                            Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(1), s -> s.isEqualTo(1))));
 
             // create inconsistencies in relation to not stale cache entries but prevent instant replace by cache manager
             getDistributedCaffeine(distributedCache).getCacheManager().manageCleanUp(Duration.ZERO);
@@ -4542,8 +4724,8 @@ final class DistributedCaffeineIntegrationTests {
             await("maintenance")
                     .atMost(WAITING_DURATION)
                     .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, f -> f.isEqualTo(3), s -> s.isEqualTo(3)),
-                            Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(2), s -> s.isEqualTo(1))));
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(3), s -> s.isEqualTo(3)),
+                            Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(2), s -> s.isEqualTo(1))));
 
             // create more cache entries (extended by size) than the maximum size allows
             distributedCache.put(key1, value1);
@@ -4551,8 +4733,8 @@ final class DistributedCaffeineIntegrationTests {
             await("maintenance")
                     .atMost(WAITING_DURATION)
                     .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, f -> f.isEqualTo(4), s -> s.isEqualTo(3)),
-                            Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(3), s -> s.isEqualTo(1))));
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(4), s -> s.isEqualTo(3)),
+                            Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(3), s -> s.isEqualTo(1))));
 
             // fix failure
             doCallRealMethod().when(toBeMarkedAsStale).stream();
@@ -4560,11 +4742,12 @@ final class DistributedCaffeineIntegrationTests {
             await("maintenance")
                     .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure
                     .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, f -> f.isEqualTo(1), s -> s.isEqualTo(6)),
-                            Count.of(EVICTED_SIZE_EXTENDED, f -> f.isEqualTo(1), s -> s.isEqualTo(3))));
-        }
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(1), s -> s.isEqualTo(6)),
+                            Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(1), s -> s.isEqualTo(3))));
+        } */
 
-        @DisplayName("Test MongoRepository")
+        // TODO
+        /* @DisplayName("Test MongoRepository")
         @Test
         void test_MongoRepository_indexes() {
             DistributedCache<Key, Value> distributedCache = createCache(
@@ -4602,7 +4785,7 @@ final class DistributedCaffeineIntegrationTests {
 
             assertThat(names).doesNotContain(indexName)
                     .hasSize(indexCount - 1);
-        }
+        } */
 
         @DisplayName("Stress test synchronization from data store")
         @Test
@@ -4655,7 +4838,7 @@ final class DistributedCaffeineIntegrationTests {
             distributedLoadingCache.putAll(keyValueMap);
 
             assertThatDataStoreHasCounts(
-                    CountGrouped.of(CACHED_GROUP, f -> f.isEqualTo(keyValueMap.size()), s -> s.isEqualTo(0)));
+                    CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(keyValueMap.size())));
 
             AtomicBoolean loopCondition = new AtomicBoolean(true);
             AtomicInteger loopCounter = new AtomicInteger(numberOfOperations);
@@ -4679,13 +4862,12 @@ final class DistributedCaffeineIntegrationTests {
             await("synchronization between cache instances")
                     .atMost(EXTENDED_WAITING_DURATION)
                     .pollInterval(EXTENDED_POLL_INTERVAL)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCache, syncedDistributedLoadingCache))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         assertThat(distributedLoadingCache.asMap())
                                 .containsExactlyInAnyOrderEntriesOf(syncedDistributedLoadingCache.asMap());
                         assertThatDataStoreHasCounts(
-                                CountGrouped.of(CACHED_GROUP, f -> f.isEqualTo(distributedLoadingCache.estimatedSize()), s -> s.isGreaterThanOrEqualTo(0)),
-                                CountGrouped.of(EVICTED_EXTENDED_GROUP, f -> f.isBetween(1L, (long) extendedMaximumSize), s -> s.isGreaterThanOrEqualTo(0)));
+                                CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(distributedLoadingCache.estimatedSize())));
                     });
 
             syncedDistributedLoadingCache.distributedPolicy().stopSynchronization();
@@ -4715,19 +4897,23 @@ final class DistributedCaffeineIntegrationTests {
             await("synchronization between cache instances")
                     .atMost(EXTENDED_WAITING_DURATION)
                     .pollInterval(EXTENDED_POLL_INTERVAL)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCache, syncedDistributedLoadingCache))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         assertThat(distributedLoadingCache.asMap())
                                 .containsExactlyInAnyOrderEntriesOf(syncedDistributedLoadingCache.asMap());
                         assertThatDataStoreHasCounts(
-                                CountGrouped.of(CACHED_GROUP, f -> f.isEqualTo(distributedLoadingCache.estimatedSize()), s -> s.isGreaterThanOrEqualTo(0)),
-                                CountGrouped.of(EVICTED_EXTENDED_GROUP, f -> f.isBetween(1L, (long) extendedMaximumSize), s -> s.isGreaterThanOrEqualTo(0)));
+                                CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(distributedLoadingCache.estimatedSize())),
+                                CountGrouped.of(EVICTED_EXTENDED_GROUP, assertion -> assertion.isGreaterThanOrEqualTo(extendedMaximumSize)));
                     });
 
-            await("cache manager maintenance")
+            await("maintenance")
                     .atMost(EXTENDED_WAITING_DURATION)
                     .pollInterval(EXTENDED_POLL_INTERVAL)
-                    .untilAsserted(() -> assertThatMaintenanceIsDone(distributedLoadingCache, syncedDistributedLoadingCache));
+                    .failFast("process maintenance", this::processMaintenance)
+                    .untilAsserted(() ->
+                            assertThatDataStoreHasCounts(
+                                    CountGrouped.of(SHORT_LIVING_GROUP, assertion -> assertion.isEqualTo(0)),
+                                    CountGrouped.of(EVICTED_EXTENDED_GROUP, assertion -> assertion.isEqualTo(extendedMaximumSize))));
 
             verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPLICIT));
             verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.REPLACED));
@@ -4751,11 +4937,11 @@ final class DistributedCaffeineIntegrationTests {
 
         @DisplayName("Stress test thread safety")
         @ParameterizedTest(name = "with {0}-executor")
-        @ValueSource(strings = {"common pool", "cached thread pool", "work stealing thread pool"})
+        @ValueSource(strings = {"same thread", "single thread", "common pool", "cached thread pool", "work stealing thread pool"})
         void stress_test_DistributedCaffeine_thread_safety(String valueSource) throws Exception {
             int maximumSize = 100;
-            int extendedMaximumSize = maximumSize / 2;
-            int numberOfOperations = 1000;
+            int extendedMaximumSize = maximumSize / 10;
+            int numberOfOperations = 1_000;
             int levelOfParallelism = runsOnGitHub(5, 10);
 
             @SuppressWarnings("unchecked")
@@ -4782,6 +4968,8 @@ final class DistributedCaffeineIntegrationTests {
             List<Executor> executors = new ArrayList<>();
             Supplier<Executor> executorSupplier = () -> {
                 Executor executor = switch (valueSource) {
+                    case "same thread" -> Runnable::run;
+                    case "single thread" -> Executors.newSingleThreadExecutor();
                     case "common pool" -> ForkJoinPool.commonPool();
                     case "cached thread pool" -> Executors.newCachedThreadPool();
                     case "work stealing thread pool" -> Executors.newWorkStealingPool(levelOfParallelism);
@@ -4828,23 +5016,48 @@ final class DistributedCaffeineIntegrationTests {
                                 ticker.addAndGet(Duration.ofHours(1).toNanos());
                             }
                         });
-                        // reset ticker to stop triggering expiration/refreshing
-                        ticker.set(0);
+                        // increment ticker to trigger last pending evictions
+                        ticker.addAndGet(Duration.ofHours(1).toNanos());
                     }, executorService)));
 
             CompletableFuture.allOf(completableFutures.toArray(CompletableFuture[]::new)).join();
 
+            // no reset of ticker, wait for still inbounding 'refresh after write' entries
+            AtomicLong estimatedSize = new AtomicLong(distributedLoadingCache.estimatedSize());
+            await("inbounding refreshes")
+                    .atMost(EXTENDED_WAITING_DURATION)
+                    .pollInterval(EXTENDED_POLL_INTERVAL)
+                    .failFast("process clean up", this::cleanUp)
+                    .during(WAITING_DURATION)
+                    .until(() -> {
+                        if (distributedLoadingCache.estimatedSize() == estimatedSize.get()) {
+                            return true;
+                        } else {
+                            estimatedSize.set(distributedLoadingCache.estimatedSize());
+                            return false;
+                        }
+                    });
+
             await("synchronization between cache instances")
                     .atMost(EXTENDED_WAITING_DURATION)
                     .pollInterval(EXTENDED_POLL_INTERVAL)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCache, syncedDistributedLoadingCache))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         assertThat(distributedLoadingCache.asMap())
                                 .containsExactlyInAnyOrderEntriesOf(syncedDistributedLoadingCache.asMap());
                         assertThatDataStoreHasCounts(
-                                CountGrouped.of(CACHED_GROUP, f -> f.isEqualTo(distributedLoadingCache.estimatedSize()), s -> s.isGreaterThanOrEqualTo(0)),
-                                CountGrouped.of(EVICTED_EXTENDED_GROUP, f -> f.isBetween(1L, (long) extendedMaximumSize), s -> s.isGreaterThanOrEqualTo(0)));
+                                CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(distributedLoadingCache.estimatedSize())),
+                                CountGrouped.of(EVICTED_EXTENDED_GROUP, assertion -> assertion.isGreaterThanOrEqualTo(extendedMaximumSize)));
                     });
+
+            await("maintenance")
+                    .atMost(EXTENDED_WAITING_DURATION)
+                    .pollInterval(EXTENDED_POLL_INTERVAL)
+                    .failFast("process maintenance", this::processMaintenance)
+                    .untilAsserted(() ->
+                            assertThatDataStoreHasCounts(
+                                    CountGrouped.of(SHORT_LIVING_GROUP, assertion -> assertion.isEqualTo(0)),
+                                    CountGrouped.of(EVICTED_EXTENDED_GROUP, assertion -> assertion.isEqualTo(extendedMaximumSize))));
 
             verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPLICIT));
             verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.REPLACED));
@@ -4877,7 +5090,7 @@ final class DistributedCaffeineIntegrationTests {
         @DisplayName("Stress test with multiple threads")
         @Test
         void stress_test_DistributedCaffeine_multiple_threads() throws Exception {
-            int maximumSize = 1000;
+            int maximumSize = 1_000;
             int extendedMaximumSize = maximumSize / 2;
             int numberOfOperations = 10_000;
             int levelOfParallelism = runsOnGitHub(5, 10);
@@ -4920,11 +5133,7 @@ final class DistributedCaffeineIntegrationTests {
                 return (DistributedLoadingCache<Key, Value>) cache;
             };
 
-            // first cache only watches passively
-            DistributedLoadingCache<Key, Value> firstDistributedLoadingCache =
-                    cacheSupplier.apply(new AtomicLong(0));
-            List<DistributedLoadingCache<Key, Value>> distributedLoadingCaches =
-                    new ArrayList<>(List.of(firstDistributedLoadingCache));
+            List<DistributedLoadingCache<Key, Value>> distributedLoadingCaches = new ArrayList<>();
             List<CompletableFuture<Void>> completableFutures = new ArrayList<>();
 
             IntStream.rangeClosed(1, levelOfParallelism).forEach(cacheIndex ->
@@ -4943,16 +5152,19 @@ final class DistributedCaffeineIntegrationTests {
                                 ticker.addAndGet(Duration.ofHours(1).toNanos());
                             }
                         });
-                        // reset ticker to stop triggering expiration/refreshing
-                        ticker.set(0);
+                        // increment ticker to trigger last pending evictions
+                        ticker.addAndGet(Duration.ofHours(1).toNanos());
                     }, executorService)));
 
             CompletableFuture.allOf(completableFutures.toArray(CompletableFuture[]::new)).join();
 
+            DistributedLoadingCache<Key, Value> lastDistributedLoadingCache = distributedLoadingCaches
+                    .get(distributedLoadingCaches.size() - 1);
+
             await("synchronization between cache instances")
                     .atMost(EXTENDED_WAITING_DURATION)
                     .pollInterval(EXTENDED_POLL_INTERVAL)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCaches))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         IntStream.range(0, distributedLoadingCaches.size() - 1).forEach(i ->
                                 assertThat(distributedLoadingCaches.get(i).asMap())
@@ -4961,14 +5173,24 @@ final class DistributedCaffeineIntegrationTests {
                                                 i + 1, distributedLoadingCaches.get(i + 1)))
                                         .containsExactlyInAnyOrderEntriesOf(distributedLoadingCaches.get(i + 1).asMap()));
                         assertThatDataStoreHasCounts(
-                                CountGrouped.of(CACHED_GROUP, f -> f.isEqualTo(firstDistributedLoadingCache.estimatedSize()), s -> s.isGreaterThanOrEqualTo(0)),
-                                CountGrouped.of(EVICTED_EXTENDED_GROUP, f -> f.isBetween(1L, (long) extendedMaximumSize), s -> s.isGreaterThanOrEqualTo(0)));
+                                CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(lastDistributedLoadingCache.estimatedSize())));
                     });
 
-            await("cache manager maintenance")
+            // no reset of ticker, wait for still inbounding 'refresh after write' entries
+            AtomicLong estimatedSize = new AtomicLong(lastDistributedLoadingCache.estimatedSize());
+            await("inbounding refreshes")
                     .atMost(EXTENDED_WAITING_DURATION)
                     .pollInterval(EXTENDED_POLL_INTERVAL)
-                    .untilAsserted(() -> assertThatMaintenanceIsDone(distributedLoadingCaches));
+                    .failFast("process clean up", this::cleanUp)
+                    .during(WAITING_DURATION)
+                    .until(() -> {
+                        if (lastDistributedLoadingCache.estimatedSize() == estimatedSize.get()) {
+                            return true;
+                        } else {
+                            estimatedSize.set(lastDistributedLoadingCache.estimatedSize());
+                            return false;
+                        }
+                    });
 
             distributedLoadingCaches.forEach(distributedCache ->
                     completableFutures.add(CompletableFuture
@@ -4979,19 +5201,23 @@ final class DistributedCaffeineIntegrationTests {
             await("synchronization between cache instances")
                     .atMost(EXTENDED_WAITING_DURATION)
                     .pollInterval(EXTENDED_POLL_INTERVAL)
-                    .failFast(() -> speedUpAssertions(distributedLoadingCaches))
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
-                        assertThatCollection(distributedLoadingCaches)
-                                .allMatch(distributedCache -> distributedCache.estimatedSize() == 0);
+                        assertThat(distributedLoadingCaches)
+                                .allSatisfy(distributedLoadingCache -> assertThat(distributedLoadingCache.estimatedSize()).isEqualTo(0));
                         assertThatDataStoreHasCounts(
-                                CountGrouped.of(CACHED_GROUP, f -> f.isEqualTo(firstDistributedLoadingCache.estimatedSize()), s -> s.isGreaterThanOrEqualTo(0)),
-                                CountGrouped.of(EVICTED_EXTENDED_GROUP, f -> f.isBetween(1L, (long) extendedMaximumSize), s -> s.isGreaterThanOrEqualTo(0)));
+                                CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(0)),
+                                CountGrouped.of(EVICTED_EXTENDED_GROUP, assertion -> assertion.isGreaterThanOrEqualTo(extendedMaximumSize)));
                     });
 
-            await("cache manager maintenance")
+            await("maintenance")
                     .atMost(EXTENDED_WAITING_DURATION)
                     .pollInterval(EXTENDED_POLL_INTERVAL)
-                    .untilAsserted(() -> assertThatMaintenanceIsDone(distributedLoadingCaches));
+                    .failFast("process maintenance", this::processMaintenance)
+                    .untilAsserted(() ->
+                            assertThatDataStoreHasCounts(
+                                    CountGrouped.of(SHORT_LIVING_GROUP, assertion -> assertion.isEqualTo(0)),
+                                    CountGrouped.of(EVICTED_EXTENDED_GROUP, assertion -> assertion.isEqualTo(extendedMaximumSize))));
 
             verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPLICIT));
             verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.REPLACED));
@@ -5013,6 +5239,7 @@ final class DistributedCaffeineIntegrationTests {
         }
     }
 
+    @SuppressWarnings("ResultOfMethodCallIgnored")
     abstract static class DistributedCaffeineIntegrationTestInstance extends DistributedCaffeineCommonTestInstance {
 
         static final String RUNS_ON_GITHUB = "runsOnGitHub";
@@ -5025,7 +5252,6 @@ final class DistributedCaffeineIntegrationTests {
         SecureRandom secureRandom;
         MongoDBContainer mongoContainer;
         MongoClient mongoClient;
-        MongoDatabase mongoDatabase;
 
         @BeforeAll
         void beforeAll() {
@@ -5052,7 +5278,6 @@ final class DistributedCaffeineIntegrationTests {
                             .connectTimeout(30, TimeUnit.SECONDS)
                             .readTimeout(30, TimeUnit.SECONDS))
                     .build());
-            this.mongoDatabase = mongoClient.getDatabase(DATABASE_NAME);
         }
 
         @AfterAll
@@ -5135,125 +5360,59 @@ final class DistributedCaffeineIntegrationTests {
         }
 
         <K, V> DistributedCache<K, V> createCache(CacheBuilder<K, V> cacheBuilder, CacheConstructor<K, V> cacheConstructor) {
-            String collectionName = format("%s_%05d", testInfo.getTestMethod().orElseThrow().getName(), testCounter.get());
-            MongoCollection<Document> mongoCollection = mongoDatabase.getCollection(collectionName);
-            return createCache(mongoCollection, cacheBuilder, cacheConstructor);
+            MongoAdapter<K, V> mongoAdapter = new MongoAdapter<>(mongoClient, DATABASE_NAME, getCollectionName());
+            return createCache(mongoAdapter, cacheBuilder, cacheConstructor);
         }
 
-        @SafeVarargs
-        final <K, V> void speedUpAssertions(Cache<K, V>... caches) {
-            speedUpAssertions(Set.of(caches));
+        String getCollectionName() {
+            return format("%s_%05d", testInfo.getTestMethod().orElseThrow().getName(), testCounter.get());
         }
 
-        <K, V> void speedUpAssertions(Collection<? extends Cache<K, V>> caches) {
+        void processMaintenance() {
             // speed up using parallel stream
-            caches.stream().parallel().forEach(cache -> {
-                cache.cleanUp();
-                if (cache instanceof DistributedCache<K, V> distributedCache) {
-                    DistributedCaffeine<K, V> distributedCaffeine = getDistributedCaffeine(distributedCache);
-                    InternalMaintenanceWorker<K, V> maintenanceWorker = distributedCaffeine.getMaintenanceWorker();
-                    Collection<ObjectId> toBeMarkedAsStale = readFieldValue(maintenanceWorker, InternalMaintenanceWorker.class,
-                            "toBeMarkedAsStale", Collection.class);
-                    Set<Integer> maybeToBeMarkedAsStaleForExtendedPersistence = readFieldValue(maintenanceWorker, InternalMaintenanceWorker.class,
-                            "maybeToBeMarkedAsStaleForExtendedPersistence", Set.class);
-                    AtomicBoolean checkToBeMarkedAsStaleForExtendedPersistenceBySize = readFieldValue(maintenanceWorker, InternalMaintenanceWorker.class,
-                            "checkToBeMarkedAsStaleForExtendedPersistenceBySize", AtomicBoolean.class);
-                    while (!toBeMarkedAsStale.isEmpty()
-                            || !maybeToBeMarkedAsStaleForExtendedPersistence.isEmpty()
-                            || checkToBeMarkedAsStaleForExtendedPersistenceBySize.get()) {
-                        invokeMethod(maintenanceWorker, InternalMaintenanceWorker.class,
-                                "processMaintenance", List.of(), List.of());
-                    }
-                }
+            distributedCacheInstances.stream().parallel().forEach(distributedCache -> {
+                distributedCache.cleanUp();
+                DistributedCaffeine<?, ?> distributedCaffeine = getDistributedCaffeine(distributedCache);
+                InternalMaintenanceWorker<?, ?> maintenanceWorker = distributedCaffeine.getMaintenanceWorker();
+                invokeMethod(maintenanceWorker, InternalMaintenanceWorker.class,
+                        "processMaintenance", List.of(Duration.class), List.of(Duration.ZERO));
             });
         }
 
+        void cleanUp() {
+            distributedCacheInstances.forEach(DistributedCache::cleanUp);
+        }
+
         void assertThatDataStoreHasCounts(Count... counts) {
-            InternalMongoRepository<?, ?> mongoRepository = getDistributedCaffeine(distributedCacheInstances.stream()
+            Repository<?, ?> repository = getDistributedCaffeine(distributedCacheInstances.stream()
                     .findFirst()
                     .orElseThrow())
-                    .getMongoRepository();
+                    .getAdapter()
+                    .getRepository();
             Map<Status, Count> statusToCount = Stream.of(counts)
                     .collect(toMap(Count::status, Function.identity()));
-            String fresh = "fresh";
-            String stale = "stale";
             Stream.of(Status.values())
                     .map(status -> statusToCount.getOrDefault(status,
-                            Count.of(status, f -> f.isEqualTo(0), s -> s.isEqualTo(0))))
-                    .forEach(count -> List.of(fresh, stale).forEach(label -> {
-                        boolean isStale = label.equals(stale);
-                        (isStale ? count.stale() : count.fresh())
-                                .apply(assertThat(mongoRepository.count(Set.of(count.status()), isStale))
-                                        .describedAs(format("%n --> count '%s' for '%s'", label, count.status())));
-                    }));
+                            Count.of(status, assertion -> assertion.isEqualTo(0))))
+                    .forEach(count -> count.assertion()
+                            .apply(assertThat(getFailable(() ->
+                                    // TODO discriminator
+                                    repository.countCacheEntries(null, Set.of(count.status()))))
+                                    .describedAs("%nCount for %s", count.status().name())));
         }
 
         void assertThatDataStoreHasCounts(CountGrouped... countsGrouped) {
-            InternalMongoRepository<?, ?> mongoRepository = getDistributedCaffeine(distributedCacheInstances.stream()
+            Repository<?, ?> repository = getDistributedCaffeine(distributedCacheInstances.stream()
                     .findFirst()
                     .orElseThrow())
-                    .getMongoRepository();
-            String fresh = "fresh";
-            String stale = "stale";
-            Stream.of(countsGrouped).forEach(countGrouped -> List.of(fresh, stale).forEach(label -> {
-                boolean isStale = label.equals(stale);
-                (isStale ? countGrouped.stale() : countGrouped.fresh())
-                        .apply(assertThat(mongoRepository.count(Set.of(countGrouped.statuses()), isStale))
-                                .describedAs(format("%n --> count '%s' for '%s'", label,
-                                        Arrays.toString(countGrouped.statuses()))));
-            }));
-        }
-
-        @SafeVarargs
-        final <K, V> void assertThatMaintenanceIsDone(DistributedCache<K, V>... distributedCaches) {
-            assertThatMaintenanceIsDone(Set.of(distributedCaches));
-        }
-
-        <K, V> void assertThatMaintenanceIsDone(Collection<? extends DistributedCache<K, V>> distributedCaches) {
-            distributedCaches.stream().parallel()
-                    .forEach(distributedCache -> {
-                        DistributedCaffeine<K, V> distributedCaffeine = getDistributedCaffeine(distributedCache);
-                        InternalCacheManager<K, V> cacheManager = distributedCaffeine.getCacheManager();
-                        InternalMaintenanceWorker<K, V> maintenanceWorker = distributedCaffeine.getMaintenanceWorker();
-                        Map<K, InternalCacheDocument<K, V>> latest = readFieldValue(cacheManager, InternalCacheManager.class,
-                                "latest", Map.class);
-                        Map<K, InternalCacheDocument<K, V>> buffer = readFieldValue(cacheManager, InternalCacheManager.class,
-                                "buffer", Map.class);
-                        Map<K, Set<InternalCacheDocument<K, V>>> balance = readFieldValue(cacheManager, InternalCacheManager.class,
-                                "balance", Map.class);
-                        Set<ObjectId> toBeMarkedAsStale = readFieldValue(maintenanceWorker, InternalMaintenanceWorker.class,
-                                "toBeMarkedAsStale", Set.class);
-                        Set<Integer> maybeToBeMarkedAsStaleForExtendedPersistence = readFieldValue(maintenanceWorker, InternalMaintenanceWorker.class,
-                                "maybeToBeMarkedAsStaleForExtendedPersistence", Set.class);
-                        AtomicBoolean checkToBeMarkedAsStaleForExtendedPersistenceBySize = readFieldValue(maintenanceWorker, InternalMaintenanceWorker.class,
-                                "checkToBeMarkedAsStaleForExtendedPersistenceBySize", AtomicBoolean.class);
-                        // speed up assertions
-                        speedUpAssertions(distributedCache);
-                        distributedCaffeine.getCacheManager().manageCleanUp(Duration.ZERO);
-                        // assertions
-                        if (distributedCaffeine.getDistributionMode().isPopulationConsidered()) {
-                            // workaround as comparing by size does not work reliably with time-based evictions
-                            // evicted cache entries are never returned even if removal (eviction listener) is delayed
-                            Policy<K, V> policy = distributedCache.policy();
-                            boolean hasEvictionPolicyByTime = Stream
-                                    .of(policy.expireAfterAccess(), policy.expireAfterWrite(), policy.expireVariably())
-                                    .anyMatch(Optional::isPresent);
-                            if (hasEvictionPolicyByTime) {
-                                assertThat(latest.entrySet().stream()
-                                        .collect(toMap(Entry::getKey, entry -> entry.getValue().getValue())))
-                                        .containsExactlyInAnyOrderEntriesOf(distributedCache.asMap());
-                            } else {
-                                assertThat(latest).hasSize((int) distributedCache.estimatedSize());
-                            }
-                        } else {
-                            assertThat(latest).isEmpty();
-                        }
-                        assertThat(buffer).isEmpty();
-                        assertThat(balance).isEmpty();
-                        assertThat(toBeMarkedAsStale).isEmpty();
-                        assertThat(maybeToBeMarkedAsStaleForExtendedPersistence).isEmpty();
-                        assertThat(checkToBeMarkedAsStaleForExtendedPersistenceBySize).isFalse();
-                    });
+                    .getAdapter()
+                    .getRepository();
+            Stream.of(countsGrouped)
+                    .forEach(count -> count.assertion()
+                            .apply(assertThat(getFailable(() ->
+                                    // TODO discriminator
+                                    repository.countCacheEntries(null, count.statuses())))
+                                    .describedAs("%nCount for %s", count.statuses())));
         }
 
         <K, V> DistributedCaffeine<K, V> getDistributedCaffeine(DistributedCache<K, V> distributedCache) {
@@ -5309,10 +5468,12 @@ final class DistributedCaffeineIntegrationTests {
                 int removeId2 = nextInt(cacheSize / 2, cacheSize);
                 distributedCache.invalidateAll(Set.of(Key.of(removeId1), Key.of(removeId2)));
             });
-            operations.add(() -> {
-                int expireId = nextInt(cacheSize);
-                distributedCache.policy().expireVariably().orElseThrow().setExpiresAfter(Key.of(expireId), Duration.ZERO);
-            });
+            if (distributedCache.policy().expireVariably().isPresent()) {
+                operations.add(() -> {
+                    int expireId = nextInt(cacheSize);
+                    distributedCache.policy().expireVariably().orElseThrow().setExpiresAfter(Key.of(expireId), Duration.ZERO);
+                });
+            }
             if (distributedCache instanceof DistributedLoadingCache<Key, Value> distributedLoadingCache) {
                 operations.add(() -> {
                     int loadId = nextInt(cacheSize, 2 * cacheSize);
@@ -5347,10 +5508,10 @@ final class DistributedCaffeineIntegrationTests {
         String nameWithMillisAndPrefixes(String... prefixes) {
             String delimiter = "_";
             String prefix = String.join(delimiter, prefixes);
-            String millis = String.valueOf(System.currentTimeMillis());
+            String time = Instant.now().toString();
             return prefix.isBlank()
-                    ? millis
-                    : String.join(delimiter, prefix, millis);
+                    ? time
+                    : String.join(delimiter, prefix, time);
         }
 
         <T, R> R injectSpy(Object instanceObject, Class<T> instanceClass, String fieldName, Class<? super R> fieldClass) {
@@ -5385,20 +5546,22 @@ final class DistributedCaffeineIntegrationTests {
         }
 
         @SuppressWarnings("unused")
-        <K, V> void printMongoCollection() {
+        <K, V> void printMongoCollection(Status... statuses) {
             AtomicInteger counter = new AtomicInteger(0);
-            distributedCacheInstances.stream()
+            Repository<?, ?> repository = distributedCacheInstances.stream()
                     .findFirst()
                     .map(this::getDistributedCaffeine)
-                    .map(DistributedCaffeine::getMongoRepository)
-                    .orElseThrow()
-                    .consumeCacheDocumentsGroupedByKeyNewestFirstForHashes(null, null,
-                            null, null,
-                            stream -> stream
-                                    .flatMap(Set::stream)
-                                    .sorted()
-                                    .forEach(cacheDocument ->
-                                            System.out.printf("%05d %s%n", counter.incrementAndGet(), cacheDocument)));
+                    .map(DistributedCaffeine::getAdapter)
+                    .map(Adapter::getRepository)
+                    .orElseThrow();
+            Set<Status> statusesOrNull = statuses.length == 0
+                    ? null
+                    : Set.of(statuses);
+            try (Stream<? extends CacheEntry<?, ?>> cacheEntryStream = getFailable(() ->
+                    repository.streamCacheEntries(null, null, statusesOrNull, null, false))) {
+                cacheEntryStream.forEach(cacheEntry ->
+                        System.out.printf("%05d %s%n", counter.incrementAndGet(), cacheEntry));
+            }
         }
 
         <T> T runsOnGitHub(T yes, T no) {
@@ -5490,27 +5653,22 @@ final class DistributedCaffeineIntegrationTests {
             }
         }
 
-        record Count(Status status, Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh,
-                     Function<AbstractLongAssert<?>, AbstractLongAssert<?>> stale) {
+        record Count(Status status, Function<AbstractLongAssert<?>, AbstractLongAssert<?>> assertion) {
 
-            static Count of(Status status,
-                            Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh,
-                            Function<AbstractLongAssert<?>, AbstractLongAssert<?>> stale) {
-                return new Count(status, fresh, stale);
+            static Count of(Status status, Function<AbstractLongAssert<?>, AbstractLongAssert<?>> assertion) {
+                return new Count(status, assertion);
             }
 
-            static Count[] isEmpty() {
+            static Count[] empty() {
                 return new Count[]{};
             }
         }
 
-        record CountGrouped(Status[] statuses, Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh,
-                            Function<AbstractLongAssert<?>, AbstractLongAssert<?>> stale) {
+        record CountGrouped(Set<Status> statuses, Function<AbstractLongAssert<?>, AbstractLongAssert<?>> assertion) {
 
-            static CountGrouped of(Status[] statuses,
-                                   Function<AbstractLongAssert<?>, AbstractLongAssert<?>> fresh,
-                                   Function<AbstractLongAssert<?>, AbstractLongAssert<?>> stale) {
-                return new CountGrouped(statuses, fresh, stale);
+            static CountGrouped of(Set<Status> statuses,
+                                   Function<AbstractLongAssert<?>, AbstractLongAssert<?>> assertion) {
+                return new CountGrouped(statuses, assertion);
             }
         }
 

@@ -17,6 +17,8 @@ package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.CacheLoader;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.ExtendedPersistenceConfigurer;
+import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
+import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 
 import java.lang.reflect.Method;
 import java.util.HashMap;
@@ -25,20 +27,24 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullMap;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_EXTENDED_GROUP;
 import static java.util.Objects.nonNull;
 
+@SuppressWarnings("java:S1450")
 class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitializer<K, V> {
 
     private static final String LOAD_ALL = "loadAll";
 
     private final CacheLoader<K, V> cacheLoader;
 
+    private Repository<K, V> repository;
     private InternalCacheManager<K, V> cacheManager;
-    private InternalMongoRepository<K, V> mongoRepository;
     private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
+    private InternalHasher<K> hasher;
 
     InternalCacheLoader(CacheLoader<K, V> cacheLoader) {
         this.cacheLoader = cacheLoader;
@@ -47,16 +53,17 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
 
     @Override
     public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
+        this.repository = distributedCaffeine.getAdapter().getRepository();
         this.cacheManager = distributedCaffeine.getCacheManager();
-        this.mongoRepository = distributedCaffeine.getMongoRepository();
         this.extendedPersistenceConfigurer = distributedCaffeine.getExtendedPersistenceConfigurer();
+        this.hasher = distributedCaffeine.getHasher();
     }
 
     @Override
     @SuppressWarnings({"java:S2583"})
     public V load(K key) throws Exception {
         V value = extendedPersistenceConfigurer.hasCacheLoaderStrategy()
-                ? loadExtendedFromMongo(key)
+                ? loadExtendedFromStore(key)
                 : null;
         value = nonNull(value)
                 ? value
@@ -72,7 +79,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
         HashMap<K, V> keyToValue = new HashMap<>();
         Set<K> keysToLoad = new HashSet<>(keys);
         if (extendedPersistenceConfigurer.hasCacheLoaderStrategy()) {
-            keyToValue.putAll(loadAllExtendedFromMongo(keysToLoad));
+            keyToValue.putAll(loadAllExtendedFromStore(keysToLoad));
             keysToLoad.removeAll(keyToValue.keySet());
         }
         if (!keysToLoad.isEmpty()) {
@@ -115,7 +122,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
     @SuppressWarnings("unchecked")
     public CompletableFuture<? extends V> asyncReload(K key, V oldValue, Executor executor) {
         return (extendedPersistenceConfigurer.hasCacheLoaderStrategy()
-                ? CompletableFuture.supplyAsync(() -> loadExtendedFromMongo(key), executor)
+                ? CompletableFuture.supplyAsync(() -> loadExtendedFromStore(key), executor)
                 : CompletableFuture.completedFuture((V) null))
                 .thenComposeAsync(newValue -> nonNull(newValue)
                                 ? CompletableFuture.completedFuture(newValue)
@@ -135,7 +142,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
     @SuppressWarnings("unchecked")
     CompletableFuture<V> asyncLoadDelegated(K key, Executor executor) {
         return (extendedPersistenceConfigurer.hasCacheLoaderStrategy()
-                ? CompletableFuture.supplyAsync(() -> loadExtendedFromMongo(key), executor)
+                ? CompletableFuture.supplyAsync(() -> loadExtendedFromStore(key), executor)
                 : CompletableFuture.completedFuture((V) null))
                 .thenComposeAsync(newValue -> nonNull(newValue)
                                 ? CompletableFuture.completedFuture(newValue)
@@ -148,7 +155,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
     @SuppressWarnings("unchecked")
     CompletableFuture<V> asyncReloadDelegated(K key, V oldValue, Executor executor) {
         return (extendedPersistenceConfigurer.hasCacheLoaderStrategy()
-                ? CompletableFuture.supplyAsync(() -> loadExtendedFromMongo(key), executor)
+                ? CompletableFuture.supplyAsync(() -> loadExtendedFromStore(key), executor)
                 : CompletableFuture.completedFuture((V) null))
                 .thenComposeAsync(newValue -> nonNull(newValue)
                                 ? CompletableFuture.completedFuture(newValue)
@@ -164,22 +171,21 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
         return !defaultLoadAll.equals(instanceLoadAll);
     }
 
-    private V loadExtendedFromMongo(K key) {
-        return loadAllExtendedFromMongo(Set.of(key)).get(key);
+    private V loadExtendedFromStore(K key) {
+        return loadAllExtendedFromStore(Set.of(key)).get(key);
     }
 
-    private Map<? extends K, ? extends V> loadAllExtendedFromMongo(Set<? extends K> keys) {
-        Map<K, V> keyToValue = new HashMap<>();
-        // no data store filter on status and stale because the newest cache entry is needed
-        mongoRepository.consumeCacheDocumentsGroupedByKeyNewestFirstForKeys(
-                keys, null,
-                null, null,
-                stream -> stream.forEach(cacheDocuments -> cacheDocuments.stream()
-                        .findFirst()
-                        .filter(cacheDocument -> !cacheDocument.isStale())
-                        .filter(InternalCacheDocument::isEvictedExtended)
-                        .ifPresent(cacheDocument ->
-                                keyToValue.put(cacheDocument.getKey(), cacheDocument.getValue()))));
-        return keyToValue;
+    private Map<? extends K, ? extends V> loadAllExtendedFromStore(Set<? extends K> keys) {
+        // TODO discriminator
+        try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
+                null,
+                hasher.getHashes(keys),
+                EVICTED_EXTENDED_GROUP,
+                null,
+                false))) {
+            return cacheEntryStream
+                    .collect(HashMap::new, (hashMap, cacheEntry) -> // allow null values
+                            hashMap.put(cacheEntry.getKey(), cacheEntry.getValue()), HashMap::putAll);
+        }
     }
 }

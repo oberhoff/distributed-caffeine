@@ -13,12 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.oberhoff.distributedcaffeine;
+package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
 
 import com.mongodb.MongoClientException;
 import com.mongodb.MongoTimeoutException;
 import com.mongodb.client.ChangeStreamIterable;
 import com.mongodb.client.MongoChangeStreamCursor;
+import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.model.Aggregates;
 import com.mongodb.client.model.Filters;
@@ -29,12 +30,14 @@ import com.mongodb.client.model.changestream.OperationType;
 import dev.failsafe.Failsafe;
 import dev.failsafe.Fallback;
 import dev.failsafe.RetryPolicy;
-import io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field;
-import org.bson.BsonObjectId;
+import io.github.oberhoff.distributedcaffeine.adapter.AbstractSynchronizer;
+import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
+import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field;
 import org.bson.BsonTimestamp;
 import org.bson.Document;
 import org.bson.conversions.Bson;
-import org.bson.types.ObjectId;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -42,6 +45,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -51,13 +55,16 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import static com.mongodb.client.model.changestream.OperationType.INSERT;
-import static io.github.oberhoff.distributedcaffeine.InternalCacheDocument.Field._ID;
+import static com.mongodb.client.model.changestream.OperationType.UPDATE;
 import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
-class InternalChangeStreamWatcher<K, V> implements InternalLazyInitializer<K, V> {
+@NullMarked
+final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
+
+    private static final Logger LOGGER = System.getLogger(MongoSynchronizer.class.getName());
 
     private static final Duration WATCHER_INTERVAL = Duration.ofSeconds(1);
     private static final String DOCUMENT_KEY = "documentKey";
@@ -65,34 +72,26 @@ class InternalChangeStreamWatcher<K, V> implements InternalLazyInitializer<K, V>
     private static final String OPERATION_TYPE = "operationType";
     private static final String FULL_DOCUMENT = "fullDocument";
 
+    private final MongoCollection<Document> mongoCollection;
     private final AtomicBoolean isActivated;
-    private final AtomicReference<Throwable> failFastThrowable;
-    private final AtomicReference<BsonTimestamp> operationTime;
+    private final AtomicReference<@Nullable Throwable> failFastThrowable;
+    private final AtomicReference<@Nullable BsonTimestamp> operationTime;
 
-    private Logger logger;
-    private MongoCollection<Document> mongoCollection;
-    private InternalCacheManager<K, V> cacheManager;
-    private InternalDocumentConverter<K, V> documentConverter;
-    private CompletableFuture<Void> watcherCompletableFuture;
+    private @Nullable CompletableFuture<Void> watcherCompletableFuture;
 
-    InternalChangeStreamWatcher() {
+    MongoSynchronizer(MongoClient mongoClient, String databaseName, String collectionName) {
+        this.mongoCollection = mongoClient.getDatabase(databaseName).getCollection(collectionName);
         this.isActivated = new AtomicBoolean(false);
         this.failFastThrowable = new AtomicReference<>(null);
         this.operationTime = new AtomicReference<>(null);
-        // see also initialize()
+        // TODO connection sharing
     }
 
     @Override
-    public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
-        this.logger = distributedCaffeine.getLogger();
-        this.mongoCollection = distributedCaffeine.getMongoCollection();
-        this.cacheManager = distributedCaffeine.getCacheManager();
-        this.documentConverter = distributedCaffeine.getDocumentConverter();
-    }
-
-    void activate() {
+    public void activate() {
         // wait for completion if required
         Optional.ofNullable(watcherCompletableFuture)
+                .filter(future -> !future.isDone())
                 .ifPresent(CompletableFuture::join);
 
         scheduleChangeStreamWatcher();
@@ -103,11 +102,10 @@ class InternalChangeStreamWatcher<K, V> implements InternalLazyInitializer<K, V>
                 .map(Duration::ofSeconds)
                 .orElseGet(() -> Duration.ofSeconds(30)); // default MongoDB timeout
         Fallback<Boolean> fallback = Fallback.<Boolean>builderOfException(event ->
-                        new MongoClientException(format("Watching change streams failed for collection '%s'",
-                                mongoCollection.getNamespace().getCollectionName()),
-                                Optional.ofNullable(failFastThrowable.get())
-                                        .orElseGet(() -> new MongoTimeoutException(format("Timeout after %s seconds",
-                                                timeoutDuration.toSeconds())))))
+                        new MongoClientException(format("Watching change streams failed for cache at '%s'",
+                                identifier), Optional.ofNullable(failFastThrowable.get())
+                                .orElseGet(() -> new MongoTimeoutException(format("Timeout after %s seconds",
+                                        timeoutDuration.toSeconds())))))
                 .handleResult(false)
                 .build();
         RetryPolicy<Boolean> retryPolicy = RetryPolicy.<Boolean>builder()
@@ -120,13 +118,15 @@ class InternalChangeStreamWatcher<K, V> implements InternalLazyInitializer<K, V>
                 .get(this::isActivated);
     }
 
-    void deactivate() {
+    @Override
+    public void deactivate() {
         isActivated.set(false);
         failFastThrowable.set(null);
         operationTime.set(null);
     }
 
-    boolean isActivated() {
+    @Override
+    public boolean isActivated() {
         return isActivated.get();
     }
 
@@ -141,16 +141,15 @@ class InternalChangeStreamWatcher<K, V> implements InternalLazyInitializer<K, V>
                 .withDelayFnOn(context -> WATCHER_INTERVAL.multipliedBy(min(context.getAttemptCount(), 10)),
                         Throwable.class)
                 .onRetryScheduled(event -> Optional.ofNullable(event.getLastException())
-                        .ifPresent(throwable -> logger.log(Level.WARNING,
-                                format("Watching change streams failed for collection '%s'. Retrying...",
-                                        mongoCollection.getNamespace().getCollectionName()), throwable)))
+                        .ifPresent(throwable -> LOGGER.log(Level.WARNING,
+                                format("Watching change streams failed for cache at '%s'. Retrying...",
+                                        identifier), throwable)))
                 .build();
         ExecutorService executorService = Executors.newSingleThreadExecutor();
-        InternalTaskPolicy<Void> taskPolicy = new InternalTaskPolicy<Void>()
-                .withPostExecutionTask(result -> executorService.shutdown());
-        watcherCompletableFuture = Failsafe.with(taskPolicy, retryPolicy)
+        watcherCompletableFuture = Failsafe.with(retryPolicy)
                 .with(executorService)
-                .runAsync(this::processChangeStreams);
+                .runAsync(this::processChangeStreams)
+                .whenComplete((result, throwable) -> executorService.shutdown());
     }
 
     private void processChangeStreams() {
@@ -158,23 +157,21 @@ class InternalChangeStreamWatcher<K, V> implements InternalLazyInitializer<K, V>
         ChangeStreamIterable<Document> changeStreamIterable;
         if (nonNull(operationTime.get())) {
             changeStreamIterable = mongoCollection.watch(getAggregationPipeline())
-                    .startAtOperationTime(operationTime.get())
+                    .startAtOperationTime(requireNonNull(operationTime.get()))
                     .fullDocument(FullDocument.UPDATE_LOOKUP);
         } else {
             changeStreamIterable = mongoCollection.watch(getAggregationPipeline())
                     .fullDocument(FullDocument.UPDATE_LOOKUP);
         }
         // get the cursor to iterate over inbound change stream documents
-        try (MongoChangeStreamCursor<ChangeStreamDocument<Document>> cursor =
-                     changeStreamIterable.cursor()) {
+        try (MongoChangeStreamCursor<ChangeStreamDocument<Document>> cursor = changeStreamIterable.cursor()) {
             isActivated.set(true);
             while (isActivated()) {
                 ChangeStreamDocument<Document> changeStreamDocument = cursor.tryNext();
                 // additional activation check necessary because tryNext() seems to be paced (blocked for a while)
                 if (nonNull(changeStreamDocument) && isActivated()) {
                     // set operation time to be used if watching fails and is retried
-                    operationTime.set(requireNonNull(changeStreamDocument.getClusterTime(),
-                            "clusterTime cannot be null"));
+                    operationTime.set(changeStreamDocument.getClusterTime());
                     processChangeStreamDocument(changeStreamDocument);
                 }
             }
@@ -182,23 +179,15 @@ class InternalChangeStreamWatcher<K, V> implements InternalLazyInitializer<K, V>
     }
 
     private void processChangeStreamDocument(ChangeStreamDocument<Document> changeStreamDocument) {
-        Optional<ObjectId> optionalObjectId = Optional.ofNullable(changeStreamDocument.getDocumentKey())
-                .map(bsonDocument -> bsonDocument.getObjectId(_ID.toString(), null))
-                .map(BsonObjectId::getValue);
-        try {
-            OperationType operationType = changeStreamDocument.getOperationType();
-            if (nonNull(operationType) && operationType.equals(INSERT)) {
-                cacheManager.manageInboundInsert(
-                        documentConverter.toCacheDocument(changeStreamDocument.getFullDocument()), true);
-            }
-        } catch (Exception e) {
-            logger.log(Level.WARNING,
-                    format("Deserializing of cache entry failed for collection '%s' (%s). Skipping...",
-                            mongoCollection.getNamespace().getCollectionName(),
-                            nonNull(changeStreamDocument.getFullDocument())
-                                    ? changeStreamDocument.getFullDocument()
-                                    : changeStreamDocument), e);
-            optionalObjectId.ifPresent(cacheManager::manageInboundFailure);
+        OperationType operationType = changeStreamDocument.getOperationType();
+        if (nonNull(changeStreamDocument.getFullDocument()) && nonNull(operationType)
+                && (operationType.equals(INSERT) || operationType.equals(UPDATE))) {
+            CacheEntry<K, V> cacheEntry = MongoRepository.toCacheEntryOrNull(requireNonNull(keySerializer),
+                    requireNonNull(valueSerializer), changeStreamDocument.getFullDocument(),
+                    LOGGER, requireNonNull(identifier));
+            Optional.ofNullable(cacheEntry)
+                    .map(Set::of)
+                    .ifPresent(cacheEntries -> requireNonNull(retriever).retrieveCacheEntries(cacheEntries));
         }
     }
 
@@ -213,14 +202,15 @@ class InternalChangeStreamWatcher<K, V> implements InternalLazyInitializer<K, V>
         return List.of(
                 Aggregates.match(
                         Filters.and(
+                                Filters.in(OPERATION_TYPE, INSERT.getValue(), UPDATE.getValue())
                                 // TODO add discriminator to filter (depending of connection/watcher is shared)
-                                Filters.eq(OPERATION_TYPE, INSERT.getValue()))),
+                        )),
                 Aggregates.project(
                         Projections.fields(
                                 Projections.include(projectionFields))));
     }
 
     private String fullDocument(Field field) {
-        return format("%s.%s", FULL_DOCUMENT, field.toString());
+        return format("%s.%s", FULL_DOCUMENT, field);
     }
 }
