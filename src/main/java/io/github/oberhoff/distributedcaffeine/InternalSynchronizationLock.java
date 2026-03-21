@@ -52,8 +52,16 @@ class InternalSynchronizationLock {
         }
     }
 
+    boolean isLocked() {
+        return lock.isLocked();
+    }
+
+    boolean isLockedByCurrentThread() {
+        return lock.isHeldByCurrentThread();
+    }
+
     void ensureLock() {
-        if (!lock.isLocked()) {
+        if (!isLocked()) {
             throw new IllegalStateException("No synchronization lock found");
         }
     }

@@ -16,10 +16,9 @@
 package io.github.oberhoff.distributedcaffeine.common;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import com.mongodb.client.MongoCollection;
 import io.github.oberhoff.distributedcaffeine.DistributedCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
-import org.bson.Document;
+import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -77,19 +76,14 @@ public abstract class DistributedCaffeineCommonTestInstance {
                 distributedCache.distributedPolicy().stopSynchronization());
         // invalidate all cache entries (only after synchronization is already stopped for all caches)
         this.distributedCacheInstances.forEach(Cache::invalidateAll);
-        // drop collection
-        this.distributedCacheInstances.stream()
-                .findFirst()
-                .ifPresent(distributedCache ->
-                        distributedCache.distributedPolicy().getMongoCollection().drop());
         this.distributedCacheInstances.clear();
     }
 
-    protected <K, V> DistributedCache<K, V> createCache(MongoCollection<Document> mongoCollection,
+    protected <K, V> DistributedCache<K, V> createCache(Adapter<K, V> adapter,
                                                         CacheBuilder<K, V> cacheBuilder,
                                                         CacheConstructor<K, V> cacheConstructor) {
         DistributedCache<K, V> distributedCache = cacheConstructor
-                .construct(cacheBuilder.apply(DistributedCaffeine.newBuilder(mongoCollection)));
+                .construct(cacheBuilder.apply(DistributedCaffeine.newBuilder(adapter)));
         distributedCacheInstances.add(distributedCache);
         return distributedCache;
     }

@@ -23,7 +23,9 @@ import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.RemovalListener;
 import com.github.benmanes.caffeine.cache.Scheduler;
 import com.github.benmanes.caffeine.cache.stats.StatsCounter;
-import com.mongodb.client.MongoCollection;
+import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
+import io.github.oberhoff.distributedcaffeine.hasher.HashProvider;
+import io.github.oberhoff.distributedcaffeine.hasher.Hashable;
 import io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.ForySerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer;
@@ -31,14 +33,12 @@ import io.github.oberhoff.distributedcaffeine.serializer.JavaObjectSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
-import org.bson.Document;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.System.Logger;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
@@ -61,7 +61,7 @@ import static java.util.stream.Collectors.joining;
 
 /**
  * Starting point for configuring and constructing cache instances using a {@link Builder} returned by
- * {@link #newBuilder(MongoCollection)}.
+ * {@link #newBuilder(Adapter)}.
  * <p>
  * Cache instances can be of type {@link DistributedCache} (extends {@link Cache}) or of type
  * {@link DistributedLoadingCache} (extends {@link LoadingCache}).
@@ -84,29 +84,29 @@ public final class DistributedCaffeine<K, V> {
 
     private final Logger logger;
 
-    private final MongoCollection<Document> mongoCollection;
+    private final Adapter<K, V> adapter;
 
-    private final @Nullable DistributionMode distributionMode;
-    private final @Nullable SerializersConfigurer<K, V> serializersConfigurer;
-    private final @Nullable ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
-    private final @Nullable InternalCacheLoader<K, V> cacheLoader;
-    private final @Nullable Executor executor;
-    private final @Nullable StatsCounter statsCounter;
+    private final DistributionMode distributionMode;
+    private final SerializersConfigurer<K, V> serializersConfigurer;
+    private final ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
+
     private final @Nullable Cache<K, V> cache;
 
-    private final InternalDocumentConverter<K, V> documentConverter;
-    private final InternalMongoRepository<K, V> mongoRepository;
-    private final InternalCacheManager<K, V> cacheManager;
-    private final InternalChangeStreamWatcher<K, V> changeStreamWatcher;
-    private final InternalMaintenanceWorker<K, V> maintenanceWorker;
+    private final @Nullable InternalHasher<K> hasher;
+    private final @Nullable Executor executor;
+    private final @Nullable StatsCounter statsCounter;
+    private final @Nullable InternalCacheLoader<K, V> cacheLoader;
+
     private final InternalSynchronizationLock synchronizationLock;
-    private final Long origin;
+    private final InternalCacheManager<K, V> cacheManager;
+    private final InternalMaintenanceWorker<K, V> maintenanceWorker;
 
     private DistributedCaffeine(Builder<K, V> builder) {
         this.logger = System.getLogger(getClass().getName());
 
-        this.mongoCollection = builder.mongoCollection;
+        this.adapter = builder.adapter;
 
+        this.hasher = builder.hasher;
         this.distributionMode = builder.distributionMode;
         this.serializersConfigurer = builder.serializersConfigurer;
         this.extendedPersistenceConfigurer = builder.extendedPersistenceConfigurer;
@@ -115,18 +115,18 @@ public final class DistributedCaffeine<K, V> {
         this.statsCounter = builder.statsCounter;
         this.cache = builder.cache;
 
-        this.documentConverter = new InternalDocumentConverter<>();
-        this.mongoRepository = new InternalMongoRepository<>();
-        this.cacheManager = new InternalCacheManager<>();
-        this.changeStreamWatcher = new InternalChangeStreamWatcher<>();
-        this.maintenanceWorker = new InternalMaintenanceWorker<>();
         this.synchronizationLock = new InternalSynchronizationLock();
-        this.origin = new SecureRandom().nextLong();
+        this.cacheManager = new InternalCacheManager<>();
+        this.maintenanceWorker = new InternalMaintenanceWorker<>();
 
-        Stream.of(builder.removalListener, builder.evictionListener, builder.cacheLoader, this.documentConverter,
-                        this.mongoRepository, this.cacheManager, this.changeStreamWatcher, this.maintenanceWorker)
+        Stream.of(builder.removalListener, builder.evictionListener, builder.cacheLoader, this.cacheManager,
+                        this.maintenanceWorker)
                 .filter(Objects::nonNull)
                 .forEach(lazyInitializer -> lazyInitializer.initialize(this));
+
+        this.adapter.setKeySerializer(this.serializersConfigurer.getKeySerializer());
+        this.adapter.setValueSerializer(this.serializersConfigurer.getValueSerializer());
+        this.adapter.setRetriever(cacheManager);
 
         activate();
     }
@@ -139,25 +139,25 @@ public final class DistributedCaffeine<K, V> {
      * <p>
      * Exemplary usage:
      * <pre>
-     * DistributedCache&#60;Key, Value&#62; distributedCache = DistributedCaffeine.newBuilder(mongoCollection)
+     * DistributedCache&#60;Key, Value&#62; distributedCache = DistributedCaffeine.newBuilder(adapter)
      *     ...
      *     .build();
      * </pre>
      *
-     * @param mongoCollection the MongoDB collection used for distributed synchronization between cache instances
-     * @param <K>             the key type of the cache
-     * @param <V>             the value type of the cache
+     * @param adapter the adapter used for distributed synchronization between cache instances
+     * @param <K>     the key type of the cache
+     * @param <V>     the value type of the cache
      * @return builder for configuring and constructing cache instances
      * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
      */
-    public static <K, V> Builder<K, V> newBuilder(MongoCollection<Document> mongoCollection) {
-        return new Builder<>(mongoCollection);
+    public static <K, V> Builder<K, V> newBuilder(Adapter<K, V> adapter) {
+        return new Builder<>(adapter);
     }
 
     /**
      * Builder for configuring and constructing cache instances of type {@link DistributedCache} (extends {@link Cache})
      * or of type {@link DistributedLoadingCache} (extends {@link LoadingCache}). To construct a builder,
-     * {@link DistributedCaffeine#newBuilder(MongoCollection)} must be used.
+     * {@link DistributedCaffeine#newBuilder(Adapter)} must be used.
      *
      * @param <K> the key type of the cache
      * @param <V> the value type of the cache
@@ -166,8 +166,9 @@ public final class DistributedCaffeine<K, V> {
     @NullMarked
     public static final class Builder<K, V> {
 
-        private final MongoCollection<Document> mongoCollection;
+        private final Adapter<K, V> adapter;
 
+        private InternalHasher<K> hasher;
         private DistributionMode distributionMode;
         private SerializersConfigurer<K, V> serializersConfigurer;
         private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
@@ -181,11 +182,12 @@ public final class DistributedCaffeine<K, V> {
         private @Nullable StatsCounter statsCounter;
         private @Nullable InternalCacheLoader<K, V> cacheLoader;
 
-        private Builder(MongoCollection<Document> mongoCollection) {
-            requireNonNull(mongoCollection, "mongoCollection cannot be null");
-            this.mongoCollection = mongoCollection;
+        private Builder(Adapter<K, V> adapter) {
+            requireNonNull(adapter, "adapter cannot be null");
+            this.adapter = adapter;
 
             // set defaults
+            this.hasher = new InternalHasher<>(null);
             this.distributionMode = POPULATION_AND_INVALIDATION_AND_EVICTION;
             this.serializersConfigurer = new SerializersConfigurer<>();
             this.extendedPersistenceConfigurer = new ExtendedPersistenceConfigurer();
@@ -199,7 +201,7 @@ public final class DistributedCaffeine<K, V> {
          * <p>
          * Exemplary usage:
          * <pre>
-         * DistributedCache&#60;Key, Value&#62; distributedCache = DistributedCaffeine.newBuilder(mongoCollection)
+         * DistributedCache&#60;Key, Value&#62; distributedCache = DistributedCaffeine.newBuilder(adapter)
          *     .withCaffeineBuilder(Caffeine.newBuilder()
          *         .maximumSize(10_000)
          *         .expireAfterWrite(Duration.ofMinutes(5)))
@@ -224,6 +226,33 @@ public final class DistributedCaffeine<K, V> {
         public Builder<K, V> withCaffeineBuilder(Caffeine<?, ?> caffeineBuilder) {
             requireNonNull(caffeineBuilder, "caffeineBuilder cannot be null");
             this.caffeineBuilder = (Caffeine<Object, Object>) caffeineBuilder;
+            return this;
+        }
+
+        /**
+         * Specifies the hash provider used for generating hashes for key objects. Alternatively, key objects can
+         * implement the {@link Hashable} interface, in which case this method can be skipped.
+         * <p>
+         * Exemplary usage:
+         * <pre>
+         * ...
+         * .withHashProvider((hasher, key) -> hasher.get()
+         *     .putUuid(key.getId())
+         *     .putLong(key.getVersion())
+         *     .putString(key.getName())
+         *     .put...
+         *     .getHash())
+         * ...
+         * </pre>
+         * <b>Note:</b> A specified hash provider always takes precedence, even if key objects implement the
+         * {@link Hashable} interface.
+         *
+         * @param hashProvider hash provider used for generating hashes for the given key using the given hasher
+         * @return a builder instance for chaining additional methods
+         */
+        public Builder<K, V> withHashProvider(HashProvider<K> hashProvider) {
+            requireNonNull(hashProvider, "hashProvider cannot be null");
+            this.hasher = new InternalHasher<>(hashProvider);
             return this;
         }
 
@@ -253,11 +282,10 @@ public final class DistributedCaffeine<K, V> {
          *     .withValueSerializer(new ValueSerializer()))
          * ...
          * </pre>
-         * <p>
          * <b>Note:</b> {@link ForySerializer} is used as default for serializing key and value objects if this method
          * is skipped.
          *
-         * @param configurer Configurer for serializers
+         * @param configurer configurer for serializers
          * @return a builder instance for chaining additional methods
          */
         public Builder<K, V> withSerializers(Configurer<SerializersConfigurer<K, V>> configurer) {
@@ -277,10 +305,9 @@ public final class DistributedCaffeine<K, V> {
          *     .withMaximumTime(Duration.ofDays(10)))
          * ...
          * </pre>
-         * <p>
          * <b>Note:</b> No extended persistence is used if this method is skipped.
          *
-         * @param configurer Configurer for extended persistence
+         * @param configurer configurer for extended persistence
          * @return a builder instance for chaining additional methods
          */
         public Builder<K, V> withExtendedPersistence(Configurer<ExtendedPersistenceConfigurer> configurer) {
@@ -544,14 +571,14 @@ public final class DistributedCaffeine<K, V> {
 
         /**
          * Specifies the maximum size for the extended persistence up to which recently evicted cache entries will
-         * remain in the MongoDB collection and may be reloaded on demand.
+         * remain in the underlying store and may be reloaded on demand.
          * <p>
          * Cache entries with extended persistence can be reloaded using loading strategies configured by
          * {@link #withLoadingStrategy(boolean)}.
          * <p>
-         * Alternatively, {@link DistributedPolicy#getFromMongo(Object, boolean)} or
-         * {@link DistributedPolicy#getAllFromMongo(Iterable, boolean)} can be used to load those cache entries directly
-         * from the MongoDB collection bypassing this cache instance.
+         * Alternatively, {@link DistributedPolicy#getFromStore(Object, boolean)} or
+         * {@link DistributedPolicy#getAllFromStore(Iterable, boolean)} can be used to load those cache entries directly
+         * from the underlying store bypassing this cache instance.
          * <p>
          * <b>Note:</b> If extended persistence is configured, at least one eviction policy must be configured.
          *
@@ -568,14 +595,14 @@ public final class DistributedCaffeine<K, V> {
 
         /**
          * Specifies the maximum amount of time for the extended persistence that recently evicted cache entries will
-         * remain in the MongoDB collection and may be reloaded on demand.
+         * remain in the underlying store and may be reloaded on demand.
          * <p>
          * Cache entries with extended persistence can be reloaded using loading strategies configured by
          * {@link #withLoadingStrategy(boolean)}.
          * <p>
-         * Alternatively, {@link DistributedPolicy#getFromMongo(Object, boolean)} or
-         * {@link DistributedPolicy#getAllFromMongo(Iterable, boolean)} can be used to load those cache entries directly
-         * from the MongoDB collection bypassing this cache instance.
+         * Alternatively, {@link DistributedPolicy#getFromStore(Object, boolean)} or
+         * {@link DistributedPolicy#getAllFromStore(Iterable, boolean)} can be used to load those cache entries directly
+         * from the underlying store bypassing this cache instance.
          * <p>
          * <b>Note:</b> If extended persistence is configured, at least one eviction policy must be configured.
          *
@@ -596,11 +623,13 @@ public final class DistributedCaffeine<K, V> {
          * <p>
          * Loading strategy for cache loader can be enabled using {@code cacheLoaderStrategy}. This means that a
          * provided {@link CacheLoader} is only invoked to obtain missing cache entries if these could not be reloaded
-         * from the MongoDB collection beforehand.
+         * from the underlying store beforehand.
          * <p>
-         * Alternatively, {@link DistributedPolicy#getFromMongo(Object, boolean)} or
-         * {@link DistributedPolicy#getAllFromMongo(Iterable, boolean)} can be used to load those cache entries directly
-         * from the MongoDB collection bypassing this cache instance.
+         * By default, no loading strategies are enabled.
+         * <p>
+         * Alternatively, {@link DistributedPolicy#getFromStore(Object, boolean)} or
+         * {@link DistributedPolicy#getAllFromStore(Iterable, boolean)} can be used to load those cache entries directly
+         * from the underlying store bypassing this cache instance.
          * <p>
          * <b>Note:</b> If extended persistence is configured, at least one eviction policy must be configured.
          *
@@ -662,36 +691,38 @@ public final class DistributedCaffeine<K, V> {
         if (!isActivated()) {
             synchronizationLock.runLocked(() -> {
                 cacheManager.activate();
-                changeStreamWatcher.activate();
                 maintenanceWorker.activate();
+                adapter.activate();
+                // synchronization after retrieving by adapter so that no changes are missed
+                cacheManager.synchronizeCacheEntries();
             });
-            // synchronization after watching so that no changes are missed
-            cacheManager.synchronizeCacheFromStore();
         }
     }
 
     void deactivate() {
         if (isActivated()) {
             synchronizationLock.runLocked(() -> {
+                adapter.deactivate();
                 maintenanceWorker.deactivate();
-                changeStreamWatcher.deactivate();
                 cacheManager.deactivate();
             });
         }
     }
 
     boolean isActivated() {
-        return cacheManager.isActivated()
-                && changeStreamWatcher.isActivated()
-                && maintenanceWorker.isActivated();
+        return adapter.isActivated() && maintenanceWorker.isActivated() && cacheManager.isActivated();
     }
 
     Logger getLogger() {
         return requireNonNull(logger);
     }
 
-    MongoCollection<Document> getMongoCollection() {
-        return requireNonNull(mongoCollection);
+    Adapter<K, V> getAdapter() {
+        return requireNonNull(adapter);
+    }
+
+    Cache<K, V> getCache() {
+        return requireNonNull(cache);
     }
 
     DistributionMode getDistributionMode() {
@@ -706,6 +737,10 @@ public final class DistributedCaffeine<K, V> {
         return requireNonNull(extendedPersistenceConfigurer);
     }
 
+    InternalHasher<K> getHasher() {
+        return requireNonNull(hasher);
+    }
+
     InternalCacheLoader<K, V> getCacheLoader() {
         return requireNonNull(cacheLoader);
     }
@@ -718,35 +753,15 @@ public final class DistributedCaffeine<K, V> {
         return requireNonNull(statsCounter);
     }
 
-    Cache<K, V> getCache() {
-        return requireNonNull(cache);
-    }
-
-    InternalDocumentConverter<K, V> getDocumentConverter() {
-        return requireNonNull(documentConverter);
-    }
-
-    InternalMongoRepository<K, V> getMongoRepository() {
-        return requireNonNull(mongoRepository);
+    InternalSynchronizationLock getSynchronizationLock() {
+        return requireNonNull(synchronizationLock);
     }
 
     InternalCacheManager<K, V> getCacheManager() {
         return requireNonNull(cacheManager);
     }
 
-    InternalChangeStreamWatcher<K, V> getChangeStreamWatcher() {
-        return requireNonNull(changeStreamWatcher);
-    }
-
     InternalMaintenanceWorker<K, V> getMaintenanceWorker() {
         return requireNonNull(maintenanceWorker);
-    }
-
-    InternalSynchronizationLock getSynchronizationLock() {
-        return requireNonNull(synchronizationLock);
-    }
-
-    Long getOrigin() {
-        return requireNonNull(origin);
     }
 }

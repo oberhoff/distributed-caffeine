@@ -15,14 +15,14 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-import com.mongodb.client.MongoCollection;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Builder;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Configurer;
+import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
+import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
-import org.bson.Document;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 
@@ -41,26 +41,26 @@ import java.util.Set;
 public interface DistributedPolicy<K, V> {
 
     /**
-     * Get the MongoDB collection used for distributed synchronization between cache instances.
+     * Get the adapter that manages distributed synchronization between cache instances using an underlying store.
      *
-     * @return the mongo collection
+     * @return the adapter
      */
-    MongoCollection<Document> getMongoCollection();
+    Adapter<K, V> getAdapter();
 
     /**
-     * Start distributed synchronization for this cache instance if it was stopped before. After starting, changes to
+     * Starts distributed synchronization for this cache instance if it was stopped before. After starting, changes to
      * this cache instance are distributed to other cache instances and changes to other cache instances are distributed
-     * to this cache instance. Persisted cache entries from the MongoDB collection are synchronized into this cache
+     * to this cache instance. Persisted cache entries from the underlying store are synchronized into this cache
      * instance with priority (only if the configured {@link DistributionMode} includes population), so that previously
      * existing cache entries in this cache instance might be overwritten or removed.
      */
     void startSynchronization();
 
     /**
-     * Stop distributed synchronization for this cache instance. After stopping, changes to this cache instance are not
+     * Stops distributed synchronization for this cache instance. After stopping, changes to this cache instance are not
      * distributed to other cache instances, nor are changes to other cache instances distributed to this cache
      * instance. Therefore, this cache instance behaves like a cache instance without distributed synchronization
-     * functionality. This also releases the connection to MongoDB.
+     * functionality. This also releases the connection to underlying store.
      */
     void stopSynchronization();
 
@@ -79,7 +79,7 @@ public interface DistributedPolicy<K, V> {
     Serializer<K, ?> getKeySerializer();
 
     /**
-     * Get the configured serializer for value objects which is always an implementation of one of the following
+     * Returns the configured serializer for value objects which is always an implementation of one of the following
      * interfaces:
      * <ul>
      *     <li>{@link ByteArraySerializer} for serializing an object to a byte array representation</li>
@@ -93,7 +93,7 @@ public interface DistributedPolicy<K, V> {
     Serializer<V, ?> getValueSerializer();
 
     /**
-     * Get the cache entry mapped to the specified key directly from the MongoDB collection bypassing this cache
+     * Returns the cache entry mapped to the specified key directly from the underlying store bypassing this cache
      * instance.
      * <p>
      * Already evicted cache entries with extended persistence can also be included, if extended persistence is
@@ -104,10 +104,10 @@ public interface DistributedPolicy<K, V> {
      *                       {@code false} otherwise
      * @return the cache entry to which the specified key is mapped, or null if no mapping is found
      */
-    @Nullable CacheEntry<K, V> getFromMongo(K key, boolean includeEvicted);
+    @Nullable CacheEntry<K, V> getFromStore(K key, boolean includeEvicted);
 
     /**
-     * Get the cache entries mapped to the specified keys directly from the MongoDB collection bypassing this cache
+     * Returns the cache entries mapped to the specified keys directly from the underlying store bypassing this cache
      * instance.
      * <p>
      * Already evicted cache entries with extended persistence can also be included, if extended persistence is
@@ -118,43 +118,5 @@ public interface DistributedPolicy<K, V> {
      *                       {@code false} otherwise
      * @return a set of cache entries to which the specified keys are mapped, keys without mapping are omitted
      */
-    Set<CacheEntry<K, V>> getAllFromMongo(Iterable<? extends K> keys, boolean includeEvicted);
-
-    /**
-     * Interface representing a cache entry containing key and value along with some metadata.
-     *
-     * @param <K> the key type of the cache
-     * @param <V> the value type of the cache
-     */
-    @NullMarked
-    interface CacheEntry<K, V> {
-
-        /**
-         * Get the id of the cache entry.
-         *
-         * @return the id
-         */
-        String getId();
-
-        /**
-         * Get the key of the cache entry.
-         *
-         * @return the key
-         */
-        K getKey();
-
-        /**
-         * Get the value of the cache entry.
-         *
-         * @return the value
-         */
-        V getValue();
-
-        /**
-         * Indicates whether the cache entry is already evicted or not.
-         *
-         * @return {@code true} if the cache entry is already evicted, otherwise {@code false}
-         */
-        boolean isEvicted();
-    }
+    Set<CacheEntry<K, V>> getAllFromStore(Iterable<? extends K> keys, boolean includeEvicted);
 }

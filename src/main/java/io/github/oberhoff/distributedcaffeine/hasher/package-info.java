@@ -13,24 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.oberhoff.distributedcaffeine.serializer;
-
-import org.jspecify.annotations.NullMarked;
-
 /**
- * Interface to use when implementing a serializer with JSON representation (encoded as String or BSON).
+ * This package contains classes and interfaces that provide hashing functionality.
  *
- * @param <T> the type of the object to serialize
  * @author Andreas Oberhoff
+ * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
  */
-@NullMarked
-public interface JsonSerializer<T> extends StringSerializer<T> {
-
-    /**
-     * Indicates whether the JSON representation should be encoded as BSON or as string when persisted in the underlying
-     * store.
-     *
-     * @return {@code true} for BSON encoding or {@code false} for string encoding
-     */
-    boolean storeAsBinaryJson();
-}
+package io.github.oberhoff.distributedcaffeine.hasher;

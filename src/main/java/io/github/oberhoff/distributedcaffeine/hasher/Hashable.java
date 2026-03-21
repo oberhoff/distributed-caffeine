@@ -13,24 +13,25 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.oberhoff.distributedcaffeine.serializer;
+package io.github.oberhoff.distributedcaffeine.hasher;
 
 import org.jspecify.annotations.NullMarked;
 
+import java.util.function.Supplier;
+
 /**
- * Interface to use when implementing a serializer with JSON representation (encoded as String or BSON).
+ * Interface representing an object that provides a hash.
  *
- * @param <T> the type of the object to serialize
  * @author Andreas Oberhoff
  */
 @NullMarked
-public interface JsonSerializer<T> extends StringSerializer<T> {
+public interface Hashable {
 
     /**
-     * Indicates whether the JSON representation should be encoded as BSON or as string when persisted in the underlying
-     * store.
+     * Returns the hash of the object. The supplied hasher might be used to compute the hash.
      *
-     * @return {@code true} for BSON encoding or {@code false} for string encoding
+     * @param hasher the supplier for a hasher to compute the hash.
+     * @return the hash
      */
-    boolean storeAsBinaryJson();
+    String getHash(Supplier<Hasher> hasher);
 }
