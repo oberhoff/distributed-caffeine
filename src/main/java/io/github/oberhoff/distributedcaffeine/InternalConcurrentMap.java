@@ -47,6 +47,18 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
         this.synchronizationLock = distributedCaffeine.getSynchronizationLock();
     }
 
+    /*
+    // TODO this methods should be atomic:
+    computeIfAbsent(K key, Function mappingFunction)
+    computeIfPresent(K key, BiFunction remappingFunction)
+    compute(K key, BiFunction remappingFunction)
+    merge(K key, V value, BiFunction remappingFunction)
+    putIfAbsent(K key, V value)
+    remove(Object key, Object value)
+    replace(K key, V oldValue, V newValue)
+    replace(K key, V value)
+    */
+
     @Override
     public V get(Object key) {
         return concurrentMap.get(key);

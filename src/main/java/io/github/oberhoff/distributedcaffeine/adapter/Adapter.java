@@ -13,24 +13,32 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.oberhoff.distributedcaffeine.serializer;
+package io.github.oberhoff.distributedcaffeine.adapter;
 
 import org.jspecify.annotations.NullMarked;
 
 /**
- * Interface to use when implementing a serializer with JSON representation (encoded as String or BSON).
+ * Interface representing an adapter that manages distributed synchronization between cache instances using an
+ * underlying store.
  *
- * @param <T> the type of the object to serialize
+ * @param <K> the key type of the cache
+ * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
 @NullMarked
-public interface JsonSerializer<T> extends StringSerializer<T> {
+public interface Adapter<K, V> extends StateAware, SerializerAware<K, V>, RetrieverAware<K, V> {
 
     /**
-     * Indicates whether the JSON representation should be encoded as BSON or as string when persisted in the underlying
-     * store.
+     * Returns the repository used by this adapter
      *
-     * @return {@code true} for BSON encoding or {@code false} for string encoding
+     * @return the repository
      */
-    boolean storeAsBinaryJson();
+    Repository<K, V> getRepository();
+
+    /**
+     * Returns the identifier of this adapter
+     *
+     * @return the identifier
+     */
+    String getIdentifier();
 }

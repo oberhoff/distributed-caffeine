@@ -19,7 +19,7 @@
  * <p>
  * {@link io.github.oberhoff.distributedcaffeine.DistributedCaffeine} is the starting point for configuring and
  * constructing cache instances using a {@link io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Builder}
- * returned by {@link io.github.oberhoff.distributedcaffeine.DistributedCaffeine#newBuilder(MongoCollection)}.
+ * returned by {@link io.github.oberhoff.distributedcaffeine.DistributedCaffeine#newBuilder(Adapter)}.
  * <p>
  * Cache instances can be of type {@link io.github.oberhoff.distributedcaffeine.DistributedCache} (extends
  * {@link com.github.benmanes.caffeine.cache.Cache}) or of type
@@ -39,4 +39,4 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-import com.mongodb.client.MongoCollection;
+import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
