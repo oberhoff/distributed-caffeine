@@ -51,12 +51,18 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
         // see also initialize()
     }
 
+    InternalCacheLoader<K,V> neutralize() {
+        // cache manager is initially deactivated
+        this.cacheManager = new InternalCacheManager<>();
+        return this;
+    }
+
     @Override
-    public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
-        this.repository = distributedCaffeine.getAdapter().getRepository();
-        this.cacheManager = distributedCaffeine.getCacheManager();
-        this.extendedPersistenceConfigurer = distributedCaffeine.getExtendedPersistenceConfigurer();
-        this.hasher = distributedCaffeine.getHasher();
+    public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
+        this.repository = instanceRegistry.getAdapter().getRepository();
+        this.cacheManager = instanceRegistry.getCacheManager();
+        this.extendedPersistenceConfigurer = instanceRegistry.getExtendedPersistenceConfigurer();
+        this.hasher = instanceRegistry.getHasher();
     }
 
     @Override

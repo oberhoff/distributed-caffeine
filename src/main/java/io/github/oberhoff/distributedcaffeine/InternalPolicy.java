@@ -33,7 +33,7 @@ import static java.util.Objects.requireNonNull;
 
 class InternalPolicy<K, V> implements Policy<K, V>, InternalLazyInitializer<K, V> {
 
-    private DistributedCaffeine<K, V> distributedCaffeine;
+    private InternalInstanceRegistry<K, V> instanceRegistry;
     private Policy<K, V> policy;
 
     InternalPolicy() {
@@ -41,9 +41,9 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalLazyInitializer<K, V
     }
 
     @Override
-    public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
-        this.distributedCaffeine = distributedCaffeine;
-        this.policy = distributedCaffeine.getCache().policy();
+    public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
+        this.instanceRegistry = instanceRegistry;
+        this.policy = instanceRegistry.getCache().policy();
     }
 
     @Override
@@ -84,7 +84,8 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalLazyInitializer<K, V
     @Override
     public Optional<VarExpiration<K, V>> expireVariably() {
         return policy.expireVariably()
-                .map(varExpiration -> new InternalExpiration<>(distributedCaffeine, policy, varExpiration));
+                .map(varExpiration ->
+                        instanceRegistry.initializeNowAndLazy(new InternalExpiration<>(varExpiration)));
     }
 
     @Override
@@ -92,20 +93,24 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalLazyInitializer<K, V
         return policy.refreshAfterWrite();
     }
 
-    static class InternalExpiration<K, V> implements VarExpiration<K, V> {
+    static class InternalExpiration<K, V> implements VarExpiration<K, V>, InternalLazyInitializer<K, V> {
 
-        private final Policy<K, V> policy;
         private final VarExpiration<K, V> varExpiration;
-        private final InternalCacheManager<K, V> cacheManager;
-        private final InternalSynchronizationLock synchronizationLock;
 
-        InternalExpiration(DistributedCaffeine<K, V> distributedCaffeine,
-                           Policy<K, V> policy,
-                           VarExpiration<K, V> varExpiration) {
-            this.policy = policy;
+        private Policy<K, V> policy;
+        private InternalCacheManager<K, V> cacheManager;
+        private InternalSynchronizationLock synchronizationLock;
+
+        InternalExpiration(VarExpiration<K, V> varExpiration) {
             this.varExpiration = varExpiration;
-            this.cacheManager = distributedCaffeine.getCacheManager();
-            this.synchronizationLock = distributedCaffeine.getSynchronizationLock();
+            // see also initialize()
+        }
+
+        @Override
+        public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
+            this.policy = instanceRegistry.getCache().policy();
+            this.cacheManager = instanceRegistry.getCacheManager();
+            this.synchronizationLock = instanceRegistry.getSynchronizationLock();
         }
 
         @Override

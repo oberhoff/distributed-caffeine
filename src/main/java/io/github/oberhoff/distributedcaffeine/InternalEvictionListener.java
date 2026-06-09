@@ -29,9 +29,15 @@ class InternalEvictionListener<K, V> implements RemovalListener<K, V>, InternalL
         // see also initialize()
     }
 
+    InternalEvictionListener<K,V> neutralize() {
+        // cache manager is initially deactivated
+        this.cacheManager = new InternalCacheManager<>();
+        return this;
+    }
+
     @Override
-    public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
-        this.cacheManager = distributedCaffeine.getCacheManager();
+    public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
+        this.cacheManager = instanceRegistry.getCacheManager();
     }
 
     @Override

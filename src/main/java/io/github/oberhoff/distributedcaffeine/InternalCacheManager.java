@@ -84,15 +84,15 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
     }
 
     @Override
-    public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
-        this.cache = distributedCaffeine.getCache();
-        this.policy = distributedCaffeine.getCache().policy();
-        this.distributionMode = distributedCaffeine.getDistributionMode();
-        this.repository = distributedCaffeine.getAdapter().getRepository();
-        this.extendedPersistenceConfigurer = distributedCaffeine.getExtendedPersistenceConfigurer();
-        this.synchronizationLock = distributedCaffeine.getSynchronizationLock();
-        this.hasher = distributedCaffeine.getHasher();
-        this.executor = distributedCaffeine.getExecutor();
+    public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
+        this.cache = instanceRegistry.getCache();
+        this.policy = instanceRegistry.getCache().policy();
+        this.distributionMode = instanceRegistry.getDistributionMode();
+        this.repository = instanceRegistry.getAdapter().getRepository();
+        this.extendedPersistenceConfigurer = instanceRegistry.getExtendedPersistenceConfigurer();
+        this.synchronizationLock = instanceRegistry.getSynchronizationLock();
+        this.hasher = instanceRegistry.getHasher();
+        this.executor = instanceRegistry.getExecutor();
     }
 
     void activate() {
@@ -287,11 +287,11 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
                     null,
                     true))) {
                 cacheEntryStream
+                        // TODO
                         .filter(cacheEntry -> !currentCacheEntries.containsKey(cacheEntry.getKey()))
                         .forEach(cacheEntries::add);
             }
             retrieveCacheEntries(cacheEntries);
-            cache.asMap().keySet().removeIf(key -> !currentCacheEntries.containsKey(key));
         }
     }
 

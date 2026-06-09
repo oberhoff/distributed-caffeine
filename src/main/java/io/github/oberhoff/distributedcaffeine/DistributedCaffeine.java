@@ -36,12 +36,10 @@ import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 
-import java.lang.System.Logger;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.time.Duration;
 import java.util.List;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ForkJoinPool;
@@ -60,8 +58,8 @@ import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
 
 /**
- * Starting point for configuring and constructing cache instances using a {@link Builder} returned by
- * {@link #newBuilder(Adapter)}.
+ * Starting point for configuring and constructing Distributed Caffeine cache instances using a builder pattern instance
+ * returned by {@link #newBuilder(Adapter)}.
  * <p>
  * Cache instances can be of type {@link DistributedCache} (extends {@link Cache}) or of type
  * {@link DistributedLoadingCache} (extends {@link LoadingCache}).
@@ -82,60 +80,28 @@ import static java.util.stream.Collectors.joining;
 @NullMarked
 public final class DistributedCaffeine<K, V> {
 
-    private final Logger logger;
-
     private final Adapter<K, V> adapter;
+    private Caffeine<Object, Object> caffeine;
+    private InternalHasher<K> hasher;
+    private DistributionMode distributionMode;
+    private SerializersConfigurer<K, V> serializersConfigurer;
+    private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
 
-    private final DistributionMode distributionMode;
-    private final SerializersConfigurer<K, V> serializersConfigurer;
-    private final ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
-
-    private final @Nullable Cache<K, V> cache;
-
-    private final @Nullable InternalHasher<K> hasher;
-    private final @Nullable Executor executor;
-    private final @Nullable StatsCounter statsCounter;
-    private final @Nullable InternalCacheLoader<K, V> cacheLoader;
-
-    private final InternalSynchronizationLock synchronizationLock;
-    private final InternalCacheManager<K, V> cacheManager;
-    private final InternalMaintenanceWorker<K, V> maintenanceWorker;
-
-    private DistributedCaffeine(Builder<K, V> builder) {
-        this.logger = System.getLogger(getClass().getName());
-
-        this.adapter = builder.adapter;
-
-        this.hasher = builder.hasher;
-        this.distributionMode = builder.distributionMode;
-        this.serializersConfigurer = builder.serializersConfigurer;
-        this.extendedPersistenceConfigurer = builder.extendedPersistenceConfigurer;
-        this.cacheLoader = builder.cacheLoader;
-        this.executor = builder.executor;
-        this.statsCounter = builder.statsCounter;
-        this.cache = builder.cache;
-
-        this.synchronizationLock = new InternalSynchronizationLock();
-        this.cacheManager = new InternalCacheManager<>();
-        this.maintenanceWorker = new InternalMaintenanceWorker<>();
-
-        Stream.of(builder.removalListener, builder.evictionListener, builder.cacheLoader, this.cacheManager,
-                        this.maintenanceWorker)
-                .filter(Objects::nonNull)
-                .forEach(lazyInitializer -> lazyInitializer.initialize(this));
-
-        this.adapter.setKeySerializer(this.serializersConfigurer.getKeySerializer());
-        this.adapter.setValueSerializer(this.serializersConfigurer.getValueSerializer());
-        this.adapter.setRetriever(cacheManager);
-
-        activate();
+    private DistributedCaffeine(Adapter<K, V> adapter) {
+        this.adapter = adapter;
+        // set defaults
+        this.caffeine = Caffeine.newBuilder();
+        this.hasher = new InternalHasher<>(null);
+        this.distributionMode = POPULATION_AND_INVALIDATION_AND_EVICTION;
+        this.serializersConfigurer = new SerializersConfigurer<>();
+        this.extendedPersistenceConfigurer = new ExtendedPersistenceConfigurer();
     }
 
     /**
-     * Returns a new builder for configuring and constructing cache instances. For example, the builder can be finalized
-     * with {@link Builder#build()} to construct a cache instance of type {@link DistributedCache} (extends
-     * {@link Cache}) or with {@link Builder#build(CacheLoader)} to construct a loading cache instance of type
-     * {@link DistributedLoadingCache} (extends {@link LoadingCache}).
+     * Returns a new builder pattern instance for configuring and constructing cache instances. For example, the builder
+     * pattern instance can be finalized with {@link DistributedCaffeine#build()} to construct a cache instance of type
+     * {@link DistributedCache} (extends {@link Cache}) or with {@link DistributedCaffeine#build(CacheLoader)} to
+     * construct a loading cache instance of type {@link DistributedLoadingCache} (extends {@link LoadingCache}).
      * <p>
      * Exemplary usage:
      * <pre>
@@ -147,305 +113,280 @@ public final class DistributedCaffeine<K, V> {
      * @param adapter the adapter used for distributed synchronization between cache instances
      * @param <K>     the key type of the cache
      * @param <V>     the value type of the cache
-     * @return builder for configuring and constructing cache instances
+     * @return builder pattern instance for configuring and constructing cache instances
      * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
      */
-    public static <K, V> Builder<K, V> newBuilder(Adapter<K, V> adapter) {
-        return new Builder<>(adapter);
+    public static <K, V> DistributedCaffeine<K, V> newBuilder(Adapter<K, V> adapter) {
+        requireNonNull(adapter, "adapter cannot be null");
+        return new DistributedCaffeine<>(adapter);
     }
 
     /**
-     * Builder for configuring and constructing cache instances of type {@link DistributedCache} (extends {@link Cache})
-     * or of type {@link DistributedLoadingCache} (extends {@link LoadingCache}). To construct a builder,
-     * {@link DistributedCaffeine#newBuilder(Adapter)} must be used.
+     * Specifies the configuration of the Caffeine cache used internally. This configuration also begins with a builder
+     * pattern instance returned by invoking its own {@code newBuilder()} method, but without finalizing it by invoking
+     * one of its own {@code build(...)} methods. Instead, this construction is done internally by the outer
+     * {@code build(...)} methods.
+     * <p>
+     * Exemplary usage:
+     * <pre>
+     * DistributedCache&#60;Key, Value&#62; distributedCache = DistributedCaffeine.newBuilder(adapter)
+     *     .withCaffeine(Caffeine.newBuilder()
+     *         .maximumSize(10_000)
+     *         .expireAfterWrite(Duration.ofMinutes(5)))
+     *     .build();
+     * </pre>
+     * <b>Note:</b> An "empty" Caffeine configuration is used as default if this method is skipped.
+     * <p>
+     * <b>Attention:</b> To ensure the integrity of distributed synchronization between cache instances, the
+     * following minor restrictions apply:
+     * <ul>
+     *      <li>Reference-based eviction using Caffeine's weak or soft references for keys or values is not
+     *      supported. Even for the use of Caffeine (stand-alone), it is advised to use the more predictable size-
+     *      or time-based eviction instead.</li>
+     * </ul>
      *
-     * @param <K> the key type of the cache
-     * @param <V> the value type of the cache
-     * @author Andreas Oberhoff
+     * @param caffeine Caffeine builder pattern instance without a final build step
+     * @return a builder pattern instance for chaining additional methods
+     * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
      */
-    @NullMarked
-    public static final class Builder<K, V> {
+    @SuppressWarnings("unchecked")
+    public DistributedCaffeine<K, V> withCaffeine(Caffeine<?, ?> caffeine) {
+        requireNonNull(caffeine, "caffeine cannot be null");
+        this.caffeine = (Caffeine<Object, Object>) caffeine;
+        return this;
+    }
 
-        private final Adapter<K, V> adapter;
+    /**
+     * Specifies the hash provider used for generating hashes for key objects. Alternatively, key objects can
+     * implement the {@link Hashable} interface, in which case this method can be skipped.
+     * <p>
+     * Exemplary usage:
+     * <pre>
+     * ...
+     * .withHashProvider((hasher, key) -> hasher.get()
+     *     .putUuid(key.getId())
+     *     .putLong(key.getVersion())
+     *     .putString(key.getName())
+     *     .put...
+     *     .getHash())
+     * ...
+     * </pre>
+     * <b>Note:</b> A specified hash provider always takes precedence, even if key objects implement the
+     * {@link Hashable} interface (implementation is mandatory if this method is skipped).
+     *
+     * @param hashProvider hash provider used for generating hashes for the given key using the given hasher
+     * @return a builder pattern instance for chaining additional methods
+     */
+    public DistributedCaffeine<K, V> withHashProvider(HashProvider<K> hashProvider) {
+        requireNonNull(hashProvider, "hashProvider cannot be null");
+        this.hasher = new InternalHasher<>(hashProvider);
+        return this;
+    }
 
-        private InternalHasher<K> hasher;
-        private DistributionMode distributionMode;
-        private SerializersConfigurer<K, V> serializersConfigurer;
-        private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
+    /**
+     * Specifies the mode used for distributed synchronization between cache instances.
+     * <p>
+     * <b>Note:</b> {@link DistributionMode#POPULATION_AND_INVALIDATION_AND_EVICTION} is used as default if this
+     * method is skipped.
+     *
+     * @param distributionMode distribution mode used for distributed synchronization
+     * @return a builder pattern instance for chaining additional methods
+     */
+    public DistributedCaffeine<K, V> withDistributionMode(DistributionMode distributionMode) {
+        requireNonNull(distributionMode, "distributionMode cannot be null");
+        this.distributionMode = distributionMode;
+        return this;
+    }
 
-        private @Nullable Caffeine<Object, Object> caffeineBuilder;
-        private @Nullable Cache<K, V> cache;
+    /**
+     * Specifies the serializers used for serializing key and value objects via the given configurer.
+     * <p>
+     * Exemplary usage:
+     * <pre>
+     * ...
+     * .withSerializers(configurer -> configurer
+     *     .withKeySerializer(new KeySerializer())
+     *     .withValueSerializer(new ValueSerializer()))
+     * ...
+     * </pre>
+     * <b>Note:</b> {@link ForySerializer} is used as default for serializing key and value objects if this method
+     * is skipped.
+     *
+     * @param configurer configurer for serializers
+     * @return a builder pattern instance for chaining additional methods
+     */
+    public DistributedCaffeine<K, V> withSerializers(Configurer<SerializersConfigurer<K, V>> configurer) {
+        requireNonNull(configurer, "configurer cannot be null");
+        this.serializersConfigurer = configurer.apply(this.serializersConfigurer);
+        return this;
+    }
 
-        private @Nullable InternalRemovalListener<K, V> removalListener;
-        private @Nullable InternalEvictionListener<K, V> evictionListener;
-        private @Nullable Executor executor;
-        private @Nullable StatsCounter statsCounter;
-        private @Nullable InternalCacheLoader<K, V> cacheLoader;
+    /**
+     * Specifies extended persistence via the given configurer.
+     * <p>
+     * Exemplary usage:
+     * <pre>
+     * ...
+     * .withExtendedPersistence(configurer -> configurer
+     *     .withMaximumSize(1_000_000)
+     *     .withMaximumTime(Duration.ofDays(10)))
+     * ...
+     * </pre>
+     * <b>Note:</b> No extended persistence is used if this method is skipped.
+     *
+     * @param configurer configurer for extended persistence
+     * @return a builder pattern instance for chaining additional methods
+     */
+    public DistributedCaffeine<K, V> withExtendedPersistence(Configurer<ExtendedPersistenceConfigurer> configurer) {
+        requireNonNull(configurer, "configurer cannot be null");
+        this.extendedPersistenceConfigurer = configurer.apply(this.extendedPersistenceConfigurer);
+        return this;
+    }
 
-        private Builder(Adapter<K, V> adapter) {
-            requireNonNull(adapter, "adapter cannot be null");
-            this.adapter = adapter;
+    /**
+     * Constructs a {@link DistributedCache} (extends {@link Cache}) instance (similar to {@link Caffeine#build()}).
+     *
+     * @param <K1> the key type of the cache (same as {@link K})
+     * @param <V1> the value type of the cache (same as {@link V})
+     * @return the new distributed cache instance
+     */
+    @SuppressWarnings("unchecked")
+    public <K1 extends K, V1 extends V> DistributedCache<K1, V1> build() {
+        Supplier<InternalInstanceRegistry<K, V>> instanceRegistrySupplier = () ->
+                buildCommon(Caffeine::build, null);
+        InternalInstanceRegistry<K, V> instanceRegistry = instanceRegistrySupplier.get();
+        instanceRegistry.setInstanceRegistrySupplier(instanceRegistrySupplier);
+        InternalDistributedCache<K, V> distributedCache = new InternalDistributedCache<>();
+        instanceRegistry.initializeLazy(distributedCache);
+        instanceRegistry.activate();
+        return (DistributedCache<K1, V1>) distributedCache;
+    }
 
-            // set defaults
-            this.hasher = new InternalHasher<>(null);
-            this.distributionMode = POPULATION_AND_INVALIDATION_AND_EVICTION;
-            this.serializersConfigurer = new SerializersConfigurer<>();
-            this.extendedPersistenceConfigurer = new ExtendedPersistenceConfigurer();
+    /**
+     * Constructs a {@link DistributedLoadingCache} (extends {@link LoadingCache}) instance (similar to
+     * {@link Caffeine#build(CacheLoader)}).
+     *
+     * @param cacheLoader the cache loader used to obtain new values
+     * @param <K1>        the key type of the cache (same as {@link K})
+     * @param <V1>        the value type of the cache (same as {@link V})
+     * @return the new distributed loading cache instance
+     */
+    @SuppressWarnings("unchecked")
+    public <K1 extends K, V1 extends V> DistributedLoadingCache<K1, V1> build(
+            CacheLoader<? super K1, ? super V1> cacheLoader) {
+        requireNonNull(cacheLoader, "cacheLoader cannot be null");
+        Supplier<InternalInstanceRegistry<K, V>> instanceRegistrySupplier = () -> {
+            InternalCacheLoader<K, V> internalCacheLoader = new InternalCacheLoader<>((CacheLoader<K, V>) cacheLoader);
+            return buildCommon(c -> c.build(internalCacheLoader), internalCacheLoader);
+        };
+        InternalInstanceRegistry<K, V> instanceRegistry = instanceRegistrySupplier.get();
+        instanceRegistry.setInstanceRegistrySupplier(instanceRegistrySupplier);
+        InternalDistributedLoadingCache<K, V> distributedLoadingCache = new InternalDistributedLoadingCache<>();
+        instanceRegistry.initializeLazy(distributedLoadingCache);
+        instanceRegistry.activate();
+        return (DistributedLoadingCache<K1, V1>) distributedLoadingCache;
+    }
+
+    @SuppressWarnings({"unchecked", "java:S3011"})
+    private InternalInstanceRegistry<K, V> buildCommon(Function<Caffeine<Object, Object>, Cache<K, V>> build,
+                                                       @Nullable InternalCacheLoader<K, V> cacheLoader) {
+        InternalInstanceRegistry<K, V> instanceRegistry = new InternalInstanceRegistry<>();
+        instanceRegistry.setAdapter(this.adapter);
+        instanceRegistry.setHasher(this.hasher);
+        instanceRegistry.setDistributionMode(this.distributionMode);
+        instanceRegistry.setSerializersConfigurer(this.serializersConfigurer);
+        instanceRegistry.setExtendedPersistenceConfigurer(this.extendedPersistenceConfigurer);
+        instanceRegistry.setCacheLoader(instanceRegistry.initializeLazy(cacheLoader));
+
+        // throw exception if weak or soft references are configured
+        boolean hasWeakOrSoftReferences;
+        Method isStrongKeysMethod = getFailable(() ->
+                caffeine.getClass().getDeclaredMethod("isStrongKeys"));
+        Method isStrongValuesMethod = getFailable(() ->
+                caffeine.getClass().getDeclaredMethod("isStrongValues"));
+        isStrongKeysMethod.setAccessible(true);
+        isStrongValuesMethod.setAccessible(true);
+        hasWeakOrSoftReferences = !((Boolean) getFailable(() -> isStrongKeysMethod.invoke(caffeine))
+                || (Boolean) getFailable(() -> isStrongValuesMethod.invoke(caffeine)));
+        if (hasWeakOrSoftReferences) {
+            throw new IllegalStateException("The use of weak or soft references is not supported");
         }
 
-        /**
-         * Specifies the Caffeine builder to be used for configuring the Caffeine cache used internally. This
-         * configuration also begins with a builder returned by invoking its own {@code newBuilder()} method, but
-         * without finalizing it by invoking one of its own {@code build(...)} methods. Instead, this construction is
-         * done internally by the outer {@code build...(...)} methods.
-         * <p>
-         * Exemplary usage:
-         * <pre>
-         * DistributedCache&#60;Key, Value&#62; distributedCache = DistributedCaffeine.newBuilder(adapter)
-         *     .withCaffeineBuilder(Caffeine.newBuilder()
-         *         .maximumSize(10_000)
-         *         .expireAfterWrite(Duration.ofMinutes(5)))
-         *     .build();
-         * </pre>
-         * <b>Note:</b> An "empty" Caffeine configuration is used as default if this builder method is
-         * skipped.
-         * <p>
-         * <b>Attention:</b> To ensure the integrity of distributed synchronization between cache instances, the
-         * following minor restrictions apply:
-         * <ul>
-         *      <li>Reference-based eviction using Caffeine's weak or soft references for keys or values is not
-         *      supported. Even for the use of Caffeine (stand-alone), it is advised to use the more predictable size-
-         *      or time-based eviction instead.</li>
-         * </ul>
-         *
-         * @param caffeineBuilder Caffeine builder instance without a final build step
-         * @return a builder instance for chaining additional methods
-         * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
-         */
-        @SuppressWarnings("unchecked")
-        public Builder<K, V> withCaffeineBuilder(Caffeine<?, ?> caffeineBuilder) {
-            requireNonNull(caffeineBuilder, "caffeineBuilder cannot be null");
-            this.caffeineBuilder = (Caffeine<Object, Object>) caffeineBuilder;
-            return this;
-        }
+        // inject removal and eviction listener
+        Field removalListenerField = getFailable(() ->
+                caffeine.getClass().getDeclaredField("removalListener"));
+        Field evictionListenerField = getFailable(() ->
+                caffeine.getClass().getDeclaredField("evictionListener"));
+        removalListenerField.setAccessible(true);
+        evictionListenerField.setAccessible(true);
+        RemovalListener<K, V> caffeineRemovalListener = getFailable(() ->
+                (RemovalListener<K, V>) removalListenerField.get(caffeine));
+        RemovalListener<K, V> caffeineEvictionListener = getFailable(() ->
+                (RemovalListener<K, V>) evictionListenerField.get(caffeine));
+        RemovalListener<K, V> noopListener = (key, value, removalCause) -> {
+        };
+        instanceRegistry.setRemovalListener(
+                instanceRegistry.initializeLazy(new InternalRemovalListener<>(nonNull(caffeineRemovalListener)
+                        ? caffeineRemovalListener
+                        : noopListener)));
+        instanceRegistry.setEvictionListener(
+                instanceRegistry.initializeLazy(new InternalEvictionListener<>(nonNull(caffeineEvictionListener)
+                        ? caffeineEvictionListener
+                        : noopListener)));
+        runFailable(() -> removalListenerField.set(caffeine, instanceRegistry.getRemovalListener()));
+        runFailable(() -> evictionListenerField.set(caffeine, instanceRegistry.getEvictionListener()));
 
-        /**
-         * Specifies the hash provider used for generating hashes for key objects. Alternatively, key objects can
-         * implement the {@link Hashable} interface, in which case this method can be skipped.
-         * <p>
-         * Exemplary usage:
-         * <pre>
-         * ...
-         * .withHashProvider((hasher, key) -> hasher.get()
-         *     .putUuid(key.getId())
-         *     .putLong(key.getVersion())
-         *     .putString(key.getName())
-         *     .put...
-         *     .getHash())
-         * ...
-         * </pre>
-         * <b>Note:</b> A specified hash provider always takes precedence, even if key objects implement the
-         * {@link Hashable} interface.
-         *
-         * @param hashProvider hash provider used for generating hashes for the given key using the given hasher
-         * @return a builder instance for chaining additional methods
-         */
-        public Builder<K, V> withHashProvider(HashProvider<K> hashProvider) {
-            requireNonNull(hashProvider, "hashProvider cannot be null");
-            this.hasher = new InternalHasher<>(hashProvider);
-            return this;
-        }
+        // inject scheduler if not set or disabled (necessary for eviction listener reliability)
+        Field schedulerField = getFailable(() ->
+                caffeine.getClass().getDeclaredField("scheduler"));
+        schedulerField.setAccessible(true);
+        Scheduler caffeineScheduler = getFailable(() ->
+                (Scheduler) schedulerField.get(caffeine));
+        Scheduler scheduler = (isNull(caffeineScheduler) || caffeineScheduler == Scheduler.disabledScheduler())
+                ? Scheduler.systemScheduler()
+                : caffeineScheduler;
+        runFailable(() -> schedulerField.set(caffeine, new InternalScheduler(scheduler)));
 
-        /**
-         * Specifies the mode used for distributed synchronization between cache instances.
-         * <p>
-         * <b>Note:</b> {@link DistributionMode#POPULATION_AND_INVALIDATION_AND_EVICTION} is used as default if this
-         * method is skipped.
-         *
-         * @param distributionMode distribution mode used for distributed synchronization
-         * @return a builder instance for chaining additional methods
-         */
-        public Builder<K, V> withDistributionMode(DistributionMode distributionMode) {
-            requireNonNull(distributionMode, "distributionMode cannot be null");
-            this.distributionMode = distributionMode;
-            return this;
-        }
+        // extract executor
+        Field executorField = getFailable(() ->
+                caffeine.getClass().getDeclaredField("executor"));
+        executorField.setAccessible(true);
+        instanceRegistry.setExecutor(Optional.ofNullable(getFailable(() ->
+                        (Executor) executorField.get(caffeine)))
+                .orElseGet(ForkJoinPool::commonPool));
 
-        /**
-         * Specifies the serializers used for serializing key and value objects via the given configurer.
-         * <p>
-         * Exemplary usage:
-         * <pre>
-         * ...
-         * .withSerializers(configurer -> configurer
-         *     .withKeySerializer(new KeySerializer())
-         *     .withValueSerializer(new ValueSerializer()))
-         * ...
-         * </pre>
-         * <b>Note:</b> {@link ForySerializer} is used as default for serializing key and value objects if this method
-         * is skipped.
-         *
-         * @param configurer configurer for serializers
-         * @return a builder instance for chaining additional methods
-         */
-        public Builder<K, V> withSerializers(Configurer<SerializersConfigurer<K, V>> configurer) {
-            requireNonNull(configurer, "configurer cannot be null");
-            this.serializersConfigurer = configurer.apply(this.serializersConfigurer);
-            return this;
-        }
-
-        /**
-         * Specifies extended persistence via the given configurer.
-         * <p>
-         * Exemplary usage:
-         * <pre>
-         * ...
-         * .withExtendedPersistence(configurer -> configurer
-         *     .withMaximumSize(1_000_000)
-         *     .withMaximumTime(Duration.ofDays(10)))
-         * ...
-         * </pre>
-         * <b>Note:</b> No extended persistence is used if this method is skipped.
-         *
-         * @param configurer configurer for extended persistence
-         * @return a builder instance for chaining additional methods
-         */
-        public Builder<K, V> withExtendedPersistence(Configurer<ExtendedPersistenceConfigurer> configurer) {
-            requireNonNull(configurer, "configurer cannot be null");
-            this.extendedPersistenceConfigurer = configurer.apply(this.extendedPersistenceConfigurer);
-            return this;
-        }
-
-        /**
-         * Constructs a {@link DistributedCache} (extends {@link Cache}) instance (similar to {@link Caffeine#build()}).
-         *
-         * @param <K1> the key type of the cache (same as {@link K})
-         * @param <V1> the value type of the cache (same as {@link V})
-         * @return the new distributed cache instance
-         */
-        @SuppressWarnings("unchecked")
-        public <K1 extends K, V1 extends V> DistributedCache<K1, V1> build() {
-            DistributedCaffeine<K, V> distributedCaffeine = buildCommon(Caffeine::build);
-            InternalDistributedCache<K, V> distributedCache = new InternalDistributedCache<>();
-            distributedCache.initialize(distributedCaffeine);
-            return (DistributedCache<K1, V1>) distributedCache;
-        }
-
-        /**
-         * Constructs a {@link DistributedLoadingCache} (extends {@link LoadingCache}) instance (similar to
-         * {@link Caffeine#build(CacheLoader)}).
-         *
-         * @param cacheLoader the cache loader used to obtain new values
-         * @param <K1>        the key type of the cache (same as {@link K})
-         * @param <V1>        the value type of the cache (same as {@link V})
-         * @return the new distributed loading cache instance
-         */
-        @SuppressWarnings("unchecked")
-        public <K1 extends K, V1 extends V> DistributedLoadingCache<K1, V1> build(
-                CacheLoader<? super K1, ? super V1> cacheLoader) {
-            requireNonNull(cacheLoader, "cacheLoader cannot be null");
-            this.cacheLoader = new InternalCacheLoader<>((CacheLoader<K, V>) cacheLoader);
-            DistributedCaffeine<K, V> distributedCaffeine = buildCommon(caffeine -> caffeine.build(this.cacheLoader));
-            InternalDistributedLoadingCache<K, V> distributedLoadingCache = new InternalDistributedLoadingCache<>();
-            distributedLoadingCache.initialize(distributedCaffeine);
-            return (DistributedLoadingCache<K1, V1>) distributedLoadingCache;
-        }
-
-        @SuppressWarnings({"unchecked", "java:S3011"})
-        private DistributedCaffeine<K, V> buildCommon(Function<Caffeine<Object, Object>, Cache<K, V>> build) {
-            // use default Caffeine builder if no customized builder is set
-            Caffeine<Object, Object> caffeine = Optional.ofNullable(this.caffeineBuilder)
-                    .orElseGet(Caffeine::newBuilder);
-
-            // throw exception if weak or soft references are configured
-            boolean hasWeakOrSoftReferences;
-            Method isStrongKeysMethod = getFailable(() ->
-                    caffeine.getClass().getDeclaredMethod("isStrongKeys"));
-            Method isStrongValuesMethod = getFailable(() ->
-                    caffeine.getClass().getDeclaredMethod("isStrongValues"));
-            isStrongKeysMethod.setAccessible(true);
-            isStrongValuesMethod.setAccessible(true);
-            hasWeakOrSoftReferences = !((Boolean) getFailable(() -> isStrongKeysMethod.invoke(caffeine))
-                    || (Boolean) getFailable(() -> isStrongValuesMethod.invoke(caffeine)));
-            isStrongKeysMethod.setAccessible(false);
-            isStrongValuesMethod.setAccessible(false);
-            if (hasWeakOrSoftReferences) {
-                throw new IllegalStateException("The use of weak or soft references is not supported");
-            }
-
-            // inject removal and eviction listener
-            Field removalListenerField = getFailable(() ->
-                    caffeine.getClass().getDeclaredField("removalListener"));
-            Field evictionListenerField = getFailable(() ->
-                    caffeine.getClass().getDeclaredField("evictionListener"));
-            removalListenerField.setAccessible(true);
-            evictionListenerField.setAccessible(true);
-            RemovalListener<K, V> caffeineRemovalListener = getFailable(() ->
-                    (RemovalListener<K, V>) removalListenerField.get(caffeine));
-            RemovalListener<K, V> caffeineEvictionListener = getFailable(() ->
-                    (RemovalListener<K, V>) evictionListenerField.get(caffeine));
-            RemovalListener<K, V> noopListener = (key, value, removalCause) -> {
+        // extract statsCounter (lazy) and replace if necessary
+        Field statsCounterSupplierField = getFailable(() ->
+                caffeine.getClass().getDeclaredField("statsCounterSupplier"));
+        statsCounterSupplierField.setAccessible(true);
+        Supplier<StatsCounter> caffeineStatsCounterSupplier = getFailable(() ->
+                (Supplier<StatsCounter>) statsCounterSupplierField.get(caffeine));
+        if (nonNull(caffeineStatsCounterSupplier)) {
+            Supplier<StatsCounter> statsCounterSupplier = () -> {
+                StatsCounter caffeineStatsCounter = caffeineStatsCounterSupplier.get();
+                instanceRegistry.setStatsCounter(caffeineStatsCounter);
+                // reset caffeine (lazy) after supplier was invoked
+                runFailable(() -> statsCounterSupplierField.set(caffeine, caffeineStatsCounterSupplier));
+                return caffeineStatsCounter;
             };
-            this.removalListener = new InternalRemovalListener<>(nonNull(caffeineRemovalListener)
-                    ? caffeineRemovalListener
-                    : noopListener);
-            this.evictionListener = new InternalEvictionListener<>(nonNull(caffeineEvictionListener)
-                    ? caffeineEvictionListener
-                    : noopListener);
-            runFailable(() -> removalListenerField.set(caffeine, removalListener));
-            runFailable(() -> evictionListenerField.set(caffeine, evictionListener));
-            removalListenerField.setAccessible(false);
-            evictionListenerField.setAccessible(false);
-
-            // inject scheduler if not set or disabled (necessary for eviction listener reliability)
-            Field schedulerField = getFailable(() ->
-                    caffeine.getClass().getDeclaredField("scheduler"));
-            schedulerField.setAccessible(true);
-            Scheduler caffeineScheduler = getFailable(() ->
-                    (Scheduler) schedulerField.get(caffeine));
-            Scheduler scheduler = (isNull(caffeineScheduler) || caffeineScheduler == Scheduler.disabledScheduler())
-                    ? Scheduler.systemScheduler()
-                    : caffeineScheduler;
-            runFailable(() -> schedulerField.set(caffeine, new InternalScheduler(scheduler)));
-            schedulerField.setAccessible(false);
-
-            // extract executor
-            Field executorField = getFailable(() ->
-                    caffeine.getClass().getDeclaredField("executor"));
-            executorField.setAccessible(true);
-            this.executor = Optional.ofNullable(getFailable(() ->
-                            (Executor) executorField.get(caffeine)))
-                    .orElseGet(ForkJoinPool::commonPool);
-            executorField.setAccessible(false);
-
-            // extract statsCounter (lazy) and replace if necessary
-            Field statsCounterSupplierField = getFailable(() ->
-                    caffeine.getClass().getDeclaredField("statsCounterSupplier"));
-            statsCounterSupplierField.setAccessible(true);
-            Supplier<StatsCounter> caffeineStatsCounterSupplier = getFailable(() ->
-                    (Supplier<StatsCounter>) statsCounterSupplierField.get(caffeine));
-            if (nonNull(caffeineStatsCounterSupplier)) {
-                Supplier<StatsCounter> statsCounterSupplier = () -> {
-                    StatsCounter caffeineStatsCounter = caffeineStatsCounterSupplier.get();
-                    this.statsCounter = caffeineStatsCounter;
-                    return caffeineStatsCounter;
-                };
-                runFailable(() -> statsCounterSupplierField.set(caffeine, statsCounterSupplier));
-            } else {
-                this.statsCounter = StatsCounter.disabledStatsCounter();
-            }
-            statsCounterSupplierField.setAccessible(false);
-
-            // build final Caffeine cache instance
-            this.cache = build.apply(caffeine);
-
-            // validate configurers
-            this.serializersConfigurer.validate(this.cache);
-            this.extendedPersistenceConfigurer.validate(this.cache);
-
-            // construct and return DistributedCaffeine instance
-            return new DistributedCaffeine<>(this);
+            runFailable(() -> statsCounterSupplierField.set(caffeine, statsCounterSupplier));
+        } else {
+            instanceRegistry.setStatsCounter(StatsCounter.disabledStatsCounter());
         }
+
+        // build final Caffeine cache instance
+        instanceRegistry.setCache(build.apply(caffeine));
+
+        // validate configurers
+        this.serializersConfigurer.validate(instanceRegistry.getCache());
+        this.extendedPersistenceConfigurer.validate(instanceRegistry.getCache());
+
+        // reset caffeine
+        runFailable(() -> removalListenerField.set(caffeine, caffeineRemovalListener));
+        runFailable(() -> evictionListenerField.set(caffeine, caffeineEvictionListener));
+        // stats counter is reset lazy and scheduler cannot be reset
+
+        return instanceRegistry;
     }
 
     /**
@@ -641,6 +582,8 @@ public final class DistributedCaffeine<K, V> {
             return this;
         }
 
+        // TODO withInvalidationStrategy
+
         Optional<Integer> getMaximumSize() {
             return Optional.ofNullable(maximumSize);
         }
@@ -685,83 +628,5 @@ public final class DistributedCaffeine<K, V> {
     @NullMarked
     @FunctionalInterface
     public interface Configurer<T> extends UnaryOperator<T> {
-    }
-
-    void activate() {
-        if (!isActivated()) {
-            synchronizationLock.runLocked(() -> {
-                cacheManager.activate();
-                maintenanceWorker.activate();
-                adapter.activate();
-                // synchronization after retrieving by adapter so that no changes are missed
-                cacheManager.synchronizeCacheEntries();
-            });
-        }
-    }
-
-    void deactivate() {
-        if (isActivated()) {
-            synchronizationLock.runLocked(() -> {
-                adapter.deactivate();
-                maintenanceWorker.deactivate();
-                cacheManager.deactivate();
-            });
-        }
-    }
-
-    boolean isActivated() {
-        return adapter.isActivated() && maintenanceWorker.isActivated() && cacheManager.isActivated();
-    }
-
-    Logger getLogger() {
-        return requireNonNull(logger);
-    }
-
-    Adapter<K, V> getAdapter() {
-        return requireNonNull(adapter);
-    }
-
-    Cache<K, V> getCache() {
-        return requireNonNull(cache);
-    }
-
-    DistributionMode getDistributionMode() {
-        return requireNonNull(distributionMode);
-    }
-
-    SerializersConfigurer<K, V> getSerializersConfigurer() {
-        return requireNonNull(serializersConfigurer);
-    }
-
-    ExtendedPersistenceConfigurer getExtendedPersistenceConfigurer() {
-        return requireNonNull(extendedPersistenceConfigurer);
-    }
-
-    InternalHasher<K> getHasher() {
-        return requireNonNull(hasher);
-    }
-
-    InternalCacheLoader<K, V> getCacheLoader() {
-        return requireNonNull(cacheLoader);
-    }
-
-    Executor getExecutor() {
-        return requireNonNull(executor);
-    }
-
-    StatsCounter getStatsCounter() {
-        return requireNonNull(statsCounter);
-    }
-
-    InternalSynchronizationLock getSynchronizationLock() {
-        return requireNonNull(synchronizationLock);
-    }
-
-    InternalCacheManager<K, V> getCacheManager() {
-        return requireNonNull(cacheManager);
-    }
-
-    InternalMaintenanceWorker<K, V> getMaintenanceWorker() {
-        return requireNonNull(maintenanceWorker);
     }
 }

@@ -31,7 +31,7 @@ import static java.util.Objects.requireNonNull;
 
 class InternalDistributedCache<K, V> implements DistributedCache<K, V>, InternalLazyInitializer<K, V> {
 
-    protected DistributedCaffeine<K, V> distributedCaffeine;
+    protected InternalInstanceRegistry<K, V> instanceRegistry;
     protected Cache<K, V> cache;
     protected Policy<K, V> policy;
     protected InternalCacheManager<K, V> cacheManager;
@@ -42,12 +42,12 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
     }
 
     @Override
-    public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
-        this.distributedCaffeine = distributedCaffeine;
-        this.cache = distributedCaffeine.getCache();
-        this.policy = distributedCaffeine.getCache().policy();
-        this.cacheManager = distributedCaffeine.getCacheManager();
-        this.synchronizationLock = distributedCaffeine.getSynchronizationLock();
+    public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
+        this.instanceRegistry = instanceRegistry;
+        this.cache = instanceRegistry.getCache();
+        this.policy = instanceRegistry.getCache().policy();
+        this.cacheManager = instanceRegistry.getCacheManager();
+        this.synchronizationLock = instanceRegistry.getSynchronizationLock();
     }
 
     @Override
@@ -143,22 +143,16 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
 
     @Override
     public ConcurrentMap<K, V> asMap() {
-        InternalConcurrentMap<K, V> internalConcurrentMap = new InternalConcurrentMap<>();
-        internalConcurrentMap.initialize(distributedCaffeine);
-        return internalConcurrentMap;
+        return instanceRegistry.initializeNowAndLazy(new InternalConcurrentMap<>());
     }
 
     @Override
     public Policy<K, V> policy() {
-        InternalPolicy<K, V> internalPolicy = new InternalPolicy<>();
-        internalPolicy.initialize(distributedCaffeine);
-        return internalPolicy;
+        return instanceRegistry.initializeNowAndLazy(new InternalPolicy<>());
     }
 
     @Override
     public DistributedPolicy<K, V> distributedPolicy() {
-        InternalDistributedPolicy<K, V> internalDistributedPolicy = new InternalDistributedPolicy<>();
-        internalDistributedPolicy.initialize(distributedCaffeine);
-        return internalDistributedPolicy;
+        return instanceRegistry.initializeNowAndLazy(new InternalDistributedPolicy<>());
     }
 }

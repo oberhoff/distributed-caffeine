@@ -27,8 +27,13 @@ class InternalRemovalListener<K, V> implements RemovalListener<K, V>, InternalLa
         // see also initialize()
     }
 
+    InternalRemovalListener<K,V> neutralize() {
+        // noop
+        return this;
+    }
+
     @Override
-    public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
+    public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
         // noop
     }
 

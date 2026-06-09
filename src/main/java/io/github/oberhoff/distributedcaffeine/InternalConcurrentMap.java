@@ -41,10 +41,10 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
     }
 
     @Override
-    public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
-        this.concurrentMap = distributedCaffeine.getCache().asMap();
-        this.cacheManager = distributedCaffeine.getCacheManager();
-        this.synchronizationLock = distributedCaffeine.getSynchronizationLock();
+    public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
+        this.concurrentMap = instanceRegistry.getCache().asMap();
+        this.cacheManager = instanceRegistry.getCacheManager();
+        this.synchronizationLock = instanceRegistry.getSynchronizationLock();
     }
 
     /*

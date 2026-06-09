@@ -58,13 +58,13 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
     }
 
     @Override
-    public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
-        super.initialize(distributedCaffeine);
-        this.logger = distributedCaffeine.getLogger();
+    public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
+        super.initialize(instanceRegistry);
+        this.logger = instanceRegistry.getLogger();
         this.loadingCache = (LoadingCache<K, V>) cache;
-        this.cacheLoader = distributedCaffeine.getCacheLoader();
-        this.executor = distributedCaffeine.getExecutor();
-        this.statsCounter = distributedCaffeine.getStatsCounter();
+        this.cacheLoader = instanceRegistry.getCacheLoader();
+        this.executor = instanceRegistry.getExecutor();
+        this.statsCounter = instanceRegistry.getStatsCounter();
     }
 
     @Override
