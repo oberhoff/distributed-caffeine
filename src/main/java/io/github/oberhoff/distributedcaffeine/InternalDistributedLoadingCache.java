@@ -32,9 +32,14 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
 import java.util.stream.Collectors;
 
+import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.entry;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.iks;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.im;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.m;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullIterable;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
 import static java.lang.String.format;
 import static java.util.Collections.unmodifiableMap;
 import static java.util.Objects.isNull;
@@ -47,7 +52,7 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
     private final ConcurrentMap<K, CompletableFuture<V>> refreshOperations;
 
     private Logger logger;
-    private LoadingCache<K, V> loadingCache;
+    private LoadingCache<InternalKey<K>, InternalValue<V>> loadingCache;
     private InternalCacheLoader<K, V> cacheLoader;
     private Executor executor;
     private StatsCounter statsCounter;
@@ -58,27 +63,27 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
     }
 
     @Override
-    public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
-        super.initialize(distributedCaffeine);
-        this.logger = distributedCaffeine.getLogger();
-        this.loadingCache = (LoadingCache<K, V>) cache;
-        this.cacheLoader = distributedCaffeine.getCacheLoader();
-        this.executor = distributedCaffeine.getExecutor();
-        this.statsCounter = distributedCaffeine.getStatsCounter();
+    public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
+        super.initialize(instanceRegistry);
+        this.logger = instanceRegistry.getLogger();
+        this.loadingCache = (LoadingCache<InternalKey<K>, InternalValue<V>>) cache;
+        this.cacheLoader = instanceRegistry.getCacheLoader();
+        this.executor = instanceRegistry.getExecutor();
+        this.statsCounter = instanceRegistry.getStatsCounter();
     }
 
     @Override
     public V get(K key) {
         requireNonNull(key);
         return synchronizationLock.getLocked(() ->
-                loadingCache.get(key));
+                v(loadingCache.get(ik(key))));
     }
 
     @Override
     public Map<K, V> getAll(Iterable<? extends K> keys) {
         Set<K> keySet = requireNonNullIterable(keys);
         return synchronizationLock.getLocked(() ->
-                loadingCache.getAll(keySet));
+                m(loadingCache.getAll(iks(keySet))));
     }
 
     @Override
@@ -96,10 +101,10 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
         // custom implementation to bypass problematic internal asynchronous handling
         // accepted drawback: no mapping of in-flight refresh operations in 'policy.refreshes()'
         Map<K, CompletableFuture<V>> keyToCompletableFutureOfValues = keySet.stream()
-                .map(key -> entry(key, policy.getIfPresentQuietly(key)))
+                .map(key -> entry(key, policy.getIfPresentQuietly(ik(key))))
                 .collect(Collectors.toMap(Entry::getKey, entry ->
-                        getOrCreateRefreshOperation(entry.getKey(), entry.getValue())));
-        return CompletableFuture.allOf(keyToCompletableFutureOfValues.values().toArray(new CompletableFuture[0]))
+                        getOrCreateRefreshOperation(entry.getKey(), v(entry.getValue()))));
+        return CompletableFuture.allOf(keyToCompletableFutureOfValues.values().toArray(CompletableFuture[]::new))
                 .thenApplyAsync(ignored -> {
                     Map<K, V> keyToNewValue = keyToCompletableFutureOfValues.entrySet().stream()
                             .map(entry -> entry(entry.getKey(), entry.getValue().join()))
@@ -116,8 +121,8 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
                         }
                     });
                     synchronizationLock.runLocked(() -> {
-                        cache.putAll(cacheManager.putAllDistributedRefresh(keysWithNewValues));
-                        cache.invalidateAll(cacheManager.invalidateAllDistributedRefresh(keysWithNullValues));
+                        cache.putAll(cacheManager.putAllDistributedRefresh(im(keysWithNewValues)));
+                        cache.invalidateAll(cacheManager.invalidateAllDistributedRefresh(iks(keysWithNullValues)));
                     });
                     return unmodifiableMap(keysWithNewValues);
                 }, executor);

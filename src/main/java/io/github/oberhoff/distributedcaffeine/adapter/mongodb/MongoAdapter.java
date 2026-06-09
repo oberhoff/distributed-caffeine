@@ -34,7 +34,7 @@ public final class MongoAdapter<K, V> extends AbstractAdapter<K, V> {
      *
      * @param mongoClient    the mongo client used by the adapter
      * @param databaseName   the database name used by the adapter
-     * @param collectionName the collection name used by teh adapter
+     * @param collectionName the collection name used by the adapter
      */
     public MongoAdapter(MongoClient mongoClient, String databaseName, String collectionName) {
         super(new MongoRepository<>(mongoClient, databaseName, collectionName),

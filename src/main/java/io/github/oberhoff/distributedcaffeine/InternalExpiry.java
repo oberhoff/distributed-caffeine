@@ -15,36 +15,32 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-import com.github.benmanes.caffeine.cache.RemovalCause;
-import com.github.benmanes.caffeine.cache.RemovalListener;
-import org.jspecify.annotations.Nullable;
+import com.github.benmanes.caffeine.cache.Expiry;
 
 import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
 import static java.util.Objects.requireNonNull;
 
-class InternalRemovalListener<K, V> implements RemovalListener<InternalKey<K>, InternalValue<V>>,
-        InternalLazyInitializer<K, V> {
+class InternalExpiry<K, V> implements Expiry<InternalKey<K>, InternalValue<V>> {
 
-    private final RemovalListener<K, V> removalListener;
+    private final Expiry<K, V> expiry;
 
-    InternalRemovalListener(RemovalListener<K, V> removalListener) {
-        this.removalListener = requireNonNull(removalListener);
-        // see also initialize()
-    }
-
-    InternalRemovalListener<K, V> neutralize() {
-        // noop
-        return this;
+    InternalExpiry(Expiry<K, V> expiry) {
+        this.expiry = requireNonNull(expiry);
     }
 
     @Override
-    public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
-        // noop
+    public long expireAfterCreate(InternalKey<K> key, InternalValue<V> value, long currentTime) {
+        return expiry.expireAfterCreate(k(key), v(value), currentTime);
     }
 
     @Override
-    public void onRemoval(@Nullable InternalKey<K> key, @Nullable InternalValue<V> value, RemovalCause removalCause) {
-        removalListener.onRemoval(k(key), v(value), removalCause);
+    public long expireAfterUpdate(InternalKey<K> key, InternalValue<V> value, long currentTime, long currentDuration) {
+        return expiry.expireAfterUpdate(k(key), v(value), currentTime, currentDuration);
+    }
+
+    @Override
+    public long expireAfterRead(InternalKey<K> key, InternalValue<V> value, long currentTime, long currentDuration) {
+        return expiry.expireAfterRead(k(key), v(value), currentTime, currentDuration);
     }
 }

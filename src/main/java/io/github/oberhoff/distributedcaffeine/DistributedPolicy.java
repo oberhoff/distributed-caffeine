@@ -15,7 +15,6 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Builder;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Configurer;
 import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
@@ -97,7 +96,7 @@ public interface DistributedPolicy<K, V> {
      * instance.
      * <p>
      * Already evicted cache entries with extended persistence can also be included, if extended persistence is
-     * configured using {@link Builder#withExtendedPersistence(Configurer)}.
+     * configured using {@link DistributedCaffeine#withExtendedPersistence(Configurer)}.
      *
      * @param key            the key whose associated cache entry is to be returned
      * @param includeEvicted {@code true} if evicted cache entries with extended persistence should also be included,
@@ -111,7 +110,7 @@ public interface DistributedPolicy<K, V> {
      * instance.
      * <p>
      * Already evicted cache entries with extended persistence can also be included, if extended persistence is
-     * configured using {@link Builder#withExtendedPersistence(Configurer)}.
+     * configured using {@link DistributedCaffeine#withExtendedPersistence(Configurer)}.
      *
      * @param keys           the keys whose associated cache entries are to be returned
      * @param includeEvicted {@code true} if evicted cache entries with extended persistence should also be included,

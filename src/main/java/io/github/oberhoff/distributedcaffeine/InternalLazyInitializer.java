@@ -17,5 +17,5 @@ package io.github.oberhoff.distributedcaffeine;
 
 interface InternalLazyInitializer<K, V> {
 
-    void initialize(DistributedCaffeine<K, V> distributedCaffeine);
+    void initialize(InternalInstanceRegistry<K, V> instanceRegistry);
 }

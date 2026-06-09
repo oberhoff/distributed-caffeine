@@ -25,7 +25,6 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Date;
 import java.util.HashSet;
 import java.util.Optional;
 import java.util.Set;
@@ -38,6 +37,7 @@ import java.util.stream.Stream;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_EXTENDED_GROUP;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.SHORT_LIVING_GROUP;
 import static java.lang.Math.min;
 import static java.lang.String.format;
@@ -63,12 +63,12 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
     }
 
     @Override
-    public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
-        this.logger = distributedCaffeine.getLogger();
-        this.identifier = distributedCaffeine.getAdapter().getIdentifier();
-        this.repository = distributedCaffeine.getAdapter().getRepository();
-        this.cacheManager = distributedCaffeine.getCacheManager();
-        this.extendedPersistenceConfigurer = distributedCaffeine.getExtendedPersistenceConfigurer();
+    public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
+        this.logger = instanceRegistry.getLogger();
+        this.identifier = instanceRegistry.getAdapter().getIdentifier();
+        this.repository = instanceRegistry.getAdapter().getRepository();
+        this.cacheManager = instanceRegistry.getCacheManager();
+        this.extendedPersistenceConfigurer = instanceRegistry.getExtendedPersistenceConfigurer();
     }
 
     void activate() {
@@ -117,34 +117,29 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
     private void processMaintenance(Duration shortLivingDuration) {
         if (isActivated()) {
             // TODO check for real activities
-            processCleanUp(shortLivingDuration);
-            processShortLived(shortLivingDuration);
+            processCleanUp();
             processExtendedPersistenceByTime();
             processExtendedPersistenceBySize();
+            // intentionally at last position
+            processShortLived(shortLivingDuration);
         }
     }
 
-    private void processCleanUp(Duration shortLivingDuration) {
-        cacheManager.cleanup(shortLivingDuration);
-    }
-
-    private void processShortLived(Duration shortLivingDuration) {
-        Instant deadline = Instant.now().minus(shortLivingDuration);
-        // TODO discriminator
-        runFailable(() -> repository.deleteCacheEntries(null, null,
-                SHORT_LIVING_GROUP, deadline));
+    private void processCleanUp() {
+        cacheManager.cleanup();
     }
 
     private void processExtendedPersistenceByTime() {
         extendedPersistenceConfigurer.getMaximumTime().ifPresent(maximumTime -> {
             Instant now = Instant.now();
-            Instant min = new Date(Long.MIN_VALUE).toInstant();
+            Instant min = Instant.ofEpochMilli(Long.MIN_VALUE);
             Instant deadline = maximumTime.compareTo(Duration.between(min, now)) > 0
                     ? min
                     : now.minus(maximumTime);
             // TODO discriminator
-            runFailable(() -> repository.deleteCacheEntries(null, null,
-                    EVICTED_EXTENDED_GROUP, deadline));
+            // invalidate (instead of hard delete)
+            runFailable(() -> repository.updateStatusOfCacheEntries(null, null,
+                    EVICTED_EXTENDED_GROUP, deadline, INVALIDATED));
         });
     }
 
@@ -170,10 +165,18 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
                 }
                 if (!hashes.isEmpty()) {
                     // TODO discriminator
-                    runFailable(() ->
-                            repository.deleteCacheEntries(null, hashes, EVICTED_EXTENDED_GROUP, null));
+                    // invalidate (instead of hard delete)
+                    runFailable(() -> repository.updateStatusOfCacheEntries(null, hashes,
+                            EVICTED_EXTENDED_GROUP, null, INVALIDATED));
                 }
             }
         });
+    }
+
+    private void processShortLived(Duration shortLivingDuration) {
+        Instant deadline = Instant.now().minus(shortLivingDuration);
+        // TODO discriminator
+        runFailable(() -> repository.deleteCacheEntries(null, null,
+                SHORT_LIVING_GROUP, deadline));
     }
 }

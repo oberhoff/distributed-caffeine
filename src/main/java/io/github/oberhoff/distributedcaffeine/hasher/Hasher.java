@@ -338,7 +338,7 @@ public final class Hasher implements HashSink {
     public String getHash() {
         String hash = HexFormat.of().formatHex(hashStream128.get().toByteArray());
         if (isNull(hash) || hash.isBlank() || hash.equalsIgnoreCase("7f498d4624c30160d8984701d306aa99")) {
-            throw new IllegalStateException("Hasher is not being used correctly");
+            throw new IllegalStateException("Nothing to hash");
         }
         return hash;
     }
