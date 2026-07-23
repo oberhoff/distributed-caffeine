@@ -63,12 +63,12 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
     }
 
     @Override
-    public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
-        this.logger = distributedCaffeine.getLogger();
-        this.identifier = distributedCaffeine.getAdapter().getIdentifier();
-        this.repository = distributedCaffeine.getAdapter().getRepository();
-        this.cacheManager = distributedCaffeine.getCacheManager();
-        this.extendedPersistenceConfigurer = distributedCaffeine.getExtendedPersistenceConfigurer();
+    public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
+        this.logger = instanceRegistry.getLogger();
+        this.identifier = instanceRegistry.getAdapter().getIdentifier();
+        this.repository = instanceRegistry.getAdapter().getRepository();
+        this.cacheManager = instanceRegistry.getCacheManager();
+        this.extendedPersistenceConfigurer = instanceRegistry.getExtendedPersistenceConfigurer();
     }
 
     void activate() {

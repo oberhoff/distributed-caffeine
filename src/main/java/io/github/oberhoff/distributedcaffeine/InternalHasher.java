@@ -34,16 +34,17 @@ class InternalHasher<K> {
 
     String getHash(K key) {
         if (nonNull(hashProvider)) {
-            return hashProvider.getHash(Hasher::new, key);
+            return hashProvider.getHash(key, Hasher::new);
         } else {
             if (key instanceof Hashable hashable) {
                 return hashable.getHash(Hasher::new);
             } else {
                 throw new IllegalStateException(
-                        "No %s configured and key of type %s does not implement %s interface".formatted(
-                                HashProvider.class.getSimpleName(),
-                                key.getClass().getSimpleName(),
-                                Hashable.class.getSimpleName()));
+                        "Neither a %s is configured, nor does the key of type %s implement the %s interface."
+                                .formatted(
+                                        HashProvider.class.getSimpleName(),
+                                        key.getClass().getSimpleName(),
+                                        Hashable.class.getSimpleName()));
             }
         }
     }

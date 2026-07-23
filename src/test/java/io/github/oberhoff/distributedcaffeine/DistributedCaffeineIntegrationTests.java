@@ -30,7 +30,6 @@ import com.mongodb.ConnectionString;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Builder;
 import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
@@ -242,10 +241,10 @@ final class DistributedCaffeineIntegrationTests {
         void test_DistributedCache_put_getIfPresent(CacheFactory<Key, Value> cacheFactory) {
             DistributedCache<Key, Value> distributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             Cache<Key, Value> caffeineCache = Caffeine.newBuilder()
                     .build();
 
@@ -287,10 +286,10 @@ final class DistributedCaffeineIntegrationTests {
         void test_DistributedCache_putAll_getAllPresent(CacheFactory<Key, Value> cacheFactory) {
             DistributedCache<Key, Value> distributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             Cache<Key, Value> caffeineCache = Caffeine.newBuilder()
                     .build();
 
@@ -338,10 +337,10 @@ final class DistributedCaffeineIntegrationTests {
         void test_DistributedCache_get_getAll(CacheFactory<Key, Value> cacheFactory) {
             DistributedCache<Key, Value> distributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             Cache<Key, Value> caffeineCache = Caffeine.newBuilder()
                     .build();
 
@@ -432,10 +431,10 @@ final class DistributedCaffeineIntegrationTests {
         void test_DistributedCache_invalidate_invalidateAll(CacheFactory<Key, Value> cacheFactory) {
             DistributedCache<Key, Value> distributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             Cache<Key, Value> caffeineCache = Caffeine.newBuilder()
                     .build();
 
@@ -549,10 +548,10 @@ final class DistributedCaffeineIntegrationTests {
 
             DistributedLoadingCache<Key, Value> distributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     CacheBuilder.identity(),
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
             DistributedLoadingCache<Key, Value> syncedDistributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     CacheBuilder.identity(),
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
             LoadingCache<Key, Value> caffeineLoadingCache = Caffeine.newBuilder()
                     .build(cacheLoader);
 
@@ -576,7 +575,7 @@ final class DistributedCaffeineIntegrationTests {
             doThrow(new IllegalStateException("unchecked"))
                     .when(cacheLoader).load(Key.of(0, "unchecked"));
 
-            InternalCacheLoader<Key, Value> internalCacheLoader = getDistributedCaffeine(distributedLoadingCache).getCacheLoader();
+            InternalCacheLoader<Key, Value> internalCacheLoader = getInstanceRegistry(distributedLoadingCache).getCacheLoader();
             assertThatExceptionOfType(IllegalAccessException.class).isThrownBy(() -> internalCacheLoader.asyncLoad(_null(), _null()));
             assertThatExceptionOfType(IllegalAccessException.class).isThrownBy(() -> internalCacheLoader.asyncLoadAll(_null(), _null()));
             assertThatExceptionOfType(IllegalAccessException.class).isThrownBy(() -> internalCacheLoader.reload(_null(), _null()));
@@ -652,10 +651,10 @@ final class DistributedCaffeineIntegrationTests {
 
             DistributedLoadingCache<Key, Value> distributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     CacheBuilder.identity(),
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
             DistributedLoadingCache<Key, Value> syncedDistributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     CacheBuilder.identity(),
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
             LoadingCache<Key, Value> caffeineLoadingCache = Caffeine.newBuilder()
                     .build(cacheLoader);
 
@@ -685,7 +684,7 @@ final class DistributedCaffeineIntegrationTests {
             doThrow(new IllegalStateException("unchecked"))
                     .when(cacheLoader).loadAll(Set.of(Key.of(0, "unchecked")));
 
-            InternalCacheLoader<Key, Value> internalCacheLoader = getDistributedCaffeine(distributedLoadingCache).getCacheLoader();
+            InternalCacheLoader<Key, Value> internalCacheLoader = getInstanceRegistry(distributedLoadingCache).getCacheLoader();
             assertThatExceptionOfType(IllegalAccessException.class).isThrownBy(() -> internalCacheLoader.asyncLoad(_null(), _null()));
             assertThatExceptionOfType(IllegalAccessException.class).isThrownBy(() -> internalCacheLoader.asyncLoadAll(_null(), _null()));
             assertThatExceptionOfType(IllegalAccessException.class).isThrownBy(() -> internalCacheLoader.reload(_null(), _null()));
@@ -763,10 +762,10 @@ final class DistributedCaffeineIntegrationTests {
 
             DistributedLoadingCache<Key, Value> distributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     CacheBuilder.identity(),
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
             DistributedLoadingCache<Key, Value> syncedDistributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     CacheBuilder.identity(),
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
             LoadingCache<Key, Value> caffeineLoadingCache = Caffeine.newBuilder()
                     .build(cacheLoader);
 
@@ -992,10 +991,10 @@ final class DistributedCaffeineIntegrationTests {
 
             DistributedLoadingCache<Key, Value> distributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     CacheBuilder.identity(),
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
             DistributedLoadingCache<Key, Value> syncedDistributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     CacheBuilder.identity(),
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
             LoadingCache<Key, Value> caffeineLoadingCache = Caffeine.newBuilder()
                     .build(cacheLoader);
 
@@ -1230,12 +1229,12 @@ final class DistributedCaffeineIntegrationTests {
         void test_DistributedLoadingCache_refreshAfterWrite_with_cache_loader(CacheFactory<Key, Value> cacheFactory) throws Exception {
             AtomicLong ticker = new AtomicLong(0);
 
-            Caffeine<Object, Object> caffeineBuilder = Caffeine.newBuilder()
+            Caffeine<Object, Object> caffeine = Caffeine.newBuilder()
                     .ticker(ticker::get)
                     .refreshAfterWrite(Duration.ofNanos(1));
 
             CacheBuilder<Key, Value> cacheBuilder =
-                    b -> b.withCaffeineBuilder(caffeineBuilder);
+                    dc -> dc.withCaffeine(caffeine);
 
             @SuppressWarnings("Convert2Lambda")
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
@@ -1248,11 +1247,11 @@ final class DistributedCaffeineIntegrationTests {
 
             DistributedLoadingCache<Key, Value> distributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     cacheBuilder,
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
             DistributedLoadingCache<Key, Value> syncedDistributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     cacheBuilder,
-                    b -> b.build(cacheLoader));
-            LoadingCache<Key, Value> caffeineLoadingCache = caffeineBuilder
+                    dc -> dc.build(cacheLoader));
+            LoadingCache<Key, Value> caffeineLoadingCache = caffeine
                     .build(cacheLoader);
 
             Set<LoadingCache<Key, Value>> allCaches = Set.of(distributedLoadingCache, syncedDistributedLoadingCache, caffeineLoadingCache);
@@ -1384,13 +1383,13 @@ final class DistributedCaffeineIntegrationTests {
         void test_DistributedLoadingCache_stats(CacheFactory<Key, Value> cacheFactory) throws Exception {
             AtomicLong ticker = new AtomicLong(0);
 
-            Caffeine<Object, Object> caffeineBuilder = Caffeine.newBuilder()
+            Caffeine<Object, Object> caffeine = Caffeine.newBuilder()
                     .ticker(ticker::get)
                     .recordStats()
                     .refreshAfterWrite(Duration.ofNanos(1));
 
             CacheBuilder<Key, Value> cacheBuilder =
-                    b -> b.withCaffeineBuilder(caffeineBuilder);
+                    dc -> dc.withCaffeine(caffeine);
 
             @SuppressWarnings("Convert2Lambda")
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
@@ -1403,11 +1402,11 @@ final class DistributedCaffeineIntegrationTests {
 
             DistributedLoadingCache<Key, Value> distributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     cacheBuilder,
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
             DistributedLoadingCache<Key, Value> syncedDistributedLoadingCache = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     cacheBuilder,
-                    b -> b.build(cacheLoader));
-            LoadingCache<Key, Value> caffeineLoadingCache = caffeineBuilder
+                    dc -> dc.build(cacheLoader));
+            LoadingCache<Key, Value> caffeineLoadingCache = caffeine
                     .build(cacheLoader);
 
             Set<LoadingCache<Key, Value>> allCaches = Set.of(distributedLoadingCache, syncedDistributedLoadingCache, caffeineLoadingCache);
@@ -1523,11 +1522,11 @@ final class DistributedCaffeineIntegrationTests {
                     Count.of(CACHED_REFRESHED, assertion -> assertion.isEqualTo(2)),
                     Count.of(CACHED_REFRESHED_AFTER_WRITE, assertion -> assertion.isEqualTo(1)));
 
-            StatsCounter statsCounter = getDistributedCaffeine(distributedLoadingCache).getStatsCounter();
+            StatsCounter statsCounter = getInstanceRegistry(distributedLoadingCache).getStatsCounter();
 
             // ensure that extracted stats counter is unique across different instances
             assertThat(statsCounter)
-                    .isNotSameAs(getDistributedCaffeine(syncedDistributedLoadingCache).getStatsCounter());
+                    .isNotSameAs(getInstanceRegistry(syncedDistributedLoadingCache).getStatsCounter());
 
             statsCounter.recordEviction(1, RemovalCause.EXPLICIT);
 
@@ -1550,10 +1549,10 @@ final class DistributedCaffeineIntegrationTests {
         void test_ConcurrentMap_put_putIfAbsent_putAll_get(CacheFactory<Key, Value> cacheFactory) {
             DistributedCache<Key, Value> distributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             Cache<Key, Value> caffeineCache = Caffeine.newBuilder()
                     .build();
 
@@ -1635,10 +1634,10 @@ final class DistributedCaffeineIntegrationTests {
         void test_ConcurrentMap_replace(CacheFactory<Key, Value> cacheFactory) {
             DistributedCache<Key, Value> distributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             Cache<Key, Value> caffeineCache = Caffeine.newBuilder()
                     .build();
 
@@ -1704,10 +1703,10 @@ final class DistributedCaffeineIntegrationTests {
         void test_ConcurrentMap_remove_contains_clear(CacheFactory<Key, Value> cacheFactory) {
             DistributedCache<Key, Value> distributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             Cache<Key, Value> caffeineCache = Caffeine.newBuilder()
                     .build();
 
@@ -1799,10 +1798,10 @@ final class DistributedCaffeineIntegrationTests {
         void test_ConcurrentMap_keySet(CacheFactory<Key, Value> cacheFactory) {
             DistributedCache<Key, Value> distributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             Cache<Key, Value> caffeineCache = Caffeine.newBuilder()
                     .build();
 
@@ -1914,10 +1913,10 @@ final class DistributedCaffeineIntegrationTests {
         void test_ConcurrentMap_values(CacheFactory<Key, Value> cacheFactory) {
             DistributedCache<Key, Value> distributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             Cache<Key, Value> caffeineCache = Caffeine.newBuilder()
                     .build();
 
@@ -2027,10 +2026,10 @@ final class DistributedCaffeineIntegrationTests {
         void test_ConcurrentMap_entrySet(CacheFactory<Key, Value> cacheFactory) {
             DistributedCache<Key, Value> distributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             Cache<Key, Value> caffeineCache = Caffeine.newBuilder()
                     .build();
 
@@ -2144,19 +2143,19 @@ final class DistributedCaffeineIntegrationTests {
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentSerializers")
         void test_Policy(CacheFactory<Key, Value> cacheFactory) {
-            Caffeine<Object, Object> caffeineBuilder = Caffeine.newBuilder()
+            Caffeine<Object, Object> caffeine = Caffeine.newBuilder()
                     .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration()));
 
             CacheBuilder<Key, Value> cacheBuilder =
-                    b -> b.withCaffeineBuilder(caffeineBuilder);
+                    dc -> dc.withCaffeine(caffeine);
 
             DistributedCache<Key, Value> distributedCache = cacheFactory.create(
                     cacheBuilder,
-                    Builder::build);
+                    DistributedCaffeine::build);
             DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
                     cacheBuilder,
-                    Builder::build);
-            Cache<Key, Value> caffeineCache = caffeineBuilder
+                    DistributedCaffeine::build);
+            Cache<Key, Value> caffeineCache = caffeine
                     .build();
 
             Set<Cache<Key, Value>> allCaches = Set.of(distributedCache, syncedDistributedCache, caffeineCache);
@@ -2298,11 +2297,11 @@ final class DistributedCaffeineIntegrationTests {
         @Test
         void test_DistributedPolicy() {
             DistributedCache<Key, Value> distributedCache = createCache(
-                    b -> b.withCaffeineBuilder(Caffeine.newBuilder()
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
                                     .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration())))
                             .withExtendedPersistence(configurer -> configurer
                                     .withMaximumTime(FOREVER.getDuration())),
-                    Builder::build);
+                    DistributedCaffeine::build);
             DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
 
             assertThat(distributedPolicy.getKeySerializer())
@@ -2387,12 +2386,12 @@ final class DistributedCaffeineIntegrationTests {
         void test_DistributionMode_population(CacheFactory<Key, Value> cacheFactory) {
             DistributedCache<Key, Value> distributedCacheA = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             DistributedCache<Key, Value> distributedCacheB = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
 
-            DistributionMode distributionMode = getDistributedCaffeine(distributedCacheA).getDistributionMode();
+            DistributionMode distributionMode = getInstanceRegistry(distributedCacheA).getDistributionMode();
 
             Key key1 = Key.of(1);
             Value value1 = Value.of(1);
@@ -2476,17 +2475,17 @@ final class DistributedCaffeineIntegrationTests {
             RemovalListener<Key, Value> removalListener = mock(RemovalListener.class);
 
             CacheBuilder<Key, Value> cacheBuilder =
-                    b -> b.withCaffeineBuilder(Caffeine.newBuilder()
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
                             .removalListener(removalListener));
 
             DistributedCache<Key, Value> distributedCacheA = cacheFactory.create(
                     cacheBuilder,
-                    Builder::build);
+                    DistributedCaffeine::build);
             DistributedCache<Key, Value> distributedCacheB = cacheFactory.create(
                     cacheBuilder,
-                    Builder::build);
+                    DistributedCaffeine::build);
 
-            DistributionMode distributionMode = getDistributedCaffeine(distributedCacheA).getDistributionMode();
+            DistributionMode distributionMode = getInstanceRegistry(distributedCacheA).getDistributionMode();
 
             Key key1 = Key.of(1);
             Value value1 = Value.of(1);
@@ -2609,18 +2608,18 @@ final class DistributedCaffeineIntegrationTests {
             RemovalListener<Key, Value> evictionListener = mock(RemovalListener.class);
 
             CacheBuilder<Key, Value> cacheBuilder =
-                    b -> b.withCaffeineBuilder(Caffeine.newBuilder()
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
                             .evictionListener(evictionListener)
                             .maximumSize(maximumSize));
 
             DistributedCache<Key, Value> distributedCacheA = cacheFactory.create(
                     cacheBuilder,
-                    Builder::build);
+                    DistributedCaffeine::build);
             DistributedCache<Key, Value> distributedCacheB = cacheFactory.create(
                     cacheBuilder,
-                    Builder::build);
+                    DistributedCaffeine::build);
 
-            DistributionMode distributionMode = getDistributedCaffeine(distributedCacheA).getDistributionMode();
+            DistributionMode distributionMode = getInstanceRegistry(distributedCacheA).getDistributionMode();
 
             Key key1 = Key.of(1);
             Value value1 = Value.of(1);
@@ -2844,19 +2843,19 @@ final class DistributedCaffeineIntegrationTests {
             RemovalListener<Key, Value> evictionListener = mock(RemovalListener.class);
 
             CacheBuilder<Key, Value> cacheBuilder =
-                    b -> b.withCaffeineBuilder(Caffeine.newBuilder()
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
                             .evictionListener(evictionListener)
                             // variable expiration policy provides more control over evictions
                             .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration())));
 
             DistributedCache<Key, Value> distributedCacheA = cacheFactory.create(
                     cacheBuilder,
-                    Builder::build);
+                    DistributedCaffeine::build);
             DistributedCache<Key, Value> distributedCacheB = cacheFactory.create(
                     cacheBuilder,
-                    Builder::build);
+                    DistributedCaffeine::build);
 
-            DistributionMode distributionMode = getDistributedCaffeine(distributedCacheA).getDistributionMode();
+            DistributionMode distributionMode = getInstanceRegistry(distributedCacheA).getDistributionMode();
             VarExpiration<Key, Value> varExpirationA = distributedCacheA.policy().expireVariably().orElseThrow();
             VarExpiration<Key, Value> varExpirationB = distributedCacheB.policy().expireVariably().orElseThrow();
 
@@ -3091,12 +3090,12 @@ final class DistributedCaffeineIntegrationTests {
 
             DistributedLoadingCache<Key, Value> distributedLoadingCacheA = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     CacheBuilder.identity(),
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
             DistributedLoadingCache<Key, Value> distributedLoadingCacheB = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     CacheBuilder.identity(),
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
 
-            DistributionMode distributionMode = getDistributedCaffeine(distributedLoadingCacheA).getDistributionMode();
+            DistributionMode distributionMode = getInstanceRegistry(distributedLoadingCacheA).getDistributionMode();
 
             Key key1 = Key.of(1);
             Key key2 = Key.of(2);
@@ -3218,7 +3217,7 @@ final class DistributedCaffeineIntegrationTests {
             AtomicLong ticker = new AtomicLong(0);
 
             CacheBuilder<Key, Value> cacheBuilder =
-                    b -> b.withCaffeineBuilder(Caffeine.newBuilder()
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
                             .ticker(ticker::get)
                             .refreshAfterWrite(Duration.ofNanos(1)));
 
@@ -3233,12 +3232,12 @@ final class DistributedCaffeineIntegrationTests {
 
             DistributedLoadingCache<Key, Value> distributedLoadingCacheA = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     cacheBuilder,
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
             DistributedLoadingCache<Key, Value> distributedLoadingCacheB = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     cacheBuilder,
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
 
-            DistributionMode distributionMode = getDistributedCaffeine(distributedLoadingCacheA).getDistributionMode();
+            DistributionMode distributionMode = getInstanceRegistry(distributedLoadingCacheA).getDistributionMode();
 
             Key key1 = Key.of(1);
             Value value1 = Value.of(1);
@@ -3382,9 +3381,9 @@ final class DistributedCaffeineIntegrationTests {
         void test_DistributionMode_synchronization(CacheFactory<Key, Value> cacheFactory) {
             DistributedCache<Key, Value> distributedCacheA = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
 
-            DistributionMode distributionMode = getDistributedCaffeine(distributedCacheA).getDistributionMode();
+            DistributionMode distributionMode = getInstanceRegistry(distributedCacheA).getDistributionMode();
 
             Key key1 = Key.of(1);
             Value value1 = Value.of(1);
@@ -3396,7 +3395,7 @@ final class DistributedCaffeineIntegrationTests {
 
             DistributedCache<Key, Value> distributedCacheB = cacheFactory.create(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
@@ -3442,7 +3441,7 @@ final class DistributedCaffeineIntegrationTests {
             RemovalListener<Key, Value> evictionListener = mock(RemovalListener.class);
 
             CacheBuilder<Key, Value> cacheBuilder =
-                    b -> b.withCaffeineBuilder(Caffeine.newBuilder()
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
                                     .evictionListener(evictionListener)
                                     .maximumSize(maximumSize))
                             .withExtendedPersistence(configurer -> configurer
@@ -3462,12 +3461,12 @@ final class DistributedCaffeineIntegrationTests {
 
             DistributedLoadingCache<Key, Value> distributedLoadingCacheA = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     cacheBuilder,
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
             DistributedLoadingCache<Key, Value> distributedLoadingCacheB = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     cacheBuilder,
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
 
-            DistributionMode distributionMode = getDistributedCaffeine(distributedLoadingCacheA).getDistributionMode();
+            DistributionMode distributionMode = getInstanceRegistry(distributedLoadingCacheA).getDistributionMode();
             DistributedPolicy<Key, Value> distributedPolicy = distributedLoadingCacheA.distributedPolicy();
 
             Key key1 = Key.of(1);
@@ -3836,9 +3835,9 @@ final class DistributedCaffeineIntegrationTests {
 
             // test cache without loading strategy
             DistributedLoadingCache<Key, Value> distributedLoadingCacheWithoutLoadingStrategy = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
-                    b -> b.withExtendedPersistence(configurer -> configurer
+                    dc -> dc.withExtendedPersistence(configurer -> configurer
                             .withLoadingStrategy(false)),
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
 
             doAnswer(invocation -> Value.of(invocation.<Key>getArgument(0).getId(), "loaded but not from store"))
                     .when(cacheLoader).load(any(Key.class));
@@ -3863,7 +3862,7 @@ final class DistributedCaffeineIntegrationTests {
             RemovalListener<Key, Value> evictionListener = mock(RemovalListener.class);
 
             CacheBuilder<Key, Value> cacheBuilder =
-                    b -> b.withCaffeineBuilder(Caffeine.newBuilder()
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
                                     .evictionListener(evictionListener)
                                     // variable expiration policy provides more control over evictions
                                     .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration())))
@@ -3884,12 +3883,12 @@ final class DistributedCaffeineIntegrationTests {
 
             DistributedLoadingCache<Key, Value> distributedLoadingCacheA = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     cacheBuilder,
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
             DistributedLoadingCache<Key, Value> distributedLoadingCacheB = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
                     cacheBuilder,
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
 
-            DistributionMode distributionMode = getDistributedCaffeine(distributedLoadingCacheA).getDistributionMode();
+            DistributionMode distributionMode = getInstanceRegistry(distributedLoadingCacheA).getDistributionMode();
             DistributedPolicy<Key, Value> distributedPolicy = distributedLoadingCacheA.distributedPolicy();
             VarExpiration<Key, Value> varExpirationA = distributedLoadingCacheA.policy().expireVariably().orElseThrow();
             VarExpiration<Key, Value> varExpirationB = distributedLoadingCacheB.policy().expireVariably().orElseThrow();
@@ -4271,9 +4270,9 @@ final class DistributedCaffeineIntegrationTests {
 
             // test cache without loading strategy
             DistributedLoadingCache<Key, Value> distributedLoadingCacheWithoutLoadingStrategy = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
-                    b -> b.withExtendedPersistence(configurer -> configurer
+                    dc -> dc.withExtendedPersistence(configurer -> configurer
                             .withLoadingStrategy(false)),
-                    b -> b.build(cacheLoader));
+                    dc -> dc.build(cacheLoader));
 
             doAnswer(invocation -> Value.of(invocation.<Key>getArgument(0).getId(), "loaded but not from store"))
                     .when(cacheLoader).load(any(Key.class));
@@ -4295,7 +4294,7 @@ final class DistributedCaffeineIntegrationTests {
         void test_DistributedCaffeine_synchronization() {
             DistributedCache<Key, Value> distributedCache = createCache(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
 
             Key key1 = Key.of(1);
             Value value1 = Value.of(1);
@@ -4308,7 +4307,7 @@ final class DistributedCaffeineIntegrationTests {
 
             DistributedCache<Key, Value> syncedDistributedCache = createCache(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
 
             await("synchronization between cache instances")
                     .atMost(WAITING_DURATION)
@@ -4377,10 +4376,10 @@ final class DistributedCaffeineIntegrationTests {
         void test_DistributedCaffeine_same_value_and_already_absent() {
             DistributedCache<Key, Value> distributedCache = createCache(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
             DistributedCache<Key, Value> syncedDistributedCache = createCache(
                     CacheBuilder.identity(),
-                    Builder::build);
+                    DistributedCaffeine::build);
 
             Key key1 = Key.of(1);
             Value value1 = Value.of(1);
@@ -4633,7 +4632,7 @@ final class DistributedCaffeineIntegrationTests {
                     .getCaptureLogger(DistributedCaffeine.class);
 
             DistributedCache<Key, Value> distributedCache = createCache(
-                    b -> b.withCaffeineBuilder(Caffeine.newBuilder()
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
                                     .maximumSize(1))
                             .withExtendedPersistence(configurer -> configurer
                                     .withMaximumSize(1)),
@@ -4791,7 +4790,7 @@ final class DistributedCaffeineIntegrationTests {
         @Test
         void stress_test_DistributedCaffeine_synchronization_from_data_store() throws Exception {
             int maximumSize = runsOnGitHub(10_000, 100_000);
-            int extendedMaximumSize = maximumSize / 10;
+            int extendedMaximumSize = maximumSize / 100;
             int numberOfOperations = 10_000;
 
             @SuppressWarnings("unchecked")
@@ -4817,7 +4816,7 @@ final class DistributedCaffeineIntegrationTests {
 
             Supplier<DistributedLoadingCache<Key, Value>> cacheSupplier = () -> {
                 DistributedCache<Key, Value> cache = createCache(
-                        b -> b.withCaffeineBuilder(Caffeine.newBuilder()
+                        dc -> dc.withCaffeine(Caffeine.newBuilder()
                                         .executor(executorService)
                                         .removalListener(removalListener)
                                         .evictionListener(evictionListener)
@@ -4826,7 +4825,7 @@ final class DistributedCaffeineIntegrationTests {
                                 .withExtendedPersistence(configurer -> configurer
                                         .withMaximumSize(extendedMaximumSize)
                                         .withLoadingStrategy(true)),
-                        b -> b.build(cacheLoader));
+                        dc -> dc.build(cacheLoader));
                 return (DistributedLoadingCache<Key, Value>) cache;
             };
 
@@ -4942,7 +4941,7 @@ final class DistributedCaffeineIntegrationTests {
             int maximumSize = 100;
             int extendedMaximumSize = maximumSize / 10;
             int numberOfOperations = 1_000;
-            int levelOfParallelism = runsOnGitHub(5, 10);
+            int levelOfParallelism = runsOnGitHub(3, 10);
 
             @SuppressWarnings("unchecked")
             RemovalListener<Key, Value> removalListener = mock(RemovalListener.class);
@@ -4981,7 +4980,7 @@ final class DistributedCaffeineIntegrationTests {
 
             Function<AtomicLong, DistributedLoadingCache<Key, Value>> cacheSupplier = ticker -> {
                 DistributedCache<Key, Value> cache = createCache(
-                        b -> b.withCaffeineBuilder(Caffeine.newBuilder()
+                        dc -> dc.withCaffeine(Caffeine.newBuilder()
                                         .ticker(ticker::get)
                                         .removalListener(removalListener)
                                         .evictionListener(evictionListener)
@@ -4992,7 +4991,7 @@ final class DistributedCaffeineIntegrationTests {
                                 .withExtendedPersistence(configurer -> configurer
                                         .withMaximumSize(extendedMaximumSize)
                                         .withLoadingStrategy(true)),
-                        b -> b.build(cacheLoader));
+                        dc -> dc.build(cacheLoader));
                 return (DistributedLoadingCache<Key, Value>) cache;
             };
 
@@ -5093,7 +5092,7 @@ final class DistributedCaffeineIntegrationTests {
             int maximumSize = 1_000;
             int extendedMaximumSize = maximumSize / 2;
             int numberOfOperations = 10_000;
-            int levelOfParallelism = runsOnGitHub(5, 10);
+            int levelOfParallelism = runsOnGitHub(3, 10);
 
             @SuppressWarnings("unchecked")
             RemovalListener<Key, Value> removalListener = mock(RemovalListener.class);
@@ -5118,7 +5117,7 @@ final class DistributedCaffeineIntegrationTests {
 
             Function<AtomicLong, DistributedLoadingCache<Key, Value>> cacheSupplier = ticker -> {
                 DistributedCache<Key, Value> cache = createCache(
-                        b -> b.withCaffeineBuilder(Caffeine.newBuilder()
+                        dc -> dc.withCaffeine(Caffeine.newBuilder()
                                         .ticker(ticker::get)
                                         .removalListener(removalListener)
                                         .evictionListener(evictionListener)
@@ -5129,7 +5128,7 @@ final class DistributedCaffeineIntegrationTests {
                                 .withExtendedPersistence(configurer -> configurer
                                         .withMaximumSize(extendedMaximumSize)
                                         .withLoadingStrategy(true)),
-                        b -> b.build(cacheLoader));
+                        dc -> dc.build(cacheLoader));
                 return (DistributedLoadingCache<Key, Value>) cache;
             };
 
@@ -5138,7 +5137,7 @@ final class DistributedCaffeineIntegrationTests {
 
             IntStream.rangeClosed(1, levelOfParallelism).forEach(cacheIndex ->
                     completableFutures.add(CompletableFuture.runAsync(() -> {
-                        sleep(Duration.ofMillis(1_000).multipliedBy(min(10, cacheIndex)));
+                        sleep(Duration.ofMillis(1_000).multipliedBy(min(10, cacheIndex - 1)));
                         AtomicLong ticker = new AtomicLong(0);
                         DistributedLoadingCache<Key, Value> distributedLoadingCache = cacheSupplier.apply(ticker);
                         distributedLoadingCaches.add(distributedLoadingCache);
@@ -5305,34 +5304,34 @@ final class DistributedCaffeineIntegrationTests {
                             CacheBuilder.identity()),
                     new DistributedCaffeineConfiguration<>(
                             "with Fory Serializer (Class)",
-                            b -> b.withSerializers(configurer -> configurer
+                            dc -> dc.withSerializers(configurer -> configurer
                                     .withKeySerializer(new ForySerializer<>(Key.class))
                                     .withValueSerializer(new ForySerializer<>(Value.class)))),
                     new DistributedCaffeineConfiguration<>(
                             "with Java Object Serializer",
-                            b -> b.withSerializers(configurer -> configurer
+                            dc -> dc.withSerializers(configurer -> configurer
                                     .withKeySerializer(new JavaObjectSerializer<>())
                                     .withValueSerializer(new JavaObjectSerializer<>()))),
                     new DistributedCaffeineConfiguration<>(
                             "with Jackson Serializer (Class, BSON)",
-                            b -> b.withSerializers(configurer -> configurer
+                            dc -> dc.withSerializers(configurer -> configurer
                                     .withKeySerializer(new JacksonSerializer<>(Key.class, true))
                                     .withValueSerializer(new JacksonSerializer<>(Value.class, true)))),
                     new DistributedCaffeineConfiguration<>(
                             "with Jackson Serializer (Class, JSON)",
-                            b -> b.withSerializers(configurer -> configurer
+                            dc -> dc.withSerializers(configurer -> configurer
                                     .withKeySerializer(new JacksonSerializer<>(Key.class, false))
                                     .withValueSerializer(new JacksonSerializer<>(Value.class, false)))),
                     new DistributedCaffeineConfiguration<>(
                             "with Jackson Serializer (TypeReference, BSON)",
-                            b -> b.withSerializers(configurer -> configurer
+                            dc -> dc.withSerializers(configurer -> configurer
                                     .withKeySerializer(new JacksonSerializer<>(new TypeReference<>() {
                                     }, true))
                                     .withValueSerializer(new JacksonSerializer<>(new TypeReference<>() {
                                     }, true)))),
                     new DistributedCaffeineConfiguration<>(
                             "with Jackson Serializer (TypeReference, JSON)",
-                            b -> b.withSerializers(configurer -> configurer
+                            dc -> dc.withSerializers(configurer -> configurer
                                     .withKeySerializer(new JacksonSerializer<>(new TypeReference<>() {
                                     }, false))
                                     .withValueSerializer(new JacksonSerializer<>(new TypeReference<>() {
@@ -5344,7 +5343,7 @@ final class DistributedCaffeineIntegrationTests {
             return Stream.of(DistributionMode.values())
                     .map(distributionMode -> new DistributedCaffeineConfiguration<>(
                             format("with %s.%s", distributionMode.getClass().getSimpleName(), distributionMode.name()),
-                            b -> b.withDistributionMode(distributionMode)));
+                            dc -> dc.withDistributionMode(distributionMode)));
         }
 
         <K, V> Stream<Named<CacheFactory<K, V>>> createNamedCacheFactoriesForParametrizedTests(Stream<DistributedCaffeineConfiguration<K, V>> distributedCaffeineConfigurations) {
@@ -5372,8 +5371,8 @@ final class DistributedCaffeineIntegrationTests {
             // speed up using parallel stream
             distributedCacheInstances.stream().parallel().forEach(distributedCache -> {
                 distributedCache.cleanUp();
-                DistributedCaffeine<?, ?> distributedCaffeine = getDistributedCaffeine(distributedCache);
-                InternalMaintenanceWorker<?, ?> maintenanceWorker = distributedCaffeine.getMaintenanceWorker();
+                InternalInstanceRegistry<?, ?> instanceRegistry = getInstanceRegistry(distributedCache);
+                InternalMaintenanceWorker<?, ?> maintenanceWorker = instanceRegistry.getMaintenanceWorker();
                 invokeMethod(maintenanceWorker, InternalMaintenanceWorker.class,
                         "processMaintenance", List.of(Duration.class), List.of(Duration.ZERO));
             });
@@ -5384,7 +5383,7 @@ final class DistributedCaffeineIntegrationTests {
         }
 
         void assertThatDataStoreHasCounts(Count... counts) {
-            Repository<?, ?> repository = getDistributedCaffeine(distributedCacheInstances.stream()
+            Repository<?, ?> repository = getInstanceRegistry(distributedCacheInstances.stream()
                     .findFirst()
                     .orElseThrow())
                     .getAdapter()
@@ -5402,7 +5401,7 @@ final class DistributedCaffeineIntegrationTests {
         }
 
         void assertThatDataStoreHasCounts(CountGrouped... countsGrouped) {
-            Repository<?, ?> repository = getDistributedCaffeine(distributedCacheInstances.stream()
+            Repository<?, ?> repository = getInstanceRegistry(distributedCacheInstances.stream()
                     .findFirst()
                     .orElseThrow())
                     .getAdapter()
@@ -5415,8 +5414,8 @@ final class DistributedCaffeineIntegrationTests {
                                     .describedAs("%nCount for %s", count.statuses())));
         }
 
-        <K, V> DistributedCaffeine<K, V> getDistributedCaffeine(DistributedCache<K, V> distributedCache) {
-            return ((InternalDistributedCache<K, V>) distributedCache).distributedCaffeine;
+        <K, V> InternalInstanceRegistry<K, V> getInstanceRegistry(DistributedCache<K, V> distributedCache) {
+            return ((InternalDistributedCache<K, V>) distributedCache).instanceRegistry;
         }
 
         void executeRandomOperation(DistributedCache<Key, Value> distributedCache, int cacheSize) {
@@ -5550,8 +5549,8 @@ final class DistributedCaffeineIntegrationTests {
             AtomicInteger counter = new AtomicInteger(0);
             Repository<?, ?> repository = distributedCacheInstances.stream()
                     .findFirst()
-                    .map(this::getDistributedCaffeine)
-                    .map(DistributedCaffeine::getAdapter)
+                    .map(this::getInstanceRegistry)
+                    .map(InternalInstanceRegistry::getAdapter)
                     .map(Adapter::getRepository)
                     .orElseThrow();
             Set<Status> statusesOrNull = statuses.length == 0

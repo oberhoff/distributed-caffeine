@@ -22,12 +22,14 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+import static java.util.Objects.requireNonNull;
+
 class InternalScheduler implements Scheduler {
 
     private final Scheduler scheduler;
 
     InternalScheduler(Scheduler scheduler) {
-        this.scheduler = scheduler;
+        this.scheduler = requireNonNull(scheduler);
     }
 
     @Override

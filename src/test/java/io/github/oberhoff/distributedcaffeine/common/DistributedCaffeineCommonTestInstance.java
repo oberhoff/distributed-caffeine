@@ -114,7 +114,7 @@ public abstract class DistributedCaffeineCommonTestInstance {
     @FunctionalInterface
     protected interface CacheBuilder<K, V> {
 
-        DistributedCaffeine.Builder<K, V> apply(DistributedCaffeine.Builder<K, V> builder);
+        DistributedCaffeine<K, V> apply(DistributedCaffeine<K, V> builder);
 
         static <K, V> CacheBuilder<K, V> identity() {
             return cacheBuilder -> cacheBuilder;
@@ -124,7 +124,7 @@ public abstract class DistributedCaffeineCommonTestInstance {
     @FunctionalInterface
     protected interface CacheConstructor<K, V> {
 
-        DistributedCache<K, V> construct(DistributedCaffeine.Builder<K, V> builder);
+        DistributedCache<K, V> construct(DistributedCaffeine<K, V> builder);
     }
 
     @FunctionalInterface

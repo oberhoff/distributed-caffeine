@@ -21,7 +21,6 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Builder;
 import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
 import io.github.oberhoff.distributedcaffeine.common.DistributedCaffeineCommonTestInstance;
 import io.github.oberhoff.distributedcaffeine.common.Key;
@@ -72,44 +71,44 @@ final class DistributedCaffeineUnitTests {
 
             assertThatThrownBy(() ->
                     createCache(adapter,
-                            b -> b.withCaffeineBuilder(_null()),
-                            Builder::build))
+                            dc -> dc.withCaffeine(_null()),
+                            DistributedCaffeine::build))
                     .isInstanceOf(NullPointerException.class)
-                    .hasMessage("caffeineBuilder cannot be null");
+                    .hasMessage("caffeine cannot be null");
 
             assertThatThrownBy(() ->
                     createCache(adapter,
-                            b -> b.withHashProvider(_null()),
-                            Builder::build))
+                            dc -> dc.withHashProvider(_null()),
+                            DistributedCaffeine::build))
                     .isInstanceOf(NullPointerException.class)
                     .hasMessage("hashProvider cannot be null");
 
             assertThatThrownBy(() ->
                     createCache(adapter,
-                            b -> b.withDistributionMode(_null()),
-                            Builder::build))
+                            dc -> dc.withDistributionMode(_null()),
+                            DistributedCaffeine::build))
                     .isInstanceOf(NullPointerException.class)
                     .hasMessage("distributionMode cannot be null");
 
             assertThatThrownBy(() ->
                     createCache(adapter,
-                            b -> b.withSerializers(configurer -> configurer
+                            dc -> dc.withSerializers(configurer -> configurer
                                     .withKeySerializer(_null())),
-                            Builder::build))
+                            DistributedCaffeine::build))
                     .isInstanceOf(NullPointerException.class)
                     .hasMessage("keySerializer cannot be null");
 
             assertThatThrownBy(() ->
                     createCache(adapter,
-                            b -> b.withSerializers(configurer -> configurer
+                            dc -> dc.withSerializers(configurer -> configurer
                                     .withValueSerializer(_null())),
-                            Builder::build))
+                            DistributedCaffeine::build))
                     .isInstanceOf(NullPointerException.class)
                     .hasMessage("valueSerializer cannot be null");
 
             assertThatThrownBy(() ->
                     createCache(adapter,
-                            b -> b.withSerializers(configurer ->
+                            dc -> dc.withSerializers(configurer ->
                                     configurer.withKeySerializer(new Serializer<>() {
                                         @Override
                                         public Object serialize(Key object) {
@@ -121,14 +120,14 @@ final class DistributedCaffeineUnitTests {
                                             return _null();
                                         }
                                     })),
-                            Builder::build))
+                            DistributedCaffeine::build))
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessage("Serializers must implement one of the following interfaces: "
                             .concat("ByteArraySerializer, StringSerializer, JsonSerializer"));
 
             assertThatThrownBy(() ->
                     createCache(adapter,
-                            b -> b.withSerializers(configurer ->
+                            dc -> dc.withSerializers(configurer ->
                                     configurer.withValueSerializer(new Serializer<>() {
                                         @Override
                                         public Object serialize(Value object) {
@@ -140,52 +139,53 @@ final class DistributedCaffeineUnitTests {
                                             return _null();
                                         }
                                     })),
-                            Builder::build))
+                            DistributedCaffeine::build))
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessage("Serializers must implement one of the following interfaces: "
                             .concat("ByteArraySerializer, StringSerializer, JsonSerializer"));
 
             assertThatThrownBy(() ->
                     createCache(adapter,
-                            b -> b.withExtendedPersistence(configurer -> configurer
+                            dc -> dc.withExtendedPersistence(configurer -> configurer
                                     .withMaximumSize(0)),
-                            Builder::build))
+                            DistributedCaffeine::build))
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessage("maximumSize must be positive");
 
             assertThatThrownBy(() ->
                     createCache(adapter,
-                            b -> b.withExtendedPersistence(configurer -> configurer
+                            dc -> dc.withExtendedPersistence(configurer -> configurer
                                     .withMaximumTime(_null())),
-                            Builder::build))
+                            DistributedCaffeine::build))
                     .isInstanceOf(NullPointerException.class)
                     .hasMessage("maximumTime cannot be null");
 
             assertThatThrownBy(() ->
                     createCache(adapter,
-                            b -> b.withExtendedPersistence(configurer -> configurer
+                            dc -> dc.withExtendedPersistence(configurer -> configurer
                                     .withMaximumTime(Duration.ZERO)),
-                            Builder::build))
+                            DistributedCaffeine::build))
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessage("maximumTime must be positive");
 
-            Stream.<CacheConstructor<Key, Value>>of(Builder::build, b -> b.build(key -> null))
+            Stream.<CacheConstructor<Key, Value>>of(DistributedCaffeine::build, dc -> dc.build(key -> null))
                     .forEach(cacheConstructor -> assertThatThrownBy(() ->
                             createCache(adapter,
-                                    b -> b.withExtendedPersistence(configurer -> configurer
+                                    dc -> dc.withExtendedPersistence(configurer -> configurer
                                             .withMaximumSize(1)),
                                     cacheConstructor))
                             .isInstanceOf(IllegalStateException.class)
-                            .hasMessage("If extended persistence is configured, at least one eviction strategy must be set"));
+                            .hasMessage("If extended persistence is configured, "
+                                    .concat("at least one eviction strategy must be set")));
 
             assertThatThrownBy(() ->
                     createCache(adapter,
-                            b -> b.withCaffeineBuilder(Caffeine.newBuilder()
+                            dc -> dc.withCaffeine(Caffeine.newBuilder()
                                             .maximumSize(1))
                                     .withExtendedPersistence(configurer -> configurer
                                             .withMaximumSize(1)
                                             .withLoadingStrategy(true)),
-                            Builder::build))
+                            DistributedCaffeine::build))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessage("If extended persistence is configured and loading strategy for cache loader is enabled, "
                             .concat("cache must be build as loading cache"));
@@ -193,16 +193,16 @@ final class DistributedCaffeineUnitTests {
             assertThatThrownBy(() ->
                     createCache(adapter,
                             CacheBuilder.identity(),
-                            b -> b.build(_null())))
+                            dc -> dc.build(_null())))
                     .isInstanceOf(NullPointerException.class)
                     .hasMessage("cacheLoader cannot be null");
 
             assertThatThrownBy(() ->
                     createCache(adapter,
-                            b -> b.withCaffeineBuilder(Caffeine.newBuilder()
+                            dc -> dc.withCaffeine(Caffeine.newBuilder()
                                     .weakKeys()
                                     .weakValues()),
-                            Builder::build))
+                            DistributedCaffeine::build))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessage("The use of weak or soft references is not supported");
         }
@@ -318,7 +318,6 @@ final class DistributedCaffeineUnitTests {
             Field field = Caffeine.class.getDeclaredField("removalListener");
             field.setAccessible(true);
             field.set(caffeine, integerRemovalListener);
-            field.setAccessible(false);
 
             Cache<Integer, Integer> integerCache = (Cache<Integer, Integer>) caffeine.build();
 
@@ -328,7 +327,9 @@ final class DistributedCaffeineUnitTests {
             integerCache.cleanUp();
             assertThat(integerCache.estimatedSize()).isEqualTo(0);
 
-            assertThat(removalCount).hasValue(2);
+            await("removal")
+                    .untilAsserted(() ->
+                            assertThat(removalCount).hasValue(2));
         }
     }
 

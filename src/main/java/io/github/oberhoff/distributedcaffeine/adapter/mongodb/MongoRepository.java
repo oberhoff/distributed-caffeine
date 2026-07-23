@@ -75,6 +75,8 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
 
     private final MongoCollection<Document> mongoCollection;
 
+    // TODO check all explain for COLLSCAN
+
     MongoRepository(MongoClient mongoClient, String databaseName, String collectionName) {
         this.mongoCollection = mongoClient.getDatabase(databaseName).getCollection(collectionName);
         ensureIndexes();
@@ -158,8 +160,17 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
                 new IndexOptions()
                         .unique(false)
                         .background(true));
+        IndexModel indexStatusDiscriminatorTimestamp = new IndexModel(
+                Indexes.compoundIndex(
+                        Indexes.ascending(STATUS.toString()),
+                        Indexes.ascending(DISCRIMINATOR.toString()),
+                        Indexes.ascending(TIMESTAMP.toString())),
+                new IndexOptions()
+                        .unique(false)
+                        .background(true));
 
-        List<IndexModel> indexes = List.of(indexHashDiscriminator, indexHashStatusDiscriminatorTimestamp);
+        List<IndexModel> indexes = List.of(indexHashDiscriminator, indexHashStatusDiscriminatorTimestamp,
+                indexStatusDiscriminatorTimestamp);
 
         mongoCollection.createIndexes(indexes);
 
