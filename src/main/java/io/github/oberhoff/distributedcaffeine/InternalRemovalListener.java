@@ -17,17 +17,23 @@ package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
+import org.jspecify.annotations.Nullable;
 
-class InternalRemovalListener<K, V> implements RemovalListener<K, V>, InternalLazyInitializer<K, V> {
+import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
+import static java.util.Objects.requireNonNull;
+
+class InternalRemovalListener<K, V> implements RemovalListener<InternalKey<K>, InternalValue<V>>,
+        InternalLazyInitializer<K, V> {
 
     private final RemovalListener<K, V> removalListener;
 
     InternalRemovalListener(RemovalListener<K, V> removalListener) {
-        this.removalListener = removalListener;
+        this.removalListener = requireNonNull(removalListener);
         // see also initialize()
     }
 
-    InternalRemovalListener<K,V> neutralize() {
+    InternalRemovalListener<K, V> neutralize() {
         // noop
         return this;
     }
@@ -38,7 +44,7 @@ class InternalRemovalListener<K, V> implements RemovalListener<K, V>, InternalLa
     }
 
     @Override
-    public void onRemoval(K key, V value, RemovalCause removalCause) {
-        removalListener.onRemoval(key, value, removalCause);
+    public void onRemoval(@Nullable InternalKey<K> key, @Nullable InternalValue<V> value, RemovalCause removalCause) {
+        removalListener.onRemoval(k(key), v(value), removalCause);
     }
 }

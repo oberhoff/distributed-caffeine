@@ -56,7 +56,7 @@ class InternalInstanceRegistry<K, V> {
     private InternalEvictionListener<K, V> evictionListener;
     private Executor executor;
     private StatsCounter statsCounter;
-    private Cache<K, V> cache;
+    private Cache<InternalKey<K>, InternalValue<V>> cache;
     private Supplier<InternalInstanceRegistry<K, V>> instanceRegistrySupplier;
 
     InternalInstanceRegistry() {
@@ -237,11 +237,11 @@ class InternalInstanceRegistry<K, V> {
         this.statsCounter = statsCounter;
     }
 
-    public Cache<K, V> getCache() {
+    public Cache<InternalKey<K>, InternalValue<V>> getCache() {
         return cache;
     }
 
-    public void setCache(Cache<K, V> cache) {
+    public void setCache(Cache<InternalKey<K>, InternalValue<V>> cache) {
         this.cache = cache;
     }
 

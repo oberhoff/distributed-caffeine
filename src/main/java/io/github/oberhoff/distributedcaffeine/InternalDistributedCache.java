@@ -24,16 +24,24 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Function;
 
+import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
+import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.iks;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.im;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.m;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullIterable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullMap;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.s;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
 class InternalDistributedCache<K, V> implements DistributedCache<K, V>, InternalLazyInitializer<K, V> {
 
     protected InternalInstanceRegistry<K, V> instanceRegistry;
-    protected Cache<K, V> cache;
-    protected Policy<K, V> policy;
+    protected Cache<InternalKey<K>, InternalValue<V>> cache;
+    protected Policy<InternalKey<K>, InternalValue<V>> policy;
     protected InternalCacheManager<K, V> cacheManager;
     protected InternalSynchronizationLock synchronizationLock;
 
@@ -53,28 +61,28 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
     @Override
     public V getIfPresent(K key) {
         requireNonNull(key);
-        return cache.getIfPresent(key);
+        return v(cache.getIfPresent(ik(key)));
     }
 
     @Override
     public Map<K, V> getAllPresent(Iterable<? extends K> keys) {
         Set<K> keySet = requireNonNullIterable(keys);
-        return cache.getAllPresent(keySet);
+        return m(cache.getAllPresent(iks(keySet)));
     }
 
     @Override
     public V get(K key, Function<? super K, ? extends V> mappingFunction) {
         requireNonNull(key);
         requireNonNull(mappingFunction);
-        Function<K, V> distributedMapping = mappingKey -> {
-            V value = mappingFunction.apply(mappingKey);
+        Function<InternalKey<K>, InternalValue<V>> distributedMapping = mappingKey -> {
+            InternalValue<V> value = iv(mappingFunction.apply(k(mappingKey)));
             if (nonNull(value)) {
                 cacheManager.putDistributed(mappingKey, value);
             }
             return value;
         };
         return synchronizationLock.getLocked(() ->
-                cache.get(key, distributedMapping));
+                v(cache.get(ik(key), distributedMapping)));
     }
 
     @Override
@@ -82,10 +90,11 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
             ? extends Map<? extends K, ? extends V>> mappingFunction) {
         Set<K> keySet = requireNonNullIterable(keys);
         requireNonNull(mappingFunction);
-        Function<? super Set<? extends K>, ? extends Map<? extends K, ? extends V>> distributedMapping = mappingKeys ->
-                cacheManager.putAllDistributed(requireNonNullMap(mappingFunction.apply(mappingKeys)));
+        Function<? super Set<? extends InternalKey<K>>,
+                ? extends Map<? extends InternalKey<K>, ? extends InternalValue<V>>> distributedMapping = mappingKeys ->
+                cacheManager.putAllDistributed(im(mappingFunction.apply(s(mappingKeys))));
         return synchronizationLock.getLocked(() ->
-                cache.getAll(keySet, distributedMapping));
+                m(cache.getAll(iks(keySet), distributedMapping)));
     }
 
     @Override
@@ -93,34 +102,34 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
         requireNonNull(key);
         requireNonNull(value);
         synchronizationLock.runLocked(() ->
-                cache.put(key, cacheManager.putDistributed(key, value)));
+                cache.put(ik(key), cacheManager.putDistributed(ik(key), iv(value))));
     }
 
     @Override
     public void putAll(Map<? extends K, ? extends V> map) {
         requireNonNullMap(map);
         synchronizationLock.runLocked(() ->
-                cache.putAll(cacheManager.putAllDistributed(map)));
+                cache.putAll(cacheManager.putAllDistributed(im(map))));
     }
 
     @Override
     public void invalidate(K key) {
         requireNonNull(key);
         synchronizationLock.runLocked(() ->
-                cache.invalidate(cacheManager.invalidateDistributed(key)));
+                cache.invalidate(cacheManager.invalidateDistributed(ik(key))));
     }
 
     @Override
     public void invalidateAll(Iterable<? extends K> keys) {
         Set<K> keySet = requireNonNullIterable(keys);
         synchronizationLock.runLocked(() ->
-                cache.invalidateAll(cacheManager.invalidateAllDistributed(keySet)));
+                cache.invalidateAll(cacheManager.invalidateAllDistributed(iks(keySet))));
     }
 
     @Override
     public void invalidateAll() {
         synchronizationLock.runLocked(() -> {
-            Set<K> keySet = cache.asMap().keySet();
+            Set<InternalKey<K>> keySet = cache.asMap().keySet();
             cacheManager.invalidateAllDistributed(keySet);
             keySet.clear();
         });

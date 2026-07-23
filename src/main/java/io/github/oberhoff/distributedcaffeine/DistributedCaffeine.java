@@ -18,10 +18,12 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.CacheLoader;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.Expiry;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.RemovalListener;
 import com.github.benmanes.caffeine.cache.Scheduler;
+import com.github.benmanes.caffeine.cache.Weigher;
 import com.github.benmanes.caffeine.cache.stats.StatsCounter;
 import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
 import io.github.oberhoff.distributedcaffeine.hasher.HashProvider;
@@ -288,8 +290,9 @@ public final class DistributedCaffeine<K, V> {
     }
 
     @SuppressWarnings({"unchecked", "java:S3011"})
-    private InternalInstanceRegistry<K, V> buildCommon(Function<Caffeine<Object, Object>, Cache<K, V>> build,
-                                                       @Nullable InternalCacheLoader<K, V> cacheLoader) {
+    private InternalInstanceRegistry<K, V> buildCommon(
+            Function<Caffeine<Object, Object>, Cache<InternalKey<K>, InternalValue<V>>> build,
+            @Nullable InternalCacheLoader<K, V> cacheLoader) {
         InternalInstanceRegistry<K, V> instanceRegistry = new InternalInstanceRegistry<>();
         instanceRegistry.setAdapter(this.adapter);
         instanceRegistry.setHasher(this.hasher);
@@ -336,6 +339,26 @@ public final class DistributedCaffeine<K, V> {
         runFailable(() -> removalListenerField.set(caffeine, instanceRegistry.getRemovalListener()));
         runFailable(() -> evictionListenerField.set(caffeine, instanceRegistry.getEvictionListener()));
 
+        // inject expiry if set
+        Field expiryField = getFailable(() ->
+                caffeine.getClass().getDeclaredField("expiry"));
+        expiryField.setAccessible(true);
+        Expiry<K, V> caffeineExpiry = getFailable(() ->
+                (Expiry<K, V>) expiryField.get(caffeine));
+        if (nonNull(caffeineExpiry)) {
+            runFailable(() -> expiryField.set(caffeine, new InternalExpiry<>(caffeineExpiry)));
+        }
+
+        // inject weigher if set
+        Field weigherField = getFailable(() ->
+                caffeine.getClass().getDeclaredField("weigher"));
+        weigherField.setAccessible(true);
+        Weigher<K, V> caffeineWeigher = getFailable(() ->
+                (Weigher<K, V>) weigherField.get(caffeine));
+        if (nonNull(caffeineWeigher)) {
+            runFailable(() -> weigherField.set(caffeine, new InternalWeigher<>(caffeineWeigher)));
+        }
+
         // inject scheduler if not set or disabled (necessary for eviction listener reliability)
         Field schedulerField = getFailable(() ->
                 caffeine.getClass().getDeclaredField("scheduler"));
@@ -374,7 +397,7 @@ public final class DistributedCaffeine<K, V> {
             instanceRegistry.setStatsCounter(StatsCounter.disabledStatsCounter());
         }
 
-        // build final Caffeine cache instance
+        // build final Caffeine cache instance (switched to internal key and value representation)
         instanceRegistry.setCache(build.apply(caffeine));
 
         // validate configurers

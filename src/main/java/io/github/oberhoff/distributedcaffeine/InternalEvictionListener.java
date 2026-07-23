@@ -17,19 +17,25 @@ package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
+import org.jspecify.annotations.Nullable;
 
-class InternalEvictionListener<K, V> implements RemovalListener<K, V>, InternalLazyInitializer<K, V> {
+import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
+import static java.util.Objects.requireNonNull;
+
+class InternalEvictionListener<K, V> implements RemovalListener<InternalKey<K>, InternalValue<V>>,
+        InternalLazyInitializer<K, V> {
 
     private final RemovalListener<K, V> evictionListener;
 
     private InternalCacheManager<K, V> cacheManager;
 
     InternalEvictionListener(RemovalListener<K, V> evictionListener) {
-        this.evictionListener = evictionListener;
+        this.evictionListener = requireNonNull(evictionListener);
         // see also initialize()
     }
 
-    InternalEvictionListener<K,V> neutralize() {
+    InternalEvictionListener<K, V> neutralize() {
         // cache manager is initially deactivated
         this.cacheManager = new InternalCacheManager<>();
         return this;
@@ -41,9 +47,9 @@ class InternalEvictionListener<K, V> implements RemovalListener<K, V>, InternalL
     }
 
     @Override
-    public void onRemoval(K key, V value, RemovalCause removalCause) {
+    public void onRemoval(@Nullable InternalKey<K> key, @Nullable InternalValue<V> value, RemovalCause removalCause) {
         // special handling, no lock required
         cacheManager.evictDistributed(key, value, removalCause);
-        evictionListener.onRemoval(key, value, removalCause);
+        evictionListener.onRemoval(k(key), v(value), removalCause);
     }
 }

@@ -29,13 +29,19 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.stream.Stream;
 
+import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.im;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullMap;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.s;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_EXTENDED_GROUP;
 import static java.util.Objects.nonNull;
 
 @SuppressWarnings("java:S1450")
-class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitializer<K, V> {
+class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalValue<V>>,
+        InternalLazyInitializer<K, V> {
 
     private static final String LOAD_ALL = "loadAll";
 
@@ -51,7 +57,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
         // see also initialize()
     }
 
-    InternalCacheLoader<K,V> neutralize() {
+    InternalCacheLoader<K, V> neutralize() {
         // cache manager is initially deactivated
         this.cacheManager = new InternalCacheManager<>();
         return this;
@@ -67,23 +73,24 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
 
     @Override
     @SuppressWarnings({"java:S2583"})
-    public V load(K key) throws Exception {
+    public InternalValue<V> load(InternalKey<K> key) throws Exception {
         V value = extendedPersistenceConfigurer.hasCacheLoaderStrategy()
-                ? loadExtendedFromStore(key)
+                ? loadExtendedFromStore(k(key))
                 : null;
         value = nonNull(value)
                 ? value
-                : cacheLoader.load(key);
+                : cacheLoader.load(k(key));
         return nonNull(value)
-                ? cacheManager.putDistributedLoaded(key, value)
+                ? cacheManager.putDistributedLoaded(key, iv(value))
                 : null;
     }
 
     @Override
     @SuppressWarnings({"java:S2589"})
-    public Map<? extends K, ? extends V> loadAll(Set<? extends K> keys) throws Exception {
+    public Map<? extends InternalKey<K>, ? extends InternalValue<V>> loadAll(Set<? extends InternalKey<K>> keys)
+            throws Exception {
         HashMap<K, V> keyToValue = new HashMap<>();
-        Set<K> keysToLoad = new HashSet<>(keys);
+        Set<K> keysToLoad = new HashSet<>(s(keys));
         if (extendedPersistenceConfigurer.hasCacheLoaderStrategy()) {
             keyToValue.putAll(loadAllExtendedFromStore(keysToLoad));
             keysToLoad.removeAll(keyToValue.keySet());
@@ -101,44 +108,46 @@ class InternalCacheLoader<K, V> implements CacheLoader<K, V>, InternalLazyInitia
                 }
             }
         }
-        return cacheManager.putAllDistributedLoaded(keyToValue);
+        return cacheManager.putAllDistributedLoaded(im(keyToValue));
     }
 
     // should never be invoked due to custom implementation
     @Override
-    public CompletableFuture<? extends V> asyncLoad(K key, Executor executor) throws Exception {
+    public CompletableFuture<? extends InternalValue<V>> asyncLoad(InternalKey<K> key, Executor executor)
+            throws Exception {
         throw new IllegalAccessException();
     }
 
     // should never be invoked
     @Override
-    public CompletableFuture<? extends Map<? extends K, ? extends V>> asyncLoadAll(
-            Set<? extends K> keys, Executor executor) throws Exception {
+    public CompletableFuture<? extends Map<? extends InternalKey<K>, ? extends InternalValue<V>>> asyncLoadAll(
+            Set<? extends InternalKey<K>> keys, Executor executor) throws Exception {
         throw new IllegalAccessException();
     }
 
     // should never be invoked
     @Override
-    public V reload(K key, V oldValue) throws Exception {
+    public InternalValue<V> reload(InternalKey<K> key, InternalValue<V> oldValue) throws Exception {
         throw new IllegalAccessException();
     }
 
     // only invoked internally if refreshAfterWrite is used (special handling needed)
     @Override
     @SuppressWarnings("unchecked")
-    public CompletableFuture<? extends V> asyncReload(K key, V oldValue, Executor executor) {
+    public CompletableFuture<? extends InternalValue<V>> asyncReload(InternalKey<K> key, InternalValue<V> oldValue,
+                                                                     Executor executor) {
         return (extendedPersistenceConfigurer.hasCacheLoaderStrategy()
-                ? CompletableFuture.supplyAsync(() -> loadExtendedFromStore(key), executor)
+                ? CompletableFuture.supplyAsync(() -> loadExtendedFromStore(k(key)), executor)
                 : CompletableFuture.completedFuture((V) null))
                 .thenComposeAsync(newValue -> nonNull(newValue)
                                 ? CompletableFuture.completedFuture(newValue)
                                 : (CompletableFuture<V>) getFailable(() ->
-                                cacheLoader.asyncReload(key, oldValue, executor)),
+                                cacheLoader.asyncReload(k(key), v(oldValue), executor)),
                         executor)
                 // retain the original 'remove if null' semantics
                 .thenApplyAsync(newValue -> nonNull(newValue)
                                 // special handling, no lock required
-                                ? cacheManager.putDistributedRefreshAfterWrite(key, newValue, oldValue)
+                                ? cacheManager.putDistributedRefreshAfterWrite(key, iv(newValue), oldValue)
                                 // special handling, no lock required
                                 : cacheManager.invalidateDistributedRefreshAfterWrite(key, oldValue),
                         executor);
