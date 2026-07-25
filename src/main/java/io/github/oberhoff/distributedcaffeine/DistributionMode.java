@@ -54,7 +54,7 @@ public enum DistributionMode {
     INVALIDATION;
 
     /**
-     * Indicates weather population is considered for distributed synchronization between cache instances or not.
+     * Indicates whether population is considered for distributed synchronization between cache instances or not.
      *
      * @return {@code true} if population is considered, otherwise {@code false}
      */
@@ -63,7 +63,7 @@ public enum DistributionMode {
     }
 
     /**
-     * Indicates weather invalidation is considered for distributed synchronization between cache instances or not.
+     * Indicates whether invalidation is considered for distributed synchronization between cache instances or not.
      *
      * @return {@code true} if invalidation is considered, otherwise {@code false}
      */
@@ -73,7 +73,7 @@ public enum DistributionMode {
     }
 
     /**
-     * Indicates weather eviction is considered for distributed synchronization between cache instances or not.
+     * Indicates whether eviction is considered for distributed synchronization between cache instances or not.
      *
      * @return {@code true} if eviction is considered, otherwise {@code false}
      */

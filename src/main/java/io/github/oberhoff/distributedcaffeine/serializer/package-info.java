@@ -14,8 +14,7 @@
  * limitations under the License.
  */
 /**
- * This package contains classes and interfaces that provide serializing/deserializing functionality for Distributed
- * Caffeine cache instances.
+ * This package contains classes and interfaces that provide serializing/deserializing functionality.
  * <p>
  * Already built-in serializers:
  * <ul>

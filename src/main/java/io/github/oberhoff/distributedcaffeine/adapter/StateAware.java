@@ -13,24 +13,32 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.oberhoff.distributedcaffeine.serializer;
+package io.github.oberhoff.distributedcaffeine.adapter;
 
 import org.jspecify.annotations.NullMarked;
 
 /**
- * Interface to use when implementing a serializer with JSON representation (encoded as String or BSON).
+ * Interface representing objects that are aware of a state.
  *
- * @param <T> the type of the object to serialize
  * @author Andreas Oberhoff
  */
 @NullMarked
-public interface JsonSerializer<T> extends StringSerializer<T> {
+public interface StateAware {
 
     /**
-     * Indicates whether the JSON representation should be encoded as BSON or as string when persisted in the underlying
-     * store.
-     *
-     * @return {@code true} for BSON encoding or {@code false} for string encoding
+     * Sets the state as activated.
      */
-    boolean storeAsBinaryJson();
+    void activate();
+
+    /**
+     * Sets the state as deactivated.
+     */
+    void deactivate();
+
+    /**
+     * Indicates whether state is activated or not.
+     *
+     * @return {@code true} if state is activated, otherwise {@code false}
+     */
+    boolean isActivated();
 }

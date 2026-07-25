@@ -15,7 +15,25 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-interface InternalLazyInitializer<K, V> {
+import com.github.benmanes.caffeine.cache.Scheduler;
+import org.jspecify.annotations.Nullable;
 
-    void initialize(InternalInstanceRegistry<K, V> instanceRegistry);
+import java.util.concurrent.Executor;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
+import static java.util.Objects.requireNonNull;
+
+class InternalScheduler implements Scheduler {
+
+    private final Scheduler scheduler;
+
+    InternalScheduler(Scheduler scheduler) {
+        this.scheduler = requireNonNull(scheduler);
+    }
+
+    @Override
+    public Future<? extends @Nullable Object> schedule(Executor executor, Runnable command, long delay, TimeUnit unit) {
+        return scheduler.schedule(executor, command, delay, unit);
+    }
 }

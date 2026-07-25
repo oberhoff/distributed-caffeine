@@ -13,17 +13,18 @@
         <maven.compiler.target>17</maven.compiler.target>
         <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <caffeine.version>3.2.3</caffeine.version>
-        <mongodb.version>5.6.2</mongodb.version>
-        <fory.version>0.14.1</fory.version>
-        <jackson.version>3.1.1</jackson.version>
+        <caffeine.version>3.2.4</caffeine.version>
+        <mongodb.version>5.9.0</mongodb.version>
+        <fory.version>1.2.0</fory.version>
+        <jackson.version>3.2.1</jackson.version>
+        <hash4j.version>0.30.0</hash4j.version>
         <failsafe.version>3.3.2</failsafe.version>
-        <junit.version>6.0.2</junit.version>
-        <testcontainers.version>2.0.3</testcontainers.version>
-        <mockito.version>5.21.0</mockito.version>
+        <junit.version>6.1.2</junit.version>
+        <testcontainers.version>2.0.5</testcontainers.version>
+        <mockito.version>5.23.0</mockito.version>
         <assertj.version>3.27.7</assertj.version>
         <awaitility.version>4.3.0</awaitility.version>
-        <slf4j.version>2.0.17</slf4j.version>
+        <slf4j.version>2.0.18</slf4j.version>
     </properties>
 
     <name>Distributed Caffeine</name>
@@ -85,6 +86,11 @@
             <version>${jackson.version}</version>
         </dependency>
         <dependency>
+            <groupId>com.dynatrace.hash4j</groupId>
+            <artifactId>hash4j</artifactId>
+            <version>${hash4j.version}</version>
+        </dependency>
+        <dependency>
             <groupId>dev.failsafe</groupId>
             <artifactId>failsafe</artifactId>
             <version>${failsafe.version}</version>
@@ -138,7 +144,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.5.4</version>
+                <version>3.5.6</version>
                 <configuration>
                     <argLine>@{argLine} -XX:MaxRAMPercentage=50</argLine>
                 </configuration>
@@ -172,7 +178,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-enforcer-plugin</artifactId>
-                <version>3.6.2</version>
+                <version>3.6.3</version>
                 <executions>
                     <execution>
                         <id>enforce-maven-version</id>
@@ -193,7 +199,7 @@
             <plugin>
                 <groupId>org.jacoco</groupId>
                 <artifactId>jacoco-maven-plugin</artifactId>
-                <version>0.8.14</version>
+                <version>0.8.15</version>
                 <executions>
                     <execution>
                         <id>prepare-agent</id>
@@ -265,7 +271,7 @@
             <plugin>
                 <groupId>org.sonatype.central</groupId>
                 <artifactId>central-publishing-maven-plugin</artifactId>
-                <version>0.10.0</version>
+                <version>0.11.0</version>
                 <extensions>true</extensions>
                 <configuration>
                     <publishingServerId>central</publishingServerId>

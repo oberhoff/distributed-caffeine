@@ -25,14 +25,21 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
 
+import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
+import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.entry;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.im;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.m;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullMap;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
 import static java.util.Objects.isNull;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toSet;
 
 class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyInitializer<K, V> {
 
-    private ConcurrentMap<K, V> concurrentMap;
+    private ConcurrentMap<InternalKey<K>, InternalValue<V>> concurrentMap;
     private InternalCacheManager<K, V> cacheManager;
     private InternalSynchronizationLock synchronizationLock;
 
@@ -41,15 +48,28 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
     }
 
     @Override
-    public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
-        this.concurrentMap = distributedCaffeine.getCache().asMap();
-        this.cacheManager = distributedCaffeine.getCacheManager();
-        this.synchronizationLock = distributedCaffeine.getSynchronizationLock();
+    public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
+        this.concurrentMap = instanceRegistry.getCache().asMap();
+        this.cacheManager = instanceRegistry.getCacheManager();
+        this.synchronizationLock = instanceRegistry.getSynchronizationLock();
     }
 
+    /*
+    // TODO this methods should be atomic:
+    computeIfAbsent(K key, Function mappingFunction)
+    computeIfPresent(K key, BiFunction remappingFunction)
+    compute(K key, BiFunction remappingFunction)
+    merge(K key, V value, BiFunction remappingFunction)
+    putIfAbsent(K key, V value)
+    remove(Object key, Object value)
+    replace(K key, V oldValue, V newValue)
+    replace(K key, V value)
+    */
+
     @Override
+    @SuppressWarnings("unchecked")
     public V get(Object key) {
-        return concurrentMap.get(key);
+        return v(concurrentMap.get(ik((K) key)));
     }
 
     @Override
@@ -57,14 +77,14 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
         requireNonNull(key);
         requireNonNull(value);
         return synchronizationLock.getLocked(() ->
-                concurrentMap.put(key, cacheManager.putDistributed(key, value)));
+                v(concurrentMap.put(ik(key), cacheManager.putDistributed(ik(key), iv(value)))));
     }
 
     @Override
     public void putAll(Map<? extends K, ? extends V> map) {
         requireNonNullMap(map);
         synchronizationLock.runLocked(() ->
-                concurrentMap.putAll(cacheManager.putAllDistributed(map)));
+                concurrentMap.putAll(cacheManager.putAllDistributed(im(map))));
     }
 
     @Override
@@ -106,7 +126,7 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
     public V remove(Object key) {
         requireNonNull(key);
         return synchronizationLock.getLocked(() ->
-                concurrentMap.remove(cacheManager.invalidateDistributed((K) key)));
+                v(concurrentMap.remove(cacheManager.invalidateDistributed(ik((K) key)))));
     }
 
     @Override
@@ -123,20 +143,22 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
     @Override
     public void clear() {
         synchronizationLock.runLocked(() -> {
-            Set<K> keySet = concurrentMap.keySet();
+            Set<InternalKey<K>> keySet = concurrentMap.keySet();
             cacheManager.invalidateAllDistributed(keySet);
             keySet.clear();
         });
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public boolean containsKey(Object key) {
-        return concurrentMap.containsKey(key);
+        return concurrentMap.containsKey(ik((K) key));
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public boolean containsValue(Object value) {
-        return concurrentMap.containsValue(value);
+        return concurrentMap.containsValue(iv((V) value));
     }
 
     @Override
@@ -154,8 +176,9 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
         return new AbstractSet<>() {
             public Iterator<K> iterator() {
                 return new Iterator<>() {
-                    private final Iterator<K> iterator = concurrentMap.keySet().iterator();
-                    private K next;
+                    private final Iterator<InternalKey<K>> iterator =
+                            concurrentMap.keySet().iterator();
+                    private InternalKey<K> next;
 
                     @Override
                     public boolean hasNext() {
@@ -165,7 +188,7 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
                     @Override
                     public K next() {
                         next = iterator.next();
-                        return next;
+                        return k(next);
                     }
 
                     @Override
@@ -185,22 +208,24 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
             @Override
             public boolean removeAll(Collection<?> c) {
                 return synchronizationLock.getLocked(() -> {
-                    Set<K> keys = concurrentMap.keySet().stream()
-                            .filter(c::contains)
+                    requireNonNull(c);
+                    Set<InternalKey<K>> keys = concurrentMap.keySet().stream()
+                            .filter(key -> c.contains(k(key)))
                             .collect(toSet());
                     cacheManager.invalidateAllDistributed(keys);
-                    return concurrentMap.keySet().removeAll(c);
+                    return concurrentMap.keySet().removeAll(keys);
                 });
             }
 
             @Override
             public boolean retainAll(Collection<?> c) {
+                requireNonNull(c);
                 return synchronizationLock.getLocked(() -> {
-                    Set<K> keys = concurrentMap.keySet().stream()
-                            .filter(key -> !c.contains(key))
+                    Set<InternalKey<K>> keys = concurrentMap.keySet().stream()
+                            .filter(key -> !c.contains(k(key)))
                             .collect(toSet());
                     cacheManager.invalidateAllDistributed(keys);
-                    return concurrentMap.keySet().retainAll(c);
+                    return concurrentMap.keySet().removeAll(keys);
                 });
             }
 
@@ -221,8 +246,9 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
         return new AbstractCollection<>() {
             public Iterator<V> iterator() {
                 return new Iterator<>() {
-                    private final Iterator<Entry<K, V>> iterator = concurrentMap.entrySet().iterator();
-                    private Entry<K, V> next;
+                    private final Iterator<Entry<InternalKey<K>, InternalValue<V>>> iterator =
+                            concurrentMap.entrySet().iterator();
+                    private Entry<InternalKey<K>, InternalValue<V>> next;
 
                     @Override
                     public boolean hasNext() {
@@ -232,7 +258,7 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
                     @Override
                     public V next() {
                         next = iterator.next();
-                        return next.getValue();
+                        return v(next.getValue());
                     }
 
                     @Override
@@ -251,25 +277,27 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
 
             @Override
             public boolean removeAll(Collection<?> c) {
+                requireNonNull(c);
                 return synchronizationLock.getLocked(() -> {
-                    Set<K> keys = concurrentMap.entrySet().stream()
-                            .filter(entry -> c.contains(entry.getValue()))
+                    Set<InternalKey<K>> keys = concurrentMap.entrySet().stream()
+                            .filter(entry -> c.contains(v(entry.getValue())))
                             .map(Entry::getKey)
                             .collect(toSet());
                     cacheManager.invalidateAllDistributed(keys);
-                    return concurrentMap.values().removeAll(c);
+                    return concurrentMap.keySet().removeAll(keys);
                 });
             }
 
             @Override
             public boolean retainAll(Collection<?> c) {
+                requireNonNull(c);
                 return synchronizationLock.getLocked(() -> {
-                    Set<K> keys = concurrentMap.entrySet().stream()
-                            .filter(entry -> !c.contains(entry.getValue()))
+                    Set<InternalKey<K>> keys = concurrentMap.entrySet().stream()
+                            .filter(entry -> !c.contains(v(entry.getValue())))
                             .map(Entry::getKey)
                             .collect(toSet());
                     cacheManager.invalidateAllDistributed(keys);
-                    return concurrentMap.values().retainAll(c);
+                    return concurrentMap.keySet().removeAll(keys);
                 });
             }
 
@@ -289,8 +317,9 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
         return new AbstractSet<>() {
             public Iterator<Entry<K, V>> iterator() {
                 return new Iterator<>() {
-                    private final Iterator<Entry<K, V>> iterator = concurrentMap.entrySet().iterator();
-                    private Entry<K, V> next;
+                    private final Iterator<Entry<InternalKey<K>, InternalValue<V>>> iterator =
+                            concurrentMap.entrySet().iterator();
+                    private Entry<InternalKey<K>, InternalValue<V>> next;
 
                     @Override
                     public boolean hasNext() {
@@ -299,8 +328,9 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
 
                     @Override
                     public Entry<K, V> next() {
-                        next = new WriteThroughEntry<>(iterator.next(), InternalConcurrentMap.this);
-                        return next;
+                        next = iterator.next();
+                        return new WriteThroughEntry<>(entry(k(next.getKey()), v(next.getValue())),
+                                InternalConcurrentMap.this);
                     }
 
                     @Override
@@ -320,24 +350,26 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
             @Override
             public boolean removeAll(Collection<?> c) {
                 return synchronizationLock.getLocked(() -> {
-                    Set<K> keys = concurrentMap.entrySet().stream()
-                            .filter(c::contains)
+                    requireNonNull(c);
+                    Set<InternalKey<K>> keys = concurrentMap.entrySet().stream()
+                            .filter(entry -> c.contains(entry(k(entry.getKey()), v(entry.getValue()))))
                             .map(Entry::getKey)
                             .collect(toSet());
                     cacheManager.invalidateAllDistributed(keys);
-                    return concurrentMap.entrySet().removeAll(c);
+                    return concurrentMap.keySet().removeAll(keys);
                 });
             }
 
             @Override
             public boolean retainAll(Collection<?> c) {
                 return synchronizationLock.getLocked(() -> {
-                    Set<K> keys = concurrentMap.entrySet().stream()
-                            .filter(entry -> !c.contains(entry))
+                    requireNonNull(c);
+                    Set<InternalKey<K>> keys = concurrentMap.entrySet().stream()
+                            .filter(entry -> !c.contains(entry(k(entry.getKey()), v(entry.getValue()))))
                             .map(Entry::getKey)
                             .collect(toSet());
                     cacheManager.invalidateAllDistributed(keys);
-                    return concurrentMap.entrySet().retainAll(c);
+                    return concurrentMap.keySet().removeAll(keys);
                 });
             }
 
@@ -355,17 +387,17 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
 
     @Override
     public boolean equals(Object object) {
-        return object instanceof Map && concurrentMap.equals(object);
+        return object instanceof Map<?, ?> map && Objects.equals(m(concurrentMap), map);
     }
 
     @Override
     public int hashCode() {
-        return concurrentMap.hashCode();
+        return m(concurrentMap).hashCode();
     }
 
     @Override
     public String toString() {
-        return concurrentMap.toString();
+        return m(concurrentMap).toString();
     }
 
     @SuppressWarnings("java:S2160")
@@ -373,7 +405,7 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
 
         private final transient Map<K, V> map;
 
-        private WriteThroughEntry(Entry<? extends K, ? extends V> entry, Map<K, V> map) {
+        private WriteThroughEntry(Entry<? extends K, ? extends V> entry, InternalConcurrentMap<K, V> map) {
             super(entry);
             this.map = map;
         }

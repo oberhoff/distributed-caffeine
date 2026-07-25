@@ -16,12 +16,9 @@
 package io.github.oberhoff.distributedcaffeine.common;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import com.mongodb.client.MongoCollection;
 import io.github.oberhoff.distributedcaffeine.DistributedCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
-import org.awaitility.Awaitility;
-import org.awaitility.core.ConditionFactory;
-import org.bson.Document;
+import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -79,33 +76,25 @@ public abstract class DistributedCaffeineCommonTestInstance {
                 distributedCache.distributedPolicy().stopSynchronization());
         // invalidate all cache entries (only after synchronization is already stopped for all caches)
         this.distributedCacheInstances.forEach(Cache::invalidateAll);
-        // drop collection
-        this.distributedCacheInstances.stream()
-                .findFirst()
-                .ifPresent(distributedCache ->
-                        distributedCache.distributedPolicy().getMongoCollection().drop());
         this.distributedCacheInstances.clear();
     }
 
-    protected <K, V> DistributedCache<K, V> createCache(MongoCollection<Document> mongoCollection,
+    protected <K, V> DistributedCache<K, V> createCache(Adapter<K, V> adapter,
                                                         CacheBuilder<K, V> cacheBuilder,
                                                         CacheConstructor<K, V> cacheConstructor) {
         DistributedCache<K, V> distributedCache = cacheConstructor
-                .construct(cacheBuilder.apply(DistributedCaffeine.newBuilder(mongoCollection)));
+                .construct(cacheBuilder.apply(DistributedCaffeine.newBuilder(adapter)));
         distributedCacheInstances.add(distributedCache);
         return distributedCache;
     }
 
-    protected void await(Duration duration) {
-        await("duration")
-                .pollInterval(duration)
-                .timeout(duration.plusSeconds(1)) // timeout must be greater than the poll delay
-                .until(() -> true);
-    }
-
-    protected ConditionFactory await(String alias) {
-        return Awaitility.await(alias)
-                .pollExecutorService(executorService);
+    @SuppressWarnings("java:S2925")
+    protected void sleep(Duration duration) {
+        try {
+            Thread.sleep(duration.toMillis());
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @SuppressWarnings("SameReturnValue")
@@ -125,7 +114,7 @@ public abstract class DistributedCaffeineCommonTestInstance {
     @FunctionalInterface
     protected interface CacheBuilder<K, V> {
 
-        DistributedCaffeine.Builder<K, V> apply(DistributedCaffeine.Builder<K, V> builder);
+        DistributedCaffeine<K, V> apply(DistributedCaffeine<K, V> builder);
 
         static <K, V> CacheBuilder<K, V> identity() {
             return cacheBuilder -> cacheBuilder;
@@ -135,7 +124,7 @@ public abstract class DistributedCaffeineCommonTestInstance {
     @FunctionalInterface
     protected interface CacheConstructor<K, V> {
 
-        DistributedCache<K, V> construct(DistributedCaffeine.Builder<K, V> builder);
+        DistributedCache<K, V> construct(DistributedCaffeine<K, V> builder);
     }
 
     @FunctionalInterface
