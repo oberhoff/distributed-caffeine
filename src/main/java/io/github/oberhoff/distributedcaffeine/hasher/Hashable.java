@@ -25,12 +25,13 @@ import java.util.function.Supplier;
  * @author Andreas Oberhoff
  */
 @NullMarked
+@FunctionalInterface
 public interface Hashable {
 
     /**
-     * Returns the hash of the object. The supplied hasher might be used to compute the hash.
+     * Returns a hash for the implementing object using the supplied hasher for computing.
      *
-     * @param hasher the supplier for a hasher to compute the hash.
+     * @param hasher the supplier for a hasher to compute the hash
      * @return the hash
      */
     String getHash(Supplier<Hasher> hasher);

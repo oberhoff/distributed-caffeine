@@ -37,7 +37,7 @@ import static java.util.Objects.requireNonNull;
 @SuppressWarnings("java:S1450")
 class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, InternalLazyInitializer<K, V> {
 
-    private DistributedCaffeine<K, V> distributedCaffeine;
+    private InternalInstanceRegistry<K, V> instanceRegistry;
     private Adapter<K, V> adapter;
     private SerializersConfigurer<K, V> serializersConfigurer;
     private Repository<K, V> repository;
@@ -48,12 +48,12 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
     }
 
     @Override
-    public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
-        this.distributedCaffeine = distributedCaffeine;
-        this.adapter = distributedCaffeine.getAdapter();
-        this.serializersConfigurer = distributedCaffeine.getSerializersConfigurer();
-        this.repository = distributedCaffeine.getAdapter().getRepository();
-        this.hasher = distributedCaffeine.getHasher();
+    public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
+        this.instanceRegistry = instanceRegistry;
+        this.adapter = instanceRegistry.getAdapter();
+        this.serializersConfigurer = instanceRegistry.getSerializersConfigurer();
+        this.repository = instanceRegistry.getAdapter().getRepository();
+        this.hasher = instanceRegistry.getHasher();
     }
 
     @Override
@@ -63,12 +63,12 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
 
     @Override
     public void startSynchronization() {
-        distributedCaffeine.activate();
+        instanceRegistry.activate();
     }
 
     @Override
     public void stopSynchronization() {
-        distributedCaffeine.deactivate();
+        instanceRegistry.deactivate();
     }
 
     @Override

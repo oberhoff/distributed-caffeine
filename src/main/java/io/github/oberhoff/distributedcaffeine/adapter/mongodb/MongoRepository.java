@@ -46,7 +46,6 @@ import java.lang.System.Logger.Level;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Date;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -75,6 +74,8 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
 
     private final MongoCollection<Document> mongoCollection;
 
+    // TODO check all explain for COLLSCAN
+
     MongoRepository(MongoClient mongoClient, String databaseName, String collectionName) {
         this.mongoCollection = mongoClient.getDatabase(databaseName).getCollection(collectionName);
         ensureIndexes();
@@ -96,7 +97,7 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
                             Updates.set(VALUE.toString(), serializeToMongo(cacheEntry.getValue(),
                                     requireNonNull(valueSerializer))),
                             Updates.set(STATUS.toString(), cacheEntry.getStatus().toString()),
-                            Updates.set(TIMESTAMP.toString(), Date.from(cacheEntry.getTimestamp())));
+                            Updates.set(TIMESTAMP.toString(), cacheEntry.getTimestamp()));
                     UpdateOptions updateOptions = new UpdateOptions().upsert(true);
                     updates.add(new UpdateOneModel<>(filter, update, updateOptions));
                 } catch (Exception e) {
@@ -129,6 +130,18 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
     }
 
     @Override
+    public void updateStatusOfCacheEntries(@Nullable String discriminator, @Nullable Set<String> hashes,
+                                           @Nullable Set<Status> statuses, @Nullable Instant olderThan,
+                                           Status newStatus) {
+        Bson filter = getFilter(discriminator, hashes, statuses, olderThan);
+        Bson update = Updates.combine(
+                Updates.set(STATUS.toString(), newStatus.toString()),
+                Updates.set(OPERATION.toString(), null), // clearing the operation lets every instance apply it
+                Updates.set(TIMESTAMP.toString(), Instant.now()));
+        mongoCollection.updateMany(filter, update);
+    }
+
+    @Override
     public void deleteCacheEntries(@Nullable String discriminator, @Nullable Set<String> hashes,
                                    @Nullable Set<Status> statuses, @Nullable Instant olderThan) {
         Bson filter = getFilter(discriminator, hashes, statuses, olderThan);
@@ -158,8 +171,17 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
                 new IndexOptions()
                         .unique(false)
                         .background(true));
+        IndexModel indexStatusDiscriminatorTimestamp = new IndexModel(
+                Indexes.compoundIndex(
+                        Indexes.ascending(STATUS.toString()),
+                        Indexes.ascending(DISCRIMINATOR.toString()),
+                        Indexes.ascending(TIMESTAMP.toString())),
+                new IndexOptions()
+                        .unique(false)
+                        .background(true));
 
-        List<IndexModel> indexes = List.of(indexHashDiscriminator, indexHashStatusDiscriminatorTimestamp);
+        List<IndexModel> indexes = List.of(indexHashDiscriminator, indexHashStatusDiscriminatorTimestamp,
+                indexStatusDiscriminatorTimestamp);
 
         mongoCollection.createIndexes(indexes);
 
@@ -200,7 +222,7 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
         }
         filters.add(Filters.eq(DISCRIMINATOR.toString(), discriminator));
         if (nonNull(olderThan)) {
-            filters.add(Filters.lt(TIMESTAMP.toString(), Date.from(olderThan)));
+            filters.add(Filters.lt(TIMESTAMP.toString(), olderThan));
         }
         return Filters.and(filters);
     }

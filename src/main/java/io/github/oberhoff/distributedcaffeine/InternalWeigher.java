@@ -15,25 +15,22 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-import com.github.benmanes.caffeine.cache.Scheduler;
-import org.jspecify.annotations.Nullable;
+import com.github.benmanes.caffeine.cache.Weigher;
 
-import java.util.concurrent.Executor;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-
+import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
 import static java.util.Objects.requireNonNull;
 
-class InternalScheduler implements Scheduler {
+class InternalWeigher<K, V> implements Weigher<InternalKey<K>, InternalValue<V>> {
 
-    private final Scheduler scheduler;
+    private final Weigher<K, V> weigher;
 
-    InternalScheduler(Scheduler scheduler) {
-        this.scheduler = requireNonNull(scheduler);
+    InternalWeigher(Weigher<K, V> weigher) {
+        this.weigher = requireNonNull(weigher);
     }
 
     @Override
-    public Future<? extends @Nullable Object> schedule(Executor executor, Runnable command, long delay, TimeUnit unit) {
-        return scheduler.schedule(executor, command, delay, unit);
+    public int weigh(InternalKey<K> key, InternalValue<V> value) {
+        return weigher.weigh(k(key), v(value));
     }
 }

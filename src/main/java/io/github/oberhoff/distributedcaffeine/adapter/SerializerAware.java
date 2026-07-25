@@ -79,7 +79,7 @@ public interface SerializerAware<K, V> {
     }
 
     /**
-     * Returns the deserialized object of an value using the specified serializer.
+     * Returns the deserialized object of a value using the specified serializer.
      *
      * @param value      the value to be deserialized
      * @param serializer the serializer to be used

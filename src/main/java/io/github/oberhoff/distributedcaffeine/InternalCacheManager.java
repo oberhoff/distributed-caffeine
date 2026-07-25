@@ -24,9 +24,7 @@ import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.adapter.Retriever;
 
-import java.lang.ref.WeakReference;
 import java.security.SecureRandom;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.HashMap;
@@ -34,16 +32,16 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import static io.github.oberhoff.distributedcaffeine.InternalUtils.entry;
+import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
+import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_LOADED;
@@ -65,10 +63,9 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
 
     private final AtomicBoolean isActivated;
     private final SecureRandom secureRandom;
-    private final ConcurrentMap<K, Meta<V>> currentCacheEntries;
 
-    private Cache<K, V> cache;
-    private Policy<K, V> policy;
+    private Cache<InternalKey<K>, InternalValue<V>> cache;
+    private Policy<InternalKey<K>, InternalValue<V>> policy;
     private DistributionMode distributionMode;
     private Repository<K, V> repository;
     private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
@@ -79,20 +76,19 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
     InternalCacheManager() {
         this.isActivated = new AtomicBoolean(false);
         this.secureRandom = new SecureRandom();
-        this.currentCacheEntries = new ConcurrentHashMap<>();
         // see also initialize()
     }
 
     @Override
-    public void initialize(DistributedCaffeine<K, V> distributedCaffeine) {
-        this.cache = distributedCaffeine.getCache();
-        this.policy = distributedCaffeine.getCache().policy();
-        this.distributionMode = distributedCaffeine.getDistributionMode();
-        this.repository = distributedCaffeine.getAdapter().getRepository();
-        this.extendedPersistenceConfigurer = distributedCaffeine.getExtendedPersistenceConfigurer();
-        this.synchronizationLock = distributedCaffeine.getSynchronizationLock();
-        this.hasher = distributedCaffeine.getHasher();
-        this.executor = distributedCaffeine.getExecutor();
+    public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
+        this.cache = instanceRegistry.getCache();
+        this.policy = instanceRegistry.getCache().policy();
+        this.distributionMode = instanceRegistry.getDistributionMode();
+        this.repository = instanceRegistry.getAdapter().getRepository();
+        this.extendedPersistenceConfigurer = instanceRegistry.getExtendedPersistenceConfigurer();
+        this.synchronizationLock = instanceRegistry.getSynchronizationLock();
+        this.hasher = instanceRegistry.getHasher();
+        this.executor = instanceRegistry.getExecutor();
     }
 
     void activate() {
@@ -101,39 +97,42 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
 
     void deactivate() {
         isActivated.set(false);
-        currentCacheEntries.clear();
     }
 
     boolean isActivated() {
         return isActivated.get();
     }
 
-    V putDistributed(K key, V value) {
+    InternalValue<V> putDistributed(InternalKey<K> key, InternalValue<V> value) {
         putAllDistributed(Map.of(key, value));
         return value;
     }
 
-    Map<? extends K, ? extends V> putAllDistributed(Map<? extends K, ? extends V> map) {
+    Map<? extends InternalKey<K>, ? extends InternalValue<V>> putAllDistributed(
+            Map<? extends InternalKey<K>, ? extends InternalValue<V>> map) {
         publishCacheEntries(map, CACHED, true);
         return map;
     }
 
-    V putDistributedLoaded(K key, V value) {
+    InternalValue<V> putDistributedLoaded(InternalKey<K> key, InternalValue<V> value) {
         putAllDistributedLoaded(Map.of(key, value));
         return value;
     }
 
-    Map<? extends K, ? extends V> putAllDistributedLoaded(Map<? extends K, ? extends V> map) {
+    Map<? extends InternalKey<K>, ? extends InternalValue<V>> putAllDistributedLoaded(
+            Map<? extends InternalKey<K>, ? extends InternalValue<V>> map) {
         publishCacheEntries(map, CACHED_LOADED, true);
         return map;
     }
 
-    Map<? extends K, ? extends V> putAllDistributedRefresh(Map<? extends K, ? extends V> map) {
+    Map<? extends InternalKey<K>, ? extends InternalValue<V>> putAllDistributedRefresh(
+            Map<? extends InternalKey<K>, ? extends InternalValue<V>> map) {
         publishCacheEntries(map, CACHED_REFRESHED, true);
         return map;
     }
 
-    V putDistributedRefreshAfterWrite(K key, V newValue, V oldValue) {
+    InternalValue<V> putDistributedRefreshAfterWrite(InternalKey<K> key, InternalValue<V> newValue,
+                                                     InternalValue<V> oldValue) {
         // special handling (activated, async, old value, not managed, no cache change)
         if (isActivated()) {
             if (distributionMode.isPopulationConsidered()) {
@@ -150,30 +149,30 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
         }
     }
 
-    K invalidateDistributed(K key) {
+    InternalKey<K> invalidateDistributed(InternalKey<K> key) {
         invalidateAllDistributed(Set.of(key));
         return key;
     }
 
-    Set<K> invalidateAllDistributed(Set<K> keys) {
-        Map<K, V> map = new HashMap<>(); // allow null values
+    Set<InternalKey<K>> invalidateAllDistributed(Set<InternalKey<K>> keys) {
+        Map<InternalKey<K>, InternalValue<V>> map = new HashMap<>(); // allow null values
         keys.forEach(key -> map.put(key, null));
         publishCacheEntries(map, INVALIDATED, true);
         return keys;
     }
 
-    Set<K> invalidateAllDistributedRefresh(Set<K> keys) {
-        Map<K, V> map = new HashMap<>(); // allow null values
+    Set<InternalKey<K>> invalidateAllDistributedRefresh(Set<InternalKey<K>> keys) {
+        Map<InternalKey<K>, InternalValue<V>> map = new HashMap<>(); // allow null values
         keys.forEach(key -> map.put(key, null));
         publishCacheEntries(map, INVALIDATED_REFRESHED, true);
         return keys;
     }
 
-    V invalidateDistributedRefreshAfterWrite(K key, V oldValue) {
+    InternalValue<V> invalidateDistributedRefreshAfterWrite(InternalKey<K> key, InternalValue<V> oldValue) {
         // special handling (activated, async, old value, not managed, no cache change)
         if (isActivated()) {
             if (distributionMode.isInvalidationConsidered()) {
-                Map<K, V> map = new HashMap<>(); // allow null values
+                Map<InternalKey<K>, InternalValue<V>> map = new HashMap<>(); // allow null values
                 map.put(key, null);
                 CompletableFuture.runAsync(() ->
                                 publishCacheEntries(map, INVALIDATED_REFRESHED_AFTER_WRITE, false),
@@ -189,7 +188,7 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
     }
 
     @SuppressWarnings("java:S3776")
-    void evictDistributed(K key, V value, RemovalCause removalCause) {
+    void evictDistributed(InternalKey<K> key, InternalValue<V> value, RemovalCause removalCause) {
         // special handling (activated, eviction support, async, not managed, cache change)
         if (isActivated() && (removalCause.equals(RemovalCause.SIZE) || removalCause.equals(RemovalCause.EXPIRED))) {
             Status status;
@@ -202,20 +201,13 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
                         ? EVICTED_SIZE
                         : EVICTED_TIME;
             }
-            CompletableFuture.runAsync(() -> {
-                // special handling of cache change
-                if (distributionMode.isPopulationConsidered() && !distributionMode.isEvictionConsidered()) {
-                    currentCacheEntries.compute(key, (k, meta) ->
-                            isNull(meta) || (meta.getStatus().isCached() && value == meta.getValue())
-                                    ? null
-                                    : meta);
-                }
-                publishCacheEntries(Map.of(key, value), status, false);
-            }, executor);
+            CompletableFuture.runAsync(() ->
+                    publishCacheEntries(Map.of(key, value), status, false), executor);
         }
     }
 
-    private void publishCacheEntries(Map<? extends K, ? extends V> map, Status status, boolean manage) {
+    private void publishCacheEntries(Map<? extends InternalKey<K>, ? extends InternalValue<V>> map, Status status,
+                                     boolean manage) {
         // extended persistence should work regardless of the distribution mode
         if (isActivated() && (status.isConsideredBy(distributionMode) || status.isEvictedExtended())) {
             if (manage) {
@@ -223,23 +215,27 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
             }
             Set<CacheEntry<K, V>> cacheEntries = map.entrySet().stream()
                     // do not distribute invalidation if value is already absent
-                    .filter(entry -> !(status.isInvalidated() && isNull(policy.getIfPresentQuietly(entry.getKey()))))
-                    .map(entry -> CacheEntry.of(
-                            null, // TODO discriminator
-                            hasher.getHash(entry.getKey()),
-                            manage ? secureRandom.nextInt() : null,
-                            (K) entry.getKey(),
-                            (V) entry.getValue(),
-                            status,
-                            Instant.now()))
+                    .filter(entry ->
+                            !(status.isInvalidated() && isNull(policy.getIfPresentQuietly(entry.getKey()))))
+                    .map(entry -> {
+                        // operation is used for self-echo filter
+                        Integer operation = manage ? secureRandom.nextInt() : null;
+                        InternalValue<V> value = entry.getValue();
+                        if (nonNull(value)) {
+                            value.setOperation(operation);
+                        }
+                        return CacheEntry.of(
+                                null, // TODO discriminator
+                                hasher.getHash(k(entry.getKey())),
+                                operation,
+                                k(entry.getKey()),
+                                v(value),
+                                status,
+                                Instant.now());
+                    })
                     .collect(toSet());
             if (!cacheEntries.isEmpty()) {
                 runFailable(() -> repository.upsertCacheEntries(cacheEntries));
-                if (manage) {
-                    currentCacheEntries.putAll(cacheEntries.stream()
-                            .map(cacheEntry -> entry(cacheEntry.getKey(), Meta.of(cacheEntry)))
-                            .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
-                }
             }
         }
     }
@@ -249,23 +245,23 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
     public void retrieveCacheEntries(Collection<CacheEntry<K, V>> cacheEntries) {
         if (isActivated()) {
             synchronizationLock.runLocked(() -> {
-                Map<K, V> toAdd = new HashMap<>();
-                Set<K> toRemove = new HashSet<>();
+                Map<InternalKey<K>, InternalValue<V>> toAdd = new HashMap<>();
+                Set<InternalKey<K>> toRemove = new HashSet<>();
                 cacheEntries.stream()
                         .filter(cacheEntry -> cacheEntry.getStatus().isConsideredBy(distributionMode))
                         .forEach(cacheEntry -> {
-                            K key = cacheEntry.getKey();
-                            Meta<V> meta = currentCacheEntries.put(key, Meta.of(cacheEntry));
-                            if (isNull(meta) || isNull(meta.getOperation())
-                                    || !meta.getOperation().equals(cacheEntry.getOperation())) {
-                                if (cacheEntry.isCached()) {
-                                    V value = cacheEntry.getValue();
-                                    toAdd.put(key, value);
-                                } else {
-                                    // only remove from cache if value is present
-                                    if (nonNull(policy.getIfPresentQuietly(key))) {
-                                        toRemove.add(key);
-                                    }
+                            InternalKey<K> key = ik(cacheEntry.getKey());
+                            if (cacheEntry.isCached()) {
+                                InternalValue<V> present = policy.getIfPresentQuietly(key);
+                                Integer operation = cacheEntry.getOperation();
+                                // self-echo filter
+                                if (isNull(present) || isNull(operation) || !operation.equals(present.getOperation())) {
+                                    toAdd.put(key, iv(cacheEntry.getValue()).setOperation(operation));
+                                }
+                            } else {
+                                // only remove from cache if value is present
+                                if (nonNull(policy.getIfPresentQuietly(key))) {
+                                    toRemove.add(key);
                                 }
                             }
                         });
@@ -286,57 +282,15 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
                     CACHED_GROUP,
                     null,
                     true))) {
-                cacheEntryStream
-                        .filter(cacheEntry -> !currentCacheEntries.containsKey(cacheEntry.getKey()))
-                        .forEach(cacheEntries::add);
+                cacheEntryStream.forEach(cacheEntries::add);
             }
             retrieveCacheEntries(cacheEntries);
-            cache.asMap().keySet().removeIf(key -> !currentCacheEntries.containsKey(key));
         }
     }
 
-    void cleanup(Duration shortLivingDuration) {
+    void cleanup() {
         if (isActivated()) {
             cache.cleanUp();
-            // TODO check in tests
-            currentCacheEntries.values().removeIf(meta ->
-                    !meta.getStatus().isCached()
-                            && meta.getTimestamp().isBefore(Instant.now().minus(shortLivingDuration)));
-        }
-    }
-
-    private static class Meta<V> {
-
-        private final Status status;
-        private final Integer operation;
-        private final WeakReference<V> value;
-        private final Instant timestamp;
-
-        private Meta(Integer operation, Status status, V value) {
-            this.operation = operation;
-            this.status = status;
-            this.value = new WeakReference<>(value);
-            this.timestamp = Instant.now();
-        }
-
-        private Integer getOperation() {
-            return operation;
-        }
-
-        private Status getStatus() {
-            return status;
-        }
-
-        private Instant getTimestamp() {
-            return timestamp;
-        }
-
-        public V getValue() {
-            return value.get();
-        }
-
-        private static <V> Meta<V> of(CacheEntry<?, V> cacheEntry) {
-            return new Meta<>(cacheEntry.getOperation(), cacheEntry.getStatus(), cacheEntry.getValue());
         }
     }
 }

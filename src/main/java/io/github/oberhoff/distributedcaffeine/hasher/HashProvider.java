@@ -30,11 +30,11 @@ import java.util.function.Supplier;
 public interface HashProvider<K> {
 
     /**
-     * Returns a hash for the specified key using the specified  hasher for computing.
+     * Returns a hash for the specified key using the supplied hasher for computing.
      *
-     * @param hasher the hasher used to compute the cache
      * @param key    the key to compute a hash for
+     * @param hasher the supplier for a hasher to compute the hash
      * @return the hash
      */
-    String getHash(Supplier<Hasher> hasher, K key);
+    String getHash(K key, Supplier<Hasher> hasher);
 }

@@ -70,6 +70,24 @@ public interface Repository<K, V> extends IdentifierAware, SerializerAware<K, V>
                                                 boolean orderByTimestampAsc) throws Exception;
 
     /**
+     * Updates status of cache entries from the underlying store that match the specified parameters. The operation
+     * field must be set to {@code null} and the timestamp field must be set to a current value for updated cache
+     * entries.
+     * <p>
+     * <b>Note:</b> Parameters expect conditional handling, see details below.
+     *
+     * @param discriminator the discriminator to filter by (filter must respect {@code null})
+     * @param hashes        the hashes to filter by ({@code null} means to omit this filter)
+     * @param statuses      the statuses to filter by ({@code null} means to omit this filter)
+     * @param olderThan     the timestamp to filter (older cache entries) by ({@code null} means to omit this filter)
+     * @param newStatus     the new status to update
+     * @throws Exception if updating fails
+     */
+    void updateStatusOfCacheEntries(@Nullable String discriminator, @Nullable Set<String> hashes,
+                                    @Nullable Set<Status> statuses, @Nullable Instant olderThan,
+                                    Status newStatus) throws Exception;
+
+    /**
      * Deletes cache entries from the underlying store that match the specified parameters.
      * <p>
      * <b>Note:</b> Parameters expect conditional handling, see details below.
