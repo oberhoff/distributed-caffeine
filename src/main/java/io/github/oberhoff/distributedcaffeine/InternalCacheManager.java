@@ -24,15 +24,16 @@ import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.adapter.Retriever;
 
-import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
 
@@ -56,13 +57,11 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.I
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED_AFTER_WRITE;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
-import static java.util.stream.Collectors.toSet;
 
 @SuppressWarnings("java:S1452")
 class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retriever<K, V> {
 
     private final AtomicBoolean isActivated;
-    private final SecureRandom secureRandom;
 
     private Cache<InternalKey<K>, InternalValue<V>> cache;
     private Policy<InternalKey<K>, InternalValue<V>> policy;
@@ -75,7 +74,6 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
 
     InternalCacheManager() {
         this.isActivated = new AtomicBoolean(false);
-        this.secureRandom = new SecureRandom();
         // see also initialize()
     }
 
@@ -213,27 +211,31 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
             if (manage) {
                 synchronizationLock.ensureLock();
             }
-            Set<CacheEntry<K, V>> cacheEntries = map.entrySet().stream()
+            List<CacheEntry<K, V>> cacheEntries = map.entrySet().stream()
                     // do not distribute invalidation if value is already absent
                     .filter(entry ->
                             !(status.isInvalidated() && isNull(policy.getIfPresentQuietly(entry.getKey()))))
                     .map(entry -> {
-                        // operation is used for self-echo filter
-                        Integer operation = manage ? secureRandom.nextInt() : null;
+                        // operation is used for self-echo filter (non-cryptographic collision marker)
+                        Integer operation = manage ? ThreadLocalRandom.current().nextInt() : null;
                         InternalValue<V> value = entry.getValue();
                         if (nonNull(value)) {
                             value.setOperation(operation);
                         }
                         return CacheEntry.of(
                                 null, // TODO discriminator
-                                hasher.getHash(k(entry.getKey())),
+                                // memoizing overload: reuses the hash cached on the key instance (e.g. stamped when
+                                // the entry was put/loaded/retrieved) instead of recomputing it under the lock
+                                hasher.getHash(entry.getKey()),
                                 operation,
                                 k(entry.getKey()),
                                 v(value),
                                 status,
                                 Instant.now());
                     })
-                    .collect(toSet());
+                    // toList (not a set): entries are unique per key, so no dedup is needed and this avoids
+                    // computing CacheEntry hashCode/equals on the write path
+                    .toList();
             if (!cacheEntries.isEmpty()) {
                 runFailable(() -> repository.upsertCacheEntries(cacheEntries));
             }
@@ -241,16 +243,22 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
     }
 
     @Override
-    @SuppressWarnings("java:S3776")
     public void retrieveCacheEntries(Collection<CacheEntry<K, V>> cacheEntries) {
+        retrieveCacheEntries(cacheEntries.stream());
+    }
+
+    @SuppressWarnings("java:S3776")
+    private void retrieveCacheEntries(Stream<CacheEntry<K, V>> cacheEntries) {
         if (isActivated()) {
             synchronizationLock.runLocked(() -> {
                 Map<InternalKey<K>, InternalValue<V>> toAdd = new HashMap<>();
                 Set<InternalKey<K>> toRemove = new HashSet<>();
-                cacheEntries.stream()
+                cacheEntries
                         .filter(cacheEntry -> cacheEntry.getStatus().isConsideredBy(distributionMode))
                         .forEach(cacheEntry -> {
-                            InternalKey<K> key = ik(cacheEntry.getKey());
+                            // propagate the store's hash onto the key so it is never recomputed for this entry
+                            // (e.g. when it is later evicted or re-published from this instance)
+                            InternalKey<K> key = ik(cacheEntry.getKey()).setHash(cacheEntry.getHash());
                             if (cacheEntry.isCached()) {
                                 InternalValue<V> present = policy.getIfPresentQuietly(key);
                                 Integer operation = cacheEntry.getOperation();
@@ -275,16 +283,16 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
         if (isActivated() && distributionMode.isPopulationConsidered()) {
             synchronizationLock.ensureLock();
             // TODO discriminator
-            Set<CacheEntry<K, V>> cacheEntries = new HashSet<>();
+            // process the store cursor directly instead of buffering it into a set first (avoids a second full copy
+            // in memory and the needless CacheEntry hashCode/equals a set would compute)
             try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
                     null,
                     null,
                     CACHED_GROUP,
                     null,
                     true))) {
-                cacheEntryStream.forEach(cacheEntries::add);
+                retrieveCacheEntries(cacheEntryStream);
             }
-            retrieveCacheEntries(cacheEntries);
         }
     }
 

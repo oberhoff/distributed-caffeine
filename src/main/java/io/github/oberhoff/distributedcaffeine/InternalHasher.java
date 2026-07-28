@@ -21,6 +21,7 @@ import io.github.oberhoff.distributedcaffeine.hasher.Hasher;
 
 import java.util.Set;
 
+import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
 import static java.util.Objects.nonNull;
 import static java.util.stream.Collectors.toSet;
 
@@ -30,6 +31,15 @@ class InternalHasher<K> {
 
     InternalHasher(HashProvider<K> hashProvider) {
         this.hashProvider = hashProvider;
+    }
+
+    // memoizing variant: reuse the hash cached on the key (or the one propagated from a store entry), otherwise
+    // compute it once and cache it on the key instance for subsequent hashings
+    String getHash(InternalKey<K> key) {
+        String hash = key.getHash();
+        return nonNull(hash)
+                ? hash
+                : key.setHash(getHash(k(key))).getHash();
     }
 
     String getHash(K key) {

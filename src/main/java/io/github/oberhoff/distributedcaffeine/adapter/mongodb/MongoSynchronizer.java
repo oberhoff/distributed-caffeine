@@ -71,6 +71,7 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
     private static final String CLUSTER_TIME = "clusterTime";
     private static final String OPERATION_TYPE = "operationType";
     private static final String FULL_DOCUMENT = "fullDocument";
+    private static final List<Bson> AGGREGATION_PIPELINE = buildAggregationPipeline();
 
     private final MongoCollection<Document> mongoCollection;
     private final AtomicBoolean isActivated;
@@ -156,11 +157,11 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
         // get change stream iterable based on optional operation time
         ChangeStreamIterable<Document> changeStreamIterable;
         if (nonNull(operationTime.get())) {
-            changeStreamIterable = mongoCollection.watch(getAggregationPipeline())
+            changeStreamIterable = mongoCollection.watch(AGGREGATION_PIPELINE)
                     .startAtOperationTime(requireNonNull(operationTime.get()))
                     .fullDocument(FullDocument.UPDATE_LOOKUP);
         } else {
-            changeStreamIterable = mongoCollection.watch(getAggregationPipeline())
+            changeStreamIterable = mongoCollection.watch(AGGREGATION_PIPELINE)
                     .fullDocument(FullDocument.UPDATE_LOOKUP);
         }
         // get the cursor to iterate over inbound change stream documents
@@ -191,13 +192,14 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
         }
     }
 
-    private List<Bson> getAggregationPipeline() {
+    // the pipeline is constant (no runtime parameters), so it is built once instead of on every watch()
+    private static List<Bson> buildAggregationPipeline() {
         List<String> projectionFields = new ArrayList<>();
         projectionFields.add(DOCUMENT_KEY);
         projectionFields.add(CLUSTER_TIME);
         projectionFields.add(OPERATION_TYPE);
         projectionFields.addAll(Stream.of(Field.values())
-                .map(this::fullDocument)
+                .map(MongoSynchronizer::fullDocument)
                 .toList());
         return List.of(
                 Aggregates.match(
@@ -210,7 +212,7 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
                                 Projections.include(projectionFields))));
     }
 
-    private String fullDocument(Field field) {
+    private static String fullDocument(Field field) {
         return format("%s.%s", FULL_DOCUMENT, field);
     }
 }

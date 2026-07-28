@@ -99,6 +99,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -986,6 +987,67 @@ final class DistributedCaffeineIntegrationTests {
                                             .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("counted"))));
         }
 
+        @DisplayName("Test refresh() coalesces concurrent operations per key")
+        @Test
+        void test_DistributedLoadingCache_refresh_coalesces_concurrent_operations_per_key() throws Exception {
+            CountDownLatch reloadStarted = new CountDownLatch(1);
+            CountDownLatch releaseReload = new CountDownLatch(1);
+            AtomicInteger reloadInvocations = new AtomicInteger(0);
+
+            // reload blocks until released, so multiple refresh() calls issued in the meantime coalesce onto the
+            // single in-flight operation for the key
+            @SuppressWarnings("Convert2Lambda")
+            CacheLoader<Key, Value> cacheLoader = new CacheLoader<>() {
+                @Override
+                public Value load(Key key) {
+                    return Value.of(key.getId());
+                }
+
+                @Override
+                public CompletableFuture<? extends Value> asyncReload(Key key, Value oldValue, Executor executor) {
+                    reloadInvocations.incrementAndGet();
+                    return CompletableFuture.supplyAsync(() -> {
+                        reloadStarted.countDown();
+                        try {
+                            releaseReload.await();
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new CompletionException(e);
+                        }
+                        return Value.of(key.getId(), "reloaded");
+                    }, executor);
+                }
+            };
+
+            DistributedLoadingCache<Key, Value> distributedLoadingCache = (DistributedLoadingCache<Key, Value>) this.<Key, Value>createCache(
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
+                            .recordStats()),
+                    dc -> dc.build(cacheLoader));
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+            distributedLoadingCache.put(key1, value1);
+
+            // first refresh starts the (blocked) reload
+            CompletableFuture<Value> refresh1 = distributedLoadingCache.refresh(key1);
+            reloadStarted.await();
+            // further refreshes while the reload is in flight must coalesce onto the same operation
+            CompletableFuture<Value> refresh2 = distributedLoadingCache.refresh(key1);
+            CompletableFuture<Value> refresh3 = distributedLoadingCache.refresh(key1);
+
+            releaseReload.countDown();
+            CompletableFuture.allOf(refresh1, refresh2, refresh3).join();
+
+            await("coalesced refresh")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        // three refresh() calls for the same key triggered only one reload
+                        assertThat(reloadInvocations).hasValue(1);
+                        // and a load success is recorded exactly once, not once per coalesced refresh
+                        assertThat(distributedLoadingCache.stats().loadSuccessCount()).isEqualTo(1);
+                    });
+        }
+
         @DisplayName("Test refreshAll() with cache loader")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentSerializers")
@@ -1801,6 +1863,146 @@ final class DistributedCaffeineIntegrationTests {
 
             assertThatDataStoreHasCounts(
                     Count.empty());
+        }
+
+        @DisplayName("Test computeIfAbsent(), computeIfPresent(), compute() and merge()")
+        @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
+        @MethodSource("provideCacheFactoriesWithDifferentSerializers")
+        void test_ConcurrentMap_compute_and_merge(CacheFactory<Key, Value> cacheFactory) {
+            DistributedCache<Key, Value> distributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+            DistributedCache<Key, Value> syncedDistributedCache = cacheFactory.create(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+            Cache<Key, Value> caffeineCache = Caffeine.newBuilder()
+                    .build();
+
+            List<ConcurrentMap<Key, Value>> allMaps = List.of(distributedCache.asMap(), syncedDistributedCache.asMap(), caffeineCache.asMap());
+            List<ConcurrentMap<Key, Value>> featureParityMaps = List.of(distributedCache.asMap(), caffeineCache.asMap());
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+            Key key2 = Key.of(2);
+            Key key3 = Key.of(3);
+            Key key4 = Key.of(4);
+            Value value4 = Value.of(4);
+            Key key5 = Key.of(5);
+            Key key6 = Key.of(6);
+            Value value6 = Value.of(6);
+            Key key7 = Key.of(7);
+            Value value7 = Value.of(7);
+            Value value7updated = Value.of(7, "updated");
+            Key key8 = Key.of(8);
+            Value value8 = Value.of(8);
+            Key key9 = Key.of(9);
+            Value value9 = Value.of(9);
+            Value value9updated = Value.of(9, "updated");
+            Key key10 = Key.of(10);
+            Value value10 = Value.of(10);
+            Key key11 = Key.of(11);
+            Value value11 = Value.of(11);
+            Key key12 = Key.of(12);
+            Value value12 = Value.of(12);
+            Value value12merged = Value.of(12, "merged");
+
+            // computeIfAbsent: absent -> computed / present -> not computed / mapping returns null -> no mapping
+            EqualResult<Key, Value> computeIfAbsent1x1 = new EqualResult<>();
+            EqualResult<Key, Value> computeIfAbsent1x2 = new EqualResult<>();
+            EqualResult<Key, Value> computeIfAbsent2x1 = new EqualResult<>();
+            // computeIfPresent: absent -> not computed / present -> updated / remapping returns null -> removed
+            EqualResult<Key, Value> computeIfPresent3x1 = new EqualResult<>();
+            EqualResult<Key, Value> computeIfPresent7x1 = new EqualResult<>();
+            EqualResult<Key, Value> computeIfPresent8x1 = new EqualResult<>();
+            // compute: absent -> computed / absent, returns null -> no mapping / present -> updated / present, returns null -> removed
+            EqualResult<Key, Value> compute4x1 = new EqualResult<>();
+            EqualResult<Key, Value> compute5x1 = new EqualResult<>();
+            EqualResult<Key, Value> compute9x1 = new EqualResult<>();
+            EqualResult<Key, Value> compute10x1 = new EqualResult<>();
+            // merge: absent -> value (remap not called) / present -> remapped / remapping returns null -> removed
+            EqualResult<Key, Value> merge6x1 = new EqualResult<>();
+            EqualResult<Key, Value> merge12x1 = new EqualResult<>();
+            EqualResult<Key, Value> merge11x1 = new EqualResult<>();
+
+            featureParityMaps.forEach(map -> {
+                assertThatNullPointerException().isThrownBy(() -> map.computeIfAbsent(_null(), key -> Value.of(0)));
+                assertThatNullPointerException().isThrownBy(() -> map.computeIfAbsent(Key.of(0), _null()));
+                assertThatNullPointerException().isThrownBy(() -> map.computeIfPresent(_null(), (key, value) -> value));
+                assertThatNullPointerException().isThrownBy(() -> map.computeIfPresent(Key.of(0), _null()));
+                assertThatNullPointerException().isThrownBy(() -> map.compute(_null(), (key, value) -> value));
+                assertThatNullPointerException().isThrownBy(() -> map.compute(Key.of(0), _null()));
+                assertThatNullPointerException().isThrownBy(() -> map.merge(_null(), Value.of(0), (oldValue, value) -> value));
+                assertThatNullPointerException().isThrownBy(() -> map.merge(Key.of(0), _null(), (oldValue, value) -> value));
+                assertThatNullPointerException().isThrownBy(() -> map.merge(Key.of(0), Value.of(0), _null()));
+
+                // computeIfAbsent
+                computeIfAbsent1x1.setValue(map.computeIfAbsent(key1, key -> value1));                    // absent -> computed
+                computeIfAbsent1x2.setValue(map.computeIfAbsent(key1, key -> Value.of(0)));                // present -> not computed
+                computeIfAbsent2x1.setValue(map.computeIfAbsent(key2, key -> null));                       // absent, returns null -> no mapping
+
+                // computeIfPresent
+                computeIfPresent3x1.setValue(map.computeIfPresent(key3, (key, value) -> Value.of(0)));     // absent -> not computed
+                map.put(key7, value7);
+                computeIfPresent7x1.setValue(map.computeIfPresent(key7, (key, value) -> value7updated));   // present -> updated
+                map.put(key8, value8);
+                computeIfPresent8x1.setValue(map.computeIfPresent(key8, (key, value) -> null));            // present, returns null -> removed
+
+                // compute
+                compute4x1.setValue(map.compute(key4, (key, value) -> value4));                            // absent -> computed
+                compute5x1.setValue(map.compute(key5, (key, value) -> null));                              // absent, returns null -> no mapping
+                map.put(key9, value9);
+                compute9x1.setValue(map.compute(key9, (key, value) -> value9updated));                     // present -> updated
+                map.put(key10, value10);
+                compute10x1.setValue(map.compute(key10, (key, value) -> null));                            // present, returns null -> removed
+
+                // merge
+                merge6x1.setValue(map.merge(key6, value6, (oldValue, value) -> Value.of(0)));              // absent -> value (remap not called)
+                map.put(key12, value12);
+                merge12x1.setValue(map.merge(key12, Value.of(0), (oldValue, value) -> value12merged));     // present -> remapped
+                map.put(key11, value11);
+                merge11x1.setValue(map.merge(key11, Value.of(0), (oldValue, value) -> null));              // present, remap returns null -> removed
+            });
+
+            await("synchronization between cache instances")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        allMaps.forEach(map -> {
+                            assertThat(map).hasSize(6);
+                            assertThat(map.get(key1)).isEqualTo(value1);
+                            assertThat(map.get(key2)).isNull();
+                            assertThat(map.get(key3)).isNull();
+                            assertThat(map.get(key4)).isEqualTo(value4);
+                            assertThat(map.get(key5)).isNull();
+                            assertThat(map.get(key6)).isEqualTo(value6);
+                            assertThat(map.get(key7)).isEqualTo(value7updated);
+                            assertThat(map.get(key8)).isNull();
+                            assertThat(map.get(key9)).isEqualTo(value9updated);
+                            assertThat(map.get(key10)).isNull();
+                            assertThat(map.get(key11)).isNull();
+                            assertThat(map.get(key12)).isEqualTo(value12merged);
+                            assertThat(computeIfAbsent1x1.getValue()).isEqualTo(value1);
+                            assertThat(computeIfAbsent1x2.getValue()).isEqualTo(value1);
+                            assertThat(computeIfAbsent2x1.getValue()).isNull();
+                            assertThat(computeIfPresent3x1.getValue()).isNull();
+                            assertThat(computeIfPresent7x1.getValue()).isEqualTo(value7updated);
+                            assertThat(computeIfPresent8x1.getValue()).isNull();
+                            assertThat(compute4x1.getValue()).isEqualTo(value4);
+                            assertThat(compute5x1.getValue()).isNull();
+                            assertThat(compute9x1.getValue()).isEqualTo(value9updated);
+                            assertThat(compute10x1.getValue()).isNull();
+                            assertThat(merge6x1.getValue()).isEqualTo(value6);
+                            assertThat(merge12x1.getValue()).isEqualTo(value12merged);
+                            assertThat(merge11x1.getValue()).isNull();
+                        });
+                        assertThatDataStoreHasCounts(
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(6)),
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(3)));
+                    });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(6)));
         }
 
         @DisplayName("Test keySet()")
@@ -5668,37 +5870,6 @@ final class DistributedCaffeineIntegrationTests {
             return prefix.isBlank()
                     ? time
                     : String.join(delimiter, prefix, time);
-        }
-
-        <T, R> R injectSpy(Object instanceObject, Class<T> instanceClass, String fieldName, Class<? super R> fieldClass) {
-            R spy = spy(readFieldValue(instanceObject, instanceClass, fieldName, fieldClass));
-            writeFieldValue(instanceObject, instanceClass, fieldName, spy);
-            return spy;
-        }
-
-        @SuppressWarnings("unchecked")
-        <T, R> R readFieldValue(Object instanceObject, Class<T> instanceClass, String fieldName, Class<? super R> fieldClass) {
-            return (R) ReflectionUtils.tryToReadFieldValue(instanceClass, fieldName, instanceClass.cast(instanceObject))
-                    .toOptional()
-                    .filter(fieldClass::isInstance)
-                    .orElseThrow(NoSuchFieldError::new);
-        }
-
-        <T> void writeFieldValue(Object instanceObject, Class<T> instanceClass, String fieldName, Object fieldValue) {
-            Predicate<Field> fieldPredicate = field -> field.getName().equals(fieldName);
-            Field field = ReflectionUtils.streamFields(instanceClass, fieldPredicate, HierarchyTraversalMode.TOP_DOWN)
-                    .findFirst()
-                    .orElseThrow(NoSuchFieldError::new);
-            ReflectionUtils.makeAccessible(field);
-            runFailable(() -> field.set(instanceObject, fieldValue));
-        }
-
-        @SuppressWarnings({"unchecked", "UnusedReturnValue", "SameParameterValue"})
-        <T, R> R invokeMethod(Object instanceObject, Class<T> instanceClass, String methodName, List<Class<?>> parameterClasses, List<Object> parameterObjects) {
-            return (R) ReflectionUtils.invokeMethod(
-                    ReflectionUtils.findMethod(instanceClass, methodName, parameterClasses.toArray(Class[]::new))
-                            .orElseThrow(NoSuchMethodError::new),
-                    instanceObject, parameterObjects.toArray(Object[]::new));
         }
 
         @SuppressWarnings("unused")

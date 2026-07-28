@@ -29,15 +29,18 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.stream.Stream;
 
+import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
 import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.im;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullMap;
-import static io.github.oberhoff.distributedcaffeine.InternalUtils.s;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_EXTENDED_GROUP;
 import static java.util.Objects.nonNull;
+import static java.util.stream.Collectors.toCollection;
+import static java.util.stream.Collectors.toMap;
+import static java.util.stream.Collectors.toSet;
 
 @SuppressWarnings("java:S1450")
 class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalValue<V>>,
@@ -75,7 +78,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalV
     @SuppressWarnings({"java:S2583"})
     public InternalValue<V> load(InternalKey<K> key) throws Exception {
         V value = extendedPersistenceConfigurer.hasCacheLoaderStrategy()
-                ? loadExtendedFromStore(k(key))
+                ? loadExtendedFromStore(key)
                 : null;
         value = nonNull(value)
                 ? value
@@ -90,9 +93,11 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalV
     public Map<? extends InternalKey<K>, ? extends InternalValue<V>> loadAll(Set<? extends InternalKey<K>> keys)
             throws Exception {
         HashMap<K, V> keyToValue = new HashMap<>();
-        Set<K> keysToLoad = new HashSet<>(s(keys));
+        Set<K> keysToLoad = keys.stream()
+                .map(InternalKey::k)
+                .collect(toCollection(HashSet::new));
         if (extendedPersistenceConfigurer.hasCacheLoaderStrategy()) {
-            keyToValue.putAll(loadAllExtendedFromStore(keysToLoad));
+            keyToValue.putAll(loadAllExtendedFromStore(keys));
             keysToLoad.removeAll(keyToValue.keySet());
         }
         if (!keysToLoad.isEmpty()) {
@@ -137,7 +142,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalV
     public CompletableFuture<? extends InternalValue<V>> asyncReload(InternalKey<K> key, InternalValue<V> oldValue,
                                                                      Executor executor) {
         return (extendedPersistenceConfigurer.hasCacheLoaderStrategy()
-                ? CompletableFuture.supplyAsync(() -> loadExtendedFromStore(k(key)), executor)
+                ? CompletableFuture.supplyAsync(() -> loadExtendedFromStore(key), executor)
                 : CompletableFuture.completedFuture((V) null))
                 .thenComposeAsync(newValue -> nonNull(newValue)
                                 ? CompletableFuture.completedFuture(newValue)
@@ -157,7 +162,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalV
     @SuppressWarnings("unchecked")
     CompletableFuture<V> asyncLoadDelegated(K key, Executor executor) {
         return (extendedPersistenceConfigurer.hasCacheLoaderStrategy()
-                ? CompletableFuture.supplyAsync(() -> loadExtendedFromStore(key), executor)
+                ? CompletableFuture.supplyAsync(() -> loadExtendedFromStore(ik(key)), executor)
                 : CompletableFuture.completedFuture((V) null))
                 .thenComposeAsync(newValue -> nonNull(newValue)
                                 ? CompletableFuture.completedFuture(newValue)
@@ -170,7 +175,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalV
     @SuppressWarnings("unchecked")
     CompletableFuture<V> asyncReloadDelegated(K key, V oldValue, Executor executor) {
         return (extendedPersistenceConfigurer.hasCacheLoaderStrategy()
-                ? CompletableFuture.supplyAsync(() -> loadExtendedFromStore(key), executor)
+                ? CompletableFuture.supplyAsync(() -> loadExtendedFromStore(ik(key)), executor)
                 : CompletableFuture.completedFuture((V) null))
                 .thenComposeAsync(newValue -> nonNull(newValue)
                                 ? CompletableFuture.completedFuture(newValue)
@@ -186,21 +191,26 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalV
         return !defaultLoadAll.equals(instanceLoadAll);
     }
 
-    private V loadExtendedFromStore(K key) {
-        return loadAllExtendedFromStore(Set.of(key)).get(key);
+    private V loadExtendedFromStore(InternalKey<K> key) {
+        return loadAllExtendedFromStore(Set.of(key)).get(k(key));
     }
 
-    private Map<? extends K, ? extends V> loadAllExtendedFromStore(Set<? extends K> keys) {
+    private Map<K, V> loadAllExtendedFromStore(Set<? extends InternalKey<K>> keys) {
+        // the memoizing overload caches each hash on its key instance, so a subsequent publish that reuses the same
+        // instance (putDistributedLoaded / refreshAfterWrite on the single-key load path) does not recompute it
+        Set<String> hashes = keys.stream()
+                .map(hasher::getHash)
+                .collect(toSet());
         // TODO discriminator
         try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
                 null,
-                hasher.getHashes(keys),
+                hashes,
                 EVICTED_EXTENDED_GROUP,
                 null,
                 false))) {
             return cacheEntryStream
-                    .collect(HashMap::new, (hashMap, cacheEntry) -> // allow null values
-                            hashMap.put(cacheEntry.getKey(), cacheEntry.getValue()), HashMap::putAll);
+                    .filter(cacheEntry -> nonNull(cacheEntry.getValue()))
+                    .collect(toMap(CacheEntry::getKey, CacheEntry::getValue));
         }
     }
 }

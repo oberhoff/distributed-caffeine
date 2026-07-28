@@ -26,13 +26,16 @@ import io.github.oberhoff.distributedcaffeine.common.DistributedCaffeineCommonTe
 import io.github.oberhoff.distributedcaffeine.common.Key;
 import io.github.oberhoff.distributedcaffeine.common.Value;
 import io.github.oberhoff.distributedcaffeine.hasher.Hasher;
+import io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
+import org.bson.Document;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 import java.time.Duration;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -343,6 +346,44 @@ final class DistributedCaffeineUnitTests {
             assertThatException().isThrownBy(() -> new Hasher().getHash())
                     .isExactlyInstanceOf(IllegalStateException.class)
                     .withMessage("Nothing to hash");
+        }
+
+        @DisplayName("that populated hash stream returns a hash")
+        @Test
+        void test_Hasher_populated_hash_stream_returns_hash() {
+            String hash = new Hasher().putString("something").getHash();
+            assertThat(hash).isNotBlank().hasSize(32);
+        }
+    }
+
+    @Nested
+    @DisplayName("Test MongoRepository")
+    final class MongoRepositoryUnit extends DistributedCaffeineUnitTestInstance {
+
+        @DisplayName("that binary JSON values round-trip through BSON conversion (including scalars)")
+        @Test
+        void test_MongoRepository_binary_json_round_trip() throws Exception {
+            // a scalar value stored as binary JSON must round-trip
+            assertBinaryJsonRoundTrip(new JacksonSerializer<>(String.class, true), "hello");
+            // an object value stored as binary JSON must round-trip
+            assertBinaryJsonRoundTrip(new JacksonSerializer<>(Value.class, true), Value.of(1));
+        }
+
+        private <T> void assertBinaryJsonRoundTrip(Serializer<T, ?> serializer, T original) throws Exception {
+            // MongoRepository (and its BSON conversion helpers) is package-private in another package, so the
+            // round-trip is exercised reflectively (via the inherited invokeMethod helper) without requiring a
+            // running MongoDB instance
+            Class<?> mongoRepositoryClass = Class.forName(
+                    "io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoRepository");
+
+            Object stored = invokeMethod(null, mongoRepositoryClass, "serializeToMongo",
+                    List.of(Object.class, Serializer.class), List.of(original, serializer));
+            Document document = new Document("value", stored);
+            Object roundTripped = invokeMethod(null, mongoRepositoryClass, "deserializeFromMongo",
+                    List.of(Document.class, String.class, Serializer.class), List.of(document, "value", serializer));
+
+            assertThat(roundTripped)
+                    .isEqualTo(original);
         }
     }
 

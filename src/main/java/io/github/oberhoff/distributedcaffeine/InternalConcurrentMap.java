@@ -24,6 +24,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 
 import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
 import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
@@ -34,7 +36,9 @@ import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNul
 import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
 import static java.util.Objects.isNull;
+import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toSet;
 
 class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyInitializer<K, V> {
@@ -54,18 +58,6 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
         this.synchronizationLock = instanceRegistry.getSynchronizationLock();
     }
 
-    /*
-    // TODO this methods should be atomic:
-    computeIfAbsent(K key, Function mappingFunction)
-    computeIfPresent(K key, BiFunction remappingFunction)
-    compute(K key, BiFunction remappingFunction)
-    merge(K key, V value, BiFunction remappingFunction)
-    putIfAbsent(K key, V value)
-    remove(Object key, Object value)
-    replace(K key, V oldValue, V newValue)
-    replace(K key, V value)
-    */
-
     @Override
     @SuppressWarnings("unchecked")
     public V get(Object key) {
@@ -76,8 +68,9 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
     public V put(K key, V value) {
         requireNonNull(key);
         requireNonNull(value);
+        InternalKey<K> internalKey = ik(key);
         return synchronizationLock.getLocked(() ->
-                v(concurrentMap.put(ik(key), cacheManager.putDistributed(ik(key), iv(value)))));
+                v(concurrentMap.put(internalKey, cacheManager.putDistributed(internalKey, iv(value)))));
     }
 
     @Override
@@ -90,22 +83,25 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
     @Override
     public V putIfAbsent(K key, V value) {
         requireNonNull(key);
-        if (!containsKey(key)) {
-            return put(key, value); // implicit distribution
-        } else {
-            return get(key);
-        }
+        requireNonNull(value);
+        // atomic check-then-act under the (reentrant) synchronization lock; map values are never null, so a
+        // non-null get() already proves presence (no separate containsKey needed)
+        return synchronizationLock.getLocked(() -> {
+            V oldValue = get(key);
+            return isNull(oldValue)
+                    ? put(key, value) // implicit distribution
+                    : oldValue;
+        });
     }
 
     @Override
     public V replace(K key, V value) {
         requireNonNull(key);
         requireNonNull(value);
-        if (containsKey(key)) {
-            return put(key, value); // implicit distribution
-        } else {
-            return null;
-        }
+        return synchronizationLock.getLocked(() ->
+                isNull(get(key))
+                        ? null
+                        : put(key, value)); // implicit distribution
     }
 
     @Override
@@ -113,12 +109,13 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
         requireNonNull(key);
         requireNonNull(oldValue);
         requireNonNull(newValue);
-        if (containsKey(key) && Objects.equals(get(key), oldValue)) {
-            put(key, newValue); // implicit distribution
-            return true;
-        } else {
+        return synchronizationLock.getLocked(() -> {
+            if (Objects.equals(get(key), oldValue)) {
+                put(key, newValue); // implicit distribution
+                return true;
+            }
             return false;
-        }
+        });
     }
 
     @Override
@@ -132,12 +129,93 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
     @Override
     public boolean remove(Object key, Object value) {
         requireNonNull(key);
-        if (containsKey(key) && Objects.equals(get(key), value)) {
-            remove(key); // implicit distribution
-            return true;
-        } else {
+        // atomic check-then-act; a null value never matches (map values are never null), so no exception is thrown
+        return synchronizationLock.getLocked(() -> {
+            V oldValue = get(key);
+            if (nonNull(oldValue) && Objects.equals(oldValue, value)) {
+                remove(key); // implicit distribution
+                return true;
+            }
             return false;
-        }
+        });
+    }
+
+    @Override
+    public V computeIfAbsent(K key, Function<? super K, ? extends V> mappingFunction) {
+        requireNonNull(key);
+        requireNonNull(mappingFunction);
+        // atomic under the (reentrant) synchronization lock; the mapping function is applied at most once, and the
+        // resulting change is distributed via put() - the inherited default is a non-atomic CAS-retry that may apply
+        // the function multiple times
+        return synchronizationLock.getLocked(() -> {
+            V oldValue = get(key);
+            if (nonNull(oldValue)) {
+                return oldValue;
+            }
+            V newValue = mappingFunction.apply(key);
+            if (nonNull(newValue)) {
+                put(key, newValue); // implicit distribution
+            }
+            return newValue;
+        });
+    }
+
+    @Override
+    public V computeIfPresent(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+        requireNonNull(key);
+        requireNonNull(remappingFunction);
+        return synchronizationLock.getLocked(() -> {
+            V oldValue = get(key);
+            if (isNull(oldValue)) {
+                return null;
+            }
+            V newValue = remappingFunction.apply(key, oldValue);
+            if (nonNull(newValue)) {
+                put(key, newValue); // implicit distribution
+                return newValue;
+            }
+            remove(key); // implicit distribution
+            return null;
+        });
+    }
+
+    @Override
+    public V compute(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+        requireNonNull(key);
+        requireNonNull(remappingFunction);
+        return synchronizationLock.getLocked(() -> {
+            V oldValue = get(key);
+            V newValue = remappingFunction.apply(key, oldValue);
+            if (nonNull(newValue)) {
+                put(key, newValue); // implicit distribution
+                return newValue;
+            }
+            if (nonNull(oldValue)) {
+                remove(key); // implicit distribution
+            }
+            return null;
+        });
+    }
+
+    @Override
+    public V merge(K key, V value, BiFunction<? super V, ? super V, ? extends V> remappingFunction) {
+        requireNonNull(key);
+        requireNonNull(value);
+        requireNonNull(remappingFunction);
+        return synchronizationLock.getLocked(() -> {
+            V oldValue = get(key);
+            V newValue = (isNull(oldValue))
+                    ? value
+                    : remappingFunction.apply(oldValue, value);
+            if (nonNull(newValue)) {
+                put(key, newValue); // implicit distribution
+            } else {
+                // newValue can only be null when the remapping function ran, which implies oldValue was present
+                // (value is non-null), so there is always a mapping to remove here
+                remove(key); // implicit distribution
+            }
+            return newValue;
+        });
     }
 
     @Override
@@ -392,12 +470,17 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyIn
 
     @Override
     public int hashCode() {
-        return m(concurrentMap).hashCode();
+        // InternalKey/InternalValue delegate hashCode() to the wrapped key/value, so the underlying map already
+        // satisfies the Map.hashCode() contract (sum of key.hashCode() ^ value.hashCode()) without unwrapping
+        return concurrentMap.hashCode();
     }
 
     @Override
     public String toString() {
-        return m(concurrentMap).toString();
+        // render directly in the standard '{key=value, ...}' format without materializing an unwrapped copy
+        return concurrentMap.entrySet().stream()
+                .map(entry -> k(entry.getKey()) + "=" + v(entry.getValue()))
+                .collect(joining(", ", "{", "}"));
     }
 
     @SuppressWarnings("java:S2160")

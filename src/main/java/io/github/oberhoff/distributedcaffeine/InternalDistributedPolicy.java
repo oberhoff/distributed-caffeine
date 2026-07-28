@@ -32,6 +32,7 @@ import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullIterable;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_EXTENDED_GROUP;
+import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
 @SuppressWarnings("java:S1450")
@@ -105,6 +106,7 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
                 null,
                 false))) {
             return cacheEntryStream
+                    .filter(cacheEntry -> nonNull(cacheEntry.getValue()))
                     .collect(Collectors.toSet());
         }
     }

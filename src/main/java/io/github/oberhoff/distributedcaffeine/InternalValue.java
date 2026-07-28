@@ -16,8 +16,8 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import java.util.Objects;
-import java.util.Optional;
 
+import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
 class InternalValue<V> {
@@ -58,14 +58,14 @@ class InternalValue<V> {
     }
 
     static <V> InternalValue<V> iv(V value) {
-        return Optional.ofNullable(value)
-                .map(InternalValue::new)
-                .orElse(null);
+        return nonNull(value)
+                ? new InternalValue<>(value)
+                : null;
     }
 
     static <V> V v(InternalValue<V> value) {
-        return Optional.ofNullable(value)
-                .map(InternalValue::getValue)
-                .orElse(null);
+        return nonNull(value)
+                ? value.getValue()
+                : null;
     }
 }

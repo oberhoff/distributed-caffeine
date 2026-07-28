@@ -33,25 +33,35 @@ public enum DistributionMode {
      * <p>
      * <b>Note:</b> This is the default distribution mode and corresponds to a full replication.
      */
-    POPULATION_AND_INVALIDATION_AND_EVICTION,
+    POPULATION_AND_INVALIDATION_AND_EVICTION(true, true, true),
 
     /**
      * Includes population (manual or loading) and invalidation (explicit removal), but excludes eviction (size- or
      * time-based removal).
      */
-    POPULATION_AND_INVALIDATION,
+    POPULATION_AND_INVALIDATION(true, true, false),
 
     /**
      * Includes invalidation (explicit removal) and eviction (size- or time-based removal), but excludes population
      * (manual or loading).
      */
-    INVALIDATION_AND_EVICTION,
+    INVALIDATION_AND_EVICTION(false, true, true),
 
     /**
      * Includes invalidation (explicit removal), but excludes population (manual or loading) and eviction (size- or
      * time-based removal).
      */
-    INVALIDATION;
+    INVALIDATION(false, true, false);
+
+    private final boolean isPopulationConsidered;
+    private final boolean isInvalidationConsidered;
+    private final boolean isEvictionConsidered;
+
+    DistributionMode(boolean isPopulationConsidered, boolean isInvalidationConsidered, boolean isEvictionConsidered) {
+        this.isPopulationConsidered = isPopulationConsidered;
+        this.isInvalidationConsidered = isInvalidationConsidered;
+        this.isEvictionConsidered = isEvictionConsidered;
+    }
 
     /**
      * Indicates whether population is considered for distributed synchronization between cache instances or not.
@@ -59,7 +69,7 @@ public enum DistributionMode {
      * @return {@code true} if population is considered, otherwise {@code false}
      */
     public boolean isPopulationConsidered() {
-        return this.equals(POPULATION_AND_INVALIDATION_AND_EVICTION) || this.equals(POPULATION_AND_INVALIDATION);
+        return isPopulationConsidered;
     }
 
     /**
@@ -68,8 +78,7 @@ public enum DistributionMode {
      * @return {@code true} if invalidation is considered, otherwise {@code false}
      */
     public boolean isInvalidationConsidered() {
-        return this.equals(POPULATION_AND_INVALIDATION_AND_EVICTION) || this.equals(POPULATION_AND_INVALIDATION)
-                || this.equals(INVALIDATION_AND_EVICTION) || this.equals(INVALIDATION);
+        return isInvalidationConsidered;
     }
 
     /**
@@ -78,6 +87,6 @@ public enum DistributionMode {
      * @return {@code true} if eviction is considered, otherwise {@code false}
      */
     public boolean isEvictionConsidered() {
-        return this.equals(POPULATION_AND_INVALIDATION_AND_EVICTION) || this.equals(INVALIDATION_AND_EVICTION);
+        return isEvictionConsidered;
     }
 }

@@ -71,6 +71,12 @@ import static java.util.stream.Collectors.toSet;
 final class MongoRepository<K, V> extends AbstractRepository<K, V> {
 
     private static final Logger LOGGER = System.getLogger(MongoRepository.class.getName());
+    // shared, immutable config reused for every bulk upsert instead of allocating one per entry
+    private static final UpdateOptions UPSERT_OPTIONS = new UpdateOptions().upsert(true);
+    // constant projection of all fields, reused for the common (fields == null) query instead of rebuilding it
+    private static final Bson ALL_FIELDS_PROJECTION = Projections.include(Stream.of(Field.values())
+            .map(Object::toString)
+            .toList());
 
     private final MongoCollection<Document> mongoCollection;
 
@@ -98,8 +104,7 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
                                     requireNonNull(valueSerializer))),
                             Updates.set(STATUS.toString(), cacheEntry.getStatus().toString()),
                             Updates.set(TIMESTAMP.toString(), cacheEntry.getTimestamp()));
-                    UpdateOptions updateOptions = new UpdateOptions().upsert(true);
-                    updates.add(new UpdateOneModel<>(filter, update, updateOptions));
+                    updates.add(new UpdateOneModel<>(filter, update, UPSERT_OPTIONS));
                 } catch (Exception e) {
                     throw new IllegalStateException(e);
                 }
@@ -159,26 +164,20 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
                 Indexes.compoundIndex(
                         Indexes.ascending(HASH.toString()),
                         Indexes.ascending(DISCRIMINATOR.toString())),
-                new IndexOptions()
-                        .unique(true)
-                        .background(true));
+                new IndexOptions().unique(true));
         IndexModel indexHashStatusDiscriminatorTimestamp = new IndexModel(
                 Indexes.compoundIndex(
                         Indexes.ascending(HASH.toString()),
                         Indexes.ascending(STATUS.toString()),
                         Indexes.ascending(DISCRIMINATOR.toString()),
                         Indexes.ascending(TIMESTAMP.toString())),
-                new IndexOptions()
-                        .unique(false)
-                        .background(true));
+                new IndexOptions().unique(false));
         IndexModel indexStatusDiscriminatorTimestamp = new IndexModel(
                 Indexes.compoundIndex(
                         Indexes.ascending(STATUS.toString()),
                         Indexes.ascending(DISCRIMINATOR.toString()),
                         Indexes.ascending(TIMESTAMP.toString())),
-                new IndexOptions()
-                        .unique(false)
-                        .background(true));
+                new IndexOptions().unique(false));
 
         List<IndexModel> indexes = List.of(indexHashDiscriminator, indexHashStatusDiscriminatorTimestamp,
                 indexStatusDiscriminatorTimestamp);
@@ -228,8 +227,10 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
     }
 
     private Bson getProjection(@Nullable Set<Field> fields) {
-        return Projections.include(Stream.of(Field.values())
-                .filter(field -> isNull(fields) || fields.contains(field))
+        return isNull(fields)
+                ? ALL_FIELDS_PROJECTION
+                : Projections.include(Stream.of(Field.values())
+                .filter(fields::contains)
                 .map(Object::toString)
                 .toList());
     }
@@ -275,8 +276,15 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
         Object mongoValue = document.get(fieldName);
         if (mongoValue instanceof Binary binary) {
             mongoValue = binary.getData();
-        } else if (mongoValue instanceof Bson bson) {
-            mongoValue = convertBsonToJson(bson);
+        } else if (nonNull(mongoValue)
+                && serializer instanceof JsonSerializer<?> jsonSerializer
+                && jsonSerializer.storeAsBinaryJson()) {
+            // symmetric to serializeToMongo: the value was stored as native BSON (any type, including scalars such
+            // as strings, numbers or booleans - not just documents/arrays), so convert it back to its JSON
+            // representation for the serializer. Deciding based on the serializer (rather than on the stored type)
+            // ensures scalars are also converted; otherwise a stored scalar would be handed to the serializer as-is
+            // (e.g. an unquoted string) and fail to deserialize.
+            mongoValue = convertBsonToJson(mongoValue);
         }
         return SerializerAware.deserialize(mongoValue, serializer);
     }
@@ -288,9 +296,9 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
         return document.get(jsonKey);
     }
 
-    private static String convertBsonToJson(Bson bson) {
+    private static String convertBsonToJson(Object bsonValue) {
         String bsonKey = "bsonKey";
-        Document document = new Document(bsonKey, bson);
+        Document document = new Document(bsonKey, bsonValue);
         String json = document.toJson();
         return json.substring(json.indexOf(":") + 1, json.lastIndexOf("}")).strip();
     }

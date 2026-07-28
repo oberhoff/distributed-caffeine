@@ -16,13 +16,14 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import java.util.Objects;
-import java.util.Optional;
 
+import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
 class InternalKey<K> {
 
     private final K key;
+    private String hash;
 
     private InternalKey(K key) {
         this.key = requireNonNull(key);
@@ -30,6 +31,15 @@ class InternalKey<K> {
 
     private K getKey() {
         return key;
+    }
+
+    String getHash() {
+        return hash;
+    }
+
+    InternalKey<K> setHash(String hash) {
+        this.hash = hash;
+        return this;
     }
 
     @Override
@@ -48,14 +58,14 @@ class InternalKey<K> {
     }
 
     static <K> InternalKey<K> ik(K key) {
-        return Optional.ofNullable(key)
-                .map(InternalKey::new)
-                .orElse(null);
+        return nonNull(key)
+                ? new InternalKey<>(key)
+                : null;
     }
 
     static <K> K k(InternalKey<K> key) {
-        return Optional.ofNullable(key)
-                .map(InternalKey::getKey)
-                .orElse(null);
+        return nonNull(key)
+                ? key.getKey()
+                : null;
     }
 }

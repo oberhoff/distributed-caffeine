@@ -289,6 +289,49 @@ public final class DistributedCaffeine<K, V> {
         return (DistributedLoadingCache<K1, V1>) distributedLoadingCache;
     }
 
+    // Caffeine exposes no public API to inspect or replace these before build(), so they are accessed reflectively.
+    // The handles are resolved once here (the builder class is stable within a JVM) instead of on every build, and
+    // resolution fails fast with a clear message if a Caffeine upgrade renames or removes a member - turning what
+    // would be a cryptic NoSuchFieldException deep inside build() into an explicit "incompatible version" error.
+    private static final Method IS_STRONG_KEYS_METHOD = caffeineMethod("isStrongKeys");
+    private static final Method IS_STRONG_VALUES_METHOD = caffeineMethod("isStrongValues");
+    private static final Field REMOVAL_LISTENER_FIELD = caffeineField("removalListener");
+    private static final Field EVICTION_LISTENER_FIELD = caffeineField("evictionListener");
+    private static final Field EXPIRY_FIELD = caffeineField("expiry");
+    private static final Field WEIGHER_FIELD = caffeineField("weigher");
+    private static final Field SCHEDULER_FIELD = caffeineField("scheduler");
+    private static final Field EXECUTOR_FIELD = caffeineField("executor");
+    private static final Field STATS_COUNTER_SUPPLIER_FIELD = caffeineField("statsCounterSupplier");
+
+    @SuppressWarnings("java:S3011")
+    private static Field caffeineField(String name) {
+        try {
+            Field field = Caffeine.class.getDeclaredField(name);
+            field.setAccessible(true);
+            return field;
+        } catch (NoSuchFieldException | RuntimeException e) {
+            throw incompatibleCaffeine("field", name, e);
+        }
+    }
+
+    @SuppressWarnings("java:S3011")
+    private static Method caffeineMethod(String name) {
+        try {
+            Method method = Caffeine.class.getDeclaredMethod(name);
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException | RuntimeException e) {
+            throw incompatibleCaffeine("method", name, e);
+        }
+    }
+
+    private static IllegalStateException incompatibleCaffeine(String memberKind, String name, Throwable cause) {
+        return new IllegalStateException(
+                ("Incompatible Caffeine version: expected %s '%s' on '%s' was not found. distributed-caffeine "
+                        + "accesses Caffeine internals via reflection and does not support this Caffeine version.")
+                        .formatted(memberKind, name, Caffeine.class.getName()), cause);
+    }
+
     @SuppressWarnings({"unchecked", "java:S3011"})
     private InternalInstanceRegistry<K, V> buildCommon(
             Function<Caffeine<Object, Object>, Cache<InternalKey<K>, InternalValue<V>>> build,
@@ -302,30 +345,18 @@ public final class DistributedCaffeine<K, V> {
         instanceRegistry.setCacheLoader(instanceRegistry.initializeLazy(cacheLoader));
 
         // throw exception if weak or soft references are configured
-        boolean hasWeakOrSoftReferences;
-        Method isStrongKeysMethod = getFailable(() ->
-                caffeine.getClass().getDeclaredMethod("isStrongKeys"));
-        Method isStrongValuesMethod = getFailable(() ->
-                caffeine.getClass().getDeclaredMethod("isStrongValues"));
-        isStrongKeysMethod.setAccessible(true);
-        isStrongValuesMethod.setAccessible(true);
-        hasWeakOrSoftReferences = !((Boolean) getFailable(() -> isStrongKeysMethod.invoke(caffeine))
-                || (Boolean) getFailable(() -> isStrongValuesMethod.invoke(caffeine)));
+        boolean hasWeakOrSoftReferences =
+                !((Boolean) getFailable(() -> IS_STRONG_KEYS_METHOD.invoke(caffeine))
+                        || (Boolean) getFailable(() -> IS_STRONG_VALUES_METHOD.invoke(caffeine)));
         if (hasWeakOrSoftReferences) {
             throw new IllegalStateException("The use of weak or soft references is not supported");
         }
 
         // inject removal and eviction listener (reset later)
-        Field removalListenerField = getFailable(() ->
-                caffeine.getClass().getDeclaredField("removalListener"));
-        Field evictionListenerField = getFailable(() ->
-                caffeine.getClass().getDeclaredField("evictionListener"));
-        removalListenerField.setAccessible(true);
-        evictionListenerField.setAccessible(true);
         RemovalListener<K, V> caffeineRemovalListener = getFailable(() ->
-                (RemovalListener<K, V>) removalListenerField.get(caffeine));
+                (RemovalListener<K, V>) REMOVAL_LISTENER_FIELD.get(caffeine));
         RemovalListener<K, V> caffeineEvictionListener = getFailable(() ->
-                (RemovalListener<K, V>) evictionListenerField.get(caffeine));
+                (RemovalListener<K, V>) EVICTION_LISTENER_FIELD.get(caffeine));
         RemovalListener<K, V> noopListener = (key, value, removalCause) -> {
         };
         instanceRegistry.setRemovalListener(
@@ -336,63 +367,50 @@ public final class DistributedCaffeine<K, V> {
                 instanceRegistry.initializeLazy(new InternalEvictionListener<>(nonNull(caffeineEvictionListener)
                         ? caffeineEvictionListener
                         : noopListener)));
-        runFailable(() -> removalListenerField.set(caffeine, instanceRegistry.getRemovalListener()));
-        runFailable(() -> evictionListenerField.set(caffeine, instanceRegistry.getEvictionListener()));
+        runFailable(() -> REMOVAL_LISTENER_FIELD.set(caffeine, instanceRegistry.getRemovalListener()));
+        runFailable(() -> EVICTION_LISTENER_FIELD.set(caffeine, instanceRegistry.getEvictionListener()));
 
         // inject expiry if set (reset later)
-        Field expiryField = getFailable(() ->
-                caffeine.getClass().getDeclaredField("expiry"));
-        expiryField.setAccessible(true);
         Expiry<K, V> caffeineExpiry = getFailable(() ->
-                (Expiry<K, V>) expiryField.get(caffeine));
+                (Expiry<K, V>) EXPIRY_FIELD.get(caffeine));
         if (nonNull(caffeineExpiry)) {
-            runFailable(() -> expiryField.set(caffeine, new InternalExpiry<>(caffeineExpiry)));
+            runFailable(() -> EXPIRY_FIELD.set(caffeine, new InternalExpiry<>(caffeineExpiry)));
         }
 
         // inject weigher if set (reset later)
-        Field weigherField = getFailable(() ->
-                caffeine.getClass().getDeclaredField("weigher"));
-        weigherField.setAccessible(true);
         Weigher<K, V> caffeineWeigher = getFailable(() ->
-                (Weigher<K, V>) weigherField.get(caffeine));
+                (Weigher<K, V>) WEIGHER_FIELD.get(caffeine));
         if (nonNull(caffeineWeigher)) {
-            runFailable(() -> weigherField.set(caffeine, new InternalWeigher<>(caffeineWeigher)));
+            runFailable(() -> WEIGHER_FIELD.set(caffeine, new InternalWeigher<>(caffeineWeigher)));
         }
 
         // inject scheduler if not set or disabled (necessary for eviction listener reliability)
-        Field schedulerField = getFailable(() ->
-                caffeine.getClass().getDeclaredField("scheduler"));
-        schedulerField.setAccessible(true);
         Scheduler caffeineScheduler = getFailable(() ->
-                (Scheduler) schedulerField.get(caffeine));
-        Scheduler scheduler = (isNull(caffeineScheduler) || caffeineScheduler == Scheduler.disabledScheduler())
-                ? Scheduler.systemScheduler()
-                : caffeineScheduler;
-        runFailable(() -> schedulerField.set(caffeine, new InternalScheduler(scheduler)));
+                (Scheduler) SCHEDULER_FIELD.get(caffeine));
+        if (!(caffeineScheduler instanceof InternalScheduler)) {
+            Scheduler scheduler = (isNull(caffeineScheduler) || caffeineScheduler == Scheduler.disabledScheduler())
+                    ? Scheduler.systemScheduler()
+                    : caffeineScheduler;
+            runFailable(() -> SCHEDULER_FIELD.set(caffeine, new InternalScheduler(scheduler)));
+        }
 
         // extract executor
-        Field executorField = getFailable(() ->
-                caffeine.getClass().getDeclaredField("executor"));
-        executorField.setAccessible(true);
         instanceRegistry.setExecutor(Optional.ofNullable(getFailable(() ->
-                        (Executor) executorField.get(caffeine)))
+                        (Executor) EXECUTOR_FIELD.get(caffeine)))
                 .orElseGet(ForkJoinPool::commonPool));
 
         // extract statsCounter (lazy) and replace if necessary
-        Field statsCounterSupplierField = getFailable(() ->
-                caffeine.getClass().getDeclaredField("statsCounterSupplier"));
-        statsCounterSupplierField.setAccessible(true);
         Supplier<StatsCounter> caffeineStatsCounterSupplier = getFailable(() ->
-                (Supplier<StatsCounter>) statsCounterSupplierField.get(caffeine));
+                (Supplier<StatsCounter>) STATS_COUNTER_SUPPLIER_FIELD.get(caffeine));
         if (nonNull(caffeineStatsCounterSupplier)) {
             Supplier<StatsCounter> statsCounterSupplier = () -> {
                 StatsCounter caffeineStatsCounter = caffeineStatsCounterSupplier.get();
                 instanceRegistry.setStatsCounter(caffeineStatsCounter);
                 // reset caffeine (lazy) after supplier was invoked
-                runFailable(() -> statsCounterSupplierField.set(caffeine, caffeineStatsCounterSupplier));
+                runFailable(() -> STATS_COUNTER_SUPPLIER_FIELD.set(caffeine, caffeineStatsCounterSupplier));
                 return caffeineStatsCounter;
             };
-            runFailable(() -> statsCounterSupplierField.set(caffeine, statsCounterSupplier));
+            runFailable(() -> STATS_COUNTER_SUPPLIER_FIELD.set(caffeine, statsCounterSupplier));
         } else {
             instanceRegistry.setStatsCounter(StatsCounter.disabledStatsCounter());
         }
@@ -405,10 +423,10 @@ public final class DistributedCaffeine<K, V> {
         this.extendedPersistenceConfigurer.validate(instanceRegistry.getCache());
 
         // reset caffeine
-        runFailable(() -> removalListenerField.set(caffeine, caffeineRemovalListener));
-        runFailable(() -> evictionListenerField.set(caffeine, caffeineEvictionListener));
-        runFailable(() -> expiryField.set(caffeine, caffeineExpiry));
-        runFailable(() -> weigherField.set(caffeine, caffeineWeigher));
+        runFailable(() -> REMOVAL_LISTENER_FIELD.set(caffeine, caffeineRemovalListener));
+        runFailable(() -> EVICTION_LISTENER_FIELD.set(caffeine, caffeineEvictionListener));
+        runFailable(() -> EXPIRY_FIELD.set(caffeine, caffeineExpiry));
+        runFailable(() -> WEIGHER_FIELD.set(caffeine, caffeineWeigher));
         // stats counter is reset lazy and scheduler cannot be reset
 
         return instanceRegistry;

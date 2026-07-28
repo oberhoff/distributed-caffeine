@@ -28,18 +28,23 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.platform.commons.util.ReflectionUtils;
 
+import java.lang.reflect.Field;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Predicate;
 
 import static java.util.Collections.singleton;
 import static java.util.Collections.singletonMap;
+import static org.mockito.Mockito.spy;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(MethodOrderer.MethodName.class)
@@ -110,6 +115,40 @@ public abstract class DistributedCaffeineCommonTestInstance {
         return singletonMap(key, value);
     }
 
+    protected <T, R> R injectSpy(Object instanceObject, Class<T> instanceClass, String fieldName, Class<? super R> fieldClass) {
+        R spy = spy(readFieldValue(instanceObject, instanceClass, fieldName, fieldClass));
+        writeFieldValue(instanceObject, instanceClass, fieldName, spy);
+        return spy;
+    }
+
+    @SuppressWarnings("unchecked")
+    protected <T, R> R readFieldValue(Object instanceObject, Class<T> instanceClass, String fieldName, Class<? super R> fieldClass) {
+        return (R) ReflectionUtils.tryToReadFieldValue(instanceClass, fieldName, instanceClass.cast(instanceObject))
+                .toOptional()
+                .filter(fieldClass::isInstance)
+                .orElseThrow(NoSuchFieldError::new);
+    }
+
+    protected <T> void writeFieldValue(Object instanceObject, Class<T> instanceClass, String fieldName, Object fieldValue) {
+        Predicate<Field> fieldPredicate = field -> field.getName().equals(fieldName);
+        Field field = ReflectionUtils.streamFields(instanceClass, fieldPredicate, ReflectionUtils.HierarchyTraversalMode.TOP_DOWN)
+                .findFirst()
+                .orElseThrow(NoSuchFieldError::new);
+        ReflectionUtils.makeAccessible(field);
+        try {
+            field.set(instanceObject, fieldValue);
+        } catch (IllegalAccessException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @SuppressWarnings({"unchecked", "UnusedReturnValue", "SameParameterValue"})
+    protected <T, R> R invokeMethod(Object instanceObject, Class<T> instanceClass, String methodName, List<Class<?>> parameterClasses, List<Object> parameterObjects) {
+        return (R) ReflectionUtils.invokeMethod(
+                ReflectionUtils.findMethod(instanceClass, methodName, parameterClasses.toArray(Class[]::new))
+                        .orElseThrow(NoSuchMethodError::new),
+                instanceObject, parameterObjects.toArray(Object[]::new));
+    }
 
     @FunctionalInterface
     protected interface CacheBuilder<K, V> {

@@ -131,21 +131,20 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
     private CompletableFuture<V> getOrCreateRefreshOperation(K key, V oldValue) {
         // retain the original 'only one concurrent refresh operation per key' semantics
         return refreshOperations.compute(key, (k, refreshOperation) -> {
-                    if (isNull(refreshOperation) || refreshOperation.isDone()) {
-                        // retain the original 'load if null, reload if not null' semantics
-                        return (isNull(oldValue)
-                                ? getFailable(() -> cacheLoader.asyncLoadDelegated(key, executor),
-                                CompletionException::new)
-                                : getFailable(() -> cacheLoader.asyncReloadDelegated(key, oldValue, executor),
-                                CompletionException::new));
-                    } else {
-                        return refreshOperation;
-                    }
-                })
+            if (isNull(refreshOperation) || refreshOperation.isDone()) {
+                // retain the original 'load if null, reload if not null' semantics
+                CompletableFuture<V> newRefreshOperation = isNull(oldValue)
+                        ? getFailable(() -> cacheLoader.asyncLoadDelegated(key, executor),
+                        CompletionException::new)
+                        : getFailable(() -> cacheLoader.asyncReloadDelegated(key, oldValue, executor),
+                        CompletionException::new);
                 // intention: retain the original 'log exception and swallow' semantics
                 // but strange: exceptions are still thrown, so this behavior is imitated
-                // additionally count stats due to custom implementation and clean up completed refresh operations
-                .whenCompleteAsync((v, e) -> {
+                // additionally count stats due to custom implementation and clean up completed refresh operations.
+                // the callback is attached only once, to the newly created operation (not on every coalesced call),
+                // so stats are not over-counted; the two-arg remove ensures only this operation is removed and a
+                // newer in-flight refresh for the same key is never dropped
+                newRefreshOperation.whenCompleteAsync((v, e) -> {
                     if (isNull(e)) {
                         statsCounter.recordLoadSuccess(1);
                     } else {
@@ -153,7 +152,12 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
                         logger.log(Level.WARNING,
                                 format("Exception thrown during refresh for %s", key), e);
                     }
-                    refreshOperations.remove(key);
+                    refreshOperations.remove(key, newRefreshOperation);
                 }, executor);
+                return newRefreshOperation;
+            } else {
+                return refreshOperation;
+            }
+        });
     }
 }
