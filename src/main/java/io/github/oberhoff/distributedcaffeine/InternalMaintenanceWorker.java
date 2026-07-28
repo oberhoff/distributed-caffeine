@@ -45,8 +45,9 @@ import static java.lang.String.format;
 @SuppressWarnings("java:S1450")
 class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
 
-    private static final Duration MAINTENANCE_INTERVAL = Duration.ofMinutes(1);
     private static final Duration SHORT_LIVING_DURATION = Duration.ofMinutes(1);
+    @SuppressWarnings({"java:S116", "FieldMayBeFinal"}) // not static final for testing
+    private Duration MAINTENANCE_INTERVAL = Duration.ofMinutes(1);
 
     private final AtomicBoolean isActivated;
 
