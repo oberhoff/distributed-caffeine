@@ -41,7 +41,7 @@ import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toSet;
 
-class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalLazyInitializer<K, V> {
+class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalInitializable<K, V> {
 
     private ConcurrentMap<InternalKey<K>, InternalValue<V>> concurrentMap;
     private InternalCacheManager<K, V> cacheManager;

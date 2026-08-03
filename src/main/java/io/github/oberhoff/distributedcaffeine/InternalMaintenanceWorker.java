@@ -43,7 +43,7 @@ import static java.lang.Math.min;
 import static java.lang.String.format;
 
 @SuppressWarnings("java:S1450")
-class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
+class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
 
     private static final Duration SHORT_LIVING_DURATION = Duration.ofMinutes(1);
     @SuppressWarnings({"java:S116", "FieldMayBeFinal"}) // not static final for testing
@@ -108,10 +108,15 @@ class InternalMaintenanceWorker<K, V> implements InternalLazyInitializer<K, V> {
                                         identifier), throwable)))
                 .build();
         ExecutorService executorService = Executors.newSingleThreadExecutor();
-        maintenanceCompletableFuture = Failsafe.with(retryPolicy)
+        // keep the future returned by Failsafe itself, because only its cancel() aborts the retry loop
+        // (dev.failsafe.spi.FailsafeFuture overrides cancel() but not newIncompleteFuture(), so the stage derived
+        // from whenComplete() is a plain CompletableFuture whose cancel() merely completes that stage while the
+        // loop keeps running - and reports isDone() == true, which would let activate() skip its join() below)
+        CompletableFuture<Void> failsafeCompletableFuture = Failsafe.with(retryPolicy)
                 .with(executorService)
-                .runAsync(() -> processMaintenance(SHORT_LIVING_DURATION))
-                .whenComplete((result, throwable) -> executorService.shutdown());
+                .runAsync(() -> processMaintenance(SHORT_LIVING_DURATION));
+        failsafeCompletableFuture.whenComplete((result, throwable) -> executorService.shutdown());
+        maintenanceCompletableFuture = failsafeCompletableFuture;
     }
 
     @SuppressWarnings("SameParameterValue")

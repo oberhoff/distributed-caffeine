@@ -15,9 +15,12 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
 
+import com.mongodb.ErrorCategory;
+import com.mongodb.MongoBulkWriteException;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoCursor;
+import com.mongodb.client.model.BulkWriteOptions;
 import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.IndexModel;
 import com.mongodb.client.model.IndexOptions;
@@ -73,6 +76,10 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
     private static final Logger LOGGER = System.getLogger(MongoRepository.class.getName());
     // shared, immutable config reused for every bulk upsert instead of allocating one per entry
     private static final UpdateOptions UPSERT_OPTIONS = new UpdateOptions().upsert(true);
+    // every model in a batch targets a distinct hash, so there is no order to preserve between them. Unordered lets
+    // the server keep going after a failed operation (instead of discarding the rest of the batch) and apply them
+    // concurrently rather than strictly one by one
+    private static final BulkWriteOptions UNORDERED_BULK_WRITE_OPTIONS = new BulkWriteOptions().ordered(false);
     // constant projection of all fields, reused for the common (fields == null) query instead of rebuilding it
     private static final Bson ALL_FIELDS_PROJECTION = Projections.include(Stream.of(Field.values())
             .map(Object::toString)
@@ -109,8 +116,47 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
                     throw new IllegalStateException(e);
                 }
             });
-            mongoCollection.bulkWrite(updates);
+            bulkUpsert(updates);
         }
+    }
+
+    // An upsert filtered by something other than '_id' is not atomic against a concurrent insert of the same key:
+    // when two cache instances write a key that does not exist yet, both filters match nothing, both attempt an
+    // insert, and the loser is rejected by the unique (hash, discriminator) index with a duplicate key error. Since
+    // the document exists by then, applying the rejected operations once more turns them into plain updates.
+    // Only those are repeated: reapplying operations that already succeeded would write their (by then possibly
+    // outdated) values over whatever another instance has written in the meantime.
+    // Deliberately a plain catch rather than a Failsafe retry policy: the operations to repeat are not the ones that
+    // were attempted but the subset the server rejected, and none of what Failsafe adds (delays, backoff, scheduling)
+    // applies to an immediate in-place repetition. Repeating exactly once is enough, because a second duplicate key
+    // for the same operations would require the document to be deleted again in between - if that ever happens the
+    // exception is reported rather than hidden behind further attempts. Note that more than one repetition would
+    // need the rejected subset to be rebased on the operations of the preceding attempt (the error indices refer to
+    // those, not to the original list), so do not simply loop over this.
+    private void bulkUpsert(List<UpdateOneModel<Document>> updates) {
+        try {
+            mongoCollection.bulkWrite(updates, UNORDERED_BULK_WRITE_OPTIONS);
+        } catch (MongoBulkWriteException e) {
+            if (!isDuplicateKeyOnly(e)) {
+                throw e;
+            }
+            mongoCollection.bulkWrite(rejectedUpdates(updates, e), UNORDERED_BULK_WRITE_OPTIONS);
+        }
+    }
+
+    private static List<UpdateOneModel<Document>> rejectedUpdates(List<UpdateOneModel<Document>> updates,
+                                                                  MongoBulkWriteException bulkWriteException) {
+        return bulkWriteException.getWriteErrors().stream()
+                // the index refers to the position within the operations handed to bulkWrite
+                .map(writeError -> updates.get(writeError.getIndex()))
+                .toList();
+    }
+
+    private static boolean isDuplicateKeyOnly(MongoBulkWriteException bulkWriteException) {
+        return !bulkWriteException.getWriteErrors().isEmpty()
+                && bulkWriteException.getWriteErrors().stream()
+                .allMatch(writeError -> ErrorCategory.fromErrorCode(writeError.getCode())
+                        .equals(ErrorCategory.DUPLICATE_KEY));
     }
 
     @Override

@@ -36,7 +36,7 @@ import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
 @SuppressWarnings("java:S1450")
-class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, InternalLazyInitializer<K, V> {
+class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, InternalInitializable<K, V> {
 
     private InternalInstanceRegistry<K, V> instanceRegistry;
     private Adapter<K, V> adapter;

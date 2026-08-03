@@ -22,25 +22,14 @@ import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.SerializersCon
 import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
 
 import java.lang.System.Logger;
-import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
-import java.util.WeakHashMap;
 import java.util.concurrent.Executor;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Supplier;
-
-import static java.util.Collections.newSetFromMap;
-import static java.util.Collections.synchronizedSet;
 
 @SuppressWarnings("UnusedReturnValue")
 class InternalInstanceRegistry<K, V> {
 
     @SuppressWarnings("java:S3416")
     private final Logger logger = System.getLogger(DistributedCaffeine.class.getName());
-
-    private final AtomicBoolean isInitialized;
-    private final Set<InternalLazyInitializer<K, V>> lazyInitializers;
 
     private final InternalSynchronizationLock synchronizationLock;
     private final InternalCacheManager<K, V> cacheManager;
@@ -57,88 +46,89 @@ class InternalInstanceRegistry<K, V> {
     private Executor executor;
     private StatsCounter statsCounter;
     private Cache<InternalKey<K>, InternalValue<V>> cache;
-    private Supplier<InternalInstanceRegistry<K, V>> instanceRegistrySupplier;
 
     InternalInstanceRegistry() {
-        this.isInitialized = new AtomicBoolean(false);
-        this.lazyInitializers = synchronizedSet(newSetFromMap(new WeakHashMap<>()));
         this.synchronizationLock = new InternalSynchronizationLock();
-        this.cacheManager = initializeLazy(new InternalCacheManager<>());
-        this.maintenanceWorker = initializeLazy(new InternalMaintenanceWorker<>());
+        // created here, so before this registry holds anything they could read - hence initialized in
+        // initializeComponents() rather than right away
+        this.cacheManager = new InternalCacheManager<>();
+        this.maintenanceWorker = new InternalMaintenanceWorker<>();
     }
 
-    <T extends InternalLazyInitializer<K, V>> T initializeLazy(T instance) {
-        lazyInitializers.add(instance);
-        return instance;
+    // Called once while building, deliberately not from activate(), for two reasons.
+    // It would be pointless: every field of this registry is assigned while building and never reassigned, so a later
+    // activation cannot offer an initializer anything it did not already see here. That only became true once the
+    // cache stopped being rebuilt on every restart - back then the whole point was to hand the components the new
+    // cache instance.
+    // And it would be unsafe: initializing assigns the fields of components the application is already using by then,
+    // and the read path (getIfPresent, getAllPresent) deliberately does not take the synchronization lock, so those
+    // readers would have no guarantee of ever seeing the reassignment - holding the lock here would not protect them.
+    // Wiring while the instance has not been handed out yet avoids that question entirely
+    void initializeComponents() {
+        initialize(cacheManager);
+        initialize(maintenanceWorker);
+        // a cache built without a cache loader has none
+        Optional.ofNullable(cacheLoader).ifPresent(this::initialize);
+        initialize(removalListener);
+        initialize(evictionListener);
+
+        adapter.setKeySerializer(serializersConfigurer.getKeySerializer());
+        adapter.setValueSerializer(serializersConfigurer.getValueSerializer());
+        adapter.setRetriever(cacheManager);
     }
 
-    <T extends InternalLazyInitializer<K, V>> T initializeNowAndLazy(T instance) {
+    // for the parts that are created on demand after building (the cache facade and the views it hands out)
+    <T extends InternalInitializable<K, V>> T initialize(T instance) {
         instance.initialize(this);
-        initializeLazy(instance);
         return instance;
     }
 
+    // checking activation outside the lock would not be atomic with acting on it, and this body does not tolerate
+    // being entered twice: activating an already activated component joins a worker future that only completes once
+    // that component stops, so a second caller would block forever - holding the lock, which freezes every cache
+    // operation. Activation is also not instantaneous (it waits for the watcher to report itself started), so the
+    // window in which a second caller could slip past an unlocked check is wide
     void activate() {
-        if (!isActivated()) {
-            synchronizationLock.runLocked(() -> {
-                if (isInitialized.get()) {
-                    swapInstances();
-                } else {
-                    isInitialized.set(true);
-                }
+        synchronizationLock.runLocked(() -> {
+            if (isActivated()) {
+                return;
+            }
 
-                lazyInitializers.stream()
-                        .filter(Objects::nonNull)
-                        .forEach(lazyInitializer -> lazyInitializer.initialize(this));
-
-                this.adapter.setKeySerializer(serializersConfigurer.getKeySerializer());
-                this.adapter.setValueSerializer(serializersConfigurer.getValueSerializer());
-                this.adapter.setRetriever(cacheManager);
-
+            try {
                 cacheManager.activate();
                 maintenanceWorker.activate();
                 adapter.activate();
                 // synchronization after retrieving by adapter so that no changes are missed
                 cacheManager.synchronizeCacheEntries();
-            });
-        }
-    }
-
-    void deactivate() {
-        if (isActivated()) {
-            synchronizationLock.runLocked(() -> {
+            } catch (RuntimeException e) {
+                // activating is not atomic by itself, and a half activated instance cannot be recovered from the
+                // outside: isActivated() below requires all three components, so it reports false and deactivate()
+                // skips its body, leaving whatever did come up running with no way to stop it. The maintenance
+                // worker is the harmful one - its retry loop only ends once it sees itself deactivated, so the
+                // worker future never completes, and the next activate() joins it forever while holding this lock.
+                // Deactivating is safe for components that never got activated
                 adapter.deactivate();
                 maintenanceWorker.deactivate();
                 cacheManager.deactivate();
-            });
-        }
+                throw e;
+            }
+        });
+    }
+
+    // deliberately without an activation check: isActivated() below requires all three components, so anything less
+    // than fully activated would skip the body and leave the components that are up running with no way to stop
+    // them - which is reachable both by an activation that failed halfway and by stopping the adapter directly
+    // through its own public API. Deactivating a component that is not activated does nothing
+    void deactivate() {
+        synchronizationLock.runLocked(() -> {
+            adapter.deactivate();
+            maintenanceWorker.deactivate();
+            cacheManager.deactivate();
+        });
     }
 
     boolean isActivated() {
         return adapter.isActivated() && maintenanceWorker.isActivated() && cacheManager.isActivated();
-    }
-
-    private void swapInstances() {
-        Optional.ofNullable(cacheLoader)
-                .map(InternalCacheLoader::neutralize)
-                .ifPresent(lazyInitializers::remove);
-        Optional.ofNullable(removalListener)
-                .map(InternalRemovalListener::neutralize)
-                .ifPresent(lazyInitializers::remove);
-        Optional.ofNullable(evictionListener)
-                .map(InternalEvictionListener::neutralize)
-                .ifPresent(lazyInitializers::remove);
-
-        InternalInstanceRegistry<K, V> instanceRegistry = instanceRegistrySupplier.get();
-
-        cacheLoader = initializeLazy(instanceRegistry.getCacheLoader());
-        removalListener = initializeLazy(instanceRegistry.getRemovalListener());
-        evictionListener = initializeLazy(instanceRegistry.getEvictionListener());
-
-        executor = instanceRegistry.getExecutor();
-        statsCounter = instanceRegistry.getStatsCounter();
-        cache = instanceRegistry.getCache();
-        instanceRegistrySupplier = instanceRegistry.getInstanceRegistrySupplier();
     }
 
     public Logger getLogger() {
@@ -243,13 +233,5 @@ class InternalInstanceRegistry<K, V> {
 
     public void setCache(Cache<InternalKey<K>, InternalValue<V>> cache) {
         this.cache = cache;
-    }
-
-    public Supplier<InternalInstanceRegistry<K, V>> getInstanceRegistrySupplier() {
-        return instanceRegistrySupplier;
-    }
-
-    public void setInstanceRegistrySupplier(Supplier<InternalInstanceRegistry<K, V>> instanceRegistrySupplier) {
-        this.instanceRegistrySupplier = instanceRegistrySupplier;
     }
 }

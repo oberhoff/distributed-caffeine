@@ -21,10 +21,11 @@ import org.jspecify.annotations.Nullable;
 
 import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
+import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
 class InternalEvictionListener<K, V> implements RemovalListener<InternalKey<K>, InternalValue<V>>,
-        InternalLazyInitializer<K, V> {
+        InternalInitializable<K, V> {
 
     private final RemovalListener<K, V> evictionListener;
 
@@ -35,12 +36,6 @@ class InternalEvictionListener<K, V> implements RemovalListener<InternalKey<K>, 
         // see also initialize()
     }
 
-    InternalEvictionListener<K, V> neutralize() {
-        // cache manager is initially deactivated
-        this.cacheManager = new InternalCacheManager<>();
-        return this;
-    }
-
     @Override
     public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
         this.cacheManager = instanceRegistry.getCacheManager();
@@ -48,6 +43,13 @@ class InternalEvictionListener<K, V> implements RemovalListener<InternalKey<K>, 
 
     @Override
     public void onRemoval(@Nullable InternalKey<K> key, @Nullable InternalValue<V> value, RemovalCause removalCause) {
+        // a stale entry is one the data store has not confirmed since synchronization was (re)started, and it keeps
+        // occupying the size budget until the sweep removes it. Distributing its eviction would hand the cluster a
+        // value this instance is in the middle of discarding, and reporting it would announce an eviction for an
+        // entry that only still exists because reconciling with the store has not caught up yet
+        if (nonNull(value) && value.isStale()) {
+            return;
+        }
         // special handling, no lock required
         cacheManager.evictDistributed(key, value, removalCause);
         evictionListener.onRemoval(k(key), v(value), removalCause);

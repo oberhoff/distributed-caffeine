@@ -39,17 +39,11 @@ public class CaptureLogger extends AbstractLogger {
     }
 
     public void startCapturing() {
-        if (capturing) {
-            throw new IllegalStateException("Already capturing");
-        }
         this.capturing = true;
         this.loggingEvents.clear();
     }
 
     public void stopCapturing() {
-        if (!capturing) {
-            throw new IllegalStateException("Not capturing");
-        }
         this.capturing = false;
         this.loggingEvents.clear();
     }

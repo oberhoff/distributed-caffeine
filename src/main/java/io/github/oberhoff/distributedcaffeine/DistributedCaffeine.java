@@ -41,8 +41,11 @@ import org.jspecify.annotations.Nullable;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.time.Duration;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ForkJoinPool;
 import java.util.function.Function;
@@ -82,6 +85,34 @@ import static java.util.stream.Collectors.joining;
 @NullMarked
 public final class DistributedCaffeine<K, V> {
 
+    // Caffeine exposes no public API to inspect or replace these before build(), so they are accessed reflectively.
+    // The handles are resolved once here (the builder class is stable within a JVM) instead of on every build, and
+    // resolution fails fast with a clear message if a Caffeine upgrade renames or removes a member - turning what
+    // would be a cryptic NoSuchFieldException deep inside build() into an explicit "incompatible version" error.
+    private static final Method IS_STRONG_KEYS_METHOD = caffeineMethod("isStrongKeys");
+    private static final Method IS_STRONG_VALUES_METHOD = caffeineMethod("isStrongValues");
+    private static final Field REMOVAL_LISTENER_FIELD = caffeineField("removalListener");
+    private static final Field EVICTION_LISTENER_FIELD = caffeineField("evictionListener");
+    private static final Field EXPIRY_FIELD = caffeineField("expiry");
+    private static final Field WEIGHER_FIELD = caffeineField("weigher");
+    private static final Field SCHEDULER_FIELD = caffeineField("scheduler");
+    private static final Field EXECUTOR_FIELD = caffeineField("executor");
+    private static final Field STATS_COUNTER_SUPPLIER_FIELD = caffeineField("statsCounterSupplier");
+
+    // an adapter owns the single change stream feeding one cache instance and is wired to that instance while
+    // building, so it belongs to exactly one of them. Handing the same one to a second build rewires it, which
+    // redirects the change stream of the first cache into the second (leaving the first silently blind) and hangs
+    // the second build outright, because activating an adapter that is already watching joins a watcher that only
+    // completes once it stops.
+    // Claimed here rather than in AbstractAdapter so that adapters implementing the interface directly are covered
+    // too, and held for as long as the cache instance exists, because that instance can be restarted at any time
+    // (a claim is only given up again when constructing fails, see buildClaimed()). The weak keys let an entry go
+    // once the application itself drops the adapter, and no value is held for it, so nothing references the key
+    // back and keeps it alive. Note that this identifies adapters by equals(), which no adapter overrides, so it
+    // is identity in practice
+    private static final Set<Adapter<?, ?>> CLAIMED_ADAPTERS =
+            Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
+
     private final Adapter<K, V> adapter;
     private Caffeine<Object, Object> caffeine;
     private InternalHasher<K> hasher;
@@ -111,6 +142,10 @@ public final class DistributedCaffeine<K, V> {
      *     ...
      *     .build();
      * </pre>
+     *
+     * <b>Attention:</b> An adapter belongs to exactly one cache instance and cannot be shared between them, which also
+     * means that a builder pattern instance can only be finalized once. Constructing several cache instances requires
+     * an own adapter for each of them, even if they are backed by the same store.
      *
      * @param adapter the adapter used for distributed synchronization between cache instances
      * @param <K>     the key type of the cache
@@ -254,14 +289,13 @@ public final class DistributedCaffeine<K, V> {
      */
     @SuppressWarnings("unchecked")
     public <K1 extends K, V1 extends V> DistributedCache<K1, V1> build() {
-        Supplier<InternalInstanceRegistry<K, V>> instanceRegistrySupplier = () ->
-                buildCommon(Caffeine::build, null);
-        InternalInstanceRegistry<K, V> instanceRegistry = instanceRegistrySupplier.get();
-        instanceRegistry.setInstanceRegistrySupplier(instanceRegistrySupplier);
-        InternalDistributedCache<K, V> distributedCache = new InternalDistributedCache<>();
-        instanceRegistry.initializeLazy(distributedCache);
-        instanceRegistry.activate();
-        return (DistributedCache<K1, V1>) distributedCache;
+        return buildClaimed(() -> {
+            InternalInstanceRegistry<K, V> instanceRegistry = buildCommon(Caffeine::build, null);
+            InternalDistributedCache<K, V> distributedCache = new InternalDistributedCache<>();
+            instanceRegistry.initialize(distributedCache);
+            instanceRegistry.activate();
+            return (DistributedCache<K1, V1>) distributedCache;
+        });
     }
 
     /**
@@ -277,59 +311,15 @@ public final class DistributedCaffeine<K, V> {
     public <K1 extends K, V1 extends V> DistributedLoadingCache<K1, V1> build(
             CacheLoader<? super K1, ? super V1> cacheLoader) {
         requireNonNull(cacheLoader, "cacheLoader cannot be null");
-        Supplier<InternalInstanceRegistry<K, V>> instanceRegistrySupplier = () -> {
-            InternalCacheLoader<K, V> internalCacheLoader = new InternalCacheLoader<>((CacheLoader<K, V>) cacheLoader);
-            return buildCommon(c -> c.build(internalCacheLoader), internalCacheLoader);
-        };
-        InternalInstanceRegistry<K, V> instanceRegistry = instanceRegistrySupplier.get();
-        instanceRegistry.setInstanceRegistrySupplier(instanceRegistrySupplier);
-        InternalDistributedLoadingCache<K, V> distributedLoadingCache = new InternalDistributedLoadingCache<>();
-        instanceRegistry.initializeLazy(distributedLoadingCache);
-        instanceRegistry.activate();
-        return (DistributedLoadingCache<K1, V1>) distributedLoadingCache;
-    }
-
-    // Caffeine exposes no public API to inspect or replace these before build(), so they are accessed reflectively.
-    // The handles are resolved once here (the builder class is stable within a JVM) instead of on every build, and
-    // resolution fails fast with a clear message if a Caffeine upgrade renames or removes a member - turning what
-    // would be a cryptic NoSuchFieldException deep inside build() into an explicit "incompatible version" error.
-    private static final Method IS_STRONG_KEYS_METHOD = caffeineMethod("isStrongKeys");
-    private static final Method IS_STRONG_VALUES_METHOD = caffeineMethod("isStrongValues");
-    private static final Field REMOVAL_LISTENER_FIELD = caffeineField("removalListener");
-    private static final Field EVICTION_LISTENER_FIELD = caffeineField("evictionListener");
-    private static final Field EXPIRY_FIELD = caffeineField("expiry");
-    private static final Field WEIGHER_FIELD = caffeineField("weigher");
-    private static final Field SCHEDULER_FIELD = caffeineField("scheduler");
-    private static final Field EXECUTOR_FIELD = caffeineField("executor");
-    private static final Field STATS_COUNTER_SUPPLIER_FIELD = caffeineField("statsCounterSupplier");
-
-    @SuppressWarnings("java:S3011")
-    private static Field caffeineField(String name) {
-        try {
-            Field field = Caffeine.class.getDeclaredField(name);
-            field.setAccessible(true);
-            return field;
-        } catch (NoSuchFieldException | RuntimeException e) {
-            throw incompatibleCaffeine("field", name, e);
-        }
-    }
-
-    @SuppressWarnings("java:S3011")
-    private static Method caffeineMethod(String name) {
-        try {
-            Method method = Caffeine.class.getDeclaredMethod(name);
-            method.setAccessible(true);
-            return method;
-        } catch (NoSuchMethodException | RuntimeException e) {
-            throw incompatibleCaffeine("method", name, e);
-        }
-    }
-
-    private static IllegalStateException incompatibleCaffeine(String memberKind, String name, Throwable cause) {
-        return new IllegalStateException(
-                ("Incompatible Caffeine version: expected %s '%s' on '%s' was not found. distributed-caffeine "
-                        + "accesses Caffeine internals via reflection and does not support this Caffeine version.")
-                        .formatted(memberKind, name, Caffeine.class.getName()), cause);
+        InternalCacheLoader<K, V> internalCacheLoader = new InternalCacheLoader<>((CacheLoader<K, V>) cacheLoader);
+        return buildClaimed(() -> {
+            InternalInstanceRegistry<K, V> instanceRegistry =
+                    buildCommon(c -> c.build(internalCacheLoader), internalCacheLoader);
+            InternalDistributedLoadingCache<K, V> distributedLoadingCache = new InternalDistributedLoadingCache<>();
+            instanceRegistry.initialize(distributedLoadingCache);
+            instanceRegistry.activate();
+            return (DistributedLoadingCache<K1, V1>) distributedLoadingCache;
+        });
     }
 
     @SuppressWarnings({"unchecked", "java:S3011"})
@@ -342,12 +332,12 @@ public final class DistributedCaffeine<K, V> {
         instanceRegistry.setDistributionMode(this.distributionMode);
         instanceRegistry.setSerializersConfigurer(this.serializersConfigurer);
         instanceRegistry.setExtendedPersistenceConfigurer(this.extendedPersistenceConfigurer);
-        instanceRegistry.setCacheLoader(instanceRegistry.initializeLazy(cacheLoader));
+        instanceRegistry.setCacheLoader(cacheLoader);
 
         // throw exception if weak or soft references are configured
         boolean hasWeakOrSoftReferences =
-                !((Boolean) getFailable(() -> IS_STRONG_KEYS_METHOD.invoke(caffeine))
-                        || (Boolean) getFailable(() -> IS_STRONG_VALUES_METHOD.invoke(caffeine)));
+                !(Boolean) getFailable(() -> IS_STRONG_KEYS_METHOD.invoke(caffeine))
+                        || !(Boolean) getFailable(() -> IS_STRONG_VALUES_METHOD.invoke(caffeine));
         if (hasWeakOrSoftReferences) {
             throw new IllegalStateException("The use of weak or soft references is not supported");
         }
@@ -360,13 +350,13 @@ public final class DistributedCaffeine<K, V> {
         RemovalListener<K, V> noopListener = (key, value, removalCause) -> {
         };
         instanceRegistry.setRemovalListener(
-                instanceRegistry.initializeLazy(new InternalRemovalListener<>(nonNull(caffeineRemovalListener)
+                new InternalRemovalListener<>(nonNull(caffeineRemovalListener)
                         ? caffeineRemovalListener
-                        : noopListener)));
+                        : noopListener));
         instanceRegistry.setEvictionListener(
-                instanceRegistry.initializeLazy(new InternalEvictionListener<>(nonNull(caffeineEvictionListener)
+                new InternalEvictionListener<>(nonNull(caffeineEvictionListener)
                         ? caffeineEvictionListener
-                        : noopListener)));
+                        : noopListener));
         runFailable(() -> REMOVAL_LISTENER_FIELD.set(caffeine, instanceRegistry.getRemovalListener()));
         runFailable(() -> EVICTION_LISTENER_FIELD.set(caffeine, instanceRegistry.getEvictionListener()));
 
@@ -418,6 +408,9 @@ public final class DistributedCaffeine<K, V> {
         // build final Caffeine cache instance (switched to internal key and value representation)
         instanceRegistry.setCache(build.apply(caffeine));
 
+        // every field the components read is assigned by now, so they are initialized once here
+        instanceRegistry.initializeComponents();
+
         // validate configurers
         this.serializersConfigurer.validate(instanceRegistry.getCache());
         this.extendedPersistenceConfigurer.validate(instanceRegistry.getCache());
@@ -430,6 +423,51 @@ public final class DistributedCaffeine<K, V> {
         // stats counter is reset lazy and scheduler cannot be reset
 
         return instanceRegistry;
+    }
+
+    // claims the adapter for the cache instance about to be constructed, see CLAIMED_ADAPTERS. The claim is released
+    // again if that instance does not come up, so that the very same adapter can be handed to another attempt. That
+    // matters most when activation is what failed, for example because the store is not reachable yet: nothing is
+    // watching then, and the next attempt overwrites the wiring of the abandoned one anyway
+    private <T> T buildClaimed(Supplier<T> build) {
+        if (!CLAIMED_ADAPTERS.add(this.adapter)) {
+            throw new IllegalStateException(format("The adapter for cache at '%s' is already in use by another cache "
+                    + "instance, every cache instance requires its own adapter", this.adapter.getIdentifier()));
+        }
+        try {
+            return build.get();
+        } catch (Exception e) {
+            CLAIMED_ADAPTERS.remove(this.adapter);
+            throw e;
+        }
+    }
+
+    @SuppressWarnings("java:S3011")
+    private static Field caffeineField(String name) {
+        try {
+            Field field = Caffeine.class.getDeclaredField(name);
+            field.setAccessible(true);
+            return field;
+        } catch (NoSuchFieldException e) {
+            throw incompatibleCaffeine(Field.class.getSimpleName().toLowerCase(), name, e);
+        }
+    }
+
+    @SuppressWarnings("java:S3011")
+    private static Method caffeineMethod(String name) {
+        try {
+            Method method = Caffeine.class.getDeclaredMethod(name);
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException e) {
+            throw incompatibleCaffeine(Method.class.getSimpleName().toLowerCase(), name, e);
+        }
+    }
+
+    private static IllegalStateException incompatibleCaffeine(String memberKind, String name, Throwable cause) {
+        return new IllegalStateException("Incompatible Caffeine version: expected %s '%s' on '%s' was not found. "
+                .concat("Distributed Caffeine accesses Caffeine internals does not support this Caffeine version.")
+                .formatted(memberKind, name, Caffeine.class.getName()), cause);
     }
 
     /**

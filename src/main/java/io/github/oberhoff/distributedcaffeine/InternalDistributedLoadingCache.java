@@ -25,11 +25,13 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
@@ -104,60 +106,88 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
                 .map(key -> entry(key, policy.getIfPresentQuietly(ik(key))))
                 .collect(Collectors.toMap(Entry::getKey, entry ->
                         getOrCreateRefreshOperation(entry.getKey(), v(entry.getValue()))));
-        return CompletableFuture.allOf(keyToCompletableFutureOfValues.values().toArray(CompletableFuture[]::new))
+        // settle every refresh individually so that allOf() cannot fail. A single failing key must not discard the
+        // values that reloaded successfully: Caffeine applies each refresh in its own whenComplete callback,
+        // independently of the aggregated future (LocalLoadingCache.refresh), so a sibling failure never blocks a
+        // successful one. The returned future still completes exceptionally, see below.
+        CompletableFuture<?>[] settledRefreshOperations = keyToCompletableFutureOfValues.values().stream()
+                .map(completableFutureOfValue -> completableFutureOfValue.handle((value, throwable) -> value))
+                .toArray(CompletableFuture[]::new);
+        return CompletableFuture.allOf(settledRefreshOperations)
                 .thenApplyAsync(ignored -> {
-                    Map<K, V> keyToNewValue = keyToCompletableFutureOfValues.entrySet().stream()
-                            .map(entry -> entry(entry.getKey(), entry.getValue().join()))
-                            .collect(HashMap::new, (hashMap, entry) -> // allow null values
-                                    hashMap.put(entry.getKey(), entry.getValue()), HashMap::putAll);
-                    // retain the original 'remove if null' semantics
+                    // retain the original 'remove if null' semantics (a failed refresh keeps the current value,
+                    // just like Caffeine, which does not touch the cache when the reload throws)
                     Map<K, V> keysWithNewValues = new HashMap<>();
                     Set<K> keysWithNullValues = new HashSet<>();
-                    keyToNewValue.forEach((key, newValue) -> {
-                        if (nonNull(newValue)) {
-                            keysWithNewValues.put(key, newValue);
-                        } else {
-                            keysWithNullValues.add(key);
+                    RuntimeException failure = null;
+                    for (Entry<K, CompletableFuture<V>> entry : keyToCompletableFutureOfValues.entrySet()) {
+                        try {
+                            // already completed (allOf above awaited the settled futures), so this cannot block
+                            V newValue = entry.getValue().join();
+                            if (nonNull(newValue)) {
+                                keysWithNewValues.put(entry.getKey(), newValue);
+                            } else {
+                                keysWithNullValues.add(entry.getKey());
+                            }
+                        } catch (CompletionException | CancellationException e) {
+                            // keep the first failure, mirroring allOf(), and report it once every key was processed
+                            failure = isNull(failure)
+                                    ? e
+                                    : failure;
                         }
-                    });
+                    }
                     synchronizationLock.runLocked(() -> {
                         cache.putAll(cacheManager.putAllDistributedRefresh(im(keysWithNewValues)));
                         cache.invalidateAll(cacheManager.invalidateAllDistributedRefresh(iks(keysWithNullValues)));
                     });
+                    if (nonNull(failure)) {
+                        // propagate as before, but only after the successful subset has been applied and distributed
+                        throw failure;
+                    }
                     return unmodifiableMap(keysWithNewValues);
                 }, executor);
     }
 
     private CompletableFuture<V> getOrCreateRefreshOperation(K key, V oldValue) {
+        AtomicReference<CompletableFuture<V>> createdRefreshOperation = new AtomicReference<>();
         // retain the original 'only one concurrent refresh operation per key' semantics
-        return refreshOperations.compute(key, (k, refreshOperation) -> {
-            if (isNull(refreshOperation) || refreshOperation.isDone()) {
+        CompletableFuture<V> refreshOperation = refreshOperations.compute(key, (k, existingRefreshOperation) -> {
+            if (isNull(existingRefreshOperation) || existingRefreshOperation.isDone()) {
                 // retain the original 'load if null, reload if not null' semantics
                 CompletableFuture<V> newRefreshOperation = isNull(oldValue)
                         ? getFailable(() -> cacheLoader.asyncLoadDelegated(key, executor),
                         CompletionException::new)
                         : getFailable(() -> cacheLoader.asyncReloadDelegated(key, oldValue, executor),
                         CompletionException::new);
-                // intention: retain the original 'log exception and swallow' semantics
-                // but strange: exceptions are still thrown, so this behavior is imitated
-                // additionally count stats due to custom implementation and clean up completed refresh operations.
-                // the callback is attached only once, to the newly created operation (not on every coalesced call),
-                // so stats are not over-counted; the two-arg remove ensures only this operation is removed and a
-                // newer in-flight refresh for the same key is never dropped
-                newRefreshOperation.whenCompleteAsync((v, e) -> {
-                    if (isNull(e)) {
-                        statsCounter.recordLoadSuccess(1);
-                    } else {
-                        statsCounter.recordLoadFailure(1);
-                        logger.log(Level.WARNING,
-                                format("Exception thrown during refresh for %s", key), e);
-                    }
-                    refreshOperations.remove(key, newRefreshOperation);
-                }, executor);
+                createdRefreshOperation.set(newRefreshOperation);
                 return newRefreshOperation;
             } else {
-                return refreshOperation;
+                return existingRefreshOperation;
             }
         });
+        // intention: retain the original 'log exception and swallow' semantics
+        // but strange: exceptions are still thrown, so this behavior is imitated
+        // additionally count stats due to custom implementation and clean up completed refresh operations.
+        // the callback is attached only once, to the newly created operation (not on every coalesced call), so stats
+        // are not over-counted; the two-arg remove ensures only this operation is removed and a newer in-flight
+        // refresh for the same key is never dropped.
+        // it has to be attached outside the mapping function above, because a same-thread executor completes the
+        // reload before the callback is even attached and then runs it inline: removing from the map while its own
+        // mapping function is still running makes that removal fail, and the failure lands in the callback's
+        // (discarded) dependent future instead of anywhere visible, silently leaking an entry per refreshed key
+        CompletableFuture<V> newRefreshOperation = createdRefreshOperation.get();
+        if (nonNull(newRefreshOperation)) {
+            newRefreshOperation.whenCompleteAsync((v, e) -> {
+                if (isNull(e)) {
+                    statsCounter.recordLoadSuccess(1);
+                } else {
+                    statsCounter.recordLoadFailure(1);
+                    logger.log(Level.WARNING,
+                            format("Exception thrown during refresh for %s", key), e);
+                }
+                refreshOperations.remove(key, newRefreshOperation);
+            }, executor);
+        }
+        return refreshOperation;
     }
 }

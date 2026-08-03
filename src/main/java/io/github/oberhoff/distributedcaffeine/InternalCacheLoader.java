@@ -44,7 +44,7 @@ import static java.util.stream.Collectors.toSet;
 
 @SuppressWarnings("java:S1450")
 class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalValue<V>>,
-        InternalLazyInitializer<K, V> {
+        InternalInitializable<K, V> {
 
     private static final String LOAD_ALL = "loadAll";
 
@@ -58,12 +58,6 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalV
     InternalCacheLoader(CacheLoader<K, V> cacheLoader) {
         this.cacheLoader = cacheLoader;
         // see also initialize()
-    }
-
-    InternalCacheLoader<K, V> neutralize() {
-        // cache manager is initially deactivated
-        this.cacheManager = new InternalCacheManager<>();
-        return this;
     }
 
     @Override

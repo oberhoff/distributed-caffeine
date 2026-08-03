@@ -15,7 +15,11 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-interface InternalLazyInitializer<K, V> {
+// implemented by everything that is wired from the instance registry instead of through its own constructor. That
+// detour is unavoidable for the parts taking part in building the very Caffeine cache they depend on: the listeners
+// and the cache loader are handed to the builder, while the cache manager needs the cache that comes out of it
+interface InternalInitializable<K, V> {
 
+    // invoked exactly once per instance, see InternalInstanceRegistry.initializeComponents()
     void initialize(InternalInstanceRegistry<K, V> instanceRegistry);
 }

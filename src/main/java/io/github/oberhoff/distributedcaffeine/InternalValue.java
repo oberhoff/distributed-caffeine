@@ -24,6 +24,7 @@ class InternalValue<V> {
 
     private final V value;
     private Integer operation;
+    private boolean stale;
 
     private InternalValue(V value) {
         this.value = requireNonNull(value);
@@ -39,6 +40,15 @@ class InternalValue<V> {
 
     InternalValue<V> setOperation(Integer operation) {
         this.operation = operation;
+        return this;
+    }
+
+    boolean isStale() {
+        return stale;
+    }
+
+    InternalValue<V> setStale(boolean stale) {
+        this.stale = stale;
         return this;
     }
 

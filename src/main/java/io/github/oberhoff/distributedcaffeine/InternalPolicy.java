@@ -38,7 +38,7 @@ import static java.util.Objects.isNull;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toUnmodifiableMap;
 
-class InternalPolicy<K, V> implements Policy<K, V>, InternalLazyInitializer<K, V> {
+class InternalPolicy<K, V> implements Policy<K, V>, InternalInitializable<K, V> {
 
     private InternalInstanceRegistry<K, V> instanceRegistry;
     private Policy<InternalKey<K>, InternalValue<V>> policy;
@@ -135,7 +135,7 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalLazyInitializer<K, V
     @Override
     public Optional<VarExpiration<K, V>> expireVariably() {
         return policy.expireVariably()
-                .map(varExpiration -> instanceRegistry.initializeNowAndLazy(new InternalExpiration<>(varExpiration)));
+                .map(varExpiration -> instanceRegistry.initialize(new InternalExpiration<>(varExpiration)));
     }
 
     @Override
@@ -159,7 +159,7 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalLazyInitializer<K, V
                 });
     }
 
-    static class InternalExpiration<K, V> implements VarExpiration<K, V>, InternalLazyInitializer<K, V> {
+    static class InternalExpiration<K, V> implements VarExpiration<K, V>, InternalInitializable<K, V> {
 
         private final VarExpiration<InternalKey<K>, InternalValue<V>> varExpiration;
 
@@ -193,12 +193,12 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalLazyInitializer<K, V
             requireNonNull(key);
             requireNonNull(value);
             requireNonNull(unit);
-            V oldValue = v(policy.getIfPresentQuietly(ik(key)));
-            if (isNull(oldValue)) {
-                return put(key, value, duration, unit); // implicit distribution
-            } else {
-                return oldValue;
-            }
+            return synchronizationLock.getLocked(() -> {
+                V oldValue = v(policy.getIfPresentQuietly(ik(key)));
+                return isNull(oldValue)
+                        ? put(key, value, duration, unit) // implicit distribution
+                        : oldValue;
+            });
         }
 
         @Override

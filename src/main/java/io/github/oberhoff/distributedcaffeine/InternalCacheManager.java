@@ -24,6 +24,8 @@ import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.adapter.Retriever;
 
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.HashMap;
@@ -55,14 +57,17 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.E
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED_AFTER_WRITE;
+import static java.lang.String.format;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 
 @SuppressWarnings("java:S1452")
-class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retriever<K, V> {
+class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriever<K, V> {
 
     private final AtomicBoolean isActivated;
 
+    private Logger logger;
+    private String identifier;
     private Cache<InternalKey<K>, InternalValue<V>> cache;
     private Policy<InternalKey<K>, InternalValue<V>> policy;
     private DistributionMode distributionMode;
@@ -79,6 +84,8 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
 
     @Override
     public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
+        this.logger = instanceRegistry.getLogger();
+        this.identifier = instanceRegistry.getAdapter().getIdentifier();
         this.cache = instanceRegistry.getCache();
         this.policy = instanceRegistry.getCache().policy();
         this.distributionMode = instanceRegistry.getDistributionMode();
@@ -134,9 +141,7 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
         // special handling (activated, async, old value, not managed, no cache change)
         if (isActivated()) {
             if (distributionMode.isPopulationConsidered()) {
-                CompletableFuture.runAsync(() ->
-                                publishCacheEntries(Map.of(key, newValue), CACHED_REFRESHED_AFTER_WRITE, false),
-                        executor);
+                publishCacheEntriesAsync(Map.of(key, newValue), CACHED_REFRESHED_AFTER_WRITE);
                 // return old value which does not change the cache and does not trigger any listeners
                 return oldValue;
             } else {
@@ -172,9 +177,7 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
             if (distributionMode.isInvalidationConsidered()) {
                 Map<InternalKey<K>, InternalValue<V>> map = new HashMap<>(); // allow null values
                 map.put(key, null);
-                CompletableFuture.runAsync(() ->
-                                publishCacheEntries(map, INVALIDATED_REFRESHED_AFTER_WRITE, false),
-                        executor);
+                publishCacheEntriesAsync(map, INVALIDATED_REFRESHED_AFTER_WRITE);
                 // return old value which does not change the cache and does not trigger any listeners
                 return oldValue;
             } else {
@@ -199,9 +202,31 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
                         ? EVICTED_SIZE
                         : EVICTED_TIME;
             }
-            CompletableFuture.runAsync(() ->
-                    publishCacheEntries(Map.of(key, value), status, false), executor);
+            // of the three asynchronous publishers this is the one that cannot be made good later: the entry is
+            // already gone from the cache, and nothing reads it again to notice and retry. A lost eviction leaves
+            // the other instances serving what this one dropped and, with extended persistence configured, leaves
+            // the entry CACHED in the store instead of evicted - so it is never pruned and comes back on the next
+            // restart. See the TODO on publishCacheEntriesAsync
+            publishCacheEntriesAsync(Map.of(key, value), status);
         }
+    }
+
+    // the three callers below publish outside the synchronization lock because they run where taking it would
+    // deadlock with Caffeine's internal lock. Whatever the returned future carries is therefore the only trace a
+    // failure leaves, and dropping it hides a store that is refusing writes: the distribution is simply lost, while
+    // locally everything looks like it succeeded
+    // TODO logging makes such a failure visible but does not make the instances converge again. Retrying is not
+    // enough on its own, because upsertCacheEntries() writes the status unconditionally, so a delayed retry can
+    // overwrite a newer CACHED write for the same key with a stale EVICTED one. Letting the data store drive the
+    // correction (as invalidate-on-prune does for extended persistence) is the more promising direction
+    private void publishCacheEntriesAsync(Map<? extends InternalKey<K>, ? extends InternalValue<V>> map,
+                                          Status status) {
+        CompletableFuture.runAsync(() -> publishCacheEntries(map, status, false), executor)
+                .exceptionally(throwable -> {
+                    logger.log(Level.WARNING, format("Distributing %s for %s failed for cache at '%s'",
+                            status, map.keySet(), identifier), throwable);
+                    return null;
+                });
     }
 
     private void publishCacheEntries(Map<? extends InternalKey<K>, ? extends InternalValue<V>> map, Status status,
@@ -265,6 +290,13 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
                                 // self-echo filter
                                 if (isNull(present) || isNull(operation) || !operation.equals(present.getOperation())) {
                                     toAdd.put(key, iv(cacheEntry.getValue()).setOperation(operation));
+                                } else {
+                                    // the store still backs this entry, so it has to survive a stale sweep even
+                                    // though it is already up to date and is therefore not written again. Clearing
+                                    // the mark here rather than only via toAdd matters because an entry that is in
+                                    // sync when synchronization stops always takes this branch: both publishing and
+                                    // retrieving stamp the local value with the very operation held in the store
+                                    present.setStale(false);
                                 }
                             } else {
                                 // only remove from cache if value is present
@@ -279,20 +311,34 @@ class InternalCacheManager<K, V> implements InternalLazyInitializer<K, V>, Retri
         }
     }
 
+    // while synchronization was stopped the cache kept serving locally, so local writes never reached the data store
+    // and changes made elsewhere never arrived. Retrieving below only ever adds what the store holds, which would
+    // leave entries the store no longer backs in place to be served as if they were still valid. Every entry present
+    // up front is therefore marked as stale and anything the store still knows clears that mark again, so that only
+    // what is left marked has to be removed afterwards. Marking happens in place, which keeps the cache readable
+    // throughout instead of replacing it with an empty one that answers every read with a miss
     void synchronizeCacheEntries() {
-        if (isActivated() && distributionMode.isPopulationConsidered()) {
+        if (isActivated()) {
             synchronizationLock.ensureLock();
-            // TODO discriminator
-            // process the store cursor directly instead of buffering it into a set first (avoids a second full copy
-            // in memory and the needless CacheEntry hashCode/equals a set would compute)
-            try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
-                    null,
-                    null,
-                    CACHED_GROUP,
-                    null,
-                    true))) {
-                retrieveCacheEntries(cacheEntryStream);
+            cache.asMap().values()
+                    .forEach(value -> value.setStale(true));
+            if (distributionMode.isPopulationConsidered()) {
+                // TODO discriminator
+                // process the store cursor directly instead of buffering it into a set first (avoids a second full
+                // copy in memory and the needless CacheEntry hashCode/equals a set would compute)
+                try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
+                        null,
+                        null,
+                        CACHED_GROUP,
+                        null,
+                        true))) {
+                    retrieveCacheEntries(cacheEntryStream);
+                }
             }
+            // without population being considered nothing clears the marks, so everything present is dropped - the
+            // same outcome as before, where a restart always continued with an empty cache
+            cache.asMap().values()
+                    .removeIf(InternalValue::isStale);
         }
     }
 

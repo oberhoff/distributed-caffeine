@@ -37,7 +37,7 @@ import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
-class InternalDistributedCache<K, V> implements DistributedCache<K, V>, InternalLazyInitializer<K, V> {
+class InternalDistributedCache<K, V> implements DistributedCache<K, V>, InternalInitializable<K, V> {
 
     protected InternalInstanceRegistry<K, V> instanceRegistry;
     protected Cache<InternalKey<K>, InternalValue<V>> cache;
@@ -152,16 +152,16 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
 
     @Override
     public ConcurrentMap<K, V> asMap() {
-        return instanceRegistry.initializeNowAndLazy(new InternalConcurrentMap<>());
+        return instanceRegistry.initialize(new InternalConcurrentMap<>());
     }
 
     @Override
     public Policy<K, V> policy() {
-        return instanceRegistry.initializeNowAndLazy(new InternalPolicy<>());
+        return instanceRegistry.initialize(new InternalPolicy<>());
     }
 
     @Override
     public DistributedPolicy<K, V> distributedPolicy() {
-        return instanceRegistry.initializeNowAndLazy(new InternalDistributedPolicy<>());
+        return instanceRegistry.initialize(new InternalDistributedPolicy<>());
     }
 }
