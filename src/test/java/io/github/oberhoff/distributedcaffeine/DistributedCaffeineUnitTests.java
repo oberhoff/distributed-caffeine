@@ -15,6 +15,12 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.CacheLoader;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
+import com.github.benmanes.caffeine.cache.RemovalCause;
+import com.github.benmanes.caffeine.cache.RemovalListener;
 import com.mongodb.MongoBulkWriteException;
 import com.mongodb.MongoException;
 import com.mongodb.ServerAddress;
@@ -27,12 +33,6 @@ import com.mongodb.client.MongoCollection;
 import com.mongodb.client.model.BulkWriteOptions;
 import com.mongodb.client.model.UpdateOneModel;
 import com.mongodb.client.model.changestream.ChangeStreamDocument;
-import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.CacheLoader;
-import com.github.benmanes.caffeine.cache.Caffeine;
-import com.github.benmanes.caffeine.cache.LoadingCache;
-import com.github.benmanes.caffeine.cache.RemovalCause;
-import com.github.benmanes.caffeine.cache.RemovalListener;
 import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
@@ -58,6 +58,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -455,6 +456,55 @@ final class DistributedCaffeineUnitTests {
         void test_Hasher_populated_hash_stream_returns_hash() {
             String hash = new Hasher().putString("something").getHash();
             assertThat(hash).isNotBlank().hasSize(32);
+        }
+
+        @DisplayName("that keys of supported types are hashed out of the box")
+        @Test
+        void test_Hasher_keys_of_supported_types_are_hashed_out_of_the_box() {
+            InternalHasher<Object> hasher = new InternalHasher<>(null);
+            UUID uuid = UUID.randomUUID();
+
+            // hashed exactly as putting the key into a hasher by hand would, so that an application migrating to
+            // a hash provider of its own can keep the entries already written to the store
+            assertThat(hasher.getHash("key")).isEqualTo(new Hasher().putString("key").getHash());
+            assertThat(hasher.getHash(1L)).isEqualTo(new Hasher().putLong(1L).getHash());
+            assertThat(hasher.getHash(1)).isEqualTo(new Hasher().putInt(1).getHash());
+            assertThat(hasher.getHash(uuid)).isEqualTo(new Hasher().putUUID(uuid).getHash());
+
+            // each type is put with the accessor of its own instead of a shared one, so keys that are equal in
+            // value but not in type stay apart
+            assertThat(hasher.getHash(1L)).isNotEqualTo(hasher.getHash(1));
+        }
+
+        @DisplayName("that keys implementing Hashable are hashed by themselves")
+        @Test
+        void test_Hasher_keys_implementing_hashable_are_hashed_by_themselves() {
+            Key key = Key.of(1, "name");
+
+            assertThat(new InternalHasher<Key>(null).getHash(key))
+                    .isEqualTo(key.getHash(Hasher::new));
+        }
+
+        @DisplayName("that a configured hash provider takes precedence")
+        @Test
+        void test_Hasher_configured_hash_provider_takes_precedence() {
+            InternalHasher<Object> hasher = new InternalHasher<>((key, hasherSupplier) -> "provided");
+
+            // over the types hashed out of the box as well as over keys hashing themselves, so that configuring
+            // one is enough to take over hashing entirely
+            assertThat(hasher.getHash("key")).isEqualTo("provided");
+            assertThat(hasher.getHash(Key.of(1))).isEqualTo("provided");
+        }
+
+        @DisplayName("that keys of unsupported types throw exception")
+        @Test
+        void test_Hasher_keys_of_unsupported_types_throw_exception() {
+            InternalHasher<Double> hasher = new InternalHasher<>(null);
+
+            assertThatException().isThrownBy(() -> hasher.getHash(1.0))
+                    .isExactlyInstanceOf(IllegalStateException.class)
+                    .withMessage("Keys of type Double are not hashable out of the box (only String, Long, Integer and UUID are), "
+                            .concat("keys have to implement the Hashable interface or a HashProvider has to be specified."));
         }
     }
 

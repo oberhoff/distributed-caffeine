@@ -20,6 +20,7 @@ import io.github.oberhoff.distributedcaffeine.hasher.Hashable;
 import io.github.oberhoff.distributedcaffeine.hasher.Hasher;
 
 import java.util.Set;
+import java.util.UUID;
 
 import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
 import static java.util.Objects.nonNull;
@@ -48,13 +49,26 @@ class InternalHasher<K> {
         } else {
             if (key instanceof Hashable hashable) {
                 return hashable.getHash(Hasher::new);
+            } else if (key instanceof String s) {
+                return new Hasher().putString(s).getHash();
+            } else if (key instanceof Long l) {
+                return new Hasher().putLong(l).getHash();
+            } else if (key instanceof Integer i) {
+                return new Hasher().putInt(i).getHash();
+            } else if (key instanceof UUID u) {
+                return new Hasher().putUUID(u).getHash();
             } else {
                 throw new IllegalStateException(
-                        "Neither a %s is configured, nor does the key of type %s implement the %s interface."
+                        "Keys of type %s are not hashable out of the box (only %s, %s, %s and %s are), "
+                                .concat("keys have to implement the %s interface or a %s has to be specified.")
                                 .formatted(
-                                        HashProvider.class.getSimpleName(),
                                         key.getClass().getSimpleName(),
-                                        Hashable.class.getSimpleName()));
+                                        String.class.getSimpleName(),
+                                        Long.class.getSimpleName(),
+                                        Integer.class.getSimpleName(),
+                                        UUID.class.getSimpleName(),
+                                        Hashable.class.getSimpleName(),
+                                        HashProvider.class.getSimpleName()));
             }
         }
     }

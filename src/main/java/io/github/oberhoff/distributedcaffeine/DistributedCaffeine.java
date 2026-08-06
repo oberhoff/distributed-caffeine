@@ -45,6 +45,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.WeakHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ForkJoinPool;
@@ -194,22 +195,22 @@ public final class DistributedCaffeine<K, V> {
     }
 
     /**
-     * Specifies the hash provider used for generating hashes for key objects. Alternatively, key objects can
-     * implement the {@link Hashable} interface, in which case this method can be skipped.
+     * Specifies the hash provider used for generating hashes for key objects. This method can be skipped for keys of
+     * type {@link String}, {@link Long}, {@link Integer} or {@link UUID}, which are hashed out of the box, and for key
+     * objects implementing the {@link Hashable} interface.
      * <p>
      * Exemplary usage:
      * <pre>
      * ...
-     * .withHashProvider((hasher, key) -> hasher.get()
-     *     .putUuid(key.getId())
+     * .withHashProvider((key, hasher) -> hasher.get()
+     *     .putUUID(key.getId())
      *     .putLong(key.getVersion())
      *     .putString(key.getName())
      *     .put...
      *     .getHash())
      * ...
      * </pre>
-     * <b>Note:</b> A specified hash provider always takes precedence, even if key objects implement the
-     * {@link Hashable} interface (implementation is mandatory if this method is skipped).
+     * <b>Note:</b> A specified hash provider always takes precedence over the alternatives listed above.
      *
      * @param hashProvider hash provider used for generating hashes for the given key using the given hasher
      * @return a builder pattern instance for chaining additional methods
