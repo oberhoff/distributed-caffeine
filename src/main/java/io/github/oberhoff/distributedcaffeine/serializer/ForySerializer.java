@@ -18,16 +18,19 @@ package io.github.oberhoff.distributedcaffeine.serializer;
 import org.apache.fory.ThreadSafeFory;
 import org.apache.fory.config.ForyBuilder;
 import org.apache.fory.config.Language;
-import org.apache.fory.logging.LogLevel;
-import org.apache.fory.logging.LoggerFactory;
 import org.jspecify.annotations.NullMarked;
 
+import java.util.Objects;
 import java.util.stream.Stream;
 
 import static java.util.Objects.requireNonNull;
 
 /**
  * Implementation of a serializer with byte array representation based on <i>Apache Fory</i>.
+ * <p>
+ * <b>Attention:</b> Class registration is not enforced by default, which means that arbitrary classes can be
+ * deserialized. Values should therefore only be deserialized from a trusted data store. If strict enforcement is
+ * required, {@link #ForySerializer(ForyBuilder, Class[])} can be used with a Fory builder enforcing this.
  *
  * @param <T> the type of the object to serialize
  * @author Andreas Oberhoff
@@ -37,10 +40,6 @@ import static java.util.Objects.requireNonNull;
 public class ForySerializer<T> implements ByteArraySerializer<T> {
 
     private final ThreadSafeFory fory;
-
-    static {
-        LoggerFactory.setLogLevel(LogLevel.ERROR_LEVEL);
-    }
 
     /**
      * Constructs a serializer with byte array representation based on <i>Apache Fory</i>.
@@ -54,6 +53,7 @@ public class ForySerializer<T> implements ByteArraySerializer<T> {
      * class-based type information.
      *
      * @param registerClasses optional class of the object (with additional classes of nested objects) to serialize
+     *                        (order must be stable)
      */
     public ForySerializer(Class<?>... registerClasses) {
         this(new ForyBuilder()
@@ -69,6 +69,7 @@ public class ForySerializer<T> implements ByteArraySerializer<T> {
      *
      * @param foryBuilder     customizable Fory builder used to construct Fory instance internally
      * @param registerClasses optional class of the object (with additional classes of nested objects) to serialize
+     *                        (order must be stable)
      */
     public ForySerializer(ForyBuilder foryBuilder, Class<?>... registerClasses) {
         requireNonNull(foryBuilder, "foryBuilder cannot be null");
@@ -76,11 +77,12 @@ public class ForySerializer<T> implements ByteArraySerializer<T> {
         this.fory = foryBuilder
                 .buildThreadSafeFory();
         Stream.of(registerClasses)
+                .filter(Objects::nonNull)
                 .forEach(fory::register);
     }
 
     @Override
-    public byte[] serialize(Object object) {
+    public byte[] serialize(T object) {
         return fory.serialize(object);
     }
 

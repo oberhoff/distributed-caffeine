@@ -27,7 +27,6 @@ import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
 import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
-import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toUnmodifiableMap;
 import static java.util.stream.Collectors.toUnmodifiableSet;
 
@@ -47,11 +46,6 @@ class InternalUtils {
                 .collect(toUnmodifiableSet());
     }
 
-    static <V> Set<InternalValue<V>> ivs(Collection<V> keys) {
-        return keys.stream().map(InternalValue::iv)
-                .collect(toUnmodifiableSet());
-    }
-
     static <K, V> Map<InternalKey<K>, InternalValue<V>> im(Map<? extends K, ? extends V> map) {
         return map.entrySet().stream()
                 .collect(toUnmodifiableMap(entry -> ik(entry.getKey()), entry -> iv(entry.getValue())));
@@ -60,12 +54,6 @@ class InternalUtils {
     static <K, V> Map<K, V> m(Map<InternalKey<K>, InternalValue<V>> map) {
         return map.entrySet().stream()
                 .collect(toUnmodifiableMap(entry -> k(entry.getKey()), entry -> v(entry.getValue())));
-    }
-
-    static void requireNonNullOnCondition(boolean condition, Object object, String message) {
-        if (condition) {
-            requireNonNull(object, message);
-        }
     }
 
     static <T> Set<T> requireNonNullIterable(Iterable<? extends T> iterable) {

@@ -35,6 +35,7 @@ import io.github.oberhoff.distributedcaffeine.serializer.JavaObjectSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
+import org.apache.fory.config.ForyBuilder;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 
@@ -175,12 +176,12 @@ public final class DistributedCaffeine<K, V> {
      * </pre>
      * <b>Note:</b> An "empty" Caffeine configuration is used as default if this method is skipped.
      * <p>
-     * <b>Attention:</b> To ensure the integrity of distributed synchronization between cache instances, the
-     * following minor restrictions apply:
+     * <b>Attention:</b> To ensure the integrity of distributed synchronization between cache instances, the following
+     * minor restrictions apply:
      * <ul>
-     *      <li>Reference-based eviction using Caffeine's weak or soft references for keys or values is not
-     *      supported. Even for the use of Caffeine (stand-alone), it is advised to use the more predictable size-
-     *      or time-based eviction instead.</li>
+     *      <li>Reference-based eviction using Caffeine's weak or soft references for keys or values is not supported.
+     *      Even for the use of Caffeine (stand-alone), it is advised to use the more predictable size- or time-based
+     *      eviction instead.</li>
      * </ul>
      *
      * @param caffeine Caffeine builder pattern instance without a final build step
@@ -224,8 +225,8 @@ public final class DistributedCaffeine<K, V> {
     /**
      * Specifies the mode used for distributed synchronization between cache instances.
      * <p>
-     * <b>Note:</b> {@link DistributionMode#POPULATION_AND_INVALIDATION_AND_EVICTION} is used as default if this
-     * method is skipped.
+     * <b>Note:</b> {@link DistributionMode#POPULATION_AND_INVALIDATION_AND_EVICTION} is used as default if this method
+     * is skipped.
      *
      * @param distributionMode distribution mode used for distributed synchronization
      * @return a builder pattern instance for chaining additional methods
@@ -247,8 +248,13 @@ public final class DistributedCaffeine<K, V> {
      *     .withValueSerializer(new ValueSerializer()))
      * ...
      * </pre>
-     * <b>Note:</b> {@link ForySerializer} is used as default for serializing key and value objects if this method
-     * is skipped.
+     * <b>Note:</b> {@link ForySerializer} is used as default for serializing key and value objects if this method is
+     * skipped.
+     * <p>
+     * <b>Attention:</b> Using the default {@link ForySerializer}, class registration is not enforced by default, which
+     * means that arbitrary classes can be deserialized. Values should therefore only be deserialized from a trusted
+     * data store. If strict enforcement is required, {@link ForySerializer#ForySerializer(ForyBuilder, Class[])} can be
+     * used with a Fory builder enforcing this.
      *
      * @param configurer configurer for serializers
      * @return a builder pattern instance for chaining additional methods
