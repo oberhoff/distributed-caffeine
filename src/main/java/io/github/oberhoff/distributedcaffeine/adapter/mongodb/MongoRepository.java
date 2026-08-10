@@ -57,13 +57,13 @@ import java.util.Spliterators;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
-import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field.DISCRIMINATOR;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field.HASH;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field.KEY;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field.OPERATION;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field.STATUS;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field.TIMESTAMP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field.VALUE;
+import static io.github.oberhoff.distributedcaffeine.adapter.Repository.DISCRIMINATOR_FIELD;
 import static java.lang.String.format;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
@@ -87,8 +87,6 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
 
     private final MongoCollection<Document> mongoCollection;
 
-    // TODO check all explain for COLLSCAN
-
     MongoRepository(MongoClient mongoClient, String databaseName, String collectionName) {
         this.mongoCollection = mongoClient.getDatabase(databaseName).getCollection(collectionName);
         ensureIndexes();
@@ -100,9 +98,12 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
             List<UpdateOneModel<Document>> updates = new ArrayList<>();
             cacheEntries.forEach(cacheEntry -> {
                 try {
+                    // the discriminator is not part of the update: an upsert builds the document to insert from the
+                    // equality conditions of its filter, so matching on it here is what stamps it on a new document,
+                    // and an existing one already carries it (it could not have been matched otherwise)
                     Bson filter = Filters.and(
                             Filters.eq(HASH.toString(), cacheEntry.getHash()),
-                            Filters.eq(DISCRIMINATOR.toString(), cacheEntry.getDiscriminator()));
+                            Filters.eq(DISCRIMINATOR_FIELD, requireNonNull(discriminator)));
                     Bson update = Updates.combine(
                             Updates.set(OPERATION.toString(), cacheEntry.getOperation()),
                             Updates.set(KEY.toString(), serializeToMongo(cacheEntry.getKey(),
@@ -160,10 +161,9 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
     }
 
     @Override
-    public Stream<CacheEntry<K, V>> streamCacheEntries(@Nullable String discriminator, @Nullable Set<String> hashes,
-                                                       @Nullable Set<Status> statuses, @Nullable Set<Field> fields,
-                                                       boolean orderByTimestampAsc) {
-        Bson filter = getFilter(discriminator, hashes, statuses, null);
+    public Stream<CacheEntry<K, V>> streamCacheEntries(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
+                                                       @Nullable Set<Field> fields, boolean orderByTimestampAsc) {
+        Bson filter = getFilter(hashes, statuses, null);
         Bson projection = getProjection(fields);
         Bson sort = orderByTimestampAsc
                 ? Sorts.ascending(TIMESTAMP.toString())
@@ -181,10 +181,9 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
     }
 
     @Override
-    public void updateStatusOfCacheEntries(@Nullable String discriminator, @Nullable Set<String> hashes,
-                                           @Nullable Set<Status> statuses, @Nullable Instant olderThan,
-                                           Status newStatus) {
-        Bson filter = getFilter(discriminator, hashes, statuses, olderThan);
+    public void updateStatusOfCacheEntries(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
+                                           @Nullable Instant olderThan, Status newStatus) {
+        Bson filter = getFilter(hashes, statuses, olderThan);
         Bson update = Updates.combine(
                 Updates.set(STATUS.toString(), newStatus.toString()),
                 Updates.set(OPERATION.toString(), null), // clearing the operation lets every instance apply it
@@ -193,40 +192,43 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
     }
 
     @Override
-    public void deleteCacheEntries(@Nullable String discriminator, @Nullable Set<String> hashes,
-                                   @Nullable Set<Status> statuses, @Nullable Instant olderThan) {
-        Bson filter = getFilter(discriminator, hashes, statuses, olderThan);
+    public void deleteCacheEntries(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
+                                   @Nullable Instant olderThan) {
+        Bson filter = getFilter(hashes, statuses, olderThan);
         mongoCollection.deleteMany(filter);
     }
 
     @Override
-    public long countCacheEntries(@Nullable String discriminator, @Nullable Set<Status> statuses) {
-        Bson filter = getFilter(discriminator, null, statuses, null);
+    public long countCacheEntries(@Nullable Set<Status> statuses) {
+        Bson filter = getFilter(null, statuses, null);
         return mongoCollection.countDocuments(filter);
     }
 
+    // Every query this repository issues filters by the discriminator and by nothing else unconditionally, so it
+    // leads both indexes: that makes it the equality prefix of every plan and keeps even a query filtering by
+    // nothing else off a collection scan.
+    //
+    // The remaining fields follow the order equality, sort, range:
+    // - (discriminator, hash) is unique, which is what the upsert relies on, and because it is unique a filter by
+    //   hashes needs exactly one index seek per hash - a status filter alongside it is then evaluated against at
+    //   most that many documents, so a wider index adding status and timestamp behind the hash buys nothing.
+    // - (discriminator, status, timestamp) serves everything filtering by status, with the timestamp trailing so
+    //   that it can be used for the range filter as well as for the ordering (the status filter is a set, which
+    //   the server expands into one sorted index range per status and merges, so no blocking sort is needed).
     private void ensureIndexes() {
-        IndexModel indexHashDiscriminator = new IndexModel(
+        IndexModel indexDiscriminatorHash = new IndexModel(
                 Indexes.compoundIndex(
-                        Indexes.ascending(HASH.toString()),
-                        Indexes.ascending(DISCRIMINATOR.toString())),
+                        Indexes.ascending(DISCRIMINATOR_FIELD),
+                        Indexes.ascending(HASH.toString())),
                 new IndexOptions().unique(true));
-        IndexModel indexHashStatusDiscriminatorTimestamp = new IndexModel(
+        IndexModel indexDiscriminatorStatusTimestamp = new IndexModel(
                 Indexes.compoundIndex(
-                        Indexes.ascending(HASH.toString()),
+                        Indexes.ascending(DISCRIMINATOR_FIELD),
                         Indexes.ascending(STATUS.toString()),
-                        Indexes.ascending(DISCRIMINATOR.toString()),
-                        Indexes.ascending(TIMESTAMP.toString())),
-                new IndexOptions().unique(false));
-        IndexModel indexStatusDiscriminatorTimestamp = new IndexModel(
-                Indexes.compoundIndex(
-                        Indexes.ascending(STATUS.toString()),
-                        Indexes.ascending(DISCRIMINATOR.toString()),
                         Indexes.ascending(TIMESTAMP.toString())),
                 new IndexOptions().unique(false));
 
-        List<IndexModel> indexes = List.of(indexHashDiscriminator, indexHashStatusDiscriminatorTimestamp,
-                indexStatusDiscriminatorTimestamp);
+        List<IndexModel> indexes = List.of(indexDiscriminatorHash, indexDiscriminatorStatusTimestamp);
 
         mongoCollection.createIndexes(indexes);
 
@@ -254,9 +256,12 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
                 .onClose(mongoCursor::close);
     }
 
-    private Bson getFilter(@Nullable String discriminator, @Nullable Set<String> hashes,
-                           @Nullable Set<Status> statuses, @Nullable Instant olderThan) {
+    private Bson getFilter(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
+                           @Nullable Instant olderThan) {
         List<Bson> filters = new ArrayList<>();
+        // first because it is the only one always present and the one both indexes lead with. The server normalizes
+        // the order of the conditions before planning, so this documents intent rather than steering it
+        filters.add(Filters.eq(DISCRIMINATOR_FIELD, requireNonNull(discriminator)));
         if (nonNull(hashes)) {
             filters.add(Filters.in(HASH.toString(), hashes));
         }
@@ -265,7 +270,6 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
                     .map(Objects::toString)
                     .toList()));
         }
-        filters.add(Filters.eq(DISCRIMINATOR.toString(), discriminator));
         if (nonNull(olderThan)) {
             filters.add(Filters.lt(TIMESTAMP.toString(), olderThan));
         }
@@ -297,7 +301,6 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
     private static <K, V> CacheEntry<K, V> toCacheEntry(Serializer<K, ?> keySerializer, Serializer<V, ?> valueSerializer,
                                                         Document document) throws Exception {
         return CacheEntry.of(
-                document.getString(DISCRIMINATOR.toString()),
                 document.getString(HASH.toString()),
                 document.getInteger(OPERATION.toString()),
                 deserializeFromMongo(document, KEY.toString(), keySerializer),

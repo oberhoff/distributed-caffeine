@@ -248,7 +248,6 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
                             value.setOperation(operation);
                         }
                         return CacheEntry.of(
-                                null, // TODO discriminator
                                 // memoizing overload: reuses the hash cached on the key instance (e.g. stamped when
                                 // the entry was put/loaded/retrieved) instead of recomputing it under the lock
                                 hasher.getHash(entry.getKey()),
@@ -269,6 +268,8 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
 
     @Override
     public void retrieveCacheEntries(Collection<CacheEntry<K, V>> cacheEntries) {
+        // no filtering by discriminator here: a retriever belongs to exactly one cache, and the adapter handing over
+        // these cache entries is scoped to that cache's discriminator - so whatever arrives is already its own
         retrieveCacheEntries(cacheEntries.stream());
     }
 
@@ -323,11 +324,9 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
             cache.asMap().values()
                     .forEach(value -> value.setStale(true));
             if (distributionMode.isPopulationConsidered()) {
-                // TODO discriminator
                 // process the store cursor directly instead of buffering it into a set first (avoids a second full
                 // copy in memory and the needless CacheEntry hashCode/equals a set would compute)
                 try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
-                        null,
                         null,
                         CACHED_GROUP,
                         null,

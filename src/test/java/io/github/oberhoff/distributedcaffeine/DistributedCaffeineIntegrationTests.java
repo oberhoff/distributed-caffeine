@@ -27,13 +27,16 @@ import com.github.benmanes.caffeine.cache.RemovalListener;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import com.github.benmanes.caffeine.cache.stats.StatsCounter;
 import com.mongodb.ConnectionString;
+import com.mongodb.ExplainVerbosity;
 import com.mongodb.MongoClientException;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.MongoCommandException;
 import com.mongodb.ReadConcern;
 import com.mongodb.ReadConcernLevel;
+import com.mongodb.client.FindIterable;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
+import com.mongodb.client.model.Sorts;
 import io.github.oberhoff.distributedcaffeine.adapter.AbstractAdapter;
 import io.github.oberhoff.distributedcaffeine.adapter.AbstractSynchronizer;
 import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
@@ -56,6 +59,8 @@ import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.assertj.core.api.AbstractLongAssert;
+import org.bson.Document;
+import org.bson.conversions.Bson;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -69,8 +74,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
-import org.junit.platform.commons.util.ReflectionUtils;
-import org.junit.platform.commons.util.ReflectionUtils.HierarchyTraversalMode;
 import org.slf4j.event.Level;
 import org.slf4j.event.LoggingEvent;
 import org.testcontainers.images.PullPolicy;
@@ -78,17 +81,16 @@ import org.testcontainers.mongodb.MongoDBContainer;
 import org.testcontainers.utility.DockerImageName;
 import tools.jackson.core.type.TypeReference;
 
-import javax.annotation.processing.Generated;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Inherited;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
-import java.lang.reflect.Field;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -100,8 +102,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -112,7 +114,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
-import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.stream.IntStream;
@@ -126,7 +127,6 @@ import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.entry;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
-import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_LOADED;
@@ -141,12 +141,14 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.I
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED_AFTER_WRITE;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.SHORT_LIVING_GROUP;
+import static io.github.oberhoff.distributedcaffeine.adapter.Repository.DEFAULT_DISCRIMINATOR;
 import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.lang.System.getProperty;
 import static java.time.temporal.ChronoUnit.FOREVER;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toMap;
+import static java.util.stream.Collectors.toSet;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatException;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
@@ -2717,7 +2719,6 @@ final class DistributedCaffeineIntegrationTests {
                         assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull();
                         assertThat(distributedPolicy.getAllFromStore(Set.of(key1, key2), false))
                                 .containsOnly(cacheEntry1)
-                                .allSatisfy(entry -> assertThat(entry.getDiscriminator()).isNull())
                                 .allSatisfy(entry -> assertThat(entry.getHash()).isNotBlank())
                                 .allSatisfy(entry -> assertThat(entry.getOperation()).isNotNull())
                                 .allSatisfy(entry -> assertThat(entry.getKey()).isEqualTo(key1))
@@ -4861,7 +4862,6 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(adapter.isActivated()).isTrue();
 
             CacheEntry<Key, Value> insertCacheEntry1 = CacheEntry.of(
-                    "discriminator",
                     "hash1",
                     1,
                     Key.of(1),
@@ -4869,7 +4869,6 @@ final class DistributedCaffeineIntegrationTests {
                     CACHED,
                     Instant.now());
             CacheEntry<Key, Value> insertCacheEntry2 = CacheEntry.of(
-                    "discriminator",
                     "hash2",
                     2,
                     Key.of(2),
@@ -4880,7 +4879,6 @@ final class DistributedCaffeineIntegrationTests {
             repository.upsertCacheEntries(Set.of(insertCacheEntry1, insertCacheEntry2));
 
             CacheEntry<Key, Value> updateCacheEntry1 = CacheEntry.of(
-                    insertCacheEntry1.getDiscriminator(),
                     insertCacheEntry1.getHash(),
                     insertCacheEntry1.getOperation(),
                     insertCacheEntry1.getKey(),
@@ -4888,7 +4886,6 @@ final class DistributedCaffeineIntegrationTests {
                     insertCacheEntry1.getStatus(),
                     Instant.now());
             CacheEntry<Key, Value> updateCacheEntry2 = CacheEntry.of(
-                    insertCacheEntry2.getDiscriminator(),
                     insertCacheEntry2.getHash(),
                     insertCacheEntry2.getOperation(),
                     insertCacheEntry2.getKey(),
@@ -4900,7 +4897,7 @@ final class DistributedCaffeineIntegrationTests {
 
             List<io.github.oberhoff.distributedcaffeine.adapter.CacheEntry<Key, Value>> foundCacheEntries = new ArrayList<>();
             try (Stream<io.github.oberhoff.distributedcaffeine.adapter.CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries("discriminator", null, null, null, false)) {
+                         repository.streamCacheEntries(null, null, null, false)) {
                 stream.forEach(foundCacheEntries::add);
             }
 
@@ -4918,12 +4915,12 @@ final class DistributedCaffeineIntegrationTests {
 
             assertThat(foundCacheEntries).hasSize(2)
                     .containsExactlyInAnyOrder(updateCacheEntry1, updateCacheEntry2);
-            assertThat(repository.countCacheEntries("discriminator", null))
+            assertThat(repository.countCacheEntries(null))
                     .isEqualTo(2);
 
-            repository.deleteCacheEntries("discriminator", null, null, null);
+            repository.deleteCacheEntries(null, null, null);
 
-            assertThat(repository.countCacheEntries("discriminator", null))
+            assertThat(repository.countCacheEntries(null))
                     .isEqualTo(0);
 
             adapter.deactivate();
@@ -4940,85 +4937,69 @@ final class DistributedCaffeineIntegrationTests {
             Instant timestamp2 = now.minusSeconds(20);
             Instant timestamp3 = now.minusSeconds(10);
 
-            // cache entries covering multiple discriminators (including null), statuses, hashes and timestamps
+            // cache entries covering statuses, hashes and timestamps (all within the scope of this repository, which
+            // is the only one it can address)
             CacheEntry<Key, Value> cachedEntry1 = CacheEntry.of(
-                    "d1", "h1", 1, Key.of(1), Value.of(1), CACHED, timestamp1);
+                    "h1", 1, Key.of(1), Value.of(1), CACHED, timestamp1);
             CacheEntry<Key, Value> cachedEntry2 = CacheEntry.of(
-                    "d1", "h2", 2, Key.of(2), Value.of(2), CACHED, timestamp2);
+                    "h2", 2, Key.of(2), Value.of(2), CACHED, timestamp2);
             CacheEntry<Key, Value> invalidatedEntry3 = CacheEntry.of(
-                    "d1", "h3", 3, Key.of(3), Value.of(3), INVALIDATED, timestamp3);
-            CacheEntry<Key, Value> otherDiscriminatorEntry = CacheEntry.of(
-                    "d2", "h1", 4, Key.of(4), Value.of(4), CACHED, timestamp2);
-            CacheEntry<Key, Value> nullDiscriminatorEntry = CacheEntry.of(
-                    null, "h5", 5, Key.of(5), Value.of(5), EVICTED_SIZE, timestamp1);
+                    "h3", 3, Key.of(3), Value.of(3), INVALIDATED, timestamp3);
 
-            repository.upsertCacheEntries(Set.of(
-                    cachedEntry1, cachedEntry2, invalidatedEntry3, otherDiscriminatorEntry, nullDiscriminatorEntry));
+            repository.upsertCacheEntries(Set.of(cachedEntry1, cachedEntry2, invalidatedEntry3));
 
-            // upsert uniqueness is (discriminator + hash): the same hash 'h1' coexists under 'd1' and 'd2', and the
-            // null discriminator is a distinct scope of its own
-            assertThat(repository.countCacheEntries("d1", null)).isEqualTo(3);
-            assertThat(repository.countCacheEntries("d2", null)).isEqualTo(1);
-            assertThat(repository.countCacheEntries(null, null)).isEqualTo(1);
+            assertThat(repository.countCacheEntries(null)).isEqualTo(3);
 
             // countCacheEntries filtered by statuses
-            assertThat(repository.countCacheEntries("d1", Set.of(CACHED))).isEqualTo(2);
-            assertThat(repository.countCacheEntries("d1", Set.of(INVALIDATED))).isEqualTo(1);
-            assertThat(repository.countCacheEntries("d1", Set.of(CACHED, INVALIDATED))).isEqualTo(3);
-            assertThat(repository.countCacheEntries("d1", Set.of(EVICTED_SIZE))).isEqualTo(0);
+            assertThat(repository.countCacheEntries(Set.of(CACHED))).isEqualTo(2);
+            assertThat(repository.countCacheEntries(Set.of(INVALIDATED))).isEqualTo(1);
+            assertThat(repository.countCacheEntries(Set.of(CACHED, INVALIDATED))).isEqualTo(3);
+            assertThat(repository.countCacheEntries(Set.of(EVICTED_SIZE))).isEqualTo(0);
 
-            // streamCacheEntries filtered by discriminator only
+            // streamCacheEntries unfiltered
             try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries("d1", null, null, null, false)) {
+                         repository.streamCacheEntries(null, null, null, false)) {
                 assertThat(stream.toList())
                         .containsExactlyInAnyOrder(cachedEntry1, cachedEntry2, invalidatedEntry3);
             }
 
-            // streamCacheEntries respects the null discriminator as its own scope
-            try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries(null, null, null, null, false)) {
-                assertThat(stream.toList())
-                        .containsExactly(nullDiscriminatorEntry);
-            }
-
             // streamCacheEntries filtered by hashes
             try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries("d1", Set.of("h1", "h2"), null, null, false)) {
+                         repository.streamCacheEntries(Set.of("h1", "h2"), null, null, false)) {
                 assertThat(stream.toList())
                         .containsExactlyInAnyOrder(cachedEntry1, cachedEntry2);
             }
 
             // streamCacheEntries filtered by statuses
             try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries("d1", null, Set.of(CACHED), null, false)) {
+                         repository.streamCacheEntries(null, Set.of(CACHED), null, false)) {
                 assertThat(stream.toList())
                         .containsExactlyInAnyOrder(cachedEntry1, cachedEntry2);
             }
 
             // streamCacheEntries filtered by hashes and statuses combined
             try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries("d1", Set.of("h1", "h2", "h3"), Set.of(INVALIDATED), null, false)) {
+                         repository.streamCacheEntries(Set.of("h1", "h2", "h3"), Set.of(INVALIDATED), null, false)) {
                 assertThat(stream.toList())
                         .containsExactly(invalidatedEntry3);
             }
 
             // streamCacheEntries ordered ascending by timestamp
             try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries("d1", null, null, null, true)) {
+                         repository.streamCacheEntries(null, null, null, true)) {
                 assertThat(stream.toList())
                         .containsExactly(cachedEntry1, cachedEntry2, invalidatedEntry3);
             }
 
             // streamCacheEntries with a field projection returns only the requested fields (others are not populated)
             List<CacheEntry<Key, Value>> projectedEntries;
-            try (Stream<CacheEntry<Key, Value>> stream = repository.streamCacheEntries("d1", Set.of("h1"), null,
-                    Set.of(CacheEntry.Field.DISCRIMINATOR, CacheEntry.Field.HASH, CacheEntry.Field.KEY,
+            try (Stream<CacheEntry<Key, Value>> stream = repository.streamCacheEntries(Set.of("h1"), null,
+                    Set.of(CacheEntry.Field.HASH, CacheEntry.Field.KEY,
                             CacheEntry.Field.STATUS, CacheEntry.Field.TIMESTAMP), false)) {
                 projectedEntries = stream.toList();
             }
             assertThat(projectedEntries).hasSize(1);
             CacheEntry<Key, Value> projectedEntry = projectedEntries.get(0);
-            assertThat(projectedEntry.getDiscriminator()).isEqualTo("d1");
             assertThat(projectedEntry.getHash()).isEqualTo("h1");
             assertThat(projectedEntry.getKey()).isEqualTo(Key.of(1));
             assertThat(projectedEntry.getStatus()).isEqualTo(CACHED);
@@ -5026,11 +5007,11 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(projectedEntry.getOperation()).isNull(); // excluded field is not populated
 
             // updateStatusOfCacheEntries updates the status, clears the operation and refreshes the timestamp
-            repository.updateStatusOfCacheEntries("d1", Set.of("h1"), Set.of(CACHED), null, INVALIDATED);
+            repository.updateStatusOfCacheEntries(Set.of("h1"), Set.of(CACHED), null, INVALIDATED);
 
             List<CacheEntry<Key, Value>> updatedEntries;
             try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries("d1", Set.of("h1"), null, null, false)) {
+                         repository.streamCacheEntries(Set.of("h1"), null, null, false)) {
                 updatedEntries = stream.toList();
             }
             assertThat(updatedEntries).hasSize(1);
@@ -5040,49 +5021,179 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(updatedEntry.getKey()).isEqualTo(Key.of(1));    // key and value preserved
             assertThat(updatedEntry.getValue()).isEqualTo(Value.of(1));
             assertThat(updatedEntry.getTimestamp()).isAfter(timestamp3); // timestamp refreshed to (a recent) now
-            assertThat(repository.countCacheEntries("d1", Set.of(CACHED))).isEqualTo(1);
-            assertThat(repository.countCacheEntries("d1", Set.of(INVALIDATED))).isEqualTo(2);
+            assertThat(repository.countCacheEntries(Set.of(CACHED))).isEqualTo(1);
+            assertThat(repository.countCacheEntries(Set.of(INVALIDATED))).isEqualTo(2);
 
             // updateStatusOfCacheEntries filtered by olderThan updates only entries older than the given timestamp,
             // cachedEntry2 (timestamp2) is updated, invalidatedEntry3 (timestamp3, not older) and the just-refreshed
             // 'h1' entry (recent) are not
-            repository.updateStatusOfCacheEntries("d1", null, null, timestamp3, EVICTED_SIZE);
-            assertThat(repository.countCacheEntries("d1", Set.of(EVICTED_SIZE))).isEqualTo(1);
+            repository.updateStatusOfCacheEntries(null, null, timestamp3, EVICTED_SIZE);
+            assertThat(repository.countCacheEntries(Set.of(EVICTED_SIZE))).isEqualTo(1);
 
             // deleteCacheEntries filtered by hashes
-            repository.deleteCacheEntries("d1", Set.of("h2"), null, null);
-            assertThat(repository.countCacheEntries("d1", null)).isEqualTo(2);
-            assertThat(repository.countCacheEntries("d1", Set.of(EVICTED_SIZE))).isEqualTo(0);
+            repository.deleteCacheEntries(Set.of("h2"), null, null);
+            assertThat(repository.countCacheEntries(null)).isEqualTo(2);
+            assertThat(repository.countCacheEntries(Set.of(EVICTED_SIZE))).isEqualTo(0);
 
             // deleteCacheEntries filtered by statuses
-            repository.deleteCacheEntries("d1", null, Set.of(INVALIDATED), null);
-            assertThat(repository.countCacheEntries("d1", null)).isEqualTo(0);
-
-            // discriminator scoping: deleting 'd1' left 'd2' and the null discriminator untouched
-            assertThat(repository.countCacheEntries("d2", null)).isEqualTo(1);
-            assertThat(repository.countCacheEntries(null, null)).isEqualTo(1);
-
-            // deleteCacheEntries respects the null discriminator as its own scope
-            repository.deleteCacheEntries(null, null, null, null);
-            assertThat(repository.countCacheEntries(null, null)).isEqualTo(0);
-            assertThat(repository.countCacheEntries("d2", null)).isEqualTo(1);
+            repository.deleteCacheEntries(null, Set.of(INVALIDATED), null);
+            assertThat(repository.countCacheEntries(null)).isEqualTo(0);
 
             // deleteCacheEntries filtered by olderThan
-            repository.deleteCacheEntries("d2", null, null, null); // start from a clean 'd2' scope
             repository.upsertCacheEntries(Set.of(
-                    CacheEntry.of("d2", "old", 1, Key.of(10), Value.of(10), CACHED, Instant.now().minusSeconds(10)),
-                    CacheEntry.of("d2", "new", 2, Key.of(11), Value.of(11), CACHED, Instant.now())));
-            assertThat(repository.countCacheEntries("d2", null)).isEqualTo(2);
-            repository.deleteCacheEntries("d2", null, null, Instant.now().minusSeconds(5));
+                    CacheEntry.of("old", 1, Key.of(10), Value.of(10), CACHED, Instant.now().minusSeconds(10)),
+                    CacheEntry.of("new", 2, Key.of(11), Value.of(11), CACHED, Instant.now())));
+            assertThat(repository.countCacheEntries(null)).isEqualTo(2);
+            repository.deleteCacheEntries(null, null, Instant.now().minusSeconds(5));
             try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries("d2", null, null, null, false)) {
+                         repository.streamCacheEntries(null, null, null, false)) {
                 assertThat(stream.toList())
                         .hasSize(1)
                         .allSatisfy(entry -> assertThat(entry.getHash()).isEqualTo("new"));
             }
 
-            repository.deleteCacheEntries("d2", null, null, null);
-            assertThat(repository.countCacheEntries("d2", null)).isEqualTo(0);
+            repository.deleteCacheEntries(null, null, null);
+            assertThat(repository.countCacheEntries(null)).isEqualTo(0);
+        }
+
+        @DisplayName("Test Adapter with a collection shared across caches")
+        @Test
+        void test_Adapter_with_shared_collection() throws Exception {
+            String collectionName = getCollectionName();
+
+            // four caches on one and the same collection: two of them share the discriminator 'a' (so they are
+            // expected to synchronize with each other), one uses 'b' and one chooses none, which puts it in the
+            // default scope
+            DistributedCache<Key, Value> cacheA1 = createCache(
+                    new MongoAdapter<>(mongoClient, DATABASE_NAME, collectionName, "a"),
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheA2 = createCache(
+                    new MongoAdapter<>(mongoClient, DATABASE_NAME, collectionName, "a"),
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheB = createCache(
+                    new MongoAdapter<>(mongoClient, DATABASE_NAME, collectionName, "b"),
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheInDefaultScope = createCache(
+                    new MongoAdapter<>(mongoClient, DATABASE_NAME, collectionName),
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            // a discriminator gone missing is reported instead of silently placing the cache in a scope of its own,
+            // where it would neither synchronize with the caches it was meant to nor say so
+            assertThatThrownBy(() ->
+                    new MongoAdapter<Key, Value>(mongoClient, DATABASE_NAME, collectionName, null))
+                    .isExactlyInstanceOf(NullPointerException.class)
+                    .hasMessage("discriminator cannot be null");
+            Stream.of("", " ", "\t\n").forEach(blank ->
+                    assertThatThrownBy(() ->
+                            new MongoAdapter<Key, Value>(mongoClient, DATABASE_NAME, collectionName, blank))
+                            .isExactlyInstanceOf(IllegalArgumentException.class)
+                            .hasMessage("discriminator cannot be blank"));
+
+            // every cache has a discriminator, so the identifier always carries one
+            assertThat(cacheA1.distributedPolicy().getAdapter().getIdentifier())
+                    .isEqualTo(String.join(":", "mongodb", DATABASE_NAME, collectionName, "a"));
+            assertThat(cacheInDefaultScope.distributedPolicy().getAdapter().getIdentifier())
+                    .isEqualTo(String.join(":", "mongodb", DATABASE_NAME, collectionName, DEFAULT_DISCRIMINATOR));
+
+            // the same key is populated in every scope, each with a value of its own
+            Key key = Key.of(1);
+            cacheA1.put(key, Value.of(1));
+            cacheB.put(key, Value.of(2));
+            cacheInDefaultScope.put(key, Value.of(3));
+
+            // synchronization happens within a discriminator ...
+            await("synchronization within the shared discriminator")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> assertThat(cacheA2.getIfPresent(key)).isEqualTo(Value.of(1)));
+
+            // ... and not across discriminators: the events of the other caches passed through the same change
+            // stream, so having seen the one above means the others had their chance as well
+            assertThat(cacheB.getIfPresent(key)).isEqualTo(Value.of(2));
+            assertThat(cacheInDefaultScope.getIfPresent(key)).isEqualTo(Value.of(3));
+
+            // uniqueness in the store is (discriminator + hash), so the same key coexists once per scope
+            assertThat(mongoClient.getDatabase(DATABASE_NAME).getCollection(collectionName).countDocuments())
+                    .isEqualTo(3);
+
+            // and every repository addresses its own scope only
+            assertThat(repositoryOf(cacheA1).countCacheEntries(null)).isEqualTo(1);
+            assertThat(repositoryOf(cacheB).countCacheEntries(null)).isEqualTo(1);
+            assertThat(repositoryOf(cacheInDefaultScope).countCacheEntries(null)).isEqualTo(1);
+
+            // deleting within one scope leaves the others untouched
+            repositoryOf(cacheB).deleteCacheEntries(null, null, null);
+            assertThat(repositoryOf(cacheB).countCacheEntries(null)).isEqualTo(0);
+            assertThat(repositoryOf(cacheA1).countCacheEntries(null)).isEqualTo(1);
+            assertThat(repositoryOf(cacheInDefaultScope).countCacheEntries(null)).isEqualTo(1);
+        }
+
+        @DisplayName("Test Repository queries are served by an index")
+        @Test
+        void test_Repository_queries_avoid_collection_scans() throws Exception {
+            String collectionName = getCollectionName();
+            // both scopes populated, so that the discriminator actually discriminates instead of matching every
+            // document - and one of them in the default scope, which an index has to serve like any other
+            DistributedCache<Key, Value> cacheWithDiscriminator = createCache(
+                    new MongoAdapter<>(mongoClient, DATABASE_NAME, collectionName, "d1"),
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheInDefaultScope = createCache(
+                    new MongoAdapter<>(mongoClient, DATABASE_NAME, collectionName),
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            // enough documents, spread over statuses and timestamps, that the planner has something to choose
+            // between rather than trivially scanning a handful. Plan selection is cost-based, so it could in
+            // principle turn over at a size no test wants to seed - probed separately up to 50k documents and
+            // across scopes holding 1% to 100% of the collection, where it does not
+            Status[] statuses = Status.values();
+            for (Repository<Key, Value> repository : List.of(
+                    repositoryOf(cacheWithDiscriminator), repositoryOf(cacheInDefaultScope))) {
+                repository.upsertCacheEntries(IntStream.range(0, 500)
+                        .mapToObj(i -> CacheEntry.of("h" + i, i, Key.of(i), Value.of(i),
+                                statuses[i % statuses.length], Instant.now().minusSeconds(i)))
+                        .collect(toSet()));
+            }
+
+            Instant deadline = Instant.now().minusSeconds(100);
+            Set<String> hashes = Set.of("h1", "h2");
+
+            for (Repository<Key, Value> repository : List.of(
+                    repositoryOf(cacheWithDiscriminator), repositoryOf(cacheInDefaultScope))) {
+                // every filter combination the repository can produce, including those no internal caller currently
+                // issues but the SPI permits (a discriminator on its own used to scan the collection)
+                assertThatQueryIsIndexed(repository, collectionName, null, null, null, false);
+                assertThatQueryIsIndexed(repository, collectionName, null, null, deadline, false);
+                assertThatQueryIsIndexed(repository, collectionName, hashes, null, null, false);
+                assertThatQueryIsIndexed(repository, collectionName, hashes, CACHED_GROUP, null, false);
+                assertThatQueryIsIndexed(repository, collectionName, null, CACHED_GROUP, null, false);
+                assertThatQueryIsIndexed(repository, collectionName, null, CACHED_GROUP, deadline, false);
+                // ordered by timestamp, as synchronizing cache entries on activation does
+                assertThatQueryIsIndexed(repository, collectionName, null, CACHED_GROUP, null, true);
+            }
+        }
+
+        // asserts against the winning plan only - rejected plans name stages that are never executed. The filter is
+        // taken from the repository itself rather than rebuilt here, so that this cannot drift from what is queried
+        private void assertThatQueryIsIndexed(Repository<Key, Value> repository, String collectionName,
+                                              Set<String> hashes, Set<Status> statuses, Instant olderThan,
+                                              boolean orderByTimestampAsc) throws Exception {
+            Bson filter = invokeMethod(repository,
+                    Class.forName("io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoRepository"),
+                    "getFilter", List.of(Set.class, Set.class, Instant.class),
+                    Arrays.asList(hashes, statuses, olderThan));
+            FindIterable<Document> findIterable = mongoClient.getDatabase(DATABASE_NAME)
+                    .getCollection(collectionName)
+                    .find(filter);
+            if (orderByTimestampAsc) {
+                findIterable = findIterable.sort(Sorts.ascending(CacheEntry.Field.TIMESTAMP.toString()));
+            }
+            String winningPlan = findIterable.explain(ExplainVerbosity.QUERY_PLANNER)
+                    .get("queryPlanner", Document.class)
+                    .get("winningPlan", Document.class)
+                    .toJson();
+            assertThat(winningPlan)
+                    .describedAs("%nWinning plan for filter %s", filter)
+                    .doesNotContain("COLLSCAN");
         }
 
         @DisplayName("Test MaintenanceWorker")
@@ -6009,8 +6120,7 @@ final class DistributedCaffeineIntegrationTests {
                             Count.of(status, assertion -> assertion.isEqualTo(0))))
                     .forEach(count -> count.assertion()
                             .apply(assertThat(getFailable(() ->
-                                    // TODO discriminator
-                                    repository.countCacheEntries(null, Set.of(count.status()))))
+                                    repository.countCacheEntries(Set.of(count.status()))))
                                     .describedAs("%nCount for %s", count.status().name())));
         }
 
@@ -6023,13 +6133,16 @@ final class DistributedCaffeineIntegrationTests {
             Stream.of(countsGrouped)
                     .forEach(count -> count.assertion()
                             .apply(assertThat(getFailable(() ->
-                                    // TODO discriminator
-                                    repository.countCacheEntries(null, count.statuses())))
+                                    repository.countCacheEntries(count.statuses())))
                                     .describedAs("%nCount for %s", count.statuses())));
         }
 
         <K, V> InternalInstanceRegistry<K, V> getInstanceRegistry(DistributedCache<K, V> distributedCache) {
             return ((InternalDistributedCache<K, V>) distributedCache).instanceRegistry;
+        }
+
+        <K, V> Repository<K, V> repositoryOf(DistributedCache<K, V> distributedCache) {
+            return distributedCache.distributedPolicy().getAdapter().getRepository();
         }
 
         void executeRandomOperation(DistributedCache<Key, Value> distributedCache, int cacheSize) {
@@ -6144,7 +6257,7 @@ final class DistributedCaffeineIntegrationTests {
                     ? null
                     : Set.of(statuses);
             try (Stream<? extends CacheEntry<?, ?>> cacheEntryStream = getFailable(() ->
-                    repository.streamCacheEntries(null, null, statusesOrNull, null, false))) {
+                    repository.streamCacheEntries(null, statusesOrNull, null, false))) {
                 cacheEntryStream.forEach(cacheEntry ->
                         System.out.printf("%05d %s%n", counter.incrementAndGet(), cacheEntry));
             }

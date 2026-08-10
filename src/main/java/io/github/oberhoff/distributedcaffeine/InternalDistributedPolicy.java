@@ -98,9 +98,7 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
         if (includeEvicted) {
             statuses.addAll(EVICTED_EXTENDED_GROUP);
         }
-        // TODO discriminator
         try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
-                null,
                 hasher.getHashes(keySet),
                 statuses,
                 null,

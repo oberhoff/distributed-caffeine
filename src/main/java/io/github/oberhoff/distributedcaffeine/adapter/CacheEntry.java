@@ -38,18 +38,12 @@ import static java.util.Objects.requireNonNull;
 public interface CacheEntry<K, V> {
 
     /**
-     * Fields used to store a cache entry in an underlying store.
+     * Fields of a cache entry, each of which can be selected when streaming cache entries from an underlying store.
      *
      * @author Andreas Oberhoff
      */
     @NullMarked
     enum Field {
-
-        /**
-         * Field used to store a discriminator of a cache entry (necessary to distinguish cache entries when a relation
-         * in an underlying store is shared across different caches, can be {@code null}).
-         */
-        DISCRIMINATOR,
 
         /**
          * Field used to store the hash of cache entry.
@@ -275,13 +269,6 @@ public interface CacheEntry<K, V> {
     }
 
     /**
-     * Returns the discriminator of the cache entry.
-     *
-     * @return the discriminator
-     */
-    @Nullable String getDiscriminator();
-
-    /**
      * Returns the hash of the cache entry.
      *
      * @return the hash
@@ -363,19 +350,17 @@ public interface CacheEntry<K, V> {
     /**
      * Returns a cache entry defined by the specified parameters.
      *
-     * @param discriminator the discriminator
-     * @param hash          the hash
-     * @param operation     the operation identifier
-     * @param key           the key
-     * @param value         the value
-     * @param status        the status
-     * @param timestamp     the timestamp
-     * @param <K>           the key type of the cache
-     * @param <V>           the value type of the cache
+     * @param hash      the hash
+     * @param operation the operation identifier
+     * @param key       the key
+     * @param value     the value
+     * @param status    the status
+     * @param timestamp the timestamp
+     * @param <K>       the key type of the cache
+     * @param <V>       the value type of the cache
      * @return the cache entry
      */
-    static <K, V> CacheEntry<K, V> of(@Nullable String discriminator, String hash,
-                                      @Nullable Integer operation, K key, @Nullable V value,
+    static <K, V> CacheEntry<K, V> of(String hash, @Nullable Integer operation, K key, @Nullable V value,
                                       Status status, Instant timestamp) {
 
         requireNonNull(hash, "hash cannot be null");
@@ -384,11 +369,6 @@ public interface CacheEntry<K, V> {
         requireNonNull(timestamp, "timestamp cannot be null");
 
         return new CacheEntry<>() {
-
-            @Override
-            public @Nullable String getDiscriminator() {
-                return discriminator;
-            }
 
             @Override
             public String getHash() {
@@ -425,8 +405,7 @@ public interface CacheEntry<K, V> {
                 if (this == object) return true;
                 if (object == null || getClass() != object.getClass()) return false;
                 CacheEntry<?, ?> that = (CacheEntry<?, ?>) object;
-                return Objects.equals(this.getDiscriminator(), that.getDiscriminator())
-                        && Objects.equals(this.getHash(), that.getHash())
+                return Objects.equals(this.getHash(), that.getHash())
                         && Objects.equals(this.getOperation(), that.getOperation())
                         && Objects.equals(this.getKey(), that.getKey())
                         && Objects.equals(this.getValue(), that.getValue())
@@ -436,14 +415,14 @@ public interface CacheEntry<K, V> {
 
             @Override
             public int hashCode() {
-                return Objects.hash(getDiscriminator(), getHash(), getOperation(), getKey(), getValue(), getStatus(),
+                return Objects.hash(getHash(), getOperation(), getKey(), getValue(), getStatus(),
                         alignTimestamp(timestamp));
             }
 
             @Override
             public String toString() {
-                return "CacheEntry{discriminator=%s, hash=%s, operation=%s, key=%s, value=%s, status=%s, timestamp=%s}"
-                        .formatted(getDiscriminator(), getHash(), getOperation(), getKey(), getValue(), getStatus(),
+                return "CacheEntry{hash=%s, operation=%s, key=%s, value=%s, status=%s, timestamp=%s}"
+                        .formatted(getHash(), getOperation(), getKey(), getValue(), getStatus(),
                                 alignTimestamp(getTimestamp()));
             }
 

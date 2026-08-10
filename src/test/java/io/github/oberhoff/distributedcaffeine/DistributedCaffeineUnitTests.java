@@ -66,6 +66,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
 
+import static io.github.oberhoff.distributedcaffeine.adapter.Repository.DEFAULT_DISCRIMINATOR;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -251,7 +252,7 @@ final class DistributedCaffeineUnitTests {
             when(adapter.getRepository()).thenReturn(repository);
             // answered rather than returned, so that every synchronization gets a stream of its own instead of
             // re-consuming one that an earlier one already closed
-            when(repository.streamCacheEntries(any(), any(), any(), any(), anyBoolean()))
+            when(repository.streamCacheEntries(any(), any(), any(), anyBoolean()))
                     .thenAnswer(invocation -> Stream.empty());
             return adapter;
         }
@@ -604,13 +605,15 @@ final class DistributedCaffeineUnitTests {
             constructor.setAccessible(true);
             Repository<Key, Value> repository = (Repository<Key, Value>)
                     constructor.newInstance(mongoClient, DATABASE_NAME, COLLECTION_NAME);
+            // wiring an adapter would normally do, which constructing the repository directly skips
+            repository.setDiscriminator(DEFAULT_DISCRIMINATOR);
             repository.setKeySerializer(new JacksonSerializer<>(Key.class, false));
             repository.setValueSerializer(new JacksonSerializer<>(Value.class, false));
             return repository;
         }
 
         private CacheEntry<Key, Value> cacheEntry(String hash, int id) {
-            return CacheEntry.of(null, hash, id, Key.of(id), Value.of(id), Status.CACHED, Instant.now());
+            return CacheEntry.of(hash, id, Key.of(id), Value.of(id), Status.CACHED, Instant.now());
         }
 
         private MongoBulkWriteException bulkWriteExceptionOf(BulkWriteError bulkWriteError) {
@@ -671,8 +674,11 @@ final class DistributedCaffeineUnitTests {
             Constructor<?> constructor = Class.forName(MONGO_SYNCHRONIZER_CLASS_NAME)
                     .getDeclaredConstructor(MongoClient.class, String.class, String.class);
             constructor.setAccessible(true);
-            return (Synchronizer<Key, Value>)
+            Synchronizer<Key, Value> synchronizer = (Synchronizer<Key, Value>)
                     constructor.newInstance(mongoClient, DATABASE_NAME, COLLECTION_NAME);
+            // wiring an adapter would normally do, which constructing the synchronizer directly skips
+            synchronizer.setDiscriminator(DEFAULT_DISCRIMINATOR);
+            return synchronizer;
         }
 
         // a freshly constructed synchronizer counts as stopped and would refuse to watch, so it is moved into the

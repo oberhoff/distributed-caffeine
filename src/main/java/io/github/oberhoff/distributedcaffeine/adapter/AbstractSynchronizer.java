@@ -38,6 +38,12 @@ public abstract class AbstractSynchronizer<K, V> implements Synchronizer<K, V> {
     protected @Nullable String identifier;
 
     /**
+     * The discriminator to be used by this adapter ({@code null} only until it has been set). Only cache entries
+     * matching it are to be synchronized.
+     */
+    protected @Nullable String discriminator;
+
+    /**
      * The key serializer to be used by this adapter.
      */
     protected @Nullable Serializer<K, ?> keySerializer;
@@ -63,6 +69,12 @@ public abstract class AbstractSynchronizer<K, V> implements Synchronizer<K, V> {
     public void setIdentifier(String identifier) {
         requireNonNull(identifier, "identifier cannot be null");
         this.identifier = identifier;
+    }
+
+    @Override
+    public void setDiscriminator(String discriminator) {
+        requireNonNull(discriminator, "discriminator cannot be null");
+        this.discriminator = discriminator;
     }
 
     @Override

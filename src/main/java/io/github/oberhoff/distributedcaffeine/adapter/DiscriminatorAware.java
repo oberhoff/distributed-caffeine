@@ -18,14 +18,21 @@ package io.github.oberhoff.distributedcaffeine.adapter;
 import org.jspecify.annotations.NullMarked;
 
 /**
- * Interface representing a synchronizer that manages distributed synchronization between cache instances using an
- * underlying store.
+ * Interface representing objects that are aware of a discriminator.
  *
- * @param <K> the key type of the cache
- * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
 @NullMarked
-public interface Synchronizer<K, V> extends IdentifierAware, DiscriminatorAware, StateAware, SerializerAware<K, V>,
-        RetrieverAware<K, V> {
+public interface DiscriminatorAware {
+
+    /**
+     * Sets the discriminator for this object.
+     * <p>
+     * <b>Note:</b> A discriminator selects which caches using the same relation in an underlying store belong
+     * together, so it is never {@code null} - caches not choosing one of their own use
+     * {@link Repository#DEFAULT_DISCRIMINATOR}.
+     *
+     * @param discriminator the discriminator to be set
+     */
+    void setDiscriminator(String discriminator);
 }

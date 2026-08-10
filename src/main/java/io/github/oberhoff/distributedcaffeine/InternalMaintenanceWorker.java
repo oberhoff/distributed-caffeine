@@ -142,24 +142,20 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
             Instant deadline = maximumTime.compareTo(Duration.between(min, now)) > 0
                     ? min
                     : now.minus(maximumTime);
-            // TODO discriminator
             // invalidate (instead of hard delete)
-            runFailable(() -> repository.updateStatusOfCacheEntries(null, null,
+            runFailable(() -> repository.updateStatusOfCacheEntries(null,
                     EVICTED_EXTENDED_GROUP, deadline, INVALIDATED));
         });
     }
 
     private void processExtendedPersistenceBySize() {
         extendedPersistenceConfigurer.getMaximumSize().ifPresent(maximumSize -> {
-            // TODO discriminator
             Long count = getFailable(() ->
-                    repository.countCacheEntries(null, EVICTED_EXTENDED_GROUP));
+                    repository.countCacheEntries(EVICTED_EXTENDED_GROUP));
             if (count > maximumSize) {
                 long limit = count - maximumSize;
                 Set<String> hashes = new HashSet<>(maximumSize);
-                // TODO discriminator
                 try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
-                        null,
                         null,
                         EVICTED_EXTENDED_GROUP,
                         null, // TODO use projection
@@ -170,9 +166,8 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
                             .forEach(hashes::add);
                 }
                 if (!hashes.isEmpty()) {
-                    // TODO discriminator
                     // invalidate (instead of hard delete)
-                    runFailable(() -> repository.updateStatusOfCacheEntries(null, hashes,
+                    runFailable(() -> repository.updateStatusOfCacheEntries(hashes,
                             EVICTED_EXTENDED_GROUP, null, INVALIDATED));
                 }
             }
@@ -181,8 +176,7 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
 
     private void processShortLived(Duration shortLivingDuration) {
         Instant deadline = Instant.now().minus(shortLivingDuration);
-        // TODO discriminator
-        runFailable(() -> repository.deleteCacheEntries(null, null,
+        runFailable(() -> repository.deleteCacheEntries(null,
                 SHORT_LIVING_GROUP, deadline));
     }
 }

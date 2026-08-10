@@ -195,9 +195,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalV
         Set<String> hashes = keys.stream()
                 .map(hasher::getHash)
                 .collect(toSet());
-        // TODO discriminator
         try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
-                null,
                 hashes,
                 EVICTED_EXTENDED_GROUP,
                 null,

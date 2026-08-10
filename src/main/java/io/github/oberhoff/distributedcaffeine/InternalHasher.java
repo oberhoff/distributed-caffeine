@@ -34,7 +34,7 @@ class InternalHasher<K> {
         this.hashProvider = hashProvider;
     }
 
-    // memoizing variant: reuse the hash cached on the key (or the one propagated from a store entry), otherwise
+    // memorizing variant: reuse the hash cached on the key (or the one propagated from a store entry), otherwise
     // compute it once and cache it on the key instance for subsequent hashings
     String getHash(InternalKey<K> key) {
         String hash = key.getHash();

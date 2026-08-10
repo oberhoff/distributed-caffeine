@@ -55,6 +55,7 @@ import java.util.stream.Stream;
 
 import static com.mongodb.client.model.changestream.OperationType.INSERT;
 import static com.mongodb.client.model.changestream.OperationType.UPDATE;
+import static io.github.oberhoff.distributedcaffeine.adapter.Repository.DISCRIMINATOR_FIELD;
 import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.util.Objects.isNull;
@@ -71,7 +72,6 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
     private static final String CLUSTER_TIME = "clusterTime";
     private static final String OPERATION_TYPE = "operationType";
     private static final String FULL_DOCUMENT = "fullDocument";
-    private static final List<Bson> AGGREGATION_PIPELINE = buildAggregationPipeline();
 
     private final MongoCollection<Document> mongoCollection;
     // unlike its sibling components, which get by with a single activation flag, this one needs three states: its
@@ -190,8 +190,10 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
         if (isStopped()) {
             return;
         }
-        // get change stream iterable, resuming where a previous attempt left off if it got that far
-        ChangeStreamIterable<Document> changeStreamIterable = mongoCollection.watch(AGGREGATION_PIPELINE)
+        // get change stream iterable, resuming where a previous attempt left off if it got that far. The pipeline is
+        // built here rather than once statically because it depends on the discriminator, which is not known before
+        // the adapter has wired this synchronizer up - which is cheap enough, as this runs once per opened cursor
+        ChangeStreamIterable<Document> changeStreamIterable = mongoCollection.watch(buildAggregationPipeline())
                 .fullDocument(FullDocument.UPDATE_LOOKUP);
         changeStreamIterable = Optional.ofNullable(resumeToken.get())
                 .map(changeStreamIterable::resumeAfter)
@@ -241,27 +243,27 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
         }
     }
 
-    // the pipeline is constant (no runtime parameters), so it is built once instead of on every watch()
-    private static List<Bson> buildAggregationPipeline() {
+    private List<Bson> buildAggregationPipeline() {
         List<String> projectionFields = new ArrayList<>();
         projectionFields.add(DOCUMENT_KEY);
         projectionFields.add(CLUSTER_TIME);
         projectionFields.add(OPERATION_TYPE);
         projectionFields.addAll(Stream.of(Field.values())
+                .map(Object::toString)
                 .map(MongoSynchronizer::fullDocument)
                 .toList());
         return List.of(
                 Aggregates.match(
                         Filters.and(
-                                Filters.in(OPERATION_TYPE, INSERT.getValue(), UPDATE.getValue())
-                                // TODO add discriminator to filter (depending of connection/watcher is shared)
-                        )),
+                                Filters.in(OPERATION_TYPE, INSERT.getValue(), UPDATE.getValue()),
+                                // events of other caches sharing this collection are not ours to apply
+                                Filters.eq(fullDocument(DISCRIMINATOR_FIELD), requireNonNull(discriminator)))),
                 Aggregates.project(
                         Projections.fields(
                                 Projections.include(projectionFields))));
     }
 
-    private static String fullDocument(Field field) {
+    private static String fullDocument(String field) {
         return format("%s.%s", FULL_DOCUMENT, field);
     }
 
