@@ -269,11 +269,13 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
 
     private void publishCacheEntriesAsync(Map<? extends InternalKey<K>, ? extends InternalValue<V>> map,
                                           Status status) {
-        // stamped here rather than in the publishing below, which happens whenever the executor gets around to it:
-        // an operation has to be ordered by when it took place, and for these it takes place now. Stamping it later
-        // would let an eviction appear to have happened after a population that in fact followed it, so that the
-        // population would be undone once the eviction comes back
-        stampOperations(map);
+        // Deliberately without an operation, so that what is published here arrives like a change of any other cache
+        // instance. Carrying one would order it against the later operations of this cache instance and let this one
+        // skip it - which for an eviction means keeping a cache entry the store no longer has as cached, because the
+        // eviction is written whenever the executor gets around to it and can land after the population following
+        // it. Every other cache instance then drops the cache entry while this one keeps it, and nothing reads the
+        // store again to notice. Losing the population everywhere is wrong too, but at least it is not a divergence
+        // between the instances - see the corresponding disabled test
         CompletableFuture.runAsync(() -> publishCacheEntries(map, status, false), executor)
                 .exceptionally(throwable -> {
                     logger.log(Level.WARNING, format("Distributing %s for %s failed for cache at '%s'",
@@ -309,7 +311,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
                                 // memoizing overload: reuses the hash cached on the key instance (e.g. stamped when
                                 // the entry was put/loaded/retrieved) instead of recomputing it under the lock
                                 hasher.getHash(entry.getKey()),
-                                operationOf(value),
+                                manage ? operationOf(value) : null,
                                 k(entry.getKey()),
                                 v(value),
                                 status,
