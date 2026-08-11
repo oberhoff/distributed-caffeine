@@ -613,7 +613,7 @@ final class DistributedCaffeineUnitTests {
         }
 
         private CacheEntry<Key, Value> cacheEntry(String hash, int id) {
-            return CacheEntry.of(hash, id, Key.of(id), Value.of(id), Status.CACHED, Instant.now());
+            return CacheEntry.of(hash, "op" + id, Key.of(id), Value.of(id), Status.CACHED, Instant.now());
         }
 
         private MongoBulkWriteException bulkWriteExceptionOf(BulkWriteError bulkWriteError) {

@@ -51,7 +51,7 @@ public interface CacheEntry<K, V> {
         HASH,
 
         /**
-         * Field used to store an internal operation identifier.
+         * Field used to store an internal operation identifier (can be {@code null}).
          */
         OPERATION,
 
@@ -277,10 +277,15 @@ public interface CacheEntry<K, V> {
 
     /**
      * Returns the operation identifier of the cache entry.
+     * <p>
+     * <b>Note:</b> Its content is internal to the cache and must not be interpreted, only stored and returned
+     * unchanged. Cache instances rely on it to recognize their own writes when these come back to them and to tell
+     * apart what they have done since, so altering or dropping it breaks distributed synchronization rather than
+     * just losing information.
      *
      * @return the operation identifier
      */
-    @Nullable Integer getOperation();
+    @Nullable String getOperation();
 
     /**
      * Returns the key of the cache entry.
@@ -360,7 +365,7 @@ public interface CacheEntry<K, V> {
      * @param <V>       the value type of the cache
      * @return the cache entry
      */
-    static <K, V> CacheEntry<K, V> of(String hash, @Nullable Integer operation, K key, @Nullable V value,
+    static <K, V> CacheEntry<K, V> of(String hash, @Nullable String operation, K key, @Nullable V value,
                                       Status status, Instant timestamp) {
 
         requireNonNull(hash, "hash cannot be null");
@@ -376,7 +381,7 @@ public interface CacheEntry<K, V> {
             }
 
             @Override
-            public @Nullable Integer getOperation() {
+            public @Nullable String getOperation() {
                 return operation;
             }
 

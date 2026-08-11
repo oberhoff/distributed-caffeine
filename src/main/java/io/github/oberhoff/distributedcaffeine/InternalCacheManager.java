@@ -23,6 +23,7 @@ import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.adapter.Retriever;
+import org.jspecify.annotations.Nullable;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -32,11 +33,14 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
@@ -65,6 +69,13 @@ import static java.util.Objects.nonNull;
 class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriever<K, V> {
 
     private final AtomicBoolean isActivated;
+    // an operation is this identifier followed by a counter, which makes it identify a single write (as the random
+    // value it replaces did) and additionally order that write against the other ones issued here. The identifier is
+    // renewed with every activation on purpose: ordering is only meaningful within one of them, because it compares
+    // a local mutation against an event this very activation published. Renewing it lets a stamp left behind by an
+    // earlier activation simply not match, instead of being compared against a counter unrelated to it
+    private final AtomicReference<String> operationId;
+    private final AtomicLong operationCounter;
 
     private Logger logger;
     private String identifier;
@@ -79,6 +90,8 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
 
     InternalCacheManager() {
         this.isActivated = new AtomicBoolean(false);
+        this.operationId = new AtomicReference<>("");
+        this.operationCounter = new AtomicLong();
         // see also initialize()
     }
 
@@ -97,6 +110,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     }
 
     void activate() {
+        operationId.set(Long.toHexString(ThreadLocalRandom.current().nextLong()));
         isActivated.set(true);
     }
 
@@ -219,6 +233,34 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     // enough on its own, because upsertCacheEntries() writes the status unconditionally, so a delayed retry can
     // overwrite a newer CACHED write for the same key with a stale EVICTED one. Letting the data store drive the
     // correction (as invalidate-on-prune does for extended persistence) is the more promising direction
+    private String nextOperation() {
+        return operationId.get() + ":" + operationCounter.incrementAndGet();
+    }
+
+    // An operation identifies a single write (self-echo filter) and, through the identifier it begins with, orders
+    // that write against the other ones this activation issued. Where it comes from differs by what is published:
+    // a populated or evicted cache entry takes the one its value was stamped with before publishing was considered
+    // at all, because that value stays in this cache either way and the stamp is what protects it. An invalidated
+    // one has no value to have been stamped and only needs an operation on the cache entry written for it.
+    private String operationOf(@Nullable InternalValue<V> value) {
+        return nonNull(value) ? value.getOperation() : nextOperation();
+    }
+
+    // whether the cache entry held here was written by this cache instance after it published the operation the
+    // arriving one carries. Only comparable within one activation, so a stamp of an earlier one never matches and
+    // the arriving cache entry is applied as it would have been before
+    private boolean isSupersededLocally(@Nullable String arriving, @Nullable String held) {
+        if (isNull(arriving) || isNull(held)) {
+            return false;
+        }
+        String prefix = operationId.get() + ":";
+        if (!arriving.startsWith(prefix) || !held.startsWith(prefix)) {
+            return false;
+        }
+        return Long.parseLong(held.substring(prefix.length()))
+                > Long.parseLong(arriving.substring(prefix.length()));
+    }
+
     private void publishCacheEntriesAsync(Map<? extends InternalKey<K>, ? extends InternalValue<V>> map,
                                           Status status) {
         CompletableFuture.runAsync(() -> publishCacheEntries(map, status, false), executor)
@@ -231,27 +273,32 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
 
     private void publishCacheEntries(Map<? extends InternalKey<K>, ? extends InternalValue<V>> map, Status status,
                                      boolean manage) {
+        // Stamped ahead of everything below, because whether a cache entry is published says nothing about whether
+        // the value handed over here stays in this cache: without population being distributed nothing is published
+        // for a population at all, and that is exactly where a removal by this very cache instance must not be
+        // allowed to undo it. Stamped for the asynchronous operations as well, even though nothing here waits for
+        // them: an eviction is a removal like any other, and a key evicted and then populated again would otherwise
+        // be removed once more when the eviction comes back
+        map.values().stream()
+                .filter(Objects::nonNull)
+                .forEach(value -> value.setOperation(nextOperation()));
         // extended persistence should work regardless of the distribution mode
         if (isActivated() && (status.isConsideredBy(distributionMode) || status.isEvictedExtended())) {
             if (manage) {
                 synchronizationLock.ensureLock();
             }
+            // deliberately without a check of whether this cache instance holds the key: whether it does says
+            // nothing about the other ones, which may well be serving it, so skipping the write here would leave
+            // them doing so indefinitely. Filtering by what is held belongs on the receiving side (see
+            // retrieveCacheEntries), where it is a fact rather than a guess
             List<CacheEntry<K, V>> cacheEntries = map.entrySet().stream()
-                    // do not distribute invalidation if value is already absent
-                    .filter(entry ->
-                            !(status.isInvalidated() && isNull(policy.getIfPresentQuietly(entry.getKey()))))
                     .map(entry -> {
-                        // operation is used for self-echo filter (non-cryptographic collision marker)
-                        Integer operation = manage ? ThreadLocalRandom.current().nextInt() : null;
                         InternalValue<V> value = entry.getValue();
-                        if (nonNull(value)) {
-                            value.setOperation(operation);
-                        }
                         return CacheEntry.of(
                                 // memoizing overload: reuses the hash cached on the key instance (e.g. stamped when
                                 // the entry was put/loaded/retrieved) instead of recomputing it under the lock
                                 hasher.getHash(entry.getKey()),
-                                operation,
+                                operationOf(value),
                                 k(entry.getKey()),
                                 v(value),
                                 status,
@@ -287,21 +334,31 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
                             InternalKey<K> key = ik(cacheEntry.getKey()).setHash(cacheEntry.getHash());
                             if (cacheEntry.isCached()) {
                                 InternalValue<V> present = policy.getIfPresentQuietly(key);
-                                Integer operation = cacheEntry.getOperation();
-                                // self-echo filter
-                                if (isNull(present) || isNull(operation) || !operation.equals(present.getOperation())) {
-                                    toAdd.put(key, iv(cacheEntry.getValue()).setOperation(operation));
-                                } else {
-                                    // the store still backs this entry, so it has to survive a stale sweep even
-                                    // though it is already up to date and is therefore not written again. Clearing
-                                    // the mark here rather than only via toAdd matters because an entry that is in
-                                    // sync when synchronization stops always takes this branch: both publishing and
-                                    // retrieving stamp the local value with the very operation held in the store
+                                String operation = cacheEntry.getOperation();
+                                // Left as it is when the arriving cache entry is the echo of the very write behind
+                                // the one held here (self-echo filter), and when this cache instance has written
+                                // this key again since publishing it - the same ordering guard as below, which here
+                                // keeps an insertion delivered as it once was from reinstating a value already
+                                // replaced by a later action of this very cache instance.
+                                // The store still backs the entry either way, so it has to survive a stale sweep
+                                // even though it is not written again. Clearing the mark here rather than only via
+                                // toAdd matters because an entry that is in sync when synchronization stops always
+                                // takes this branch: both publishing and retrieving stamp the local value with the
+                                // very operation held in the store
+                                if (nonNull(present)
+                                        && (isSupersededLocally(operation, present.getOperation())
+                                        || (nonNull(operation) && operation.equals(present.getOperation())))) {
                                     present.setStale(false);
+                                } else {
+                                    toAdd.put(key, iv(cacheEntry.getValue()).setOperation(operation));
                                 }
                             } else {
-                                // only remove from cache if value is present
-                                if (nonNull(policy.getIfPresentQuietly(key))) {
+                                // only remove from cache if value is present - and only if it was not written here
+                                // after the arriving cache entry was published, which would mean undoing a later
+                                // action of this very cache instance with an earlier one of its own
+                                InternalValue<V> present = policy.getIfPresentQuietly(key);
+                                if (nonNull(present)
+                                        && !isSupersededLocally(cacheEntry.getOperation(), present.getOperation())) {
                                     toRemove.add(key);
                                 }
                             }

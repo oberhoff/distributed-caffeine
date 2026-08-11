@@ -861,7 +861,11 @@ final class DistributedCaffeineIntegrationTests {
                                     });
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED_REFRESHED, assertion -> assertion.isEqualTo(1)));
+                                Count.of(CACHED_REFRESHED, assertion -> assertion.isEqualTo(1)),
+                                // key2 is refreshed to nothing (its cache loader returns null), which is an
+                                // invalidation and therefore reaches the underlying store even though no cache
+                                // instance ever held that key
+                                Count.of(INVALIDATED_REFRESHED, assertion -> assertion.isEqualTo(1)));
                     });
 
             loggerDistributedCaffeine.stopCapturing();
@@ -926,6 +930,8 @@ final class DistributedCaffeineIntegrationTests {
                         });
                         assertThatDataStoreHasCounts(
                                 Count.of(CACHED_REFRESHED, assertion -> assertion.isEqualTo(1)),
+                                // still the one written for key2 further above, nothing has cleaned it up yet
+                                Count.of(INVALIDATED_REFRESHED, assertion -> assertion.isEqualTo(1)),
                                 Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2)));
                     });
 
@@ -954,7 +960,8 @@ final class DistributedCaffeineIntegrationTests {
                                     .isNull();
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(INVALIDATED_REFRESHED, assertion -> assertion.isEqualTo(1)),
+                                // key1 now refreshes to nothing as well, joining the one written for key2
+                                Count.of(INVALIDATED_REFRESHED, assertion -> assertion.isEqualTo(2)),
                                 Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2)));
                     });
 
@@ -1236,7 +1243,11 @@ final class DistributedCaffeineIntegrationTests {
                                     });
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED_REFRESHED, assertion -> assertion.isEqualTo(1)));
+                                Count.of(CACHED_REFRESHED, assertion -> assertion.isEqualTo(1)),
+                                // key2 is refreshed to nothing (its cache loader returns null), which is an
+                                // invalidation and therefore reaches the underlying store even though no cache
+                                // instance ever held that key
+                                Count.of(INVALIDATED_REFRESHED, assertion -> assertion.isEqualTo(1)));
                     });
 
             loggerDistributedCaffeine.stopCapturing();
@@ -1309,6 +1320,8 @@ final class DistributedCaffeineIntegrationTests {
                         });
                         assertThatDataStoreHasCounts(
                                 Count.of(CACHED_REFRESHED, assertion -> assertion.isEqualTo(1)),
+                                // still the one written for key2 further above, nothing has cleaned it up yet
+                                Count.of(INVALIDATED_REFRESHED, assertion -> assertion.isEqualTo(1)),
                                 Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2)));
                     });
 
@@ -1339,7 +1352,8 @@ final class DistributedCaffeineIntegrationTests {
                                     .isEmpty();
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(INVALIDATED_REFRESHED, assertion -> assertion.isEqualTo(1)),
+                                // key1 now refreshes to nothing as well, joining the one written for key2
+                                Count.of(INVALIDATED_REFRESHED, assertion -> assertion.isEqualTo(2)),
                                 Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2)));
                     });
 
@@ -1892,7 +1906,7 @@ final class DistributedCaffeineIntegrationTests {
                 map.put(key2, toBeReplacedValue);
                 replacedValue1x2.setValue(map.replace(key1, value1));
                 replacedBool2x2.setObject(map.replace(key2, toBeReplacedValue, value2));
-                /* TODO replacedBool2x3.setObject(*/ map.replace(key2, toBeReplacedValue, value2); // );
+                replacedBool2x3.setObject(map.replace(key2, toBeReplacedValue, value2));
             });
 
             await("synchronization between cache instances")
@@ -1908,7 +1922,7 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(map.get(key2)).isEqualTo(value2);
                             assertThat(replacedValue1x2.getValue()).isEqualTo(toBeReplacedValue);
                             assertThat(replacedBool2x2.<Boolean>getObject()).isTrue();
-                            // TODO assertThat(replacedBool2x3.<Boolean>getObject()).isFalse();
+                            assertThat(replacedBool2x3.<Boolean>getObject()).isFalse();
                         });
                         assertThatDataStoreHasCounts(
                                 Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
@@ -2895,7 +2909,11 @@ final class DistributedCaffeineIntegrationTests {
                                     .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPLICIT));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(INVALIDATION)) {
-                            verifyNoInteractions(removalListener);
+                            // without population being distributed each cache instance holds only the key it
+                            // populated itself, so here each of them invalidates a key only the other one holds -
+                            // which is exactly what an invalidation has to reach to be of any use in these modes
+                            verify(removalListener, times(2))
+                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPLICIT));
                         }
                     });
 
@@ -2910,12 +2928,10 @@ final class DistributedCaffeineIntegrationTests {
                                     Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
                                 || distributionMode.equals(INVALIDATION)) {
-                            assertThat(distributedCacheA.estimatedSize()).isEqualTo(1);
-                            assertThat(distributedCacheB.estimatedSize()).isEqualTo(1);
-                            assertThat(distributedCacheA.getIfPresent(key1)).isEqualTo(value1);
-                            assertThat(distributedCacheB.getIfPresent(key2)).isEqualTo(value2);
+                            assertThat(distributedCacheA.estimatedSize()).isEqualTo(0);
+                            assertThat(distributedCacheB.estimatedSize()).isEqualTo(0);
                             assertThatDataStoreHasCounts(
-                                    Count.empty());
+                                    Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2)));
                         }
                     });
 
@@ -2958,6 +2974,49 @@ final class DistributedCaffeineIntegrationTests {
 
             assertThatDataStoreHasCounts(
                     Count.empty());
+        }
+
+        @DisplayName("Test that a repopulation is not reverted by the invalidation preceding it")
+        @Test
+        void test_DistributionMode_invalidation_does_not_revert_repopulation() {
+            // the invalidation and the repopulation happen one after the other on the same cache instance, so the
+            // repopulation is unambiguously the later one. Without population being distributed there is also no
+            // cache entry following the invalidation that could restore what its event removes, so losing the
+            // repopulation here is permanent rather than transient
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withDistributionMode(INVALIDATION),
+                    DistributedCaffeine::build);
+
+            Key key = Key.of(1);
+            Value value = Value.of(1);
+
+            distributedCache.put(key, Value.of(0));
+            distributedCache.invalidate(key);
+            distributedCache.put(key, value);
+
+            // no awaiting: the point is not that something arrives eventually but that the repopulation survives the
+            // invalidation being delivered back to this very cache instance, so it has to be given time to arrive
+            sleep(Duration.ofSeconds(2));
+
+            assertThat(distributedCache.getIfPresent(key)).isEqualTo(value);
+        }
+
+        @DisplayName("Test that a repopulation is not reverted by the invalidation of an absent cache entry")
+        @Test
+        void test_DistributionMode_invalidation_of_absent_does_not_revert_repopulation() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withDistributionMode(INVALIDATION),
+                    DistributedCaffeine::build);
+
+            Key key = Key.of(1);
+            Value value = Value.of(1);
+
+            distributedCache.invalidate(key); // nothing held here, so nothing is distributed at the moment
+            distributedCache.put(key, value);
+
+            sleep(Duration.ofSeconds(2));
+
+            assertThat(distributedCache.getIfPresent(key)).isEqualTo(value);
         }
 
         @DisplayName("Test eviction by size")
@@ -3435,6 +3494,32 @@ final class DistributedCaffeineIntegrationTests {
                 assertThatDataStoreHasCounts(
                         Count.empty());
             }
+        }
+
+        @DisplayName("Test that a repopulation is not reverted by the eviction preceding it")
+        @Test
+        void test_DistributionMode_eviction_does_not_revert_repopulation() {
+            // same shape as the invalidation above, only that the removal preceding the repopulation is an eviction:
+            // key1 is evicted to make room for key2 and is put again right after, so the repopulation is once more
+            // unambiguously the later action of this very cache instance
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withDistributionMode(INVALIDATION_AND_EVICTION)
+                            .withCaffeine(Caffeine.newBuilder().maximumSize(1)),
+                    DistributedCaffeine::build);
+
+            Key key1 = Key.of(1);
+            Key key2 = Key.of(2);
+            Value value = Value.of(11);
+
+            distributedCache.put(key1, Value.of(1));
+            distributedCache.put(key2, Value.of(2));
+            distributedCache.cleanUp(); // key1 is evicted here, which is what gets distributed
+            distributedCache.put(key1, value);
+            distributedCache.cleanUp();
+
+            sleep(Duration.ofSeconds(2));
+
+            assertThat(distributedCache.getIfPresent(key1)).isEqualTo(value);
         }
 
         @DisplayName("Test refresh")
@@ -4831,9 +4916,14 @@ final class DistributedCaffeineIntegrationTests {
                                 .getFromStore(key1, false)).getTimestamp())
                                 .isAfter(timestamp);
                         assertThatDataStoreHasCounts(
-                                Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
+                                // invalidating a key this cache instance does not hold still reaches the
+                                // underlying store: whether it is held here says nothing about the other
+                                // cache instances, which would otherwise keep serving it
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(1)));
                     });
 
+            // the cache entry written for the absent key is short-living and does not accumulate
             processMaintenance();
 
             assertThatDataStoreHasCounts(
@@ -4863,14 +4953,14 @@ final class DistributedCaffeineIntegrationTests {
 
             CacheEntry<Key, Value> insertCacheEntry1 = CacheEntry.of(
                     "hash1",
-                    1,
+                    "op1",
                     Key.of(1),
                     Value.of(1),
                     CACHED,
                     Instant.now());
             CacheEntry<Key, Value> insertCacheEntry2 = CacheEntry.of(
                     "hash2",
-                    2,
+                    "op2",
                     Key.of(2),
                     Value.of(2),
                     CACHED,
@@ -4940,11 +5030,11 @@ final class DistributedCaffeineIntegrationTests {
             // cache entries covering statuses, hashes and timestamps (all within the scope of this repository, which
             // is the only one it can address)
             CacheEntry<Key, Value> cachedEntry1 = CacheEntry.of(
-                    "h1", 1, Key.of(1), Value.of(1), CACHED, timestamp1);
+                    "h1", "op1", Key.of(1), Value.of(1), CACHED, timestamp1);
             CacheEntry<Key, Value> cachedEntry2 = CacheEntry.of(
-                    "h2", 2, Key.of(2), Value.of(2), CACHED, timestamp2);
+                    "h2", "op2", Key.of(2), Value.of(2), CACHED, timestamp2);
             CacheEntry<Key, Value> invalidatedEntry3 = CacheEntry.of(
-                    "h3", 3, Key.of(3), Value.of(3), INVALIDATED, timestamp3);
+                    "h3", "op3", Key.of(3), Value.of(3), INVALIDATED, timestamp3);
 
             repository.upsertCacheEntries(Set.of(cachedEntry1, cachedEntry2, invalidatedEntry3));
 
@@ -5041,8 +5131,8 @@ final class DistributedCaffeineIntegrationTests {
 
             // deleteCacheEntries filtered by olderThan
             repository.upsertCacheEntries(Set.of(
-                    CacheEntry.of("old", 1, Key.of(10), Value.of(10), CACHED, Instant.now().minusSeconds(10)),
-                    CacheEntry.of("new", 2, Key.of(11), Value.of(11), CACHED, Instant.now())));
+                    CacheEntry.of("old", "op1", Key.of(10), Value.of(10), CACHED, Instant.now().minusSeconds(10)),
+                    CacheEntry.of("new", "op2", Key.of(11), Value.of(11), CACHED, Instant.now())));
             assertThat(repository.countCacheEntries(null)).isEqualTo(2);
             repository.deleteCacheEntries(null, null, Instant.now().minusSeconds(5));
             try (Stream<CacheEntry<Key, Value>> stream =
@@ -5149,7 +5239,7 @@ final class DistributedCaffeineIntegrationTests {
             for (Repository<Key, Value> repository : List.of(
                     repositoryOf(cacheWithDiscriminator), repositoryOf(cacheInDefaultScope))) {
                 repository.upsertCacheEntries(IntStream.range(0, 500)
-                        .mapToObj(i -> CacheEntry.of("h" + i, i, Key.of(i), Value.of(i),
+                        .mapToObj(i -> CacheEntry.of("h" + i, "op" + i, Key.of(i), Value.of(i),
                                 statuses[i % statuses.length], Instant.now().minusSeconds(i)))
                         .collect(toSet()));
             }

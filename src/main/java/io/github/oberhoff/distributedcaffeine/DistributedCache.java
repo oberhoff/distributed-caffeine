@@ -21,6 +21,14 @@ import org.jspecify.annotations.NullMarked;
 /**
  * Interface representing a distributed cache instance. Cache entries are added manually and remain in the cache until
  * either invalidated or evicted.
+ * <p>
+ * <b>Note:</b> Invalidating by key stops every cache instance from serving that cache entry, no matter which of them
+ * the invalidation was requested on and whether that one held the cache entry at all. It therefore always reaches the
+ * underlying store, even when nothing was found in memory to invalidate.
+ * <p>
+ * <b>Attention:</b> {@link com.github.benmanes.caffeine.cache.Cache#invalidateAll()} (without keys) is an exception to
+ * that: it only invalidates what the cache instance it is called on currently holds, leaving cache entries held
+ * exclusively by other ones untouched. Invalidate by key to reach those.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache

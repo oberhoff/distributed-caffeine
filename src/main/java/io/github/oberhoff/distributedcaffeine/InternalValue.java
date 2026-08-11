@@ -23,7 +23,7 @@ import static java.util.Objects.requireNonNull;
 class InternalValue<V> {
 
     private final V value;
-    private Integer operation;
+    private String operation;
     private boolean stale;
 
     private InternalValue(V value) {
@@ -34,11 +34,11 @@ class InternalValue<V> {
         return value;
     }
 
-    Integer getOperation() {
+    String getOperation() {
         return operation;
     }
 
-    InternalValue<V> setOperation(Integer operation) {
+    InternalValue<V> setOperation(String operation) {
         this.operation = operation;
         return this;
     }

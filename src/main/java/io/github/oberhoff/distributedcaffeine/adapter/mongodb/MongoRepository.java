@@ -63,7 +63,6 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field.OP
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field.STATUS;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field.TIMESTAMP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field.VALUE;
-import static io.github.oberhoff.distributedcaffeine.adapter.Repository.DISCRIMINATOR_FIELD;
 import static java.lang.String.format;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
@@ -302,7 +301,7 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
                                                         Document document) throws Exception {
         return CacheEntry.of(
                 document.getString(HASH.toString()),
-                document.getInteger(OPERATION.toString()),
+                document.getString(OPERATION.toString()),
                 deserializeFromMongo(document, KEY.toString(), keySerializer),
                 deserializeFromMongo(document, VALUE.toString(), valueSerializer),
                 Status.of(document.getString(STATUS.toString())),
