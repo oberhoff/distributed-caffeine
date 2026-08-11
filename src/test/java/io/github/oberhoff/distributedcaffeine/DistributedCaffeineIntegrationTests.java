@@ -3502,9 +3502,16 @@ final class DistributedCaffeineIntegrationTests {
             // same shape as the invalidation above, only that the removal preceding the repopulation is an eviction:
             // key1 is evicted to make room for key2 and is put again right after, so the repopulation is once more
             // unambiguously the later action of this very cache instance
+            // An eviction is distributed asynchronously, so the executor decides when it is published - while it takes
+            // place when the cache evicts. Delaying the executor pins the interesting order: the eviction happens
+            // before the repopulation and is published after it, which is exactly when ordering the two by the moment
+            // they were published instead of the moment they happened undoes the repopulation. Without the delay this
+            // depends on how quickly the executor happens to run, which passes locally and fails on CI.
             DistributedCache<Key, Value> distributedCache = createCache(
                     dc -> dc.withDistributionMode(INVALIDATION_AND_EVICTION)
-                            .withCaffeine(Caffeine.newBuilder().maximumSize(1)),
+                            .withCaffeine(Caffeine.newBuilder()
+                                    .maximumSize(1)
+                                    .executor(CompletableFuture.delayedExecutor(500, TimeUnit.MILLISECONDS))),
                     DistributedCaffeine::build);
 
             Key key1 = Key.of(1);
@@ -4299,6 +4306,39 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(notFoundValue).isNull();
             assertThat(loadedButNotFromStoreValue).isNotNull()
                     .satisfies(value -> assertThat(value.getName()).isEqualTo("loaded but not from store"));
+        }
+
+        @DisplayName("Test invalidation of a cache entry only the underlying store still holds")
+        @Test
+        void test_ExtendedPersistence_invalidation_of_passivated_cache_entry() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withCaffeine(Caffeine.newBuilder().maximumSize(1))
+                            .withExtendedPersistence(configurer -> configurer.withMaximumSize(10)),
+                    DistributedCaffeine::build);
+            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+
+            distributedCache.put(key1, value1);
+            distributedCache.put(Key.of(2), Value.of(2));
+            distributedCache.cleanUp(); // evicts key1, which extended persistence keeps reloadable
+
+            await("passivation")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        assertThat(distributedCache.getIfPresent(key1)).isNull();
+                        assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull();
+                    });
+
+            // no cache instance holds it anymore, so this is precisely the case an invalidation used to skip - and
+            // skipping it would leave the cache entry reloadable after having been invalidated
+            distributedCache.invalidate(key1);
+
+            await("invalidation")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() ->
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNull());
         }
 
         @DisplayName("Test extended persistence by time")

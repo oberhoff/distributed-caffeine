@@ -233,6 +233,12 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     // enough on its own, because upsertCacheEntries() writes the status unconditionally, so a delayed retry can
     // overwrite a newer CACHED write for the same key with a stale EVICTED one. Letting the data store drive the
     // correction (as invalidate-on-prune does for extended persistence) is the more promising direction
+    private void stampOperations(Map<? extends InternalKey<K>, ? extends InternalValue<V>> map) {
+        map.values().stream()
+                .filter(Objects::nonNull)
+                .forEach(value -> value.setOperation(nextOperation()));
+    }
+
     private String nextOperation() {
         return operationId.get() + ":" + operationCounter.incrementAndGet();
     }
@@ -263,6 +269,11 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
 
     private void publishCacheEntriesAsync(Map<? extends InternalKey<K>, ? extends InternalValue<V>> map,
                                           Status status) {
+        // stamped here rather than in the publishing below, which happens whenever the executor gets around to it:
+        // an operation has to be ordered by when it took place, and for these it takes place now. Stamping it later
+        // would let an eviction appear to have happened after a population that in fact followed it, so that the
+        // population would be undone once the eviction comes back
+        stampOperations(map);
         CompletableFuture.runAsync(() -> publishCacheEntries(map, status, false), executor)
                 .exceptionally(throwable -> {
                     logger.log(Level.WARNING, format("Distributing %s for %s failed for cache at '%s'",
@@ -276,12 +287,12 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
         // Stamped ahead of everything below, because whether a cache entry is published says nothing about whether
         // the value handed over here stays in this cache: without population being distributed nothing is published
         // for a population at all, and that is exactly where a removal by this very cache instance must not be
-        // allowed to undo it. Stamped for the asynchronous operations as well, even though nothing here waits for
-        // them: an eviction is a removal like any other, and a key evicted and then populated again would otherwise
-        // be removed once more when the eviction comes back
-        map.values().stream()
-                .filter(Objects::nonNull)
-                .forEach(value -> value.setOperation(nextOperation()));
+        // allowed to undo it. Only for the managed operations though, which are the ones taking place right here -
+        // the asynchronous ones are stamped by publishCacheEntriesAsync when they take place, not when they are
+        // finally published
+        if (manage) {
+            stampOperations(map);
+        }
         // extended persistence should work regardless of the distribution mode
         if (isActivated() && (status.isConsideredBy(distributionMode) || status.isEvictedExtended())) {
             if (manage) {

@@ -670,7 +670,10 @@ public final class DistributedCaffeine<K, V> {
             return this;
         }
 
-        // TODO withInvalidationStrategy
+        // TODO
+        // there is no counterpart for invalidation to configure: invalidating a cache entry reaches the underlying
+        // store whether or not any cache instance still holds it, so one kept there by extended persistence stops
+        // being reloadable without anything having to be enabled for it
 
         Optional<Integer> getMaximumSize() {
             return Optional.ofNullable(maximumSize);
