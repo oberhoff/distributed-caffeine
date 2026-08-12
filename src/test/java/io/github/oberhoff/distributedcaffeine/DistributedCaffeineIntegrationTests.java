@@ -133,12 +133,14 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.C
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_LOADED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_REFRESHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_REFRESHED_AFTER_WRITE;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.COMMAND;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_EXTENDED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_SIZE;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_SIZE_EXTENDED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_TIME;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_TIME_EXTENDED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED_AFTER_WRITE;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.SHORT_LIVING_GROUP;
@@ -541,7 +543,8 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(cache.getAllPresent(map4to5.keySet())).isEmpty();
                         });
                         assertThatDataStoreHasCounts(
-                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(5)));
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(5)),
+                                Count.of(COMMAND, assertion -> assertion.isEqualTo(1)));
                     });
 
             processMaintenance();
@@ -2021,7 +2024,8 @@ final class DistributedCaffeineIntegrationTests {
                         allMaps.forEach(map ->
                                 assertThat(map).isEmpty());
                         assertThatDataStoreHasCounts(
-                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(3)));
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(3)),
+                                Count.of(COMMAND, assertion -> assertion.isEqualTo(1)));
                     });
 
             processMaintenance();
@@ -2276,7 +2280,8 @@ final class DistributedCaffeineIntegrationTests {
                         allMaps.forEach(map ->
                                 assertThat(map.keySet()).isEmpty());
                         assertThatDataStoreHasCounts(
-                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(6)));
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(6)),
+                                Count.of(COMMAND, assertion -> assertion.isEqualTo(1)));
                     });
 
             processMaintenance();
@@ -2389,7 +2394,8 @@ final class DistributedCaffeineIntegrationTests {
                         allMaps.forEach(map ->
                                 assertThat(map.values()).isEmpty());
                         assertThatDataStoreHasCounts(
-                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(6)));
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(6)),
+                                Count.of(COMMAND, assertion -> assertion.isEqualTo(1)));
                     });
 
             processMaintenance();
@@ -2508,7 +2514,8 @@ final class DistributedCaffeineIntegrationTests {
                         allMaps.forEach(map ->
                                 assertThat(map.entrySet()).isEmpty());
                         assertThatDataStoreHasCounts(
-                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(6)));
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(6)),
+                                Count.of(COMMAND, assertion -> assertion.isEqualTo(1)));
                     });
 
             processMaintenance();
@@ -2980,10 +2987,14 @@ final class DistributedCaffeineIntegrationTests {
         @DisplayName("Test that a repopulation is not reverted by the invalidation preceding it")
         @Test
         void test_DistributionMode_invalidation_does_not_revert_repopulation() {
-            // the invalidation and the repopulation happen one after the other on the same cache instance, so the
-            // repopulation is unambiguously the later one. Without population being distributed there is also no
-            // cache entry following the invalidation that could restore what its event removes, so losing the
-            // repopulation here is permanent rather than transient
+            // The invalidation and the repopulation happen one after the other on the same cache instance, so the
+            // repopulation is unambiguously the later one.
+            // This mode is not interchangeable with the others here, so do not parameterize this test over them:
+            // without population being distributed, nothing is written for the repopulation and no cache entry
+            // follows the invalidation that could restore what its event removes, which is what makes losing it
+            // permanent. Where population is distributed the very same sequence recovers on its own, because the
+            // cache entry written for the repopulation follows the invalidated one and is applied after it - so the
+            // assertion below would hold there whether or not the ordering it tests exists at all
             DistributedCache<Key, Value> distributedCache = createCache(
                     dc -> dc.withDistributionMode(INVALIDATION),
                     DistributedCaffeine::build);
@@ -3005,6 +3016,8 @@ final class DistributedCaffeineIntegrationTests {
         @DisplayName("Test that a repopulation is not reverted by the invalidation of an absent cache entry")
         @Test
         void test_DistributionMode_invalidation_of_absent_does_not_revert_repopulation() {
+            // same reasoning about the distribution mode as above: only without population being distributed is
+            // losing the repopulation permanent, and therefore observable once everything has settled
             DistributedCache<Key, Value> distributedCache = createCache(
                     dc -> dc.withDistributionMode(INVALIDATION),
                     DistributedCaffeine::build);
@@ -3013,6 +3026,106 @@ final class DistributedCaffeineIntegrationTests {
             Value value = Value.of(1);
 
             distributedCache.invalidate(key); // nothing held here, so nothing is distributed at the moment
+            distributedCache.put(key, value);
+
+            sleep(Duration.ofSeconds(2));
+
+            assertThat(distributedCache.getIfPresent(key)).isEqualTo(value);
+        }
+
+        @DisplayName("Test that invalidating all reaches cache entries held by another cache instance")
+        @Test
+        void test_DistributionMode_invalidate_all_reaches_other_cache_instances() {
+            // Without population being distributed each cache instance holds only what it populated itself, which is
+            // what makes this the mode where invalidating all has something to reach that the calling cache instance
+            // cannot enumerate: the second key below is held exclusively by the other cache instance and nothing in
+            // the store says it exists, so no set of keys assembled here can cover it
+            DistributedCache<Key, Value> distributedCacheA = createCache(
+                    dc -> dc.withDistributionMode(INVALIDATION),
+                    DistributedCaffeine::build);
+            DistributedCache<Key, Value> distributedCacheB = createCache(
+                    dc -> dc.withDistributionMode(INVALIDATION),
+                    DistributedCaffeine::build);
+
+            Key key1 = Key.of(1);
+            Key key2 = Key.of(2);
+
+            distributedCacheA.put(key1, Value.of(1));
+            distributedCacheB.put(key2, Value.of(2));
+
+            distributedCacheA.invalidateAll();
+
+            await("invalidation of all cache entries")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        assertThat(distributedCacheA.estimatedSize()).isEqualTo(0);
+                        assertThat(distributedCacheB.estimatedSize()).isEqualTo(0);
+                    });
+        }
+
+        @DisplayName("Test that invalidating all reaches cache entries the calling cache instance no longer holds")
+        @Test
+        void test_DistributionMode_invalidate_all_reaches_stored_cache_entries() {
+            // This mode excludes eviction from being distributed, so a cache entry evicted here locally stays cached
+            // in the store and in the other cache instance - a key the calling cache instance cannot enumerate either,
+            // this time although the store does know it. Emptying every cache instance is not enough while the store
+            // keeps its own record of it, because that record is what a reactivation and extended persistence read
+            // back, so the cached cache entries have to be gone from the store as well
+            DistributedCache<Key, Value> distributedCacheA = createCache(
+                    dc -> dc.withDistributionMode(POPULATION_AND_INVALIDATION)
+                            .withCaffeine(Caffeine.newBuilder()
+                                    .maximumSize(1)),
+                    DistributedCaffeine::build);
+            DistributedCache<Key, Value> distributedCacheB = createCache(
+                    dc -> dc.withDistributionMode(POPULATION_AND_INVALIDATION),
+                    DistributedCaffeine::build);
+
+            Key key1 = Key.of(1);
+            Key key2 = Key.of(2);
+
+            distributedCacheA.put(key1, Value.of(1));
+            distributedCacheA.put(key2, Value.of(2));
+            distributedCacheA.cleanUp(); // key1 is evicted here, which is not distributed in this mode
+
+            await("synchronization between cache instances")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        assertThat(distributedCacheA.estimatedSize()).isEqualTo(1);
+                        assertThat(distributedCacheB.estimatedSize()).isEqualTo(2);
+                        assertThatDataStoreHasCounts(
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
+                    });
+
+            distributedCacheA.invalidateAll();
+
+            await("invalidation of all cache entries")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        assertThat(distributedCacheA.estimatedSize()).isEqualTo(0);
+                        assertThat(distributedCacheB.estimatedSize()).isEqualTo(0);
+                        // both keys, the one evicted here included - and no cached cache entry left behind
+                        assertThatDataStoreHasCounts(
+                                Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2)),
+                                Count.of(COMMAND, assertion -> assertion.isEqualTo(1)));
+                    });
+        }
+
+        @DisplayName("Test that a repopulation is not reverted by invalidating all preceding it")
+        @Test
+        void test_DistributionMode_invalidate_all_does_not_revert_repopulation() {
+            // same reasoning about the distribution mode as for the invalidation probes above: only without population
+            // being distributed is losing the repopulation permanent, and therefore observable once everything has
+            // settled. Invalidating all is ordered against the later actions of this cache instance exactly like an
+            // invalidation by key, so what is put afterwards has to survive it being delivered back here
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withDistributionMode(INVALIDATION),
+                    DistributedCaffeine::build);
+
+            Key key = Key.of(1);
+            Value value = Value.of(1);
+
+            distributedCache.put(key, Value.of(0));
+            distributedCache.invalidateAll();
             distributedCache.put(key, value);
 
             sleep(Duration.ofSeconds(2));
@@ -4318,8 +4431,10 @@ final class DistributedCaffeineIntegrationTests {
         @Test
         void test_ExtendedPersistence_invalidation_of_passivated_cache_entry() {
             DistributedCache<Key, Value> distributedCache = createCache(
-                    dc -> dc.withCaffeine(Caffeine.newBuilder().maximumSize(1))
-                            .withExtendedPersistence(configurer -> configurer.withMaximumSize(10)),
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
+                                    .maximumSize(1))
+                            .withExtendedPersistence(configurer ->
+                                    configurer.withMaximumSize(10)),
                     DistributedCaffeine::build);
             DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
 
@@ -4342,6 +4457,40 @@ final class DistributedCaffeineIntegrationTests {
             distributedCache.invalidate(key1);
 
             await("invalidation")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() ->
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNull());
+        }
+
+        @DisplayName("Test that invalidating all reaches a cache entry only the underlying store still holds")
+        @Test
+        void test_ExtendedPersistence_invalidate_all_of_passivated_cache_entry() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
+                                    .maximumSize(1))
+                            .withExtendedPersistence(configurer ->
+                                    configurer.withMaximumSize(10)),
+                    DistributedCaffeine::build);
+            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
+
+            Key key1 = Key.of(1);
+
+            distributedCache.put(key1, Value.of(1));
+            distributedCache.put(Key.of(2), Value.of(2));
+            distributedCache.cleanUp(); // evicts key1, which extended persistence keeps reloadable
+
+            await("passivation")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        assertThat(distributedCache.getIfPresent(key1)).isNull();
+                        assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull();
+                    });
+
+            // no cache instance holds this one, so emptying every one of them cannot reach it: what keeps it
+            // reloadable is the record the store has of it, and only clearing that stops it from coming back
+            distributedCache.invalidateAll();
+
+            await("invalidation of all cache entries")
                     .atMost(WAITING_DURATION)
                     .untilAsserted(() ->
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNull());
@@ -6061,7 +6210,8 @@ final class DistributedCaffeineIntegrationTests {
                                 .allSatisfy(distributedLoadingCache -> assertThat(distributedLoadingCache.estimatedSize()).isEqualTo(0));
                         assertThatDataStoreHasCounts(
                                 CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(0)),
-                                CountGrouped.of(EVICTED_EXTENDED_GROUP, assertion -> assertion.isGreaterThanOrEqualTo(extendedMaximumSize)));
+                                CountGrouped.of(EVICTED_EXTENDED_GROUP, assertion -> assertion.isEqualTo(0)),
+                                CountGrouped.of(INVALIDATED_GROUP, assertion -> assertion.isGreaterThanOrEqualTo(extendedMaximumSize)));
                     });
 
             await("maintenance")
@@ -6071,7 +6221,7 @@ final class DistributedCaffeineIntegrationTests {
                     .untilAsserted(() ->
                             assertThatDataStoreHasCounts(
                                     CountGrouped.of(SHORT_LIVING_GROUP, assertion -> assertion.isEqualTo(0)),
-                                    CountGrouped.of(EVICTED_EXTENDED_GROUP, assertion -> assertion.isEqualTo(extendedMaximumSize))));
+                                    CountGrouped.of(EVICTED_EXTENDED_GROUP, assertion -> assertion.isEqualTo(0))));
 
             verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPLICIT));
             verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.REPLACED));

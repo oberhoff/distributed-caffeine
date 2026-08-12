@@ -129,9 +129,8 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
     @Override
     public void invalidateAll() {
         synchronizationLock.runLocked(() -> {
-            Set<InternalKey<K>> keySet = cache.asMap().keySet();
-            cacheManager.invalidateAllDistributed(keySet);
-            keySet.clear();
+            cacheManager.invalidateAllDistributed();
+            cache.invalidateAll();
         });
     }
 

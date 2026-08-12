@@ -26,9 +26,15 @@ import org.jspecify.annotations.NullMarked;
  * the invalidation was requested on and whether that one held the cache entry at all. It therefore always reaches the
  * underlying store, even when nothing was found in memory to invalidate.
  * <p>
- * <b>Attention:</b> {@link com.github.benmanes.caffeine.cache.Cache#invalidateAll()} (without keys) is an exception to
- * that: it only invalidates what the cache instance it is called on currently holds, leaving cache entries held
- * exclusively by other ones untouched. Invalidate by key to reach those.
+ * <b>Note:</b> {@link com.github.benmanes.caffeine.cache.Cache#invalidateAll()} (without keys) reaches just as far,
+ * although it cannot name the cache entries it invalidates. What is removed is therefore decided by each cache
+ * instance for itself once the invalidation arrives, so all of them end up empty no matter which cache entries each of
+ * them held, and cache entries only the underlying store still holds are invalidated as well - leaving those would
+ * keep them reloadable right afterwards.
+ * <p>
+ * <b>Attention:</b> What the cache instance requesting it does afterwards is not undone by it, but an operation of
+ * another cache instance racing it is subject to last write wins, as there is no order between cache instances to
+ * appeal to.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache

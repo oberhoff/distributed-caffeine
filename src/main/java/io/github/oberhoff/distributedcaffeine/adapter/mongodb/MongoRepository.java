@@ -102,7 +102,7 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
                     // and an existing one already carries it (it could not have been matched otherwise)
                     Bson filter = Filters.and(
                             Filters.eq(HASH.toString(), cacheEntry.getHash()),
-                            Filters.eq(DISCRIMINATOR_FIELD, requireNonNull(discriminator)));
+                            Filters.eq(DISCRIMINATOR_FIELD, discriminator));
                     Bson update = Updates.combine(
                             Updates.set(OPERATION.toString(), cacheEntry.getOperation()),
                             Updates.set(KEY.toString(), serializeToMongo(cacheEntry.getKey(),
@@ -260,7 +260,7 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
         List<Bson> filters = new ArrayList<>();
         // first because it is the only one always present and the one both indexes lead with. The server normalizes
         // the order of the conditions before planning, so this documents intent rather than steering it
-        filters.add(Filters.eq(DISCRIMINATOR_FIELD, requireNonNull(discriminator)));
+        filters.add(Filters.eq(DISCRIMINATOR_FIELD, discriminator));
         if (nonNull(hashes)) {
             filters.add(Filters.in(HASH.toString(), hashes));
         }

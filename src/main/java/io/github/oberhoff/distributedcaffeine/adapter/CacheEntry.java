@@ -46,7 +46,8 @@ public interface CacheEntry<K, V> {
     enum Field {
 
         /**
-         * Field used to store the hash of cache entry.
+         * Field used to store the hash of a cache entry, or the name of the command it carries (see
+         * {@link CacheEntry.Status#COMMAND}).
          */
         HASH,
 
@@ -56,12 +57,14 @@ public interface CacheEntry<K, V> {
         OPERATION,
 
         /**
-         * Field used to store the key of a cache entry.
+         * Field used to store the key of a cache entry (can be {@code null} only for a cache entry carrying a
+         * command, see {@link CacheEntry.Status#COMMAND}).
          */
         KEY,
 
         /**
-         * Field used to store the value of a cache entry.
+         * Field used to store the value of a cache entry (can be {@code null}, for example for an invalidated cache
+         * entry or for one carrying a command).
          */
         VALUE,
 
@@ -149,7 +152,18 @@ public interface CacheEntry<K, V> {
         /**
          * Status of a cache entry that was evicted by time while extended persistence was configured.
          */
-        EVICTED_TIME_EXTENDED;
+        EVICTED_TIME_EXTENDED,
+
+        /**
+         * Status of a cache entry that carries a command instead of belonging to a key, which is what makes it the
+         * only one without a key and a value. Its hash names the command, for example
+         * {@link CacheEntry.Command#INVALIDATE_ALL}.
+         * <p>
+         * <b>Note:</b> A command is not one of the cache operations a {@link DistributionMode} selects between, so it
+         * is considered by every one of them. A cache instance receiving a command it does not know ignores it, which
+         * is what lets commands be added without every cache instance having to understand them already.
+         */
+        COMMAND;
 
         /**
          * Group of statuses representing populated cache entries.
@@ -178,11 +192,12 @@ public interface CacheEntry<K, V> {
 
         /**
          * Group of statuses representing invalidated and evicted cache entries while extended persistence was not
-         * configured.
+         * configured, along with the one representing a command, which is equally short-living: it has been applied by
+         * every cache instance watching by the time it can be removed.
          */
         public static final Set<Status> SHORT_LIVING_GROUP =
                 Set.of(INVALIDATED, INVALIDATED_REFRESHED, INVALIDATED_REFRESHED_AFTER_WRITE,
-                        EVICTED_SIZE, EVICTED_TIME);
+                        EVICTED_SIZE, EVICTED_TIME, COMMAND);
 
         private final String value;
 
@@ -228,6 +243,15 @@ public interface CacheEntry<K, V> {
         }
 
         /**
+         * Indicates whether a cache entry carries a command instead of belonging to a key or not.
+         *
+         * @return {@code true} if cache entry carries a command, otherwise {@code false}
+         */
+        public boolean isCommand() {
+            return this == COMMAND;
+        }
+
+        /**
          * Indicates whether a status of a cache entry is considered by a specified {@link DistributionMode}.
          *
          * @param distributionMode the distribution mode
@@ -241,7 +265,7 @@ public interface CacheEntry<K, V> {
             } else if (isEvicted()) {
                 return distributionMode.isEvictionConsidered();
             } else {
-                return false;
+                return isCommand();
             }
         }
 
@@ -269,7 +293,32 @@ public interface CacheEntry<K, V> {
     }
 
     /**
-     * Returns the hash of the cache entry.
+     * Commands a cache entry can carry instead of belonging to a key.
+     *
+     * @author Andreas Oberhoff
+     */
+    @NullMarked
+    enum Command {
+
+        /**
+         * Command representing an 'invalidate all' operation.
+         */
+        INVALIDATE_ALL;
+
+        private final String value;
+
+        Command() {
+            this.value = name().toLowerCase();
+        }
+
+        @Override
+        public String toString() {
+            return value;
+        }
+    }
+
+    /**
+     * Returns the hash of the cache entry, or the name of the command it carries (see {@link Status#COMMAND}).
      *
      * @return the hash
      */
@@ -288,11 +337,12 @@ public interface CacheEntry<K, V> {
     @Nullable String getOperation();
 
     /**
-     * Returns the key of the cache entry.
+     * Returns the key of the cache entry ({@code null} only for a cache entry carrying a command, see
+     * {@link Status#COMMAND}).
      *
      * @return the key
      */
-    K getKey();
+    @Nullable K getKey();
 
     /**
      * Returns the value of the cache entry.
@@ -353,11 +403,21 @@ public interface CacheEntry<K, V> {
     }
 
     /**
+     * Indicates whether the cache entry carries a command instead of belonging to a key or not. Its hash names the
+     * command, for example {@link Command#INVALIDATE_ALL}.
+     *
+     * @return {@code true} if cache entry carries a command, otherwise {@code false}
+     */
+    default boolean isCommand() {
+        return getStatus().isCommand();
+    }
+
+    /**
      * Returns a cache entry defined by the specified parameters.
      *
-     * @param hash      the hash
+     * @param hash      the hash, or the name of the command for {@link Status#COMMAND}
      * @param operation the operation identifier
-     * @param key       the key
+     * @param key       the key ({@code null} only for {@link Status#COMMAND})
      * @param value     the value
      * @param status    the status
      * @param timestamp the timestamp
@@ -365,13 +425,15 @@ public interface CacheEntry<K, V> {
      * @param <V>       the value type of the cache
      * @return the cache entry
      */
-    static <K, V> CacheEntry<K, V> of(String hash, @Nullable String operation, K key, @Nullable V value,
+    static <K, V> CacheEntry<K, V> of(String hash, @Nullable String operation, @Nullable K key, @Nullable V value,
                                       Status status, Instant timestamp) {
 
         requireNonNull(hash, "hash cannot be null");
-        requireNonNull(key, "key cannot be null");
         requireNonNull(status, "status cannot be null");
         requireNonNull(timestamp, "timestamp cannot be null");
+        if (!status.isCommand()) {
+            requireNonNull(key, "key cannot be null");
+        }
 
         return new CacheEntry<>() {
 
@@ -386,7 +448,7 @@ public interface CacheEntry<K, V> {
             }
 
             @Override
-            public K getKey() {
+            public @Nullable K getKey() {
                 return key;
             }
 

@@ -38,8 +38,7 @@ public abstract class AbstractRepository<K, V> implements Repository<K, V> {
     protected @Nullable String identifier;
 
     /**
-     * The discriminator to be used by this adapter ({@code null} only until it has been set). Every operation of this
-     * repository is scoped to it.
+     * The discriminator to be used by this adapter.
      */
     protected @Nullable String discriminator;
 

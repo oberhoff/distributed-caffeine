@@ -49,11 +49,14 @@ import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Command.INVALIDATE_ALL;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_LOADED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_REFRESHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_REFRESHED_AFTER_WRITE;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.COMMAND;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_EXTENDED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_SIZE;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_SIZE_EXTENDED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_TIME;
@@ -64,6 +67,7 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.I
 import static java.lang.String.format;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
+import static java.util.Objects.requireNonNull;
 
 @SuppressWarnings("java:S1452")
 class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriever<K, V> {
@@ -176,6 +180,37 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
         keys.forEach(key -> map.put(key, null));
         publishCacheEntries(map, INVALIDATED, true);
         return keys;
+    }
+
+    // Invalidating all cache entries cannot be expressed as a set of keys: the calling cache instance can only
+    // enumerate what it holds itself, and without population being distributed nothing else knows what the others
+    // hold. So instead of one cache entry per key, a command is written, and every cache instance decides from its own
+    // content what it removes when that arrives (see retrieveCacheEntries). Where population is distributed the store
+    // keeps a record of what is cached, which has to go as well - otherwise a reactivation reads it back and extended
+    // persistence reloads from it, undoing what was just invalidated
+    void invalidateAllDistributed() {
+        if (isActivated() && COMMAND.isConsideredBy(distributionMode)) {
+            synchronizationLock.ensureLock();
+            if (distributionMode.isPopulationConsidered()) {
+                Set<Status> statuses = new HashSet<>(CACHED_GROUP);
+                if (extendedPersistenceConfigurer.isConfigured()) {
+                    statuses.addAll(EVICTED_EXTENDED_GROUP);
+                }
+                // transitions what is there and writes nothing for what is not, which also means it cannot resurrect
+                // a key as invalidated that no longer exists. Ahead of the cache entry below, so that a population
+                // following this operation cannot be overwritten by it afterwards
+                runFailable(() -> repository.updateStatusOfCacheEntries(null, statuses, null, INVALIDATED));
+            }
+            runFailable(() -> repository.upsertCacheEntries(List.of(CacheEntry.of(
+                    INVALIDATE_ALL.toString(),
+                    // stamped like any other operation of this cache instance, which is what keeps whatever it does
+                    // after this from being undone once this arrives back here
+                    nextOperation(),
+                    null,
+                    null,
+                    COMMAND,
+                    Instant.now()))));
+        }
     }
 
     Set<InternalKey<K>> invalidateAllDistributedRefresh(Set<InternalKey<K>> keys) {
@@ -342,9 +377,31 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
                 cacheEntries
                         .filter(cacheEntry -> cacheEntry.getStatus().isConsideredBy(distributionMode))
                         .forEach(cacheEntry -> {
+                            // A command belongs to no key, so it is handled ahead of everything below, which all works
+                            // with one. Dispatched by the name it carries as its hash, and one that is not known here
+                            // is skipped rather than treated as a cache entry - which is what allows a command to be
+                            // added without every cache instance already understanding it
+                            if (cacheEntry.isCommand()) {
+                                if (INVALIDATE_ALL.toString().equals(cacheEntry.getHash())) {
+                                    // What it removes is not something the cache instance publishing it could know, so
+                                    // it is decided here, from what this one holds at the moment it arrives. The
+                                    // ordering guard is the same as for a single key, only applied to each of them:
+                                    // what this cache instance has written since publishing it stays, everything else
+                                    // goes. A command of another one carries an operation of its own, so nothing is
+                                    // superseded by it and the cache is emptied entirely, which is what following it
+                                    // means here
+                                    cache.asMap().forEach((presentKey, present) -> {
+                                        if (!isSupersededLocally(cacheEntry.getOperation(), present.getOperation())) {
+                                            toRemove.add(presentKey);
+                                        }
+                                    });
+                                }
+                                return;
+                            }
                             // propagate the store's hash onto the key so it is never recomputed for this entry
                             // (e.g. when it is later evicted or re-published from this instance)
-                            InternalKey<K> key = ik(cacheEntry.getKey()).setHash(cacheEntry.getHash());
+                            InternalKey<K> key = ik(requireNonNull(cacheEntry.getKey()))
+                                    .setHash(cacheEntry.getHash());
                             if (cacheEntry.isCached()) {
                                 InternalValue<V> present = policy.getIfPresentQuietly(key);
                                 String operation = cacheEntry.getOperation();

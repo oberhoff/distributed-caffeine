@@ -221,9 +221,8 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalInitia
     @Override
     public void clear() {
         synchronizationLock.runLocked(() -> {
-            Set<InternalKey<K>> keySet = concurrentMap.keySet();
-            cacheManager.invalidateAllDistributed(keySet);
-            keySet.clear();
+            cacheManager.invalidateAllDistributed();
+            concurrentMap.clear();
         });
     }
 
