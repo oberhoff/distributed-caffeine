@@ -21,14 +21,7 @@ import org.jspecify.annotations.NullMarked;
  * Interface representing an adapter that manages distributed synchronization between cache instances using an
  * underlying store.
  * <p>
- * <b>Attention:</b> An adapter belongs to exactly one cache instance and cannot be shared between them. Constructing
- * several cache instances requires an own adapter for each of them, even if they are backed by the same store.
- * <p>
- * <b>Note:</b> Cache instances synchronize with each other only while they use the same relation in an underlying
- * store <i>and</i> the same discriminator (see {@link DiscriminatorAware#setDiscriminator(String)}), so instances
- * meant to be related have to agree on it, and one relation can hold any number of unrelated caches. Changing the
- * discriminator of an already used cache leaves its previously stored cache entries behind though: they keep the
- * discriminator they were written with and are from then on neither read nor maintained by any cache.
+ * <b>Note:</b> An adapter belongs to exactly one cache instance and cannot be shared between them.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
@@ -50,4 +43,12 @@ public interface Adapter<K, V> extends StateAware, SerializerAware<K, V>, Retrie
      * @return the identifier
      */
     String getIdentifier();
+
+    /**
+     * Returns the discriminator of this adapter
+     *
+     * @return the discriminator
+     */
+    @SuppressWarnings("unused")
+    String getDiscriminator();
 }

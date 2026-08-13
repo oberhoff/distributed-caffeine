@@ -145,9 +145,7 @@ public final class DistributedCaffeine<K, V> {
      *     .build();
      * </pre>
      *
-     * <b>Attention:</b> An adapter belongs to exactly one cache instance and cannot be shared between them, which also
-     * means that a builder pattern instance can only be finalized once. Constructing several cache instances requires
-     * an own adapter for each of them, even if they are backed by the same store.
+     * <b>Attention:</b> An adapter belongs to exactly one cache instance and cannot be shared between them.
      *
      * @param adapter the adapter used for distributed synchronization between cache instances
      * @param <K>     the key type of the cache
@@ -320,6 +318,7 @@ public final class DistributedCaffeine<K, V> {
         requireNonNull(cacheLoader, "cacheLoader cannot be null");
         InternalCacheLoader<K, V> internalCacheLoader = new InternalCacheLoader<>((CacheLoader<K, V>) cacheLoader);
         return buildClaimed(() -> {
+            @SuppressWarnings("NullableProblems")
             InternalInstanceRegistry<K, V> instanceRegistry =
                     buildCommon(c -> c.build(internalCacheLoader), internalCacheLoader);
             InternalDistributedLoadingCache<K, V> distributedLoadingCache = new InternalDistributedLoadingCache<>();

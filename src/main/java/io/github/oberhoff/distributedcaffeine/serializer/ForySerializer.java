@@ -20,7 +20,6 @@ import org.apache.fory.config.ForyBuilder;
 import org.apache.fory.config.Language;
 import org.jspecify.annotations.NullMarked;
 
-import java.util.Objects;
 import java.util.stream.Stream;
 
 import static java.util.Objects.requireNonNull;
@@ -77,7 +76,6 @@ public class ForySerializer<T> implements ByteArraySerializer<T> {
         this.fory = foryBuilder
                 .buildThreadSafeFory();
         Stream.of(registerClasses)
-                .filter(Objects::nonNull)
                 .forEach(fory::register);
     }
 

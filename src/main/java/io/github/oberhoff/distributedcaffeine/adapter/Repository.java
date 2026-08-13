@@ -30,38 +30,34 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
  * Interface representing a repository that manages distributed synchronization between cache instances using an
  * underlying store.
  * <p>
- * <b>Attention:</b> A repository represents the view of exactly one cache instance on an underlying store, not the
- * store as a whole. Every operation below is implicitly scoped to the discriminator set via
- * {@link DiscriminatorAware#setDiscriminator(String)} and must neither read nor write cache entries belonging to
- * another one.
+ * <b>Note:</b> Every operation must implicitly be restricted to a discriminator set via
+ * {@link DiscriminatorAware#setDiscriminator(String)} and stored in {@link Repository#DISCRIMINATOR_FIELD}, along with
+ * fields from {@link CacheEntry.Field}.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
 @NullMarked
-@SuppressWarnings("java:S112")
+@SuppressWarnings({"RedundantThrows", "java:S112"})
 public interface Repository<K, V> extends IdentifierAware, DiscriminatorAware, SerializerAware<K, V> {
 
     /**
-     * Canonical name of the field a discriminator is stored in, offered to implementations whose underlying store
-     * names its fields. Unlike the fields of a {@link CacheEntry}, a discriminator is not part of a cache entry but
-     * scopes a repository as a whole.
+     * Canonical name of the discriminator field.
      */
     String DISCRIMINATOR_FIELD = "discriminator";
 
     /**
-     * Discriminator used by caches that do not choose one of their own. It is an ordinary discriminator in every
-     * respect, so caches using it are related to each other and separate from caches using any other.
+     * Canonical value of a default discriminator.
      */
     String DEFAULT_DISCRIMINATOR = "default";
 
     /**
-     * Upserts cache entries into the underlying store, stamping the discriminator of this repository on each of them.
+     * Upserts cache entries into the underlying store.
      * <p>
      * <b>Note:</b> The unique identifier for an upsert is the combination of the discriminator and the hash of a cache
-     * entry (neither of them ever {@code null}). The uniqueness must be ensured by the underlying store (e.g. by an
-     * index on both fields).
+     * entry (neither of them is ever {@code null}). The uniqueness must be ensured by the underlying store (e.g. by a
+     * unique index on both fields).
      *
      * @param cacheEntries the cache entries to store
      * @throws Exception if upserting fails
@@ -72,9 +68,8 @@ public interface Repository<K, V> extends IdentifierAware, DiscriminatorAware, S
      * Returns a (optionally ordered) stream of cache entries from the underlying store that match the specified
      * parameters.
      * <p>
-     * <b>Note:</b> Filtering by the discriminator of this repository applies in addition to the parameters below, so
-     * that cache entries belonging to other caches are never returned. Parameters expect conditional handling, see
-     * details below.
+     * <b>Note:</b> Parameters expect conditional handling, see details below (filtering by discriminator must be
+     * implicit).
      *
      * @param hashes              the hashes to filter by ({@code null} means to omit this filter)
      * @param statuses            the statuses to filter by ({@code null} means to omit this filter)
@@ -93,9 +88,8 @@ public interface Repository<K, V> extends IdentifierAware, DiscriminatorAware, S
      * field must be set to {@code null} and the timestamp field must be set to a current value for updated cache
      * entries.
      * <p>
-     * <b>Note:</b> Filtering by the discriminator of this repository applies in addition to the parameters below, so
-     * that cache entries belonging to other caches are never updated. Parameters expect conditional handling, see
-     * details below.
+     * <b>Note:</b> Parameters expect conditional handling, see details below (filtering by discriminator must be
+     * implicit).
      *
      * @param hashes    the hashes to filter by ({@code null} means to omit this filter)
      * @param statuses  the statuses to filter by ({@code null} means to omit this filter)
@@ -109,9 +103,8 @@ public interface Repository<K, V> extends IdentifierAware, DiscriminatorAware, S
     /**
      * Deletes cache entries from the underlying store that match the specified parameters.
      * <p>
-     * <b>Note:</b> Filtering by the discriminator of this repository applies in addition to the parameters below, so
-     * that cache entries belonging to other caches are never deleted. Parameters expect conditional handling, see
-     * details below.
+     * <b>Note:</b> Parameters expect conditional handling, see details below (filtering by discriminator must be
+     * implicit).
      *
      * @param hashes    the hashes to filter by ({@code null} means to omit this filter)
      * @param statuses  the statuses to filter by ({@code null} means to omit this filter)
@@ -124,9 +117,8 @@ public interface Repository<K, V> extends IdentifierAware, DiscriminatorAware, S
     /**
      * Counts cache entries in the underlying store that match the specified parameters.
      * <p>
-     * <b>Note:</b> Filtering by the discriminator of this repository applies in addition to the parameters below, so
-     * that cache entries belonging to other caches are never counted. Parameters expect conditional handling, see
-     * details below.
+     * <b>Note:</b> Parameters expect conditional handling, see details below (filtering by discriminator must be
+     * implicit).
      *
      * @param statuses the statuses to filter by ({@code null} means to omit this filter)
      * @return the count

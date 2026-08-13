@@ -27,10 +27,6 @@ public interface DiscriminatorAware {
 
     /**
      * Sets the discriminator for this object.
-     * <p>
-     * <b>Note:</b> A discriminator selects which caches using the same relation in an underlying store belong
-     * together, so it is never {@code null} - caches not choosing one of their own use
-     * {@link Repository#DEFAULT_DISCRIMINATOR}.
      *
      * @param discriminator the discriminator to be set
      */

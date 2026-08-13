@@ -38,7 +38,8 @@ import static java.util.Objects.requireNonNull;
 public interface CacheEntry<K, V> {
 
     /**
-     * Fields of a cache entry, each of which can be selected when streaming cache entries from an underlying store.
+     * Fields of a cache entry used to store it in an underlying store, along with
+     * {@link Repository#DISCRIMINATOR_FIELD}.
      *
      * @author Andreas Oberhoff
      */
@@ -46,35 +47,33 @@ public interface CacheEntry<K, V> {
     enum Field {
 
         /**
-         * Field used to store the hash of a cache entry, or the name of the command it carries (see
-         * {@link CacheEntry.Status#COMMAND}).
+         * Field used to store the hash of a cache entry (or the name of the command if status is
+         * {@link Status#COMMAND}), never {@code null}.
          */
         HASH,
 
         /**
-         * Field used to store an internal operation identifier (can be {@code null}).
+         * Field used to store an internal operation identifier, can be {@code null}.
          */
         OPERATION,
 
         /**
-         * Field used to store the key of a cache entry (can be {@code null} only for a cache entry carrying a
-         * command, see {@link CacheEntry.Status#COMMAND}).
+         * Field used to store the key of a cache entry (or {@code null} if status is {@link Status#COMMAND}).
          */
         KEY,
 
         /**
-         * Field used to store the value of a cache entry (can be {@code null}, for example for an invalidated cache
-         * entry or for one carrying a command).
+         * Field used to store the value of a cache entry, can be {@code null}.
          */
         VALUE,
 
         /**
-         * Field used to store the status of a cache entry.
+         * Field used to store the status of a cache entry, never {@code null}.
          */
         STATUS,
 
         /**
-         * Field used to store the timestamp of a cache entry.
+         * Field used to store the timestamp of a cache entry, never {@code null}.
          */
         TIMESTAMP;
 
@@ -155,13 +154,7 @@ public interface CacheEntry<K, V> {
         EVICTED_TIME_EXTENDED,
 
         /**
-         * Status of a cache entry that carries a command instead of belonging to a key, which is what makes it the
-         * only one without a key and a value. Its hash names the command, for example
-         * {@link CacheEntry.Command#INVALIDATE_ALL}.
-         * <p>
-         * <b>Note:</b> A command is not one of the cache operations a {@link DistributionMode} selects between, so it
-         * is considered by every one of them. A cache instance receiving a command it does not know ignores it, which
-         * is what lets commands be added without every cache instance having to understand them already.
+         * Status of a cache entry that carries a command instead of belonging to a key.
          */
         COMMAND;
 
@@ -192,8 +185,7 @@ public interface CacheEntry<K, V> {
 
         /**
          * Group of statuses representing invalidated and evicted cache entries while extended persistence was not
-         * configured, along with the one representing a command, which is equally short-living: it has been applied by
-         * every cache instance watching by the time it can be removed.
+         * configured, along with cache entries carrying a command.
          */
         public static final Set<Status> SHORT_LIVING_GROUP =
                 Set.of(INVALIDATED, INVALIDATED_REFRESHED, INVALIDATED_REFRESHED_AFTER_WRITE,
@@ -318,29 +310,23 @@ public interface CacheEntry<K, V> {
     }
 
     /**
-     * Returns the hash of the cache entry, or the name of the command it carries (see {@link Status#COMMAND}).
+     * Returns the hash of the cache entry (or the name of the command if status is {@link Status#COMMAND}).
      *
-     * @return the hash
+     * @return the hash (or the name of the command if status is {@link Status#COMMAND})
      */
     String getHash();
 
     /**
      * Returns the operation identifier of the cache entry.
-     * <p>
-     * <b>Note:</b> Its content is internal to the cache and must not be interpreted, only stored and returned
-     * unchanged. Cache instances rely on it to recognize their own writes when these come back to them and to tell
-     * apart what they have done since, so altering or dropping it breaks distributed synchronization rather than
-     * just losing information.
      *
      * @return the operation identifier
      */
     @Nullable String getOperation();
 
     /**
-     * Returns the key of the cache entry ({@code null} only for a cache entry carrying a command, see
-     * {@link Status#COMMAND}).
+     * Returns the key of the cache entry (or {@code null} if status is {@link Status#COMMAND}).
      *
-     * @return the key
+     * @return the key (or {@code null} if status is {@link Status#COMMAND})
      */
     @Nullable K getKey();
 
@@ -403,8 +389,7 @@ public interface CacheEntry<K, V> {
     }
 
     /**
-     * Indicates whether the cache entry carries a command instead of belonging to a key or not. Its hash names the
-     * command, for example {@link Command#INVALIDATE_ALL}.
+     * Indicates whether the cache entry carries a command instead of belonging to a key or not.
      *
      * @return {@code true} if cache entry carries a command, otherwise {@code false}
      */
@@ -415,9 +400,9 @@ public interface CacheEntry<K, V> {
     /**
      * Returns a cache entry defined by the specified parameters.
      *
-     * @param hash      the hash, or the name of the command for {@link Status#COMMAND}
+     * @param hash      the hash (or the name of the command if status is {@link Status#COMMAND})
      * @param operation the operation identifier
-     * @param key       the key ({@code null} only for {@link Status#COMMAND})
+     * @param key       the key (or {@code null} if status is {@link Status#COMMAND})
      * @param value     the value
      * @param status    the status
      * @param timestamp the timestamp
@@ -427,7 +412,6 @@ public interface CacheEntry<K, V> {
      */
     static <K, V> CacheEntry<K, V> of(String hash, @Nullable String operation, @Nullable K key, @Nullable V value,
                                       Status status, Instant timestamp) {
-
         requireNonNull(hash, "hash cannot be null");
         requireNonNull(status, "status cannot be null");
         requireNonNull(timestamp, "timestamp cannot be null");

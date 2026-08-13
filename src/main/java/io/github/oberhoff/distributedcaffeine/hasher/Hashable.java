@@ -17,12 +17,13 @@ package io.github.oberhoff.distributedcaffeine.hasher;
 
 import org.jspecify.annotations.NullMarked;
 
+import java.util.UUID;
 import java.util.function.Supplier;
 
 /**
  * Interface representing an object that provides a hash.
  * <p>
- * Keys of type {@link String}, {@link Long}, {@link Integer} or {@link java.util.UUID} are hashed out of the box, so
+ * <b>Note:</b> Keys of type {@link String}, {@link Long}, {@link Integer} or {@link UUID} are hashed out of the box, so
  * only keys of other types have to implement this interface, unless a {@link HashProvider} is specified.
  *
  * @author Andreas Oberhoff

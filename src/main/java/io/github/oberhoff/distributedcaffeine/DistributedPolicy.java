@@ -59,7 +59,7 @@ public interface DistributedPolicy<K, V> {
      * Stops distributed synchronization for this cache instance. After stopping, changes to this cache instance are not
      * distributed to other cache instances, nor are changes to other cache instances distributed to this cache
      * instance. Therefore, this cache instance behaves like a cache instance without distributed synchronization
-     * functionality. This also releases the connection to underlying store.
+     * functionality. This also releases the connection to underlying store if not shared.
      */
     void stopSynchronization();
 

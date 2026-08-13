@@ -52,25 +52,23 @@ public abstract class AbstractAdapter<K, V> implements Adapter<K, V> {
     protected final String discriminator;
 
     /**
-     * Constructs a new adapter defined by the specified parameters, using {@link Repository#DEFAULT_DISCRIMINATOR},
-     * so that its cache is related to the caches using the same relation in an underlying store and that same
-     * discriminator, and separate from all others.
+     * Constructs a new adapter defined by the specified parameters, using {@link Repository#DEFAULT_DISCRIMINATOR}.
+     * <p>
+     * <b>Note:</b> A discriminator must be used if different caches should share a relation in the underlying store.
      *
      * @param repository   the repository to be used by the adapter
      * @param synchronizer the synchronizer to be used by this adapter
      * @param identifier   the identifier to be used by this adapter
      */
+    @SuppressWarnings("unused")
     protected AbstractAdapter(Repository<K, V> repository, Synchronizer<K, V> synchronizer, String identifier) {
         this(repository, synchronizer, identifier, Repository.DEFAULT_DISCRIMINATOR);
     }
 
     /**
-     * Constructs a new adapter defined by the specified parameters, so that its cache is related to the caches using
-     * the same relation in an underlying store and the same discriminator, and separate from all others.
+     * Constructs a new adapter defined by the specified parameters, using a custom discriminator.
      * <p>
-     * <b>Attention:</b> The discriminator can neither be {@code null} nor blank, so that one gone missing (for example
-     * an absent or empty configuration value) is reported instead of silently placing the cache in a scope of its own.
-     * Use the constructor without a discriminator for {@link Repository#DEFAULT_DISCRIMINATOR}.
+     * <b>Note:</b> A discriminator must be used if different caches should share a relation in the underlying store.
      *
      * @param repository    the repository to be used by the adapter
      * @param synchronizer  the synchronizer to be used by this adapter
@@ -83,8 +81,6 @@ public abstract class AbstractAdapter<K, V> implements Adapter<K, V> {
         requireNonNull(synchronizer, "synchronizer cannot be null");
         requireNonNull(identifier, "identifier cannot be null");
         requireNonNull(discriminator, "discriminator cannot be null");
-        // a blank discriminator is rejected along with a missing one: it would work as a scope of its own, but
-        // reaching one is far more likely to be a configuration value that came back empty than an intended name
         if (discriminator.isBlank()) {
             throw new IllegalArgumentException("discriminator cannot be blank");
         }
@@ -106,6 +102,11 @@ public abstract class AbstractAdapter<K, V> implements Adapter<K, V> {
     @Override
     public String getIdentifier() {
         return identifier;
+    }
+
+    @Override
+    public String getDiscriminator() {
+        return discriminator;
     }
 
     @Override

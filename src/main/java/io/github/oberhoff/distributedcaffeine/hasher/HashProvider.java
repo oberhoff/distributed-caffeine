@@ -17,10 +17,14 @@ package io.github.oberhoff.distributedcaffeine.hasher;
 
 import org.jspecify.annotations.NullMarked;
 
+import java.util.UUID;
 import java.util.function.Supplier;
 
 /**
  * Interface representing a provider that computes a hash for a key using the supplied hasher.
+ * <p>
+ * <b>Note:</b> Keys of type {@link String}, {@link Long}, {@link Integer} or {@link UUID} are hashed out of the box, so
+ * only for keys of other types not implementing the {@link Hashable} interface a hash provider must be specified.
  *
  * @param <K> the key type of the cache
  * @author Andreas Oberhoff

@@ -683,6 +683,9 @@ final class DistributedCaffeineUnitTests {
 
         // a freshly constructed synchronizer counts as stopped and would refuse to watch, so it is moved into the
         // state a pending activation leaves behind (without starting the asynchronous machinery around it)
+        // unchecked: the state is held in an AtomicReference of a package-private enum, which cannot be named here, so
+        // reading the field yields a raw reference and setting the constant found by name is unverifiable for javac
+        @SuppressWarnings("unchecked")
         private void startWatching(Synchronizer<Key, Value> synchronizer) {
             Object starting = Stream.of(readFieldValue(synchronizer, synchronizer.getClass(), "watchState",
                             AtomicReference.class).get().getClass().getEnumConstants())
