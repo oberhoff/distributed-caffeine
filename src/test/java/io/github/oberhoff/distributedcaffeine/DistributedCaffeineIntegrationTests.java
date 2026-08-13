@@ -5364,27 +5364,31 @@ final class DistributedCaffeineIntegrationTests {
             // expected to synchronize with each other), one uses 'b' and one chooses none, which puts it in the
             // default scope
             DistributedCache<Key, Value> cacheA1 = createCache(
-                    new MongoAdapter<>(mongoClient, DATABASE_NAME, collectionName, "a"),
+                    MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName)
+                            .withDiscriminator("a").build(),
                     CacheBuilder.identity(), DistributedCaffeine::build);
             DistributedCache<Key, Value> cacheA2 = createCache(
-                    new MongoAdapter<>(mongoClient, DATABASE_NAME, collectionName, "a"),
+                    MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName)
+                            .withDiscriminator("a").build(),
                     CacheBuilder.identity(), DistributedCaffeine::build);
             DistributedCache<Key, Value> cacheB = createCache(
-                    new MongoAdapter<>(mongoClient, DATABASE_NAME, collectionName, "b"),
+                    MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName)
+                            .withDiscriminator("b").build(),
                     CacheBuilder.identity(), DistributedCaffeine::build);
             DistributedCache<Key, Value> cacheInDefaultScope = createCache(
-                    new MongoAdapter<>(mongoClient, DATABASE_NAME, collectionName),
+                    MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName).build(),
                     CacheBuilder.identity(), DistributedCaffeine::build);
 
             // a discriminator gone missing is reported instead of silently placing the cache in a scope of its own,
             // where it would neither synchronize with the caches it was meant to nor say so
             assertThatThrownBy(() ->
-                    new MongoAdapter<Key, Value>(mongoClient, DATABASE_NAME, collectionName, null))
+                    MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName).withDiscriminator(null))
                     .isExactlyInstanceOf(NullPointerException.class)
                     .hasMessage("discriminator cannot be null");
             Stream.of("", " ", "\t\n").forEach(blank ->
                     assertThatThrownBy(() ->
-                            new MongoAdapter<Key, Value>(mongoClient, DATABASE_NAME, collectionName, blank))
+                            MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName)
+                                    .withDiscriminator(blank))
                             .isExactlyInstanceOf(IllegalArgumentException.class)
                             .hasMessage("discriminator cannot be blank"));
 
@@ -5434,10 +5438,11 @@ final class DistributedCaffeineIntegrationTests {
             // both scopes populated, so that the discriminator actually discriminates instead of matching every
             // document - and one of them in the default scope, which an index has to serve like any other
             DistributedCache<Key, Value> cacheWithDiscriminator = createCache(
-                    new MongoAdapter<>(mongoClient, DATABASE_NAME, collectionName, "d1"),
+                    MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName)
+                            .withDiscriminator("d1").build(),
                     CacheBuilder.identity(), DistributedCaffeine::build);
             DistributedCache<Key, Value> cacheInDefaultScope = createCache(
-                    new MongoAdapter<>(mongoClient, DATABASE_NAME, collectionName),
+                    MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName).build(),
                     CacheBuilder.identity(), DistributedCaffeine::build);
 
             // enough documents, spread over statuses and timestamps, that the planner has something to choose
@@ -5624,8 +5629,9 @@ final class DistributedCaffeineIntegrationTests {
                     .applyConnectionString(new ConnectionString(mongoContainer.getReplicaSetUrl()))
                     .readConcern(ReadConcern.LOCAL)
                     .build())) {
-                MongoAdapter<Key, Value> localReadConcernAdapter = new MongoAdapter<>(
-                        failFastMongoClient, DATABASE_NAME, getCollectionName());
+                MongoAdapter<Key, Value> localReadConcernAdapter = MongoAdapter
+                        .newBuilder(failFastMongoClient, DATABASE_NAME, getCollectionName())
+                        .build();
                 assertThatThrownBy(() -> DistributedCaffeine.newBuilder(localReadConcernAdapter).build())
                         .isExactlyInstanceOf(MongoClientException.class)
                         .hasMessageStartingWith("Watching change streams failed")
@@ -6382,7 +6388,9 @@ final class DistributedCaffeineIntegrationTests {
         }
 
         <K, V> DistributedCache<K, V> createCache(CacheBuilder<K, V> cacheBuilder, CacheConstructor<K, V> cacheConstructor) {
-            MongoAdapter<K, V> mongoAdapter = new MongoAdapter<>(mongoClient, DATABASE_NAME, getCollectionName());
+            MongoAdapter<K, V> mongoAdapter = MongoAdapter
+                    .newBuilder(mongoClient, DATABASE_NAME, getCollectionName())
+                    .build();
             return createCache(mongoAdapter, cacheBuilder, cacheConstructor);
         }
 

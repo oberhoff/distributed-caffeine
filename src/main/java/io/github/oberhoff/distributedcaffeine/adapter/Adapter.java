@@ -21,7 +21,7 @@ import org.jspecify.annotations.NullMarked;
  * Interface representing an adapter that manages distributed synchronization between cache instances using an
  * underlying store.
  * <p>
- * <b>Note:</b> An adapter belongs to exactly one cache instance and cannot be shared between them.
+ * <b>Note:</b> An adapter instance belongs to exactly one cache instance and cannot be shared between them.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache

@@ -54,7 +54,8 @@ public abstract class AbstractAdapter<K, V> implements Adapter<K, V> {
     /**
      * Constructs a new adapter defined by the specified parameters, using {@link Repository#DEFAULT_DISCRIMINATOR}.
      * <p>
-     * <b>Note:</b> A discriminator must be used if different caches should share a relation in the underlying store.
+     * <b>Note:</b> Discriminators are used to distinguish between cache entries from different caches that a relation
+     * in the underlying store.
      *
      * @param repository   the repository to be used by the adapter
      * @param synchronizer the synchronizer to be used by this adapter
@@ -68,7 +69,8 @@ public abstract class AbstractAdapter<K, V> implements Adapter<K, V> {
     /**
      * Constructs a new adapter defined by the specified parameters, using a custom discriminator.
      * <p>
-     * <b>Note:</b> A discriminator must be used if different caches should share a relation in the underlying store.
+     * <b>Note:</b> Discriminators are used to distinguish between cache entries from different caches that a relation
+     * in the underlying store.
      *
      * @param repository    the repository to be used by the adapter
      * @param synchronizer  the synchronizer to be used by this adapter
