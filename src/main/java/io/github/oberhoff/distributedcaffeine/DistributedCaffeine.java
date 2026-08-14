@@ -36,7 +36,6 @@ import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.apache.fory.config.ForyBuilder;
-import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.reflect.Field;
@@ -57,6 +56,7 @@ import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailableOrNull;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
 import static java.lang.String.format;
 import static java.util.Objects.isNull;
@@ -84,7 +84,6 @@ import static java.util.stream.Collectors.joining;
  * @author Andreas Oberhoff
  * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
  */
-@NullMarked
 public final class DistributedCaffeine<K, V> {
 
     // Caffeine exposes no public API to inspect or replace these before build(), so they are accessed reflectively.
@@ -349,10 +348,10 @@ public final class DistributedCaffeine<K, V> {
         }
 
         // inject removal and eviction listener (reset later)
-        RemovalListener<K, V> caffeineRemovalListener = getFailable(() ->
-                (RemovalListener<K, V>) REMOVAL_LISTENER_FIELD.get(caffeine));
-        RemovalListener<K, V> caffeineEvictionListener = getFailable(() ->
-                (RemovalListener<K, V>) EVICTION_LISTENER_FIELD.get(caffeine));
+        RemovalListener<K, V> caffeineRemovalListener = getFailableOrNull(() ->
+                (@Nullable RemovalListener<K, V>) REMOVAL_LISTENER_FIELD.get(caffeine));
+        RemovalListener<K, V> caffeineEvictionListener = getFailableOrNull(() ->
+                (@Nullable RemovalListener<K, V>) EVICTION_LISTENER_FIELD.get(caffeine));
         RemovalListener<K, V> noopListener = (key, value, removalCause) -> {
         };
         instanceRegistry.setRemovalListener(
@@ -367,22 +366,22 @@ public final class DistributedCaffeine<K, V> {
         runFailable(() -> EVICTION_LISTENER_FIELD.set(caffeine, instanceRegistry.getEvictionListener()));
 
         // inject expiry if set (reset later)
-        Expiry<K, V> caffeineExpiry = getFailable(() ->
-                (Expiry<K, V>) EXPIRY_FIELD.get(caffeine));
+        Expiry<K, V> caffeineExpiry = getFailableOrNull(() ->
+                (@Nullable Expiry<K, V>) EXPIRY_FIELD.get(caffeine));
         if (nonNull(caffeineExpiry)) {
             runFailable(() -> EXPIRY_FIELD.set(caffeine, new InternalExpiry<>(caffeineExpiry)));
         }
 
         // inject weigher if set (reset later)
-        Weigher<K, V> caffeineWeigher = getFailable(() ->
-                (Weigher<K, V>) WEIGHER_FIELD.get(caffeine));
+        Weigher<K, V> caffeineWeigher = getFailableOrNull(() ->
+                (@Nullable Weigher<K, V>) WEIGHER_FIELD.get(caffeine));
         if (nonNull(caffeineWeigher)) {
             runFailable(() -> WEIGHER_FIELD.set(caffeine, new InternalWeigher<>(caffeineWeigher)));
         }
 
         // inject scheduler if not set or disabled (necessary for eviction listener reliability)
-        Scheduler caffeineScheduler = getFailable(() ->
-                (Scheduler) SCHEDULER_FIELD.get(caffeine));
+        Scheduler caffeineScheduler = getFailableOrNull(() ->
+                (@Nullable Scheduler) SCHEDULER_FIELD.get(caffeine));
         if (!(caffeineScheduler instanceof InternalScheduler)) {
             Scheduler scheduler = (isNull(caffeineScheduler) || caffeineScheduler == Scheduler.disabledScheduler())
                     ? Scheduler.systemScheduler()
@@ -391,12 +390,12 @@ public final class DistributedCaffeine<K, V> {
         }
 
         // extract executor
-        instanceRegistry.setExecutor(Optional.ofNullable(getFailable(() ->
+        instanceRegistry.setExecutor(Optional.ofNullable(getFailableOrNull(() ->
                         (Executor) EXECUTOR_FIELD.get(caffeine)))
                 .orElseGet(ForkJoinPool::commonPool));
 
         // extract statsCounter (lazy) and replace if necessary
-        Supplier<StatsCounter> caffeineStatsCounterSupplier = getFailable(() ->
+        Supplier<StatsCounter> caffeineStatsCounterSupplier = getFailableOrNull(() ->
                 (Supplier<StatsCounter>) STATS_COUNTER_SUPPLIER_FIELD.get(caffeine));
         if (nonNull(caffeineStatsCounterSupplier)) {
             Supplier<StatsCounter> statsCounterSupplier = () -> {
@@ -483,7 +482,6 @@ public final class DistributedCaffeine<K, V> {
      * @param <V> the value type of the cache
      * @author Andreas Oberhoff
      */
-    @NullMarked
     public static final class SerializersConfigurer<K, V> {
 
         private Serializer<K, ?> keySerializer;
@@ -586,7 +584,6 @@ public final class DistributedCaffeine<K, V> {
      *
      * @author Andreas Oberhoff
      */
-    @NullMarked
     public static final class ExtendedPersistenceConfigurer {
 
         private @Nullable Integer maximumSize;
@@ -715,7 +712,6 @@ public final class DistributedCaffeine<K, V> {
      * @param <T> the type of the configurer
      * @author Andreas Oberhoff
      */
-    @NullMarked
     @FunctionalInterface
     public interface Configurer<T> extends UnaryOperator<T> {
     }

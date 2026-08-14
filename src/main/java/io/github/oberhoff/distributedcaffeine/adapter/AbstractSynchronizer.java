@@ -16,8 +16,6 @@
 package io.github.oberhoff.distributedcaffeine.adapter;
 
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
-import org.jspecify.annotations.NullMarked;
-import org.jspecify.annotations.Nullable;
 
 import static java.util.Objects.requireNonNull;
 
@@ -29,38 +27,42 @@ import static java.util.Objects.requireNonNull;
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
-@NullMarked
 public abstract class AbstractSynchronizer<K, V> implements Synchronizer<K, V> {
 
     /**
      * The identifier to be used by this adapter.
      */
-    protected @Nullable String identifier;
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    protected String identifier;
 
     /**
-     * The discriminator to be used by this adapter ({@code null} only until it has been set). Only cache entries
-     * matching it are to be synchronized.
+     * The discriminator to be used by this adapter. Only cache entries matching it are to be synchronized.
      */
-    protected @Nullable String discriminator;
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    protected String discriminator;
 
     /**
      * The key serializer to be used by this adapter.
      */
-    protected @Nullable Serializer<K, ?> keySerializer;
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    protected Serializer<K, ?> keySerializer;
 
     /**
      * The value serializer to be used by this adapter.
      */
-    protected @Nullable Serializer<V, ?> valueSerializer;
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    protected Serializer<V, ?> valueSerializer;
 
     /**
      * The key retriever to be used by this adapter.
      */
-    protected @Nullable Retriever<K, V> retriever;
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    protected Retriever<K, V> retriever;
 
     /**
      * Constructs a new synchronizer.
      */
+    @SuppressWarnings({"java:S2637", "NullAway.Init"})
     protected AbstractSynchronizer() {
         // noop
     }

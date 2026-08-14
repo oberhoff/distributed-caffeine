@@ -16,7 +16,6 @@
 package io.github.oberhoff.distributedcaffeine.adapter;
 
 import io.github.oberhoff.distributedcaffeine.DistributionMode;
-import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Instant;
@@ -34,7 +33,6 @@ import static java.util.Objects.requireNonNull;
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
-@NullMarked
 public interface CacheEntry<K, V> {
 
     /**
@@ -43,7 +41,6 @@ public interface CacheEntry<K, V> {
      *
      * @author Andreas Oberhoff
      */
-    @NullMarked
     enum Field {
 
         /**
@@ -53,7 +50,7 @@ public interface CacheEntry<K, V> {
         HASH,
 
         /**
-         * Field used to store an internal operation identifier, can be {@code null}.
+         * Field used to store an internal operation identifier (can be {@code null}).
          */
         OPERATION,
 
@@ -63,17 +60,18 @@ public interface CacheEntry<K, V> {
         KEY,
 
         /**
-         * Field used to store the value of a cache entry, can be {@code null}.
+         * Field used to store the value of a cache entry (or {@code null} if status is in
+         * {@link Status#INVALIDATED_GROUP} or is {@link Status#COMMAND}).
          */
         VALUE,
 
         /**
-         * Field used to store the status of a cache entry, never {@code null}.
+         * Field used to store the status of a cache entry (never {@code null}).
          */
         STATUS,
 
         /**
-         * Field used to store the timestamp of a cache entry, never {@code null}.
+         * Field used to store the timestamp of a cache entry (never {@code null}).
          */
         TIMESTAMP;
 
@@ -95,7 +93,6 @@ public interface CacheEntry<K, V> {
      *
      * @author Andreas Oberhoff
      */
-    @NullMarked
     enum Status {
 
         /**
@@ -289,7 +286,6 @@ public interface CacheEntry<K, V> {
      *
      * @author Andreas Oberhoff
      */
-    @NullMarked
     enum Command {
 
         /**
@@ -310,16 +306,17 @@ public interface CacheEntry<K, V> {
     }
 
     /**
-     * Returns the hash of the cache entry (or the name of the command if status is {@link Status#COMMAND}).
+     * Returns the hash of the cache entry (or the name of the command if status is {@link Status#COMMAND}, never
+     * {@code null}).
      *
-     * @return the hash (or the name of the command if status is {@link Status#COMMAND})
+     * @return the hash (or the name of the command if status is {@link Status#COMMAND}, never {@code null})
      */
     String getHash();
 
     /**
-     * Returns the operation identifier of the cache entry.
+     * Returns the operation identifier of the cache entry (can be {@code null}).
      *
-     * @return the operation identifier
+     * @return the operation identifier (can be {@code null})
      */
     @Nullable String getOperation();
 
@@ -331,23 +328,24 @@ public interface CacheEntry<K, V> {
     @Nullable K getKey();
 
     /**
-     * Returns the value of the cache entry.
+     * Returns the value of the cache entry (or {@code null} if status is in {@link Status#INVALIDATED_GROUP} or is
+     * {@link Status#COMMAND}).
      *
-     * @return the value
+     * @return the value (or {@code null} if status is in {@link Status#INVALIDATED_GROUP} or is {@link Status#COMMAND})
      */
     @Nullable V getValue();
 
     /**
-     * Returns the status of the cache entry.
+     * Returns the status of the cache entry (never{@code null}).
      *
-     * @return the status
+     * @return the status (never{@code null})
      */
     Status getStatus();
 
     /**
-     * Returns the timestamp of the cache entry.
+     * Returns the timestamp of the cache entry (never {@code null}).
      *
-     * @return the timestamp
+     * @return the timestamp (never{@code null})
      */
     Instant getTimestamp();
 
@@ -400,12 +398,13 @@ public interface CacheEntry<K, V> {
     /**
      * Returns a cache entry defined by the specified parameters.
      *
-     * @param hash      the hash (or the name of the command if status is {@link Status#COMMAND})
-     * @param operation the operation identifier
+     * @param hash      the hash (or the name of the command if status is {@link Status#COMMAND}, never {@code null})
+     * @param operation the operation identifier (can be {@code null})
      * @param key       the key (or {@code null} if status is {@link Status#COMMAND})
-     * @param value     the value
-     * @param status    the status
-     * @param timestamp the timestamp
+     * @param value     the value (or {@code null} if status is in {@link Status#INVALIDATED_GROUP} or is
+     *                  {@link Status#COMMAND})
+     * @param status    the status (never {@code null})
+     * @param timestamp the timestamp (never {@code null})
      * @param <K>       the key type of the cache
      * @param <V>       the value type of the cache
      * @return the cache entry
@@ -417,6 +416,9 @@ public interface CacheEntry<K, V> {
         requireNonNull(timestamp, "timestamp cannot be null");
         if (!status.isCommand()) {
             requireNonNull(key, "key cannot be null");
+        }
+        if (!status.isCommand() && !status.isInvalidated()) {
+            requireNonNull(key, "value cannot be null");
         }
 
         return new CacheEntry<>() {

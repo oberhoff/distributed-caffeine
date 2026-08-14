@@ -46,20 +46,27 @@ import static java.lang.String.format;
 class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
 
     private static final Duration SHORT_LIVING_DURATION = Duration.ofMinutes(1);
-    @SuppressWarnings({"java:S116", "FieldMayBeFinal"}) // not static final for testing
+    @SuppressWarnings({"java:S116", "FieldMayBeFinal", "CanBeFinal"}) // not static final for testing
     private Duration MAINTENANCE_INTERVAL = Duration.ofMinutes(1);
 
     private final AtomicBoolean isActivated;
-
-    private Logger logger;
-    private String identifier;
-    private Repository<K, V> repository;
-    private InternalCacheManager<K, V> cacheManager;
-    private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
     private CompletableFuture<Void> maintenanceCompletableFuture;
 
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    private Logger logger;
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    private String identifier;
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    private Repository<K, V> repository;
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    private InternalCacheManager<K, V> cacheManager;
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
+
+    @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalMaintenanceWorker() {
         this.isActivated = new AtomicBoolean(false);
+        maintenanceCompletableFuture = CompletableFuture.completedFuture(null);
         // see also initialize()
     }
 
@@ -74,9 +81,9 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
 
     void activate() {
         // wait for completion if required
-        Optional.ofNullable(maintenanceCompletableFuture)
-                .filter(future -> !future.isDone())
-                .ifPresent(CompletableFuture::join);
+        if (!maintenanceCompletableFuture.isDone()) {
+            maintenanceCompletableFuture.join();
+        }
 
         isActivated.set(true);
 
@@ -86,9 +93,9 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
     void deactivate() {
         isActivated.set(false);
 
-        Optional.ofNullable(maintenanceCompletableFuture)
-                .filter(future -> !future.isDone())
-                .ifPresent(future -> future.cancel(true));
+        if (!maintenanceCompletableFuture.isDone()) {
+            maintenanceCompletableFuture.cancel(true);
+        }
     }
 
     boolean isActivated() {

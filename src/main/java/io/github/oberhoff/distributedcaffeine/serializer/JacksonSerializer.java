@@ -15,7 +15,6 @@
  */
 package io.github.oberhoff.distributedcaffeine.serializer;
 
-import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.json.JsonMapper;
@@ -30,7 +29,6 @@ import static java.util.Objects.requireNonNull;
  * @author Andreas Oberhoff
  * @see <a href="https://github.com/FasterXML/jackson">Jackson on GitHub</a>
  */
-@NullMarked
 public class JacksonSerializer<T> implements JsonSerializer<T> {
 
     private final JsonMapper jsonMapper;

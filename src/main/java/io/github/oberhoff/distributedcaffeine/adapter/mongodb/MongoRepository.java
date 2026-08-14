@@ -41,7 +41,6 @@ import org.bson.BsonDocument;
 import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.bson.types.Binary;
-import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.System.Logger;
@@ -66,10 +65,8 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field.VA
 import static java.lang.String.format;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
-import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toSet;
 
-@NullMarked
 final class MongoRepository<K, V> extends AbstractRepository<K, V> {
 
     private static final Logger LOGGER = System.getLogger(MongoRepository.class.getName());
@@ -97,10 +94,8 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
                             Filters.eq(DISCRIMINATOR_FIELD, discriminator));
                     Bson update = Updates.combine(
                             Updates.set(OPERATION.toString(), cacheEntry.getOperation()),
-                            Updates.set(KEY.toString(), serializeToMongo(cacheEntry.getKey(),
-                                    requireNonNull(keySerializer))),
-                            Updates.set(VALUE.toString(), serializeToMongo(cacheEntry.getValue(),
-                                    requireNonNull(valueSerializer))),
+                            Updates.set(KEY.toString(), serializeToMongo(cacheEntry.getKey(), keySerializer)),
+                            Updates.set(VALUE.toString(), serializeToMongo(cacheEntry.getValue(), valueSerializer)),
                             Updates.set(STATUS.toString(), cacheEntry.getStatus().toString()),
                             Updates.set(TIMESTAMP.toString(), cacheEntry.getTimestamp()));
                     updates.add(new UpdateOneModel<>(filter, update, UPSERT_OPTIONS));
@@ -126,9 +121,8 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
                 .sort(sort)
                 .cursor();
         return streamFromMongoCursor(mongoCursor)
-                .map(document -> toCacheEntryOrNull(
-                        requireNonNull(keySerializer), requireNonNull(valueSerializer), document,
-                        LOGGER, requireNonNull(identifier)))
+                .map(document ->
+                        toCacheEntryOrNull(keySerializer, valueSerializer, document, LOGGER, identifier))
                 .filter(Objects::nonNull);
     }
 
@@ -247,8 +241,7 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
                 .onClose(mongoCursor::close);
     }
 
-    private Bson getFilter(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
-                           @Nullable Instant olderThan) {
+    private Bson getFilter(@Nullable Set<String> hashes, @Nullable Set<Status> statuses, @Nullable Instant olderThan) {
         List<Bson> filters = new ArrayList<>();
         // first because it is the only one always present and the one both indexes lead with. The server normalizes
         // the order of the conditions before planning, so this documents intent rather than steering it
@@ -277,7 +270,8 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
     }
 
     static <K, V> @Nullable CacheEntry<K, V> toCacheEntryOrNull(Serializer<K, ?> keySerializer,
-                                                                Serializer<V, ?> valueSerializer, Document document,
+                                                                Serializer<V, ?> valueSerializer,
+                                                                Document document,
                                                                 Logger logger, String identifier) {
         try {
             return toCacheEntry(keySerializer, valueSerializer, document);
@@ -289,7 +283,8 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
         }
     }
 
-    private static <K, V> CacheEntry<K, V> toCacheEntry(Serializer<K, ?> keySerializer, Serializer<V, ?> valueSerializer,
+    private static <K, V> CacheEntry<K, V> toCacheEntry(Serializer<K, ?> keySerializer,
+                                                        Serializer<V, ?> valueSerializer,
                                                         Document document) throws Exception {
         return CacheEntry.of(
                 document.getString(HASH.toString()),
@@ -319,17 +314,13 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
         } else if (nonNull(mongoValue)
                 && serializer instanceof JsonSerializer<?> jsonSerializer
                 && jsonSerializer.storeAsBinaryJson()) {
-            // symmetric to serializeToMongo: the value was stored as native BSON (any type, including scalars such
-            // as strings, numbers or booleans - not just documents/arrays), so convert it back to its JSON
-            // representation for the serializer. Deciding based on the serializer (rather than on the stored type)
-            // ensures scalars are also converted; otherwise a stored scalar would be handed to the serializer as-is
-            // (e.g. an unquoted string) and fail to deserialize.
             mongoValue = convertBsonToJson(mongoValue);
         }
         return SerializerAware.deserialize(mongoValue, serializer);
     }
 
-    private static Object convertJsonToBson(String json) {
+    // null for the JSON literal 'null', which a serializer is free to produce - the caller passes it on as such
+    private static @Nullable Object convertJsonToBson(String json) {
         String jsonKey = "jsonKey";
         String documentJson = format("{\"%s\":%s}", jsonKey, json);
         Document document = Document.parse(documentJson);

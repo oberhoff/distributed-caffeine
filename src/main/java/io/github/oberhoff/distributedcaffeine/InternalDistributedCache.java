@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
+import org.jspecify.annotations.Nullable;
 
 import java.util.Map;
 import java.util.Set;
@@ -33,18 +34,25 @@ import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNul
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullMap;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.s;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
-import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.ivn;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.vn;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
 class InternalDistributedCache<K, V> implements DistributedCache<K, V>, InternalInitializable<K, V> {
 
+    @SuppressWarnings("NotNullFieldNotInitialized")
     protected InternalInstanceRegistry<K, V> instanceRegistry;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     protected Cache<InternalKey<K>, InternalValue<V>> cache;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     protected Policy<InternalKey<K>, InternalValue<V>> policy;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     protected InternalCacheManager<K, V> cacheManager;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     protected InternalSynchronizationLock synchronizationLock;
 
+    @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalDistributedCache() {
         // see also initialize()
     }
@@ -59,9 +67,9 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
     }
 
     @Override
-    public V getIfPresent(K key) {
+    public @Nullable V getIfPresent(K key) {
         requireNonNull(key);
-        return v(cache.getIfPresent(ik(key)));
+        return vn(cache.getIfPresent(ik(key)));
     }
 
     @Override
@@ -70,19 +78,25 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
         return m(cache.getAllPresent(iks(keySet)));
     }
 
+    // a mapping function resolving to null is accepted here (as it is by ConcurrentMap.computeIfAbsent) and means
+    // that nothing is cached, so the result is nullable. Caffeine documents the same for its own method ("or null if
+    // the computed value is null") but cannot express it for a value type that is not nullable, and making it one
+    // would declare every other method of this cache as holding nullable values, which none of them do
     @Override
-    public V get(K key, Function<? super K, ? extends V> mappingFunction) {
+    @SuppressWarnings({"java:S2638", "NullAway"})
+    public @Nullable V get(K key, Function<? super K, ? extends @Nullable V> mappingFunction) {
         requireNonNull(key);
         requireNonNull(mappingFunction);
-        Function<InternalKey<K>, InternalValue<V>> distributedMapping = mappingKey -> {
-            InternalValue<V> value = iv(mappingFunction.apply(k(mappingKey)));
+        Function<InternalKey<K>, @Nullable InternalValue<V>> distributedMapping = mappingKey -> {
+            InternalValue<V> value = ivn(mappingFunction.apply(k(mappingKey)));
             if (nonNull(value)) {
                 cacheManager.putDistributed(mappingKey, value);
             }
             return value;
         };
-        return synchronizationLock.getLocked(() ->
-                v(cache.get(ik(key), distributedMapping)));
+        //noinspection NullableProblems
+        return synchronizationLock.getLockedOrNull(() ->
+                vn(cache.get(ik(key), distributedMapping)));
     }
 
     @Override

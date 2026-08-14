@@ -18,7 +18,6 @@ package io.github.oberhoff.distributedcaffeine.serializer;
 import org.apache.fory.ThreadSafeFory;
 import org.apache.fory.config.ForyBuilder;
 import org.apache.fory.config.Language;
-import org.jspecify.annotations.NullMarked;
 
 import java.util.stream.Stream;
 
@@ -35,7 +34,6 @@ import static java.util.Objects.requireNonNull;
  * @author Andreas Oberhoff
  * @see <a href="https://github.com/apache/fory">Apache Fory on GitHub</a>
  */
-@NullMarked
 public class ForySerializer<T> implements ByteArraySerializer<T> {
 
     private final ThreadSafeFory fory;

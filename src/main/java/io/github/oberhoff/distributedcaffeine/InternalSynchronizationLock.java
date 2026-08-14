@@ -15,6 +15,8 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import org.jspecify.annotations.Nullable;
+
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
@@ -52,12 +54,19 @@ class InternalSynchronizationLock {
         }
     }
 
-    boolean isLocked() {
-        return lock.isLocked();
+    // same as above, but for suppliers whose result may be null - not delegating to it, because its type variable
+    // cannot carry a nullable result
+    <T> @Nullable T getLockedOrNull(Supplier<@Nullable T> supplier) {
+        lock();
+        try {
+            return supplier.get();
+        } finally {
+            unlock();
+        }
     }
 
-    boolean isLockedByCurrentThread() {
-        return lock.isHeldByCurrentThread();
+    boolean isLocked() {
+        return lock.isLocked();
     }
 
     void ensureLock() {

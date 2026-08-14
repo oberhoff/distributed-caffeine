@@ -23,7 +23,7 @@ import com.dynatrace.hash4j.hashing.HashStream64;
 import com.dynatrace.hash4j.hashing.Hasher128;
 import com.dynatrace.hash4j.hashing.Hasher64;
 import com.dynatrace.hash4j.hashing.Hashing;
-import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
 
 import java.util.HexFormat;
 import java.util.Optional;
@@ -38,7 +38,6 @@ import java.util.function.ToLongFunction;
  *
  * @author Andreas Oberhoff
  */
-@NullMarked
 public final class Hasher implements HashSink {
 
     private static final Hasher128 hasher128 = Hashing.xxh3_128();
@@ -316,7 +315,7 @@ public final class Hasher implements HashSink {
     }
 
     @Override
-    public <T> Hasher putNullable(T obj, HashFunnel<T> funnel) {
+    public <T> Hasher putNullable(@Nullable T obj, HashFunnel<T> funnel) {
         hashStream128.putNullable(obj, funnel);
         hasData = true;
         return this;

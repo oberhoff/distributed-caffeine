@@ -48,7 +48,7 @@ import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
-import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.vn;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Command.INVALIDATE_ALL;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_GROUP;
@@ -69,7 +69,7 @@ import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
-@SuppressWarnings("java:S1452")
+@SuppressWarnings({"java:S1452"})
 class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriever<K, V> {
 
     private final AtomicBoolean isActivated;
@@ -78,23 +78,34 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     // renewed with every activation on purpose: ordering is only meaningful within one of them, because it compares
     // a local mutation against an event this very activation published. Renewing it lets a stamp left behind by an
     // earlier activation simply not match, instead of being compared against a counter unrelated to it
-    private final AtomicReference<String> operationId;
+    private final AtomicReference<@Nullable String> operationId;
     private final AtomicLong operationCounter;
 
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private Logger logger;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private String identifier;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private Cache<InternalKey<K>, InternalValue<V>> cache;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private Policy<InternalKey<K>, InternalValue<V>> policy;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private DistributionMode distributionMode;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private Repository<K, V> repository;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalSynchronizationLock synchronizationLock;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalHasher<K> hasher;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private Executor executor;
 
+    @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalCacheManager() {
-        this.isActivated = new AtomicBoolean(false);
-        this.operationId = new AtomicReference<>("");
+        this.isActivated = new AtomicBoolean();
+        this.operationId = new AtomicReference<>();
         this.operationCounter = new AtomicLong();
         // see also initialize()
     }
@@ -176,7 +187,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     }
 
     Set<InternalKey<K>> invalidateAllDistributed(Set<InternalKey<K>> keys) {
-        Map<InternalKey<K>, InternalValue<V>> map = new HashMap<>(); // allow null values
+        Map<InternalKey<K>, @Nullable InternalValue<V>> map = new HashMap<>(); // allow null values
         keys.forEach(key -> map.put(key, null));
         publishCacheEntries(map, INVALIDATED, true);
         return keys;
@@ -214,17 +225,17 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     }
 
     Set<InternalKey<K>> invalidateAllDistributedRefresh(Set<InternalKey<K>> keys) {
-        Map<InternalKey<K>, InternalValue<V>> map = new HashMap<>(); // allow null values
+        Map<InternalKey<K>, @Nullable InternalValue<V>> map = new HashMap<>(); // allow null values
         keys.forEach(key -> map.put(key, null));
         publishCacheEntries(map, INVALIDATED_REFRESHED, true);
         return keys;
     }
 
-    InternalValue<V> invalidateDistributedRefreshAfterWrite(InternalKey<K> key, InternalValue<V> oldValue) {
+    @Nullable InternalValue<V> invalidateDistributedRefreshAfterWrite(InternalKey<K> key, InternalValue<V> oldValue) {
         // special handling (activated, async, old value, not managed, no cache change)
         if (isActivated()) {
             if (distributionMode.isInvalidationConsidered()) {
-                Map<InternalKey<K>, InternalValue<V>> map = new HashMap<>(); // allow null values
+                Map<InternalKey<K>, @Nullable InternalValue<V>> map = new HashMap<>(); // allow null values
                 map.put(key, null);
                 publishCacheEntriesAsync(map, INVALIDATED_REFRESHED_AFTER_WRITE);
                 // return old value which does not change the cache and does not trigger any listeners
@@ -268,7 +279,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     // enough on its own, because upsertCacheEntries() writes the status unconditionally, so a delayed retry can
     // overwrite a newer CACHED write for the same key with a stale EVICTED one. Letting the data store drive the
     // correction (as invalidate-on-prune does for extended persistence) is the more promising direction
-    private void stampOperations(Map<? extends InternalKey<K>, ? extends InternalValue<V>> map) {
+    private void stampOperations(Map<? extends InternalKey<K>, ? extends @Nullable InternalValue<V>> map) {
         map.values().stream()
                 .filter(Objects::nonNull)
                 .forEach(value -> value.setOperation(nextOperation()));
@@ -283,7 +294,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     // a populated or evicted cache entry takes the one its value was stamped with before publishing was considered
     // at all, because that value stays in this cache either way and the stamp is what protects it. An invalidated
     // one has no value to have been stamped and only needs an operation on the cache entry written for it.
-    private String operationOf(@Nullable InternalValue<V> value) {
+    private @Nullable String operationOf(@Nullable InternalValue<V> value) {
         return nonNull(value) ? value.getOperation() : nextOperation();
     }
 
@@ -302,7 +313,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
                 > Long.parseLong(arriving.substring(prefix.length()));
     }
 
-    private void publishCacheEntriesAsync(Map<? extends InternalKey<K>, ? extends InternalValue<V>> map,
+    private void publishCacheEntriesAsync(Map<? extends InternalKey<K>, ? extends @Nullable InternalValue<V>> map,
                                           Status status) {
         // Deliberately without an operation, so that what is published here arrives like a change of any other cache
         // instance. Carrying one would order it against the later operations of this cache instance and let this one
@@ -319,8 +330,8 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
                 });
     }
 
-    private void publishCacheEntries(Map<? extends InternalKey<K>, ? extends InternalValue<V>> map, Status status,
-                                     boolean manage) {
+    private void publishCacheEntries(Map<? extends InternalKey<K>, ? extends @Nullable InternalValue<V>> map,
+                                     Status status, boolean manage) {
         // Stamped ahead of everything below, because whether a cache entry is published says nothing about whether
         // the value handed over here stays in this cache: without population being distributed nothing is published
         // for a population at all, and that is exactly where a removal by this very cache instance must not be
@@ -348,7 +359,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
                                 hasher.getHash(entry.getKey()),
                                 manage ? operationOf(value) : null,
                                 k(entry.getKey()),
-                                v(value),
+                                vn(value),
                                 status,
                                 Instant.now());
                     })
@@ -399,7 +410,9 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
                                 return;
                             }
                             // propagate the store's hash onto the key so it is never recomputed for this entry
-                            // (e.g. when it is later evicted or re-published from this instance)
+                            // (e.g. when it is later evicted or re-published from this instance).
+                            // Only a command carries no key, and those returned above - a cache entry without one
+                            // contradicts its own status, which no annotation can express here
                             InternalKey<K> key = ik(requireNonNull(cacheEntry.getKey()))
                                     .setHash(cacheEntry.getHash());
                             if (cacheEntry.isCached()) {
@@ -420,7 +433,10 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
                                         || (nonNull(operation) && operation.equals(present.getOperation())))) {
                                     present.setStale(false);
                                 } else {
-                                    toAdd.put(key, iv(cacheEntry.getValue()).setOperation(operation));
+                                    // a cached status always comes with a value - only invalidated and evicted
+                                    // ones carry none, which no annotation can express here either
+                                    toAdd.put(key, iv(requireNonNull(cacheEntry.getValue()))
+                                            .setOperation(operation));
                                 }
                             } else {
                                 // only remove from cache if value is present - and only if it was not written here

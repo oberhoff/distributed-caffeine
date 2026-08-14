@@ -37,6 +37,8 @@
  * @author Andreas Oberhoff
  * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
  */
+@NullMarked
 package io.github.oberhoff.distributedcaffeine;
 
 import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
+import org.jspecify.annotations.NullMarked;

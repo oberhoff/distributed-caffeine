@@ -22,7 +22,6 @@ import io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
-import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 
 import java.util.Set;
@@ -35,7 +34,6 @@ import java.util.Set;
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
-@NullMarked
 @SuppressWarnings("java:S1452")
 public interface DistributedPolicy<K, V> {
 

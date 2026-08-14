@@ -19,7 +19,6 @@ import io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
-import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 
 import static java.util.Objects.isNull;
@@ -31,7 +30,6 @@ import static java.util.Objects.isNull;
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
-@NullMarked
 public interface SerializerAware<K, V> {
 
     /**
@@ -51,10 +49,10 @@ public interface SerializerAware<K, V> {
     /**
      * Returns the serialized value of an object using the specified serializer.
      *
-     * @param object     the object to be serialized
+     * @param object     the object to be serialized (can be {@code null})
      * @param serializer the serializer to be used
      * @param <T>        type of the serialized value
-     * @return the serialized value
+     * @return the serialized value (or {@code null} if the object is {@code null})
      * @throws Exception if serialization fails
      */
     @SuppressWarnings("unchecked")
@@ -81,10 +79,10 @@ public interface SerializerAware<K, V> {
     /**
      * Returns the deserialized object of a value using the specified serializer.
      *
-     * @param value      the value to be deserialized
+     * @param value      the value to be deserialized (can be {@code null})
      * @param serializer the serializer to be used
      * @param <T>        type of the deserialized object
-     * @return the deserialized object
+     * @return the deserialized object (or {@code null} if the value is {@code null})
      * @throws Exception if deserialization fails
      */
     @SuppressWarnings("unchecked")

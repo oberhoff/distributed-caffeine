@@ -15,14 +15,11 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter;
 
-import org.jspecify.annotations.NullMarked;
-
 /**
  * Interface representing objects that are aware of a state.
  *
  * @author Andreas Oberhoff
  */
-@NullMarked
 public interface StateAware {
 
     /**

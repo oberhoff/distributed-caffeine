@@ -19,8 +19,8 @@ import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
 import org.jspecify.annotations.Nullable;
 
-import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
-import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
+import static io.github.oberhoff.distributedcaffeine.InternalKey.kn;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.vn;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
@@ -29,8 +29,10 @@ class InternalEvictionListener<K, V> implements RemovalListener<InternalKey<K>, 
 
     private final RemovalListener<K, V> evictionListener;
 
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalCacheManager<K, V> cacheManager;
 
+    @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalEvictionListener(RemovalListener<K, V> evictionListener) {
         this.evictionListener = requireNonNull(evictionListener);
         // see also initialize()
@@ -50,8 +52,10 @@ class InternalEvictionListener<K, V> implements RemovalListener<InternalKey<K>, 
         if (nonNull(value) && value.isStale()) {
             return;
         }
-        // special handling, no lock required
-        cacheManager.evictDistributed(key, value, removalCause);
-        evictionListener.onRemoval(k(key), v(value), removalCause);
+        if (nonNull(key) && nonNull(value)) {
+            // special handling, no lock required
+            cacheManager.evictDistributed(key, value, removalCause);
+        }
+        evictionListener.onRemoval(kn(key), vn(value), removalCause);
     }
 }

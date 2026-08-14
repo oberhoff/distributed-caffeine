@@ -19,8 +19,8 @@ import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
 import org.jspecify.annotations.Nullable;
 
-import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
-import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
+import static io.github.oberhoff.distributedcaffeine.InternalKey.kn;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.vn;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
@@ -47,6 +47,6 @@ class InternalRemovalListener<K, V> implements RemovalListener<InternalKey<K>, I
         if (nonNull(value) && value.isStale()) {
             return;
         }
-        removalListener.onRemoval(k(key), v(value), removalCause);
+        removalListener.onRemoval(kn(key), vn(value), removalCause);
     }
 }

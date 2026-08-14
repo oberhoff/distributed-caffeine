@@ -15,6 +15,8 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import org.jspecify.annotations.Nullable;
+
 import java.util.Objects;
 
 import static java.util.Objects.nonNull;
@@ -23,7 +25,7 @@ import static java.util.Objects.requireNonNull;
 class InternalValue<V> {
 
     private final V value;
-    private String operation;
+    private @Nullable String operation;
     private boolean stale;
 
     private InternalValue(V value) {
@@ -34,11 +36,11 @@ class InternalValue<V> {
         return value;
     }
 
-    String getOperation() {
+    @Nullable String getOperation() {
         return operation;
     }
 
-    InternalValue<V> setOperation(String operation) {
+    InternalValue<V> setOperation(@Nullable String operation) {
         this.operation = operation;
         return this;
     }
@@ -47,6 +49,7 @@ class InternalValue<V> {
         return stale;
     }
 
+    @SuppressWarnings("UnusedReturnValue")
     InternalValue<V> setStale(boolean stale) {
         this.stale = stale;
         return this;
@@ -68,12 +71,20 @@ class InternalValue<V> {
     }
 
     static <V> InternalValue<V> iv(V value) {
+        return new InternalValue<>(value);
+    }
+
+    static <V> @Nullable InternalValue<V> ivn(@Nullable V value) {
         return nonNull(value)
                 ? new InternalValue<>(value)
                 : null;
     }
 
     static <V> V v(InternalValue<V> value) {
+        return value.getValue();
+    }
+
+    static <V> @Nullable V vn(@Nullable InternalValue<V> value) {
         return nonNull(value)
                 ? value.getValue()
                 : null;

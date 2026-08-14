@@ -19,11 +19,13 @@ import com.github.benmanes.caffeine.cache.CacheLoader;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.ExtendedPersistenceConfigurer;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
+import org.jspecify.annotations.Nullable;
 
 import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -33,7 +35,7 @@ import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
 import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.im;
-import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullMap;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.nullable;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_EXTENDED_GROUP;
@@ -43,18 +45,24 @@ import static java.util.stream.Collectors.toMap;
 import static java.util.stream.Collectors.toSet;
 
 @SuppressWarnings("java:S1450")
-class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalValue<V>>,
+class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable InternalValue<V>>,
         InternalInitializable<K, V> {
 
     private static final String LOAD_ALL = "loadAll";
 
     private final CacheLoader<K, V> cacheLoader;
 
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private Repository<K, V> repository;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalCacheManager<K, V> cacheManager;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalHasher<K> hasher;
+    private boolean hasLoadAll;
 
+    @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalCacheLoader(CacheLoader<K, V> cacheLoader) {
         this.cacheLoader = cacheLoader;
         // see also initialize()
@@ -66,24 +74,24 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalV
         this.cacheManager = instanceRegistry.getCacheManager();
         this.extendedPersistenceConfigurer = instanceRegistry.getExtendedPersistenceConfigurer();
         this.hasher = instanceRegistry.getHasher();
+        this.hasLoadAll = hasLoadAll();
     }
 
     @Override
-    @SuppressWarnings({"java:S2583"})
-    public InternalValue<V> load(InternalKey<K> key) throws Exception {
+    @SuppressWarnings("java:S2638")
+    public @Nullable InternalValue<V> load(InternalKey<K> key) throws Exception {
         V value = extendedPersistenceConfigurer.hasCacheLoaderStrategy()
                 ? loadExtendedFromStore(key)
                 : null;
         value = nonNull(value)
                 ? value
-                : cacheLoader.load(k(key));
+                : nullable(cacheLoader.load(k(key)));
         return nonNull(value)
                 ? cacheManager.putDistributedLoaded(key, iv(value))
                 : null;
     }
 
     @Override
-    @SuppressWarnings({"java:S2589"})
     public Map<? extends InternalKey<K>, ? extends InternalValue<V>> loadAll(Set<? extends InternalKey<K>> keys)
             throws Exception {
         HashMap<K, V> keyToValue = new HashMap<>();
@@ -96,11 +104,16 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalV
         }
         if (!keysToLoad.isEmpty()) {
             // retain the original 'use loadAll() if overridden' semantics
-            if (hasLoadAll()) {
-                keyToValue.putAll(requireNonNullMap(cacheLoader.loadAll(keysToLoad)));
+            // accepted drawback: Caffeine loads the keys one by one when loadAll() is not overridden
+            // (LocalLoadingCache.loadSequentially), which this cache instance cannot do without turning the single
+            // store write below into one per key. Loading them here instead means the batch counts as one load in the
+            // statistics rather than one per key, and that a loader failing partway through discards the values
+            // loaded before it, which Caffeine would have cached by then
+            if (hasLoadAll) {
+                keyToValue.putAll(cacheLoader.loadAll(keysToLoad));
             } else {
                 for (K key : keysToLoad) {
-                    V value = cacheLoader.load(key);
+                    V value = nullable(cacheLoader.load(key));
                     if (nonNull(value)) {
                         keyToValue.put(key, value);
                     }
@@ -112,7 +125,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalV
 
     // should never be invoked due to custom implementation
     @Override
-    public CompletableFuture<? extends InternalValue<V>> asyncLoad(InternalKey<K> key, Executor executor)
+    public CompletableFuture<? extends @Nullable InternalValue<V>> asyncLoad(InternalKey<K> key, Executor executor)
             throws Exception {
         throw new IllegalAccessException();
     }
@@ -126,15 +139,18 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalV
 
     // should never be invoked
     @Override
-    public InternalValue<V> reload(InternalKey<K> key, InternalValue<V> oldValue) throws Exception {
+    @SuppressWarnings("java:S2638")
+    public @Nullable InternalValue<V> reload(InternalKey<K> key, InternalValue<V> oldValue)
+            throws Exception {
         throw new IllegalAccessException();
     }
 
     // only invoked internally if refreshAfterWrite is used (special handling needed)
     @Override
-    @SuppressWarnings("unchecked")
-    public CompletableFuture<? extends InternalValue<V>> asyncReload(InternalKey<K> key, InternalValue<V> oldValue,
-                                                                     Executor executor) {
+    @SuppressWarnings({"unchecked", "java:S2638"})
+    public CompletableFuture<? extends @Nullable InternalValue<V>> asyncReload(InternalKey<K> key,
+                                                                               InternalValue<V> oldValue,
+                                                                               Executor executor) {
         return (extendedPersistenceConfigurer.hasCacheLoaderStrategy()
                 ? CompletableFuture.supplyAsync(() -> loadExtendedFromStore(key), executor)
                 : CompletableFuture.completedFuture((V) null))
@@ -154,7 +170,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalV
 
     // invoked by custom implementation
     @SuppressWarnings("unchecked")
-    CompletableFuture<V> asyncLoadDelegated(K key, Executor executor) {
+    CompletableFuture<@Nullable V> asyncLoadDelegated(K key, Executor executor) {
         return (extendedPersistenceConfigurer.hasCacheLoaderStrategy()
                 ? CompletableFuture.supplyAsync(() -> loadExtendedFromStore(ik(key)), executor)
                 : CompletableFuture.completedFuture((V) null))
@@ -167,7 +183,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalV
 
     // invoked by custom implementation
     @SuppressWarnings("unchecked")
-    CompletableFuture<V> asyncReloadDelegated(K key, V oldValue, Executor executor) {
+    CompletableFuture<@Nullable V> asyncReloadDelegated(K key, V oldValue, Executor executor) {
         return (extendedPersistenceConfigurer.hasCacheLoaderStrategy()
                 ? CompletableFuture.supplyAsync(() -> loadExtendedFromStore(ik(key)), executor)
                 : CompletableFuture.completedFuture((V) null))
@@ -178,14 +194,15 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalV
                         executor);
     }
 
-    // based on com.github.benmanes.caffeine.cache.LocalLoadingCache.hasLoadAll()
-    boolean hasLoadAll() {
+    // based on com.github.benmanes.caffeine.cache.LocalLoadingCache.hasLoadAll(), resolved once (see initialize())
+    // just like Caffeine does when it builds its bulk mapping function, instead of on every bulk load
+    private boolean hasLoadAll() {
         Method defaultLoadAll = getFailable(() -> CacheLoader.class.getMethod(LOAD_ALL, Set.class));
         Method instanceLoadAll = getFailable(() -> cacheLoader.getClass().getMethod(LOAD_ALL, Set.class));
-        return !defaultLoadAll.equals(instanceLoadAll);
+        return !Objects.equals(defaultLoadAll, instanceLoadAll);
     }
 
-    private V loadExtendedFromStore(InternalKey<K> key) {
+    private @Nullable V loadExtendedFromStore(InternalKey<K> key) {
         return loadAllExtendedFromStore(Set.of(key)).get(k(key));
     }
 
@@ -200,6 +217,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, InternalV
                 EVICTED_EXTENDED_GROUP,
                 null,
                 false))) {
+            //noinspection NullableProblems
             return cacheEntryStream
                     .filter(cacheEntry -> nonNull(cacheEntry.getValue()))
                     .collect(toMap(CacheEntry::getKey, CacheEntry::getValue));

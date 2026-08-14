@@ -61,6 +61,7 @@ import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.assertj.core.api.AbstractLongAssert;
 import org.bson.Document;
 import org.bson.conversions.Bson;
+import org.jspecify.annotations.NullUnmarked;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -148,7 +149,6 @@ import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.lang.System.getProperty;
 import static java.time.temporal.ChronoUnit.FOREVER;
-import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toMap;
 import static java.util.stream.Collectors.toSet;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -250,7 +250,7 @@ final class DistributedCaffeineIntegrationTests {
     final class Mongo_8_latest extends DistributedCaffeineIntegration {
     }
 
-    @SuppressWarnings({"java:S5838", "java:S5778", "java:S5961", "ResultOfMethodCallIgnored"})
+    @SuppressWarnings({"java:S5838", "java:S5778", "java:S5961", "ResultOfMethodCallIgnored", "DataFlowIssue"})
     abstract static class DistributedCaffeineIntegration extends DistributedCaffeineIntegrationTestInstance {
 
         @DisplayName("Test put() and getIfPresent()")
@@ -312,6 +312,7 @@ final class DistributedCaffeineIntegrationTests {
                     .build();
 
             Set<Cache<Key, Value>> allCaches = Set.of(distributedCache, syncedDistributedCache, caffeineCache);
+            //noinspection ExtractMethodRecommender
             Set<Cache<Key, Value>> featureParityCaches = Set.of(distributedCache, caffeineCache);
 
             Map<Key, Value> map1to2 = Map.of(
@@ -409,7 +410,7 @@ final class DistributedCaffeineIntegrationTests {
                         allCaches.forEach(cache -> {
                             assertThat(cache.estimatedSize()).isEqualTo(7);
                             assertThat(cache.getIfPresent(key1)).isEqualTo(computedValue1.getValue())
-                                    .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("computed"));
+                                    .satisfies(value -> assertThat(value.getName()).isEqualTo("computed"));
                             assertThat(cache.getIfPresent(key2)).isEqualTo(computedValue2.getValue())
                                     .isNull();
                             assertThat(cache.getAllPresent(keys3to4))
@@ -630,7 +631,7 @@ final class DistributedCaffeineIntegrationTests {
                         allCaches.forEach(loadingCache -> {
                             assertThat(loadingCache.estimatedSize()).isEqualTo(3);
                             assertThat(loadingCache.getIfPresent(key1)).isEqualTo(loadedValue1.getValue())
-                                    .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("loaded"));
+                                    .satisfies(value -> assertThat(value.getName()).isEqualTo("loaded"));
                             assertThat(loadingCache.getIfPresent(key2)).isEqualTo(loadedValue2.getValue())
                                     .isNull();
                             assertThat(loadingCache.getAllPresent(keys3to4))
@@ -839,7 +840,7 @@ final class DistributedCaffeineIntegrationTests {
                         allCaches.forEach(loadingCache -> {
                             assertThat(loadingCache.estimatedSize()).isEqualTo(1);
                             assertThat(loadingCache.getIfPresent(key1)).isEqualTo(refreshedValue1.getValue())
-                                    .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("loaded"));
+                                    .satisfies(value -> assertThat(value.getName()).isEqualTo("loaded"));
                             assertThat(loadingCache.getIfPresent(key2)).isEqualTo(refreshedValue2.getValue())
                                     .isNull();
                         });
@@ -909,7 +910,7 @@ final class DistributedCaffeineIntegrationTests {
                         allCaches.forEach(loadingCache -> {
                             assertThat(loadingCache.estimatedSize()).isEqualTo(1);
                             assertThat(loadingCache.getIfPresent(key1)).isEqualTo(refreshedValue1.getValue())
-                                    .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("reloaded"));
+                                    .satisfies(value -> assertThat(value.getName()).isEqualTo("reloaded"));
                         });
                         Stream.of(loggerDistributedCaffeine, loggerLocalLoadingCache).forEach(logger -> {
                             String message = "Exception thrown during refresh";
@@ -997,8 +998,8 @@ final class DistributedCaffeineIntegrationTests {
                             allCaches.forEach(loadingCache ->
                                     assertThat(loadingCache.getIfPresent(key1))
                                             .isNotNull()
-                                            .satisfies(value -> assertThat(requireNonNull(value).getId()).isLessThan(levelOfParallelism))
-                                            .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("counted"))));
+                                            .satisfies(value -> assertThat(value.getId()).isLessThan(levelOfParallelism))
+                                            .satisfies(value -> assertThat(value.getName()).isEqualTo("counted"))));
         }
 
         @DisplayName("Test refresh() coalesces concurrent operations per key")
@@ -1388,8 +1389,8 @@ final class DistributedCaffeineIntegrationTests {
                     .untilAsserted(() ->
                             allCaches.forEach(loadingCache ->
                                     assertThat(loadingCache.getIfPresent(key1)).isNotNull()
-                                            .satisfies(value -> assertThat(requireNonNull(value).getId()).isLessThan(levelOfParallelism))
-                                            .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("counted"))));
+                                            .satisfies(value -> assertThat(value.getId()).isLessThan(levelOfParallelism))
+                                            .satisfies(value -> assertThat(value.getName()).isEqualTo("counted"))));
         }
 
         @DisplayName("Test refreshAll() applies successful keys despite a failing key")
@@ -1572,7 +1573,7 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(loadingCache.getIfPresent(key1))
                                     .isNotNull()
                                     .isNotEqualTo(value1)
-                                    .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("reloaded"));
+                                    .satisfies(value -> assertThat(value.getName()).isEqualTo("reloaded"));
                             assertThat(loadingCache.getIfPresent(key2)).isNull();
                             assertThat(getValue1.getValue()).isEqualTo(value1);
                             assertThat(getValue2.getValue()).isEqualTo(value2);
@@ -2595,7 +2596,7 @@ final class DistributedCaffeineIntegrationTests {
 
                 Policy.CacheEntry<Key, Value> cacheEntry = policy.getEntryIfPresentQuietly(key1);
                 assertThatExceptionOfType(UnsupportedOperationException.class).isThrownBy(() ->
-                        requireNonNull(cacheEntry).setValue(Value.of(0)));
+                        cacheEntry.setValue(Value.of(0)));
             });
 
             await("synchronization between cache instances")
@@ -2607,16 +2608,16 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(policy.getIfPresentQuietly(key1)).isEqualTo(value1)
                                     .isEqualTo(oldValue1x2.getValue())
                                     .isNotEqualTo(oldValue1x1.getValue());
-                            assertThat(requireNonNull(policy.getEntryIfPresentQuietly(key1)).expiresAt())
+                            assertThat(policy.getEntryIfPresentQuietly(key1).expiresAt())
                                     .isPositive();
                             assertThat(policy.getIfPresentQuietly(key2)).isEqualTo(value2)
                                     .isEqualTo(oldValue2x2.getValue())
                                     .isNotEqualTo(oldValue2x1.getValue());
-                            assertThat(requireNonNull(policy.getEntryIfPresentQuietly(key2)).expiresAt())
+                            assertThat(policy.getEntryIfPresentQuietly(key2).expiresAt())
                                     .isPositive();
                             assertThat(policy.getIfPresentQuietly(key3)).isEqualTo(computedValue3.getValue())
-                                    .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("computed"));
-                            assertThat(requireNonNull(policy.getEntryIfPresentQuietly(key3)).expiresAt())
+                                    .satisfies(value -> assertThat(value.getName()).isEqualTo("computed"));
+                            assertThat(policy.getEntryIfPresentQuietly(key3).expiresAt())
                                     .isPositive();
                         });
                         assertThatDataStoreHasCounts(
@@ -3715,9 +3716,9 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1)
-                                    .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("loaded"));
+                                    .satisfies(value -> assertThat(value.getName()).isEqualTo("loaded"));
                             assertThat(distributedLoadingCacheB.getIfPresent(key2)).isEqualTo(loadedValue2)
-                                    .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("loaded"));
+                                    .satisfies(value -> assertThat(value.getName()).isEqualTo("loaded"));
                             assertThatDataStoreHasCounts(
                                     Count.empty());
                         }
@@ -3753,13 +3754,13 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(2);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(2);
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1)
-                                    .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("loaded"));
+                                    .satisfies(value -> assertThat(value.getName()).isEqualTo("loaded"));
                             assertThat(distributedLoadingCacheA.getIfPresent(key2)).isEqualTo(reloadedValue2)
-                                    .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("reloaded"));
+                                    .satisfies(value -> assertThat(value.getName()).isEqualTo("reloaded"));
                             assertThat(distributedLoadingCacheB.getIfPresent(key1)).isEqualTo(reloadedValue1)
-                                    .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("reloaded"));
+                                    .satisfies(value -> assertThat(value.getName()).isEqualTo("reloaded"));
                             assertThat(distributedLoadingCacheB.getIfPresent(key2)).isEqualTo(loadedValue2)
-                                    .satisfies(value -> assertThat(requireNonNull(value).getName()).isEqualTo("loaded"));
+                                    .satisfies(value -> assertThat(value.getName()).isEqualTo("loaded"));
                             assertThatDataStoreHasCounts(
                                     Count.empty());
                         }
@@ -3884,24 +3885,24 @@ final class DistributedCaffeineIntegrationTests {
                                 || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(2);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(2);
-                            assertThat(requireNonNull(distributedLoadingCacheA.getIfPresent(key1)))
+                            assertThat(distributedLoadingCacheA.getIfPresent(key1))
                                     .satisfies(value -> {
-                                        assertThat(requireNonNull(value).getId()).isEqualTo(key1.getId());
+                                        assertThat(value.getId()).isEqualTo(key1.getId());
                                         assertThat(value.getName()).isEqualTo("refreshed");
                                     });
-                            assertThat(requireNonNull(distributedLoadingCacheA.getIfPresent(key2)))
+                            assertThat(distributedLoadingCacheA.getIfPresent(key2))
                                     .satisfies(value -> {
-                                        assertThat(requireNonNull(value).getId()).isEqualTo(key2.getId());
+                                        assertThat(value.getId()).isEqualTo(key2.getId());
                                         assertThat(value.getName()).isEqualTo("refreshed");
                                     });
-                            assertThat(requireNonNull(distributedLoadingCacheB.getIfPresent(key1)))
+                            assertThat(distributedLoadingCacheB.getIfPresent(key1))
                                     .satisfies(value -> {
-                                        assertThat(requireNonNull(value).getId()).isEqualTo(key1.getId());
+                                        assertThat(value.getId()).isEqualTo(key1.getId());
                                         assertThat(value.getName()).isEqualTo("refreshed");
                                     });
-                            assertThat(requireNonNull(distributedLoadingCacheB.getIfPresent(key2)))
+                            assertThat(distributedLoadingCacheB.getIfPresent(key2))
                                     .satisfies(value -> {
-                                        assertThat(requireNonNull(value).getId()).isEqualTo(key2.getId());
+                                        assertThat(value.getId()).isEqualTo(key2.getId());
                                         assertThat(value.getName()).isEqualTo("refreshed");
                                     });
                             assertThatDataStoreHasCounts(
@@ -3910,16 +3911,16 @@ final class DistributedCaffeineIntegrationTests {
                                 || distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
                             assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
-                            assertThat(requireNonNull(distributedLoadingCacheA.getIfPresent(key1)))
+                            assertThat(distributedLoadingCacheA.getIfPresent(key1))
                                     .satisfies(value -> {
-                                        assertThat(requireNonNull(value).getId()).isEqualTo(key1.getId());
+                                        assertThat(value.getId()).isEqualTo(key1.getId());
                                         assertThat(value.getName()).isEqualTo("refreshed");
                                     });
                             assertThat(distributedLoadingCacheA.getIfPresent(key2)).isNull();
                             assertThat(distributedLoadingCacheB.getIfPresent(key1)).isNull();
-                            assertThat(requireNonNull(distributedLoadingCacheB.getIfPresent(key2)))
+                            assertThat(distributedLoadingCacheB.getIfPresent(key2))
                                     .satisfies(value -> {
-                                        assertThat(requireNonNull(value).getId()).isEqualTo(key2.getId());
+                                        assertThat(value.getId()).isEqualTo(key2.getId());
                                         assertThat(value.getName()).isEqualTo("refreshed");
                                     });
                             assertThatDataStoreHasCounts(
@@ -4081,9 +4082,9 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
                             assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
@@ -4131,11 +4132,11 @@ final class DistributedCaffeineIntegrationTests {
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
                             assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
                                     Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(1)));
@@ -4187,12 +4188,12 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
                             assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
                                     Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(1)));
@@ -4245,14 +4246,14 @@ final class DistributedCaffeineIntegrationTests {
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
                             assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromStore(key3, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
                             assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
                                     Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(2)));
@@ -4266,7 +4267,7 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key3, true)).isNull();
                             assertThatDataStoreHasCounts(
@@ -4307,15 +4308,15 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
                             assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
                                     Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(2)));
@@ -4329,7 +4330,7 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key3, true)).isNull();
                             assertThatDataStoreHasCounts(
@@ -4372,17 +4373,17 @@ final class DistributedCaffeineIntegrationTests {
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
                             assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
                             assertThat(distributedPolicy.getFromStore(key4, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue4));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue4));
                             assertThat(distributedPolicy.getFromStore(key4, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue4));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue4));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
                                     Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(3)));
@@ -4394,10 +4395,10 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheB.getIfPresent(key3)).isEqualTo(loadedValue3);
                             assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key3, true)).isNull();
                             assertThat(distributedPolicy.getFromStore(key4, false)).isNull();
@@ -4429,7 +4430,7 @@ final class DistributedCaffeineIntegrationTests {
             doAnswer(invocation -> Value.of(invocation.<Key>getArgument(0).getId(), "loaded but not from store"))
                     .when(cacheLoader).load(any(Key.class));
 
-            Value loadedFromStoreValue = requireNonNull(distributedPolicy.getFromStore(key1, true)).getValue();
+            Value loadedFromStoreValue = distributedPolicy.getFromStore(key1, true).getValue();
             Value notFoundValue = distributedLoadingCacheWithoutLoadingStrategy.getIfPresent(key1);
             Value loadedButNotFromStoreValue = distributedLoadingCacheWithoutLoadingStrategy.get(key1);
 
@@ -4574,9 +4575,9 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
                             assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
@@ -4626,11 +4627,11 @@ final class DistributedCaffeineIntegrationTests {
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
                             assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
                                     Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(1)));
@@ -4641,7 +4642,7 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheB.getIfPresent(key2)).isEqualTo(loadedValue2);
                             assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNull();
                             assertThatDataStoreHasCounts(
@@ -4684,12 +4685,12 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
                             assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
                                     Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(1)));
@@ -4700,10 +4701,10 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
                                     Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(2)));
                         }
@@ -4744,14 +4745,14 @@ final class DistributedCaffeineIntegrationTests {
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
                             assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromStore(key3, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
                             assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
                                     Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(2)));
@@ -4762,10 +4763,10 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheB.getIfPresent(key3)).isEqualTo(loadedValue3);
                             assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key3, true)).isNull();
                             assertThatDataStoreHasCounts(
@@ -4807,15 +4808,15 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
                             assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
                                     Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(2)));
@@ -4826,13 +4827,13 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
                             assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
                                     Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(3)));
                         }
@@ -4873,19 +4874,19 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.asMap())
                                     .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
                             assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
                             assertThat(distributedPolicy.getFromStore(key4, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue4));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue4));
                             assertThat(distributedPolicy.getFromStore(key4, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue4));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue4));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(2)),
                                     Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(2)));
@@ -4897,13 +4898,13 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedLoadingCacheA.getIfPresent(key4)).isEqualTo(loadedValue4);
                             assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue1));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue2));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(requireNonNull(entry).getValue()).isEqualTo(loadedValue3));
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
                             assertThat(distributedPolicy.getFromStore(key4, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key4, true)).isNull();
                             assertThatDataStoreHasCounts(
@@ -4933,7 +4934,7 @@ final class DistributedCaffeineIntegrationTests {
             doAnswer(invocation -> Value.of(invocation.<Key>getArgument(0).getId(), "loaded but not from store"))
                     .when(cacheLoader).load(any(Key.class));
 
-            Value loadedFromStoreValue = requireNonNull(distributedPolicy.getFromStore(key2, true)).getValue();
+            Value loadedFromStoreValue = distributedPolicy.getFromStore(key2, true).getValue();
             Value notFoundValue = distributedLoadingCacheWithoutLoadingStrategy.getIfPresent(key2);
             Value loadedButNotFromStoreValue = distributedLoadingCacheWithoutLoadingStrategy.get(key2);
 
@@ -5103,8 +5104,8 @@ final class DistributedCaffeineIntegrationTests {
                                 Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
                     });
 
-            Instant timestamp = requireNonNull(distributedCache.distributedPolicy()
-                    .getFromStore(key1, false)).getTimestamp();
+            Instant timestamp = distributedCache.distributedPolicy()
+                    .getFromStore(key1, false).getTimestamp();
 
             distributedCache.put(key1, value1); // same value instance should produce new timestamp
             distributedCache.invalidate(Key.of(0, "not present"));
@@ -5121,8 +5122,8 @@ final class DistributedCaffeineIntegrationTests {
                         // identity checks (self-echo filter)
                         assertThat(distributedCache.getIfPresent(key1)).isSameAs(value1);
                         assertThat(syncedDistributedCache.getIfPresent(key1)).isNotSameAs(value1);
-                        assertThat(requireNonNull(distributedCache.distributedPolicy()
-                                .getFromStore(key1, false)).getTimestamp())
+                        assertThat(distributedCache.distributedPolicy()
+                                .getFromStore(key1, false).getTimestamp())
                                 .isAfter(timestamp);
                         assertThatDataStoreHasCounts(
                                 Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
@@ -6263,7 +6264,7 @@ final class DistributedCaffeineIntegrationTests {
         }
     }
 
-    @SuppressWarnings("ResultOfMethodCallIgnored")
+    @SuppressWarnings({"ResultOfMethodCallIgnored", "NotNullFieldNotInitialized"})
     abstract static class DistributedCaffeineIntegrationTestInstance extends DistributedCaffeineCommonTestInstance {
 
         static final String RUNS_ON_GITHUB = "runsOnGitHub";
@@ -6580,6 +6581,7 @@ final class DistributedCaffeineIntegrationTests {
         record DistributedCaffeineConfiguration<K, V>(String displayName, CacheBuilder<K, V> cacheBuilder) {
         }
 
+        @NullUnmarked
         static class EqualResult<K, V> {
 
             private boolean initialized = false;

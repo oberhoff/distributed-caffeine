@@ -15,8 +15,6 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-import org.jspecify.annotations.NullMarked;
-
 /**
  * Modes for defining the scope of distributed synchronization. Each mode includes/excludes different types of cache
  * operations (population, invalidation, eviction) which are then considered or not considered for distributed
@@ -24,7 +22,6 @@ import org.jspecify.annotations.NullMarked;
  *
  * @author Andreas Oberhoff
  */
-@NullMarked
 public enum DistributionMode {
 
     /**
@@ -57,6 +54,7 @@ public enum DistributionMode {
     private final boolean isInvalidationConsidered;
     private final boolean isEvictionConsidered;
 
+    @SuppressWarnings("SameParameterValue")
     DistributionMode(boolean isPopulationConsidered, boolean isInvalidationConsidered, boolean isEvictionConsidered) {
         this.isPopulationConsidered = isPopulationConsidered;
         this.isInvalidationConsidered = isInvalidationConsidered;

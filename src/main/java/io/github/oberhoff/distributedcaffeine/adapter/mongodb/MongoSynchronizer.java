@@ -36,7 +36,6 @@ import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field;
 import org.bson.BsonDocument;
 import org.bson.Document;
 import org.bson.conversions.Bson;
-import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.System.Logger;
@@ -56,13 +55,12 @@ import java.util.stream.Stream;
 import static com.mongodb.client.model.changestream.OperationType.INSERT;
 import static com.mongodb.client.model.changestream.OperationType.UPDATE;
 import static io.github.oberhoff.distributedcaffeine.adapter.Repository.DISCRIMINATOR_FIELD;
+import static io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoRepository.toCacheEntryOrNull;
 import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
-import static java.util.Objects.requireNonNull;
 
-@NullMarked
 final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
 
     private static final Logger LOGGER = System.getLogger(MongoSynchronizer.class.getName());
@@ -185,7 +183,7 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
     }
 
     private void processChangeStreams() {
-        // this attempt may have been scheduled before deactivation, in which case watching must not be (re)started;
+        // this attempt may have been scheduled before deactivation, in which case watching must not be (re)started
         // the retry policy only evaluates its abort condition at failure time, not when a delayed attempt resumes
         if (isStopped()) {
             return;
@@ -234,12 +232,11 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
         OperationType operationType = changeStreamDocument.getOperationType();
         if (nonNull(changeStreamDocument.getFullDocument()) && nonNull(operationType)
                 && (operationType.equals(INSERT) || operationType.equals(UPDATE))) {
-            CacheEntry<K, V> cacheEntry = MongoRepository.toCacheEntryOrNull(requireNonNull(keySerializer),
-                    requireNonNull(valueSerializer), changeStreamDocument.getFullDocument(),
-                    LOGGER, requireNonNull(identifier));
+            CacheEntry<K, V> cacheEntry = toCacheEntryOrNull(keySerializer, valueSerializer,
+                    changeStreamDocument.getFullDocument(), LOGGER, identifier);
             Optional.ofNullable(cacheEntry)
                     .map(Set::of)
-                    .ifPresent(cacheEntries -> requireNonNull(retriever).retrieveCacheEntries(cacheEntries));
+                    .ifPresent(cacheEntries -> retriever.retrieveCacheEntries(cacheEntries));
         }
     }
 
@@ -257,7 +254,7 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
                         Filters.and(
                                 Filters.in(OPERATION_TYPE, INSERT.getValue(), UPDATE.getValue()),
                                 // events of other caches sharing this collection are not ours to apply
-                                Filters.eq(fullDocument(DISCRIMINATOR_FIELD), requireNonNull(discriminator)))),
+                                Filters.eq(fullDocument(DISCRIMINATOR_FIELD), discriminator))),
                 Aggregates.project(
                         Projections.fields(
                                 Projections.include(projectionFields))));

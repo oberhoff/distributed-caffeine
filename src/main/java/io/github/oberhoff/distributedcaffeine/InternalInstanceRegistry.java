@@ -20,6 +20,7 @@ import com.github.benmanes.caffeine.cache.stats.StatsCounter;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.ExtendedPersistenceConfigurer;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.SerializersConfigurer;
 import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
+import org.jspecify.annotations.Nullable;
 
 import java.lang.System.Logger;
 import java.util.Optional;
@@ -35,22 +36,31 @@ class InternalInstanceRegistry<K, V> {
     private final InternalCacheManager<K, V> cacheManager;
     private final InternalMaintenanceWorker<K, V> maintenanceWorker;
 
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private Adapter<K, V> adapter;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalHasher<K> hasher;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private DistributionMode distributionMode;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private SerializersConfigurer<K, V> serializersConfigurer;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
-    private InternalCacheLoader<K, V> cacheLoader;
+    private @Nullable InternalCacheLoader<K, V> cacheLoader;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalRemovalListener<K, V> removalListener;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalEvictionListener<K, V> evictionListener;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private Executor executor;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private StatsCounter statsCounter;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private Cache<InternalKey<K>, InternalValue<V>> cache;
 
+    @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalInstanceRegistry() {
         this.synchronizationLock = new InternalSynchronizationLock();
-        // created here, so before this registry holds anything they could read - hence initialized in
-        // initializeComponents() rather than right away
         this.cacheManager = new InternalCacheManager<>();
         this.maintenanceWorker = new InternalMaintenanceWorker<>();
     }
@@ -187,11 +197,11 @@ class InternalInstanceRegistry<K, V> {
         this.extendedPersistenceConfigurer = extendedPersistenceConfigurer;
     }
 
-    public InternalCacheLoader<K, V> getCacheLoader() {
+    public @Nullable InternalCacheLoader<K, V> getCacheLoader() {
         return cacheLoader;
     }
 
-    public void setCacheLoader(InternalCacheLoader<K, V> cacheLoader) {
+    public void setCacheLoader(@Nullable InternalCacheLoader<K, V> cacheLoader) {
         this.cacheLoader = cacheLoader;
     }
 

@@ -15,8 +15,6 @@
  */
 package io.github.oberhoff.distributedcaffeine.hasher;
 
-import org.jspecify.annotations.NullMarked;
-
 import java.util.UUID;
 import java.util.function.Supplier;
 
@@ -28,7 +26,6 @@ import java.util.function.Supplier;
  *
  * @author Andreas Oberhoff
  */
-@NullMarked
 @FunctionalInterface
 public interface Hashable {
 

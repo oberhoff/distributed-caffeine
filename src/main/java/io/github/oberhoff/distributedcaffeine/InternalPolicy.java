@@ -16,7 +16,8 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.Policy;
-import org.jspecify.annotations.NonNull;
+
+import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
 import java.util.Map;
@@ -33,16 +34,21 @@ import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
 import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.m;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.ivn;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.vn;
 import static java.util.Objects.isNull;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toUnmodifiableMap;
 
 class InternalPolicy<K, V> implements Policy<K, V>, InternalInitializable<K, V> {
 
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalInstanceRegistry<K, V> instanceRegistry;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private Policy<InternalKey<K>, InternalValue<V>> policy;
 
+    @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalPolicy() {
         // see also initialize()
     }
@@ -59,15 +65,17 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalInitializable<K, V> 
     }
 
     @Override
-    public V getIfPresentQuietly(K key) {
-        return v(policy.getIfPresentQuietly(ik(key)));
+    public @Nullable V getIfPresentQuietly(K key) {
+        return vn(policy.getIfPresentQuietly(ik(key)));
     }
 
     @Override
-    public CacheEntry<@NonNull K, @NonNull V> getEntryIfPresentQuietly(K key) {
-        return Optional.ofNullable(policy.getEntryIfPresentQuietly(ik(key)))
-                .map(InternalPolicy::createCacheEntry)
-                .orElse(null);
+    @SuppressWarnings("java:S2638")
+    public @Nullable CacheEntry<K, V> getEntryIfPresentQuietly(K key) {
+        CacheEntry<InternalKey<K>, InternalValue<V>> cacheEntry = policy.getEntryIfPresentQuietly(ik(key));
+        return isNull(cacheEntry)
+                ? null
+                : createCacheEntry(cacheEntry);
     }
 
     @Override
@@ -80,6 +88,7 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalInitializable<K, V> 
 
     @Override
     public Optional<Eviction<K, V>> eviction() {
+        //noinspection Convert2Diamond
         return policy.eviction()
                 .map(eviction -> new Eviction<K, V>() {
 
@@ -140,6 +149,7 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalInitializable<K, V> 
 
     @Override
     public Optional<FixedRefresh<K, V>> refreshAfterWrite() {
+        //noinspection Convert2Diamond
         return policy.refreshAfterWrite()
                 .map(fixedRefresh -> new FixedRefresh<K, V>() {
                     @Override
@@ -163,10 +173,14 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalInitializable<K, V> 
 
         private final VarExpiration<InternalKey<K>, InternalValue<V>> varExpiration;
 
+        @SuppressWarnings("NotNullFieldNotInitialized")
         private Policy<InternalKey<K>, InternalValue<V>> policy;
+        @SuppressWarnings("NotNullFieldNotInitialized")
         private InternalCacheManager<K, V> cacheManager;
+        @SuppressWarnings("NotNullFieldNotInitialized")
         private InternalSynchronizationLock synchronizationLock;
 
+        @SuppressWarnings({"java:S2637", "NullAway.Init"})
         InternalExpiration(VarExpiration<InternalKey<K>, InternalValue<V>> varExpiration) {
             this.varExpiration = varExpiration;
             // see also initialize()
@@ -180,21 +194,21 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalInitializable<K, V> 
         }
 
         @Override
-        public V put(K key, V value, long duration, TimeUnit unit) {
+        public @Nullable V put(K key, V value, long duration, TimeUnit unit) {
             requireNonNull(key);
             requireNonNull(value);
             requireNonNull(unit);
-            return synchronizationLock.getLocked(() ->
-                    v(varExpiration.put(ik(key), cacheManager.putDistributed(ik(key), iv(value)), duration, unit)));
+            return synchronizationLock.getLockedOrNull(() ->
+                    vn(varExpiration.put(ik(key), cacheManager.putDistributed(ik(key), iv(value)), duration, unit)));
         }
 
         @Override
-        public V putIfAbsent(K key, V value, long duration, TimeUnit unit) {
+        public @Nullable V putIfAbsent(K key, V value, long duration, TimeUnit unit) {
             requireNonNull(key);
             requireNonNull(value);
             requireNonNull(unit);
-            return synchronizationLock.getLocked(() -> {
-                V oldValue = v(policy.getIfPresentQuietly(ik(key)));
+            return synchronizationLock.getLockedOrNull(() -> {
+                V oldValue = vn(policy.getIfPresentQuietly(ik(key)));
                 return isNull(oldValue)
                         ? put(key, value, duration, unit) // implicit distribution
                         : oldValue;
@@ -202,14 +216,16 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalInitializable<K, V> 
         }
 
         @Override
-        public V compute(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction, Duration duration) {
+        @SuppressWarnings("NullableProblems")
+        public @Nullable V compute(K key, BiFunction<? super K, ? super @Nullable V, ? extends @Nullable V> remappingFunction,
+                                   Duration duration) {
             requireNonNull(key);
             requireNonNull(remappingFunction);
             requireNonNull(duration);
-            BiFunction<InternalKey<K>, InternalValue<V>, InternalValue<V>> distributedRemapping =
+            BiFunction<InternalKey<K>, @Nullable InternalValue<V>, @Nullable InternalValue<V>> distributedRemapping =
                     (remappingKey, remappingValue) -> {
-                        InternalValue<V> value = iv(remappingFunction
-                                .apply(k(remappingKey), v(remappingValue)));
+                        InternalValue<V> value = ivn(remappingFunction
+                                .apply(k(remappingKey), vn(remappingValue)));
                         if (isNull(value)) {
                             cacheManager.invalidateDistributed(remappingKey);
                         } else {
@@ -217,8 +233,8 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalInitializable<K, V> 
                         }
                         return value;
                     };
-            return synchronizationLock.getLocked(() ->
-                    v(varExpiration.compute(ik(key), distributedRemapping, duration)));
+            return synchronizationLock.getLockedOrNull(() ->
+                    vn(varExpiration.compute(ik(key), distributedRemapping, duration)));
         }
 
         @Override
@@ -237,7 +253,7 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalInitializable<K, V> 
         }
 
         @Override
-        public <T> T oldest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
+        public <T extends @Nullable Object> T oldest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
             Function<Stream<CacheEntry<InternalKey<K>, InternalValue<V>>>, T> internalMappingFunction =
                     stream -> mappingFunction.apply(stream
                             .map(InternalPolicy::createCacheEntry));
@@ -250,7 +266,7 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalInitializable<K, V> 
         }
 
         @Override
-        public <T> T youngest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
+        public <T extends @Nullable Object> T youngest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
             Function<Stream<CacheEntry<InternalKey<K>, InternalValue<V>>>, T> internalMappingFunction =
                     stream -> mappingFunction.apply(stream
                             .map(InternalPolicy::createCacheEntry));
@@ -259,6 +275,7 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalInitializable<K, V> 
     }
 
     private static <K, V> CacheEntry<K, V> createCacheEntry(CacheEntry<InternalKey<K>, InternalValue<V>> entry) {
+        //noinspection Convert2Diamond
         return new CacheEntry<K, V>() {
 
             @Override
@@ -298,7 +315,8 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalInitializable<K, V> 
         };
     }
 
-    private static <K, V> @NonNull FixedExpiration<K, V> createFixedExpiration(FixedExpiration<InternalKey<K>, InternalValue<V>> fixedExpiration) {
+    private static <K, V> FixedExpiration<K, V> createFixedExpiration(FixedExpiration<InternalKey<K>, InternalValue<V>> fixedExpiration) {
+        //noinspection Convert2Diamond
         return new FixedExpiration<K, V>() {
 
             @Override

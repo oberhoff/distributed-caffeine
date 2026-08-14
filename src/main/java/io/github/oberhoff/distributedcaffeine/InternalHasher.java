@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import io.github.oberhoff.distributedcaffeine.hasher.HashProvider;
 import io.github.oberhoff.distributedcaffeine.hasher.Hashable;
 import io.github.oberhoff.distributedcaffeine.hasher.Hasher;
+import org.jspecify.annotations.Nullable;
 
 import java.util.Set;
 import java.util.UUID;
@@ -28,9 +29,9 @@ import static java.util.stream.Collectors.toSet;
 
 class InternalHasher<K> {
 
-    private final HashProvider<K> hashProvider;
+    private final @Nullable HashProvider<K> hashProvider;
 
-    InternalHasher(HashProvider<K> hashProvider) {
+    InternalHasher(@Nullable HashProvider<K> hashProvider) {
         this.hashProvider = hashProvider;
     }
 
@@ -38,9 +39,13 @@ class InternalHasher<K> {
     // compute it once and cache it on the key instance for subsequent hashings
     String getHash(InternalKey<K> key) {
         String hash = key.getHash();
-        return nonNull(hash)
-                ? hash
-                : key.setHash(getHash(k(key))).getHash();
+        if (nonNull(hash)) {
+            return hash;
+        }
+        // caching what was computed rather than reading it back off the key, whose accessor cannot promise a hash
+        String computedHash = getHash(k(key));
+        key.setHash(computedHash);
+        return computedHash;
     }
 
     String getHash(K key) {

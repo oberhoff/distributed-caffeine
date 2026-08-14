@@ -19,4 +19,7 @@
  * @author Andreas Oberhoff
  * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
  */
+@NullMarked
 package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
+
+import org.jspecify.annotations.NullMarked;

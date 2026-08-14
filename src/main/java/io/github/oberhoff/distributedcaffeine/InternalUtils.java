@@ -15,6 +15,8 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import org.jspecify.annotations.Nullable;
+
 import java.util.AbstractMap.SimpleEntry;
 import java.util.Collection;
 import java.util.Map;
@@ -32,7 +34,9 @@ import static java.util.stream.Collectors.toUnmodifiableSet;
 
 class InternalUtils {
 
-    static <K, V> Entry<K, V> entry(K key, V value) {
+    // the value type carries whatever nullness the caller passes in, instead of forcing a nullable one on callers
+    // that hand over a value which cannot be null
+    static <K, V extends @Nullable Object> Entry<K, V> entry(K key, V value) {
         return new SimpleEntry<>(key, value);
     }
 
@@ -61,23 +65,17 @@ class InternalUtils {
                 .collect(toUnmodifiableSet());
     }
 
+    @SuppressWarnings("UnusedReturnValue")
     static <K, V> Map<K, V> requireNonNullMap(Map<K, V> map) {
         return Map.copyOf(map);
     }
 
-    static void runFailable(FailableRunnable failableRunnable) {
-        getFailable(() -> {
-            failableRunnable.run();
-            return null;
-        });
-    }
-
-    static <T> T getFailable(FailableSupplier<T> failableSupplier) {
+    static <T extends @Nullable Object> T getFailable(FailableSupplier<T> failableSupplier) {
         return getFailable(failableSupplier, RuntimeException::new);
     }
 
-    static <T> T getFailable(FailableSupplier<T> failableSupplier,
-                             Function<Throwable, RuntimeException> runtimeExceptionFactory) {
+    static <T extends @Nullable Object> T getFailable(FailableSupplier<T> failableSupplier,
+                                                      Function<Throwable, RuntimeException> runtimeExceptionFactory) {
         try {
             return failableSupplier.get();
         } catch (RuntimeException e) {
@@ -85,6 +83,26 @@ class InternalUtils {
         } catch (Throwable t) {
             throw runtimeExceptionFactory.apply(t);
         }
+    }
+
+    static void runFailable(FailableRunnable failableRunnable) {
+        // an explicit target type for the supplier, because the nullable result of a runnable that has none would
+        // otherwise be lost while inferring it from an implicit lambda
+        FailableSupplier<@Nullable Void> failableSupplier = () -> {
+            failableRunnable.run();
+            return null;
+        };
+        getFailable(failableSupplier);
+    }
+
+    static <T extends @Nullable Object> @Nullable T getFailableOrNull(FailableSupplier<T> failableSupplier) {
+        return getFailable(failableSupplier);
+    }
+
+    static <T> @Nullable T nullable(@Nullable T nullable) {
+        @SuppressWarnings("UnnecessaryLocalVariable")
+        T workaround = nullable;
+        return workaround;
     }
 
     @FunctionalInterface
@@ -95,7 +113,7 @@ class InternalUtils {
     }
 
     @FunctionalInterface
-    interface FailableSupplier<T> {
+    interface FailableSupplier<T extends @Nullable Object> {
 
         @SuppressWarnings("java:S112")
         T get() throws Throwable;

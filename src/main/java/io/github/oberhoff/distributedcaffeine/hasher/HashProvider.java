@@ -15,8 +15,6 @@
  */
 package io.github.oberhoff.distributedcaffeine.hasher;
 
-import org.jspecify.annotations.NullMarked;
-
 import java.util.UUID;
 import java.util.function.Supplier;
 
@@ -29,7 +27,6 @@ import java.util.function.Supplier;
  * @param <K> the key type of the cache
  * @author Andreas Oberhoff
  */
-@NullMarked
 @FunctionalInterface
 public interface HashProvider<K> {
 

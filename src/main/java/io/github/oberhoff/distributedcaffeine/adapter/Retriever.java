@@ -15,8 +15,6 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter;
 
-import org.jspecify.annotations.NullMarked;
-
 import java.util.Collection;
 
 /**
@@ -27,7 +25,6 @@ import java.util.Collection;
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
-@NullMarked
 public interface Retriever<K, V> {
 
     /**

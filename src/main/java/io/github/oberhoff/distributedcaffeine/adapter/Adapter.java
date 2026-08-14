@@ -15,8 +15,6 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter;
 
-import org.jspecify.annotations.NullMarked;
-
 /**
  * Interface representing an adapter that manages distributed synchronization between cache instances using an
  * underlying store.
@@ -27,7 +25,6 @@ import org.jspecify.annotations.NullMarked;
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
-@NullMarked
 public interface Adapter<K, V> extends StateAware, SerializerAware<K, V>, RetrieverAware<K, V> {
 
     /**

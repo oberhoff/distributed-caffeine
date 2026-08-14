@@ -15,7 +15,6 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter;
 
-import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Instant;
@@ -38,7 +37,6 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
-@NullMarked
 @SuppressWarnings({"RedundantThrows", "java:S112"})
 public interface Repository<K, V> extends IdentifierAware, DiscriminatorAware, SerializerAware<K, V> {
 

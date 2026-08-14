@@ -17,6 +17,7 @@ package io.github.oberhoff.distributedcaffeine.common;
 
 import io.github.oberhoff.distributedcaffeine.hasher.Hashable;
 import io.github.oberhoff.distributedcaffeine.hasher.Hasher;
+import org.jspecify.annotations.NonNull;
 
 import java.io.Serializable;
 import java.util.Objects;
@@ -67,7 +68,7 @@ public class Key implements Hashable, Serializable {
     }
 
     @Override
-    public String getHash(Supplier<Hasher> hasher) {
+    public @NonNull String getHash(@NonNull Supplier<Hasher> hasher) {
         return hasher.get()
                 .putInt(id)
                 .putString(name)

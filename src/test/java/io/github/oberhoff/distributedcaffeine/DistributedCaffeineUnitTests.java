@@ -259,6 +259,7 @@ final class DistributedCaffeineUnitTests {
 
         @DisplayName("that an adapter already in use is rejected")
         @Test
+        @SuppressWarnings("java:S5778")
         void test_Builder_rejects_adapter_already_in_use() throws Exception {
             Adapter<Key, Value> adapter = mockAdapter("database.collection");
 
@@ -286,6 +287,7 @@ final class DistributedCaffeineUnitTests {
 
         @DisplayName("that an adapter is released again if constructing fails")
         @Test
+        @SuppressWarnings("java:S5778")
         void test_Builder_releases_adapter_if_constructing_fails() throws Exception {
             Adapter<Key, Value> adapter = mockAdapter("database.collection");
 
@@ -489,12 +491,13 @@ final class DistributedCaffeineUnitTests {
         @DisplayName("that a configured hash provider takes precedence")
         @Test
         void test_Hasher_configured_hash_provider_takes_precedence() {
-            InternalHasher<Object> hasher = new InternalHasher<>((key, hasherSupplier) -> "provided");
+            String hash = UUID.randomUUID().toString();
+            InternalHasher<Object> hasher = new InternalHasher<>((key, hasherSupplier) -> hash);
 
             // over the types hashed out of the box as well as over keys hashing themselves, so that configuring
             // one is enough to take over hashing entirely
-            assertThat(hasher.getHash("key")).isEqualTo("provided");
-            assertThat(hasher.getHash(Key.of(1))).isEqualTo("provided");
+            assertThat(hasher.getHash("key")).isEqualTo(hash);
+            assertThat(hasher.getHash(Key.of(1))).isEqualTo(hash);
         }
 
         @DisplayName("that keys of unsupported types throw exception")
@@ -534,6 +537,7 @@ final class DistributedCaffeineUnitTests {
 
             Object stored = invokeMethod(null, mongoRepositoryClass, "serializeToMongo",
                     List.of(Object.class, Serializer.class), List.of(original, serializer));
+            @SuppressWarnings("MismatchedQueryAndUpdateOfCollection")
             Document document = new Document("value", stored);
             Object roundTripped = invokeMethod(null, mongoRepositoryClass, "deserializeFromMongo",
                     List.of(Document.class, String.class, Serializer.class), List.of(document, "value", serializer));

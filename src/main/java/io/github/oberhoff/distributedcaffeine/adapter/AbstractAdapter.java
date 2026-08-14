@@ -16,7 +16,6 @@
 package io.github.oberhoff.distributedcaffeine.adapter;
 
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
-import org.jspecify.annotations.NullMarked;
 
 import static java.util.Objects.requireNonNull;
 
@@ -28,7 +27,6 @@ import static java.util.Objects.requireNonNull;
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
-@NullMarked
 public abstract class AbstractAdapter<K, V> implements Adapter<K, V> {
 
     /**

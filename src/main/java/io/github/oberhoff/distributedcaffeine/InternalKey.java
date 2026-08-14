@@ -15,6 +15,8 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import org.jspecify.annotations.Nullable;
+
 import java.util.Objects;
 
 import static java.util.Objects.nonNull;
@@ -23,7 +25,7 @@ import static java.util.Objects.requireNonNull;
 class InternalKey<K> {
 
     private final K key;
-    private String hash;
+    private @Nullable String hash;
 
     private InternalKey(K key) {
         this.key = requireNonNull(key);
@@ -33,11 +35,11 @@ class InternalKey<K> {
         return key;
     }
 
-    String getHash() {
+    @Nullable String getHash() {
         return hash;
     }
 
-    InternalKey<K> setHash(String hash) {
+    InternalKey<K> setHash(@Nullable String hash) {
         this.hash = hash;
         return this;
     }
@@ -58,12 +60,14 @@ class InternalKey<K> {
     }
 
     static <K> InternalKey<K> ik(K key) {
-        return nonNull(key)
-                ? new InternalKey<>(key)
-                : null;
+        return new InternalKey<>(key);
     }
 
     static <K> K k(InternalKey<K> key) {
+        return key.getKey();
+    }
+
+    static <K> @Nullable K kn(@Nullable InternalKey<K> key) {
         return nonNull(key)
                 ? key.getKey()
                 : null;

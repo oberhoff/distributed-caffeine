@@ -18,7 +18,6 @@ package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
 import com.mongodb.client.MongoClient;
 import io.github.oberhoff.distributedcaffeine.adapter.AbstractAdapter;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
-import org.jspecify.annotations.NullMarked;
 
 import static io.github.oberhoff.distributedcaffeine.adapter.Repository.DEFAULT_DISCRIMINATOR;
 import static java.util.Objects.requireNonNull;
@@ -36,7 +35,6 @@ import static java.util.Objects.requireNonNull;
  * @author Andreas Oberhoff
  * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
  */
-@NullMarked
 public final class MongoAdapter<K, V> extends AbstractAdapter<K, V> {
 
     private MongoAdapter(Builder builder) {
@@ -73,7 +71,6 @@ public final class MongoAdapter<K, V> extends AbstractAdapter<K, V> {
      *
      * @author Andreas Oberhoff
      */
-    @NullMarked
     public static final class Builder {
 
         private final MongoClient mongoClient;

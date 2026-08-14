@@ -17,6 +17,7 @@ package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.github.benmanes.caffeine.cache.stats.StatsCounter;
+import org.jspecify.annotations.Nullable;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -41,7 +42,7 @@ import static io.github.oberhoff.distributedcaffeine.InternalUtils.iks;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.im;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.m;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullIterable;
-import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
+import static io.github.oberhoff.distributedcaffeine.InternalValue.vn;
 import static java.lang.String.format;
 import static java.util.Collections.unmodifiableMap;
 import static java.util.Objects.isNull;
@@ -51,14 +52,22 @@ import static java.util.Objects.requireNonNull;
 class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, V>
         implements DistributedLoadingCache<K, V> {
 
-    private final ConcurrentMap<K, CompletableFuture<V>> refreshOperations;
+    // a refresh resolving to null is a valid outcome (it means the key is to be removed), so the value of these
+    // operations is nullable - unlike the map itself, which never holds a null future
+    private final ConcurrentMap<K, CompletableFuture<@Nullable V>> refreshOperations;
 
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private Logger logger;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private LoadingCache<InternalKey<K>, InternalValue<V>> loadingCache;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalCacheLoader<K, V> cacheLoader;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private Executor executor;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private StatsCounter statsCounter;
 
+    @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalDistributedLoadingCache() {
         this.refreshOperations = new ConcurrentHashMap<>();
         // see also initialize()
@@ -69,23 +78,28 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
         super.initialize(instanceRegistry);
         this.logger = instanceRegistry.getLogger();
         this.loadingCache = (LoadingCache<InternalKey<K>, InternalValue<V>>) cache;
-        this.cacheLoader = instanceRegistry.getCacheLoader();
+        this.cacheLoader = requireNonNull(instanceRegistry.getCacheLoader());
         this.executor = instanceRegistry.getExecutor();
         this.statsCounter = instanceRegistry.getStatsCounter();
     }
 
+    // a cache loader resolving to null means that nothing is cached, so the result is nullable. Caffeine documents
+    // the same for its own method ("or null if the computed value is null") but cannot express it for a value type
+    // that is not nullable, and making it one would declare every other method of this cache as holding nullable
+    // values, which none of them do
     @Override
-    public V get(K key) {
+    @SuppressWarnings({"java:S2638", "NullAway"})
+    public @Nullable V get(K key) {
         requireNonNull(key);
-        return synchronizationLock.getLocked(() ->
-                v(loadingCache.get(ik(key))));
+        return synchronizationLock.getLockedOrNull(() ->
+                vn(loadingCache.get(ik(key))));
     }
 
     @Override
     public Map<K, V> getAll(Iterable<? extends K> keys) {
         Set<K> keySet = requireNonNullIterable(keys);
-        return synchronizationLock.getLocked(() ->
-                m(loadingCache.getAll(iks(keySet))));
+        return requireNonNull(synchronizationLock.getLocked(() ->
+                m(loadingCache.getAll(iks(keySet)))));
     }
 
     @Override
@@ -102,10 +116,10 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
         Set<K> keySet = requireNonNullIterable(keys);
         // custom implementation to bypass problematic internal asynchronous handling
         // accepted drawback: no mapping of in-flight refresh operations in 'policy.refreshes()'
-        Map<K, CompletableFuture<V>> keyToCompletableFutureOfValues = keySet.stream()
+        Map<K, CompletableFuture<@Nullable V>> keyToCompletableFutureOfValues = keySet.stream()
                 .map(key -> entry(key, policy.getIfPresentQuietly(ik(key))))
                 .collect(Collectors.toMap(Entry::getKey, entry ->
-                        getOrCreateRefreshOperation(entry.getKey(), v(entry.getValue()))));
+                        getOrCreateRefreshOperation(entry.getKey(), vn(entry.getValue()))));
         // settle every refresh individually so that allOf() cannot fail. A single failing key must not discard the
         // values that reloaded successfully: Caffeine applies each refresh in its own whenComplete callback,
         // independently of the aggregated future (LocalLoadingCache.refresh), so a sibling failure never blocks a
@@ -120,7 +134,7 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
                     Map<K, V> keysWithNewValues = new HashMap<>();
                     Set<K> keysWithNullValues = new HashSet<>();
                     RuntimeException failure = null;
-                    for (Entry<K, CompletableFuture<V>> entry : keyToCompletableFutureOfValues.entrySet()) {
+                    for (Entry<K, CompletableFuture<@Nullable V>> entry : keyToCompletableFutureOfValues.entrySet()) {
                         try {
                             // already completed (allOf above awaited the settled futures), so this cannot block
                             V newValue = entry.getValue().join();
@@ -148,23 +162,27 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
                 }, executor);
     }
 
-    private CompletableFuture<V> getOrCreateRefreshOperation(K key, V oldValue) {
-        AtomicReference<CompletableFuture<V>> createdRefreshOperation = new AtomicReference<>();
+    private CompletableFuture<@Nullable V> getOrCreateRefreshOperation(K key, @Nullable V oldValue) {
+        AtomicReference<@Nullable CompletableFuture<@Nullable V>> createdRefreshOperation = new AtomicReference<>();
         // retain the original 'only one concurrent refresh operation per key' semantics
-        CompletableFuture<V> refreshOperation = refreshOperations.compute(key, (k, existingRefreshOperation) -> {
-            if (isNull(existingRefreshOperation) || existingRefreshOperation.isDone()) {
-                // retain the original 'load if null, reload if not null' semantics
-                CompletableFuture<V> newRefreshOperation = isNull(oldValue)
-                        ? getFailable(() -> cacheLoader.asyncLoadDelegated(key, executor),
-                        CompletionException::new)
-                        : getFailable(() -> cacheLoader.asyncReloadDelegated(key, oldValue, executor),
-                        CompletionException::new);
-                createdRefreshOperation.set(newRefreshOperation);
-                return newRefreshOperation;
-            } else {
-                return existingRefreshOperation;
-            }
-        });
+        CompletableFuture<@Nullable V> refreshOperation =
+                refreshOperations.compute(key, (k, existingRefreshOperation) -> {
+                    if (isNull(existingRefreshOperation) || existingRefreshOperation.isDone()) {
+                        // retain the original 'load if null, reload if not null' semantics
+                        // an explicit target type for the suppliers, because the nullable value type of the
+                        // operation would otherwise be lost while inferring it from an implicit lambda
+                        InternalUtils.FailableSupplier<CompletableFuture<@Nullable V>> refreshSupplier =
+                                isNull(oldValue)
+                                        ? () -> cacheLoader.asyncLoadDelegated(key, executor)
+                                        : () -> cacheLoader.asyncReloadDelegated(key, oldValue, executor);
+                        CompletableFuture<@Nullable V> newRefreshOperation =
+                                getFailable(refreshSupplier, CompletionException::new);
+                        createdRefreshOperation.set(newRefreshOperation);
+                        return newRefreshOperation;
+                    } else {
+                        return existingRefreshOperation;
+                    }
+                });
         // intention: retain the original 'log exception and swallow' semantics
         // but strange: exceptions are still thrown, so this behavior is imitated
         // additionally count stats due to custom implementation and clean up completed refresh operations.
@@ -175,7 +193,7 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
         // reload before the callback is even attached and then runs it inline: removing from the map while its own
         // mapping function is still running makes that removal fail, and the failure lands in the callback's
         // (discarded) dependent future instead of anywhere visible, silently leaking an entry per refreshed key
-        CompletableFuture<V> newRefreshOperation = createdRefreshOperation.get();
+        CompletableFuture<@Nullable V> newRefreshOperation = createdRefreshOperation.get();
         if (nonNull(newRefreshOperation)) {
             newRefreshOperation.whenCompleteAsync((v, e) -> {
                 if (isNull(e)) {

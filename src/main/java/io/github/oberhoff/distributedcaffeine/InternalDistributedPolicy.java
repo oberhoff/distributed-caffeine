@@ -21,7 +21,7 @@ import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
-import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 import java.util.HashSet;
 import java.util.Set;
@@ -38,12 +38,18 @@ import static java.util.Objects.requireNonNull;
 @SuppressWarnings("java:S1450")
 class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, InternalInitializable<K, V> {
 
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalInstanceRegistry<K, V> instanceRegistry;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private Adapter<K, V> adapter;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private SerializersConfigurer<K, V> serializersConfigurer;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private Repository<K, V> repository;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalHasher<K> hasher;
 
+    @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalDistributedPolicy() {
         // see also initialize()
     }
@@ -83,7 +89,8 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
     }
 
     @Override
-    public CacheEntry<@NonNull K, @NonNull V> getFromStore(K key, boolean includeEvicted) {
+    @SuppressWarnings("java:S2638")
+    public @Nullable CacheEntry<K, V> getFromStore(K key, boolean includeEvicted) {
         requireNonNull(key);
         return getAllFromStore(Set.of(key), includeEvicted).stream()
                 .filter(cacheEntry -> key.equals(cacheEntry.getKey()))
