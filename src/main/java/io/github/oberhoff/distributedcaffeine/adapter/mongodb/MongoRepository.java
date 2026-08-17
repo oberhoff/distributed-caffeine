@@ -34,6 +34,7 @@ import io.github.oberhoff.distributedcaffeine.adapter.AbstractRepository;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
+import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
 import io.github.oberhoff.distributedcaffeine.adapter.SerializerAware;
 import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
@@ -63,8 +64,8 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field.ST
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field.TIMESTAMP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field.VALUE;
 import static java.lang.String.format;
-import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
+import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toSet;
 
 final class MongoRepository<K, V> extends AbstractRepository<K, V> {
@@ -73,6 +74,10 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
     private static final UpdateOptions UPSERT_OPTIONS = new UpdateOptions().upsert(true);
     private static final BulkWriteOptions UNORDERED_BULK_WRITE_OPTIONS = new BulkWriteOptions().ordered(false);
     private static final Bson ALL_FIELDS_PROJECTION = Projections.include(Stream.of(Field.values())
+            .map(Object::toString)
+            .toList());
+    private static final Bson METADATA_FIELDS_PROJECTION = Projections.include(Stream.of(Field.values())
+            .filter(field -> field != KEY && field != VALUE)
             .map(Object::toString)
             .toList());
 
@@ -109,9 +114,24 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
 
     @Override
     public Stream<CacheEntry<K, V>> streamCacheEntries(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
-                                                       @Nullable Set<Field> fields, boolean orderByTimestampAsc) {
+                                                       boolean orderByTimestampAsc) {
+        return streamDocuments(hashes, statuses, orderByTimestampAsc, ALL_FIELDS_PROJECTION)
+                .map(document -> toCacheEntryOrNull(keySerializer, valueSerializer, document, LOGGER, identifier))
+                .filter(Objects::nonNull);
+    }
+
+    @Override
+    public Stream<CacheEntryMetadata> streamCacheEntryMetadata(@Nullable Set<String> hashes,
+                                                               @Nullable Set<Status> statuses,
+                                                               boolean orderByTimestampAsc) {
+        return streamDocuments(hashes, statuses, orderByTimestampAsc, METADATA_FIELDS_PROJECTION)
+                .map(document -> toCacheEntryMetadataOrNull(document, identifier))
+                .filter(Objects::nonNull);
+    }
+
+    private Stream<Document> streamDocuments(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
+                                             boolean orderByTimestampAsc, Bson projection) {
         Bson filter = getFilter(hashes, statuses, null);
-        Bson projection = getProjection(fields);
         Bson sort = orderByTimestampAsc
                 ? Sorts.ascending(TIMESTAMP.toString())
                 : null;
@@ -120,10 +140,7 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
                 .projection(projection)
                 .sort(sort)
                 .cursor();
-        return streamFromMongoCursor(mongoCursor)
-                .map(document ->
-                        toCacheEntryOrNull(keySerializer, valueSerializer, document, LOGGER, identifier))
-                .filter(Objects::nonNull);
+        return streamFromMongoCursor(mongoCursor);
     }
 
     @Override
@@ -260,39 +277,39 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
         return Filters.and(filters);
     }
 
-    private Bson getProjection(@Nullable Set<Field> fields) {
-        return isNull(fields)
-                ? ALL_FIELDS_PROJECTION
-                : Projections.include(Stream.of(Field.values())
-                .filter(fields::contains)
-                .map(Object::toString)
-                .toList());
-    }
-
     static <K, V> @Nullable CacheEntry<K, V> toCacheEntryOrNull(Serializer<K, ?> keySerializer,
-                                                                Serializer<V, ?> valueSerializer,
-                                                                Document document,
+                                                                Serializer<V, ?> valueSerializer, Document document,
                                                                 Logger logger, String identifier) {
         try {
-            return toCacheEntry(keySerializer, valueSerializer, document);
+            return CacheEntry.of(
+                    requireNonNull(document.getString(HASH.toString()), "hash cannot be null"),
+                    document.getString(OPERATION.toString()),
+                    deserializeFromMongo(document, KEY.toString(), keySerializer),
+                    deserializeFromMongo(document, VALUE.toString(), valueSerializer),
+                    Status.of(requireNonNull(document.getString(STATUS.toString()), "status cannot be null")),
+                    requireNonNull(document.getDate(TIMESTAMP.toString()), "timestamp cannot be null").toInstant());
         } catch (Exception e) {
             logger.log(Level.WARNING,
-                    format("Deserializing of cache entry failed for document '%s' at '%s'. Skipping...",
+                    format("Reading of cache entry failed for document '%s' at '%s'. Skipping...",
                             document, identifier), e);
             return null;
         }
     }
 
-    private static <K, V> CacheEntry<K, V> toCacheEntry(Serializer<K, ?> keySerializer,
-                                                        Serializer<V, ?> valueSerializer,
-                                                        Document document) throws Exception {
-        return CacheEntry.of(
-                document.getString(HASH.toString()),
-                document.getString(OPERATION.toString()),
-                deserializeFromMongo(document, KEY.toString(), keySerializer),
-                deserializeFromMongo(document, VALUE.toString(), valueSerializer),
-                Status.of(document.getString(STATUS.toString())),
-                document.getDate(TIMESTAMP.toString()).toInstant());
+    private static @Nullable CacheEntryMetadata toCacheEntryMetadataOrNull(Document document, String identifier) {
+        try {
+            return CacheEntryMetadata.of(
+                    requireNonNull(document.getString(HASH.toString()), "hash cannot be null"),
+                    document.getString(OPERATION.toString()),
+                    Status.of(requireNonNull(document.getString(STATUS.toString()), "status cannot be null")),
+                    requireNonNull(document.getDate(TIMESTAMP.toString()), "timestamp cannot be null")
+                            .toInstant());
+        } catch (Exception e) {
+            LOGGER.log(Level.WARNING,
+                    format("Reading of cache entry metadata failed for document '%s' at '%s'. Skipping...",
+                            document, identifier), e);
+            return null;
+        }
     }
 
     private static <T> @Nullable Object serializeToMongo(@Nullable T object, Serializer<T, ?> serializer)
@@ -319,7 +336,6 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
         return SerializerAware.deserialize(mongoValue, serializer);
     }
 
-    // null for the JSON literal 'null', which a serializer is free to produce - the caller passes it on as such
     private static @Nullable Object convertJsonToBson(String json) {
         String jsonKey = "jsonKey";
         String documentJson = format("{\"%s\":%s}", jsonKey, json);

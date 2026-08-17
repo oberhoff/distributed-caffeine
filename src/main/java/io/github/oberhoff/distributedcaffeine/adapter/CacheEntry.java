@@ -27,13 +27,16 @@ import java.util.stream.Stream;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Interface representing a cache entry containing key and value along with some metadata.
+ * Class representing a cache entry containing key and value along with some metadata (field values must meet certain
+ * conditions).
+ * <p>
+ * See {@link CacheEntryMetadata} for the metadata of a cache entry without its key and value.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
-public interface CacheEntry<K, V> {
+public final class CacheEntry<K, V> {
 
     /**
      * Fields of a cache entry used to store it in an underlying store, along with
@@ -41,7 +44,7 @@ public interface CacheEntry<K, V> {
      *
      * @author Andreas Oberhoff
      */
-    enum Field {
+    public enum Field {
 
         /**
          * Field used to store the hash of a cache entry (or the name of the command if status is
@@ -93,7 +96,7 @@ public interface CacheEntry<K, V> {
      *
      * @author Andreas Oberhoff
      */
-    enum Status {
+    public enum Status {
 
         /**
          * Status of a cache entry that was populated manually.
@@ -286,7 +289,7 @@ public interface CacheEntry<K, V> {
      *
      * @author Andreas Oberhoff
      */
-    enum Command {
+    public enum Command {
 
         /**
          * Command representing an 'invalidate all' operation.
@@ -305,94 +308,31 @@ public interface CacheEntry<K, V> {
         }
     }
 
-    /**
-     * Returns the hash of the cache entry (or the name of the command if status is {@link Status#COMMAND}, never
-     * {@code null}).
-     *
-     * @return the hash (or the name of the command if status is {@link Status#COMMAND}, never {@code null})
-     */
-    String getHash();
+    private final String hash;
+    private final @Nullable String operation;
+    private final @Nullable K key;
+    private final @Nullable V value;
+    private final Status status;
+    private final Instant timestamp;
 
-    /**
-     * Returns the operation identifier of the cache entry (can be {@code null}).
-     *
-     * @return the operation identifier (can be {@code null})
-     */
-    @Nullable String getOperation();
+    private CacheEntry(String hash, @Nullable String operation, @Nullable K key, @Nullable V value, Status status,
+                       Instant timestamp) {
+        requireNonNull(hash, "hash cannot be null");
+        requireNonNull(status, "status cannot be null");
+        requireNonNull(timestamp, "timestamp cannot be null");
+        if (!status.isCommand()) {
+            requireNonNull(key, "key cannot be null");
+        }
+        if (!status.isInvalidated() && !status.isCommand()) {
+            requireNonNull(value, "value cannot be null");
+        }
 
-    /**
-     * Returns the key of the cache entry (or {@code null} if status is {@link Status#COMMAND}).
-     *
-     * @return the key (or {@code null} if status is {@link Status#COMMAND})
-     */
-    @Nullable K getKey();
-
-    /**
-     * Returns the value of the cache entry (or {@code null} if status is in {@link Status#INVALIDATED_GROUP} or is
-     * {@link Status#COMMAND}).
-     *
-     * @return the value (or {@code null} if status is in {@link Status#INVALIDATED_GROUP} or is {@link Status#COMMAND})
-     */
-    @Nullable V getValue();
-
-    /**
-     * Returns the status of the cache entry (never{@code null}).
-     *
-     * @return the status (never{@code null})
-     */
-    Status getStatus();
-
-    /**
-     * Returns the timestamp of the cache entry (never {@code null}).
-     *
-     * @return the timestamp (never{@code null})
-     */
-    Instant getTimestamp();
-
-    /**
-     * Indicates whether the cache entry was populated or not.
-     *
-     * @return {@code true} if cache entry was populated, otherwise {@code false}
-     */
-    default boolean isCached() {
-        return getStatus().isCached();
-    }
-
-    /**
-     * Indicates whether the cache entry was invalidated or not.
-     *
-     * @return {@code true} if cache entry was invalidated, otherwise {@code false}
-     */
-    default boolean isInvalidated() {
-        return getStatus().isInvalidated();
-    }
-
-    /**
-     * Indicates whether the cache entry was evicted or not regardless of whether extended persistence was configured or
-     * not.
-     *
-     * @return {@code true} if cache entry was evicted, otherwise {@code false}
-     */
-    default boolean isEvicted() {
-        return getStatus().isEvicted();
-    }
-
-    /**
-     * Indicates whether the cache entry was evicted or not while extended persistence was not configured.
-     *
-     * @return {@code true} if cache entry was evicted, otherwise {@code false}
-     */
-    default boolean isEvictedExtended() {
-        return getStatus().isEvictedExtended();
-    }
-
-    /**
-     * Indicates whether the cache entry carries a command instead of belonging to a key or not.
-     *
-     * @return {@code true} if cache entry carries a command, otherwise {@code false}
-     */
-    default boolean isCommand() {
-        return getStatus().isCommand();
+        this.hash = hash;
+        this.operation = operation;
+        this.key = key;
+        this.value = value;
+        this.status = status;
+        this.timestamp = timestamp;
     }
 
     /**
@@ -407,81 +347,148 @@ public interface CacheEntry<K, V> {
      * @param timestamp the timestamp (never {@code null})
      * @param <K>       the key type of the cache
      * @param <V>       the value type of the cache
-     * @return the cache entry
+     * @return the new cache entry
+     * @throws NullPointerException if a field value does not meet the conditions of a cache entry
      */
-    static <K, V> CacheEntry<K, V> of(String hash, @Nullable String operation, @Nullable K key, @Nullable V value,
-                                      Status status, Instant timestamp) {
-        requireNonNull(hash, "hash cannot be null");
-        requireNonNull(status, "status cannot be null");
-        requireNonNull(timestamp, "timestamp cannot be null");
-        if (!status.isCommand()) {
-            requireNonNull(key, "key cannot be null");
-        }
-        if (!status.isCommand() && !status.isInvalidated()) {
-            requireNonNull(key, "value cannot be null");
-        }
+    public static <K, V> CacheEntry<K, V> of(String hash, @Nullable String operation, @Nullable K key,
+                                             @Nullable V value, Status status, Instant timestamp) {
+        return new CacheEntry<>(hash, operation, key, value, status, timestamp);
+    }
 
-        return new CacheEntry<>() {
+    /**
+     * Returns the hash of the cache entry (or the name of the command if status is {@link Status#COMMAND}, never
+     * {@code null}).
+     *
+     * @return the hash (or the name of the command if status is {@link Status#COMMAND}, never {@code null})
+     */
+    public String getHash() {
+        return hash;
+    }
 
-            @Override
-            public String getHash() {
-                return hash;
-            }
+    /**
+     * Returns the operation identifier of the cache entry (can be {@code null}).
+     *
+     * @return the operation identifier (can be {@code null})
+     */
+    public @Nullable String getOperation() {
+        return operation;
+    }
 
-            @Override
-            public @Nullable String getOperation() {
-                return operation;
-            }
+    /**
+     * Returns the key of the cache entry (or {@code null} if status is {@link Status#COMMAND}).
+     *
+     * @return the key (or {@code null} if status is {@link Status#COMMAND})
+     */
+    public @Nullable K getKey() {
+        return key;
+    }
 
-            @Override
-            public @Nullable K getKey() {
-                return key;
-            }
+    /**
+     * Returns the value of the cache entry (or {@code null} if status is in {@link Status#INVALIDATED_GROUP} or is
+     * {@link Status#COMMAND}).
+     *
+     * @return the value (or {@code null} if status is in {@link Status#INVALIDATED_GROUP} or is {@link Status#COMMAND})
+     */
+    public @Nullable V getValue() {
+        return value;
+    }
 
-            @Override
-            public @Nullable V getValue() {
-                return value;
-            }
+    /**
+     * Returns the status of the cache entry (never {@code null}).
+     *
+     * @return the status (never {@code null})
+     */
+    public Status getStatus() {
+        return status;
+    }
 
-            @Override
-            public Status getStatus() {
-                return status;
-            }
+    /**
+     * Returns the timestamp of the cache entry (never {@code null}).
+     *
+     * @return the timestamp (never {@code null})
+     */
+    public Instant getTimestamp() {
+        return timestamp;
+    }
 
-            @Override
-            public Instant getTimestamp() {
-                return timestamp;
-            }
+    /**
+     * Indicates whether the cache entry was populated or not.
+     *
+     * @return {@code true} if cache entry was populated, otherwise {@code false}
+     */
+    public boolean isCached() {
+        return status.isCached();
+    }
 
-            @Override
-            public boolean equals(@Nullable Object object) {
-                if (this == object) return true;
-                if (object == null || getClass() != object.getClass()) return false;
-                CacheEntry<?, ?> that = (CacheEntry<?, ?>) object;
-                return Objects.equals(this.getHash(), that.getHash())
-                        && Objects.equals(this.getOperation(), that.getOperation())
-                        && Objects.equals(this.getKey(), that.getKey())
-                        && Objects.equals(this.getValue(), that.getValue())
-                        && Objects.equals(this.getStatus(), that.getStatus())
-                        && Objects.equals(alignTimestamp(this.getTimestamp()), alignTimestamp(that.getTimestamp()));
-            }
+    /**
+     * Indicates whether the cache entry was invalidated or not.
+     *
+     * @return {@code true} if cache entry was invalidated, otherwise {@code false}
+     */
+    public boolean isInvalidated() {
+        return status.isInvalidated();
+    }
 
-            @Override
-            public int hashCode() {
-                return Objects.hash(getHash(), getOperation(), getKey(), getValue(), getStatus(),
-                        alignTimestamp(timestamp));
-            }
+    /**
+     * Indicates whether the cache entry was evicted or not regardless of whether extended persistence was configured or
+     * not.
+     *
+     * @return {@code true} if cache entry was evicted, otherwise {@code false}
+     */
+    public boolean isEvicted() {
+        return status.isEvicted();
+    }
 
-            @Override
-            public String toString() {
-                return "CacheEntry{hash=%s, operation=%s, key=%s, value=%s, status=%s, timestamp=%s}"
-                        .formatted(getHash(), getOperation(), getKey(), getValue(), getStatus(),
-                                alignTimestamp(getTimestamp()));
-            }
+    /**
+     * Indicates whether the cache entry was evicted or not while extended persistence was not configured.
+     *
+     * @return {@code true} if cache entry was evicted, otherwise {@code false}
+     */
+    public boolean isEvictedExtended() {
+        return status.isEvictedExtended();
+    }
 
-            private Instant alignTimestamp(Instant timestamp) {
-                return timestamp.truncatedTo(ChronoUnit.MILLIS);
-            }
-        };
+    /**
+     * Indicates whether the cache entry carries a command instead of belonging to a key or not.
+     *
+     * @return {@code true} if cache entry carries a command, otherwise {@code false}
+     */
+    public boolean isCommand() {
+        return status.isCommand();
+    }
+
+    @Override
+    public boolean equals(@Nullable Object object) {
+        if (object == this) return true;
+        if (object == null || object.getClass() != getClass()) return false;
+        CacheEntry<?, ?> that = (CacheEntry<?, ?>) object;
+        return Objects.equals(this.hash, that.hash)
+                && Objects.equals(this.operation, that.operation)
+                && Objects.equals(this.key, that.key)
+                && Objects.equals(this.value, that.value)
+                && Objects.equals(this.status, that.status)
+                && Objects.equals(alignTimestamp(this.timestamp), alignTimestamp(that.timestamp));
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(hash, operation, key, value, status, alignTimestamp(timestamp));
+    }
+
+    @Override
+    public String toString() {
+        return "%s{%s=%s, %s=%s, %s=%s, %s=%s, %s=%s, %s=%s}".formatted(getClass().getSimpleName(),
+                Field.HASH, hash,
+                Field.OPERATION, operation,
+                Field.KEY, key,
+                Field.VALUE, value,
+                Field.STATUS, status,
+                Field.TIMESTAMP, alignTimestamp(timestamp));
+    }
+
+    // the underlying store may keep a timestamp at a coarser resolution than the one handed to it, so comparing them
+    // has to happen at the resolution both sides can represent
+    static Instant alignTimestamp(Instant timestamp) {
+        return timestamp.truncatedTo(ChronoUnit.MILLIS);
     }
 }

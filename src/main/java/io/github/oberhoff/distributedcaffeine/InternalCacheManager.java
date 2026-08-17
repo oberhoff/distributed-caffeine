@@ -271,14 +271,6 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
         }
     }
 
-    // the three callers below publish outside the synchronization lock because they run where taking it would
-    // deadlock with Caffeine's internal lock. Whatever the returned future carries is therefore the only trace a
-    // failure leaves, and dropping it hides a store that is refusing writes: the distribution is simply lost, while
-    // locally everything looks like it succeeded
-    // TODO logging makes such a failure visible but does not make the instances converge again. Retrying is not
-    // enough on its own, because upsertCacheEntries() writes the status unconditionally, so a delayed retry can
-    // overwrite a newer CACHED write for the same key with a stale EVICTED one. Letting the data store drive the
-    // correction (as invalidate-on-prune does for extended persistence) is the more promising direction
     private void stampOperations(Map<? extends InternalKey<K>, ? extends @Nullable InternalValue<V>> map) {
         map.values().stream()
                 .filter(Objects::nonNull)
@@ -313,6 +305,14 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
                 > Long.parseLong(arriving.substring(prefix.length()));
     }
 
+    // the three callers of this method publish outside the synchronization lock because they run where taking it
+    // would deadlock with Caffeine's internal lock. Whatever the returned future carries is therefore the only trace
+    // a failure leaves, and dropping it hides a store that is refusing writes: the distribution is simply lost, while
+    // locally everything looks like it succeeded
+    // TODO logging makes such a failure visible but does not make the instances converge again. Retrying is not
+    // enough on its own, because upsertCacheEntries() writes the status unconditionally, so a delayed retry can
+    // overwrite a newer CACHED write for the same key with a stale EVICTED one. Letting the data store drive the
+    // correction (as invalidate-on-prune does for extended persistence) is the more promising direction
     private void publishCacheEntriesAsync(Map<? extends InternalKey<K>, ? extends @Nullable InternalValue<V>> map,
                                           Status status) {
         // Deliberately without an operation, so that what is published here arrives like a change of any other cache
@@ -472,7 +472,6 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
                 try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
                         null,
                         CACHED_GROUP,
-                        null,
                         true))) {
                     retrieveCacheEntries(cacheEntryStream);
                 }

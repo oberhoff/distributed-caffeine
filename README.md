@@ -55,52 +55,109 @@ more complex or more expensive tools with comparable features.
 
 ## Usage
 
+### Adapters
+
+Before the actual (store-agnostic) Distributed Caffeine cache instances are specified, an adapter must be configured to
+provide the connection to the underlying store. An already built-in `MongoAdapter` for MongoDB can be used or custom
+adapters can be implemented based on the `Adapter` interface.
+
+#### Configuration of an adapter for MongoDB
+
+The configuration of the MongoDB-based adapter always starts with a builder returned by invoking the
+`MongoAdapter.newBuilder(mongoClient, databaseName, collectionName)` method and ends with finalizing the builder by
+invoking one of the `build()` methods to construct the adapter instance. The `mongoClient`, `databaseName` and
+`collectionName` parameters refer to the MongoDB client, database name and collection name used for distributed
+synchronization and persistence. Optionally, a discriminator can be specified (using the `withDiscriminator(...)`
+method) to distinguish between cache entries from different caches that share a collection in MongoDB.
+
+```java
+MongoAdapter<Key, Value> adapter = MongoAdapter.newBuilder(mongoClient, databaseName, collectionName)
+    .withDiscriminator("discriminator") // optional with default
+    .build();
+```
+
+Note: An adapter instance belongs to exactly one cache instance and cannot be shared between them.
+
+### Distributed Caffeine Caches
+
 Distributed Caffeine cache instances are represented by `DistributedCache` and `DistributedLoadingCache` interfaces
 which are derived from Caffeine's `Cache` and `LoadingCache` interfaces and therefore offer almost the same usage and
 integration options (drop-in replacement possible). Please refer to the official
 [Caffeine documentation](https://github.com/ben-manes/caffeine/wiki) for more details on use and integration.
 
-The configuration of a cache always starts with a builder returned by invoking the `newBuilder(mongoCollection)` method
-and ends with finalizing the builder by invoking one of the `build(...)` methods to construct the cache instance. The
-`mongoCollection` parameter refers to the MongoDB collection used for distributed synchronization and persistence.
+#### Minimal configurations of distributed (loading) caches
 
-#### Minimal configuration of a distributed cache
+The configuration of a cache always starts with a builder returned by invoking the
+`DistributedCaffeine.newBuilder(adapter)` method and ends with finalizing the builder by invoking one of the
+`build(...)` methods to construct the cache instance. The `adapter` parameter refers to the adapter instance build like
+described above.
 
 ```java
-DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(mongoCollection)
+DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(adapter)
     .build();
 ```
 
-#### Minimal configuration of a distributed loading cache
-
 ```java
-DistributedLoadingCache<Key, Value> distributedLoadingCache = DistributedCaffeine.newBuilder(mongoCollection)
+DistributedLoadingCache<Key, Value> distributedLoadingCache = DistributedCaffeine.newBuilder(adapter)
     .build(key -> loadExpensiveValue(key));
 ```
 
 #### Configuration of the Caffeine cache used internally
 
+The configuration of the Caffeine cache used internally also starts with a builder returned by invoking its own 
+`Caffeine.newBuilder()` method, however the builder is not finalized by invoking one of its own `build(...)` methods 
+(this construction is done internally by the outer `build(...)` methods instead). If the configuration of the Caffeine 
+cache is skipped, a default (empty) configuration is used. Please refer to the official
+[Caffeine documentation](https://github.com/ben-manes/caffeine/wiki) for more details on configuration.
+
 ```java
-DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(mongoCollection)
+DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(adapter)
     .withCaffeine(Caffeine.newBuilder()
         .maximumSize(10_000)
         .expireAfterWrite(Duration.ofMinutes(10)))
     .build();
 ```
 
-Please note that the configuration of the Caffeine cache used internally also starts with a builder returned by invoking
-its own `newBuilder()` method, but that the builder is not finalized by invoking one of its own `build(...)` methods
-(this construction is done internally by the outer `build(...)` methods instead). If the configuration of the Caffeine
-cache is skipped, a default (empty) configuration is used. Please refer to the official
-[Caffeine documentation](https://github.com/ben-manes/caffeine/wiki) for more details on configuration.
+#### Configuration of hashing (for keys of cache entries)
 
-#### Configuration of the distribution mode
+Cache entries need to be identifiable in the underlying store by a hash computed for their keys. Keys of type `String`,
+`Long`, `Integer` or `UUID` are hashed out of the box. For other types of keys two ways for computation of hashes are
+supported.
+
+If the implementation of the key class cannot or should not be changed, a hash provider can be configured. The supplied
+hasher can be used to compute and return a hash based on values of the given key.
 
 ```java
-DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(mongoCollection)
-    .withDistributionMode(DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION)
+DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(adapter)
+    .withHashProvider((key, hasher) -> hasher.get()
+        .putUUID(key.getId())
+        .putLong(key.getVersion())
+        .putString(key.getName())
+        .getHash())
     .build();
 ```
+
+Alternatively, the key class can implement the `Hashable` interface. The supplied hasher can be used to compute and
+return a hash based on values of the key instance.
+
+```java
+public class Key implements Hashable {
+    @Override
+    public String getHash(Supplier<Hasher> hasher) {
+       return hasher.get()
+           .putUUID(this.id)
+           .putLong(this.version)
+           .putString(this.name)
+           .getHash();
+    }
+}
+```
+
+Note: Hashing must be equivalent to key equality (`equals()`-semantics) and stable across cache instances, so
+all values relevant for key equality (and only those) should be put into a hasher. A specified hash provider always
+takes precedence over the alternatives listed above.
+
+#### Configuration of the distribution mode
 
 Distribution modes include/exclude different types of cache operations (population, invalidation, eviction) which are
 then considered or not considered for distributed synchronization between cache instances. The following distribution
@@ -116,15 +173,16 @@ modes are provided:
 * `INVALIDATION`: Includes invalidation (explicit removal), but excludes population (manual or loading) and eviction
   (size- or time-based removal).
 
-#### Configuration of serialization
-
 ```java
-DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(mongoCollection)
-    .withSerializers(configurer -> configurer
-        .withKeySerializer(new JacksonSerializer<>(Key.class, storeAsBinaryJson))
-        .withValueSerializer(new JacksonSerializer<>(Value.class, storeAsBinaryJson)))
+DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(adapter)
+    .withDistributionMode(DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION)
     .build();
 ```
+
+Note: Invalidations are distributed to other cache instances independently of what the invalidating cache
+instance holds.
+
+#### Configuration of serialization
 
 Keys and values of cache entries must be serialized for storing and deserialized when loaded back into the cache
 instances. Already built-in serializers are `ForySerializer` (default, no explicit configuration needed, stores objects
@@ -136,10 +194,32 @@ format using classic
 built-in serializers or by implementing one of the `ByteArraySerializer`, `StringSerializer` or `JsonSerializer`
 interfaces.
 
+```java
+DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(adapter)
+    .withSerializers(configurer -> configurer
+        .withKeySerializer(new JacksonSerializer<>(Key.class, storeAsBinaryJson))
+        .withValueSerializer(new JacksonSerializer<>(Value.class, storeAsBinaryJson)))
+    .build();
+```
+
 #### Configuration of extended persistence
 
+Persistence can be extended for evicted cache entries (regardless of whether the configured distribution mode includes
+evictions), so that even if they are no longer held in-memory by any cache instance, they remain (if not invalidated) in
+the underlying store and may be reloaded on demand. Extended persistence can also be limited by size (configuring the
+maximum number of evicted cache entries that will remain) and time (configuring the maximum amount of time that evicted
+cache entries will remain).
+
+Reloading of those cache entries can be configured by enabling loading strategies. Using the loading strategy for cache
+loader means that a provided cache loader is only invoked to obtain missing cache entries if these could not be reloaded
+from the underlying store beforehand.
+
+Alternatively, the `getFromStore(...)` or `getAllFromStore(...)` methods flagged with `includeEvicted=true` (via
+`cacheInstance.distributedPolicy()`) can be used to load those cache entries directly from the underlying store
+bypassing the cache instance.
+
 ```java
-DistributedLoadingCache<Key, Value> distributedLoadingCache = DistributedCaffeine.newBuilder(mongoCollection)
+DistributedLoadingCache<Key, Value> distributedLoadingCache = DistributedCaffeine.newBuilder(adapter)
     .withCaffeine(Caffeine.newBuilder()
         .maximumSize(10_000)
         .expireAfterWrite(Duration.ofMinutes(10)))
@@ -150,20 +230,6 @@ DistributedLoadingCache<Key, Value> distributedLoadingCache = DistributedCaffein
     .build(key -> loadExpensiveValue(key)); // cache loader
 ```
 
-Persistence can be extended for evicted cache entries (regardless of whether the configured distribution mode includes
-evictions), so that even if they are no longer held in-memory by any cache instance, they remain in the underlying
-store and may be reloaded on demand. Extended persistence can also be limited by size (configuring the maximum number of
-evicted cache entries that will remain) and time (configuring the maximum amount of time that evicted cache
-entries will remain).
-
-Reloading of those cache entries can be configured by enabling loading strategies. Using the loading strategy for cache
-loader means that a provided cache loader is only invoked to obtain missing cache entries if these could not be reloaded
-from the underlying store beforehand.
-
-Alternatively, the `getFromStore(...)` or `getAllFromStore(...)` methods flagged with `includeEvicted=true` (via
-`cacheInstance.distributedPolicy()`) can be used to load those cache entries directly from the underlying store
-bypassing the cache instance.
-
 ## Remarks
 
 * Distributed Caffeine only supports the
@@ -173,8 +239,6 @@ bypassing the cache instance.
   [weak or soft references for keys or values](https://github.com/ben-manes/caffeine/wiki/Eviction#reference-based) is
   not supported. Even when using Caffeine (stand-alone), it is advisable to use the more predictable size- or time-based
   eviction instead.
-* Any custom objects used as keys for cache entries should implement the `hashCode()` method, keeping in mind the
-  importance of good value distribution and low collision rates (`Objects.hash(...)` method might be helpful).
 * Manipulating cache entries or their metadata directly in the MongoDB collection should be done with caution.
   Corresponding cache instances might attempt to reflect certain changes immediately, which may fail if the changed data
   cannot be interpreted correctly anymore.
@@ -182,8 +246,8 @@ bypassing the cache instance.
   caution. The newly configured cache instances attempt to synchronize any existing legacy data from the corresponding
   MongoDB collection, which may fail if the legacy data cannot be interpreted correctly anymore. Corresponding MongoDB
   collections should be cleaned up (or perhaps migrated) beforehand.
-* Related cache instances (sharing the same MongoDB collection) must be configured in the same way to prevent
-  unpredictable behavior.
+* Related cache instances (sharing the same MongoDB collection and discriminator) must be configured in the same way to
+  prevent unpredictable behavior.
 * Each cache instance requires its own connection to MongoDB for watching change streams. If many cache instances are
   used or many connections are used elsewhere, the connection pool might be enlarged. The default pool size is 100,
   which is sufficient for most cases.

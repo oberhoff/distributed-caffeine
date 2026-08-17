@@ -22,7 +22,6 @@ import java.util.Collection;
 import java.util.Set;
 import java.util.stream.Stream;
 
-import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 
 /**
@@ -30,8 +29,8 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
  * underlying store.
  * <p>
  * <b>Note:</b> Every operation must implicitly be restricted to a discriminator set via
- * {@link DiscriminatorAware#setDiscriminator(String)} and stored in {@link Repository#DISCRIMINATOR_FIELD}, along with
- * fields from {@link CacheEntry.Field}.
+ * {@link DiscriminatorAware#setDiscriminator(String)} and stored in a {@link Repository#DISCRIMINATOR_FIELD}, along
+ * with fields from {@link CacheEntry.Field}.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
@@ -68,18 +67,41 @@ public interface Repository<K, V> extends IdentifierAware, DiscriminatorAware, S
      * <p>
      * <b>Note:</b> Parameters expect conditional handling, see details below (filtering by discriminator must be
      * implicit).
+     * <p>
+     * <b>Note:</b> A cache entry that could not be read for whatever reason (e.g. deserialization fails or field values
+     * do not meet the conditions of a cache entry) should be skipped and logged instead of breaking the stream
+     * exceptionally.
      *
      * @param hashes              the hashes to filter by ({@code null} means to omit this filter)
      * @param statuses            the statuses to filter by ({@code null} means to omit this filter)
-     * @param fields              the fields to return within the cache entry ({@code null} means to return all fields)
      * @param orderByTimestampAsc {@code true} if returned cache entries should be ordered ascending by timestamp,
-     *                            {@code false} otherwise (order does not matter)
+     *                            otherwise {@code false} (order does not matter)
      * @return a stream of cache entries
      * @throws Exception if streaming fails
      */
     Stream<CacheEntry<K, V>> streamCacheEntries(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
-                                                @Nullable Set<Field> fields,
                                                 boolean orderByTimestampAsc) throws Exception;
+
+    /**
+     * Returns a (optionally ordered) stream of metadata of cache entries from the underlying store that match the
+     * specified parameters.
+     * <p>
+     * <b>Note:</b> Parameters expect conditional handling, see details below (filtering by discriminator must be
+     * implicit).
+     * <p>
+     * <b>Note:</b> Metadata of a cache entry that could not be read for whatever reason (e.g. field values do not meet
+     * the conditions of the metadata of a cache entry) should be skipped and logged instead of breaking the stream
+     * exceptionally.
+     *
+     * @param hashes              the hashes to filter by ({@code null} means to omit this filter)
+     * @param statuses            the statuses to filter by ({@code null} means to omit this filter)
+     * @param orderByTimestampAsc {@code true} if returned metadata of cache entries should be ordered ascending by
+     *                            timestamp, otherwise {@code false} (order does not matter)
+     * @return a stream of metadata of cache entries
+     * @throws Exception if streaming fails
+     */
+    Stream<CacheEntryMetadata> streamCacheEntryMetadata(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
+                                                        boolean orderByTimestampAsc) throws Exception;
 
     /**
      * Updates status of cache entries from the underlying store that match the specified parameters. The operation

@@ -18,7 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import dev.failsafe.Failsafe;
 import dev.failsafe.RetryPolicy;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.ExtendedPersistenceConfigurer;
-import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
+import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 
 import java.lang.System.Logger;
@@ -162,14 +162,14 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
             if (count > maximumSize) {
                 long limit = count - maximumSize;
                 Set<String> hashes = new HashSet<>(maximumSize);
-                try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
-                        null,
-                        EVICTED_EXTENDED_GROUP,
-                        null, // TODO use projection
-                        true))) {
-                    cacheEntryStream
+                try (Stream<CacheEntryMetadata> cacheEntryMetadataStream = getFailable(() ->
+                        repository.streamCacheEntryMetadata(
+                                null,
+                                EVICTED_EXTENDED_GROUP,
+                                true))) {
+                    cacheEntryMetadataStream
                             .limit(limit)
-                            .map(CacheEntry::getHash)
+                            .map(CacheEntryMetadata::getHash)
                             .forEach(hashes::add);
                 }
                 if (!hashes.isEmpty()) {

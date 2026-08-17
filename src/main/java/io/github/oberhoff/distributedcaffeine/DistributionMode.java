@@ -19,6 +19,8 @@ package io.github.oberhoff.distributedcaffeine;
  * Modes for defining the scope of distributed synchronization. Each mode includes/excludes different types of cache
  * operations (population, invalidation, eviction) which are then considered or not considered for distributed
  * synchronization between cache instances.
+ * <p>
+ * <b>Note:</b> Invalidations are distributed to other cache instances independently of what this cache instance holds.
  *
  * @author Andreas Oberhoff
  */
@@ -27,8 +29,6 @@ public enum DistributionMode {
     /**
      * Includes population (manual or loading), invalidation (explicit removal) and eviction (size- or time-based
      * removal).
-     * <p>
-     * <b>Note:</b> This is the default distribution mode and corresponds to a full replication.
      */
     POPULATION_AND_INVALIDATION_AND_EVICTION(true, true, true),
 

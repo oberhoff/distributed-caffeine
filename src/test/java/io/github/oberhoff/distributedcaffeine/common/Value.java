@@ -63,10 +63,10 @@ public class Value implements Serializable {
     }
 
     @Override
-    public boolean equals(Object obj) {
-        if (obj == this) return true;
-        if (obj == null || obj.getClass() != this.getClass()) return false;
-        Value that = (Value) obj;
+    public boolean equals(Object object) {
+        if (object == this) return true;
+        if (object == null || object.getClass() != getClass()) return false;
+        Value that = (Value) object;
         return Objects.equals(this.id, that.id)
                 && Objects.equals(this.name, that.name);
     }

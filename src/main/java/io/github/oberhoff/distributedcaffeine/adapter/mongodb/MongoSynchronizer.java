@@ -232,6 +232,9 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
         OperationType operationType = changeStreamDocument.getOperationType();
         if (nonNull(changeStreamDocument.getFullDocument()) && nonNull(operationType)
                 && (operationType.equals(INSERT) || operationType.equals(UPDATE))) {
+            // skipped (logged and left out) rather than thrown on, as the contract of a synchronizer asks for: the
+            // resume token is advanced only once an event has been applied, so failing here would make the watcher
+            // retry that very event indefinitely
             CacheEntry<K, V> cacheEntry = toCacheEntryOrNull(keySerializer, valueSerializer,
                     changeStreamDocument.getFullDocument(), LOGGER, identifier);
             Optional.ofNullable(cacheEntry)

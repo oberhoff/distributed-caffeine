@@ -20,6 +20,9 @@ import java.util.Collection;
 /**
  * Interface representing a retriever that manages distributed synchronization between cache instances using an
  * underlying store.
+ * <p>
+ * <b>Note:</b> Inbound changes of the underlying store are supposed to be passed on as cache entries by the
+ * {@link Adapter} using the retriever.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache

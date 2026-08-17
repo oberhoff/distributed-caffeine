@@ -88,7 +88,6 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
     // that is not nullable, and making it one would declare every other method of this cache as holding nullable
     // values, which none of them do
     @Override
-    @SuppressWarnings({"java:S2638", "NullAway"})
     public @Nullable V get(K key) {
         requireNonNull(key);
         return synchronizationLock.getLockedOrNull(() ->
@@ -103,12 +102,12 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
     }
 
     @Override
-    public CompletableFuture<V> refresh(K key) {
+    public CompletableFuture<@Nullable V> refresh(K key) {
         requireNonNull(key);
         // custom implementation to bypass problematic internal asynchronous handling
         // accepted drawback: no mapping of in-flight refresh operations in policy.refreshes()
         return refreshAll(Set.of(key))
-                .thenApplyAsync(map -> map.get(key), executor);
+                .<@Nullable V>thenApplyAsync(map -> map.get(key), executor);
     }
 
     @Override

@@ -42,6 +42,7 @@ import io.github.oberhoff.distributedcaffeine.adapter.AbstractSynchronizer;
 import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
+import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.adapter.Retriever;
 import io.github.oberhoff.distributedcaffeine.adapter.Synchronizer;
@@ -61,6 +62,7 @@ import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.assertj.core.api.AbstractLongAssert;
 import org.bson.Document;
 import org.bson.conversions.Bson;
+import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.NullUnmarked;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -149,6 +151,7 @@ import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.lang.System.getProperty;
 import static java.time.temporal.ChronoUnit.FOREVER;
+import static java.time.temporal.ChronoUnit.MILLIS;
 import static java.util.stream.Collectors.toMap;
 import static java.util.stream.Collectors.toSet;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -561,7 +564,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(Key key) throws Exception {
+                public Value load(@NonNull Key key) throws Exception {
                     throw new UnsupportedOperationException();
                 }
             });
@@ -658,13 +661,13 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(Key key) throws Exception {
+                public Value load(@NonNull Key key) throws Exception {
                     throw new UnsupportedOperationException(); // ensure load() is never invoked
                 }
 
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Map<? extends Key, ? extends Value> loadAll(Set<? extends Key> keys) throws Exception {
+                public @NonNull Map<? extends Key, ? extends Value> loadAll(@NonNull Set<? extends Key> keys) throws Exception {
                     throw new UnsupportedOperationException(); // override loadAll() explicitly
                 }
             });
@@ -775,7 +778,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(Key key) throws Exception {
+                public Value load(@NonNull Key key) throws Exception {
                     throw new UnsupportedOperationException();
                 }
             });
@@ -1018,7 +1021,7 @@ final class DistributedCaffeineIntegrationTests {
                 }
 
                 @Override
-                public CompletableFuture<? extends Value> asyncReload(Key key, Value oldValue, Executor executor) {
+                public @NonNull CompletableFuture<? extends Value> asyncReload(@NonNull Key key, @NonNull Value oldValue, @NonNull Executor executor) {
                     reloadInvocations.incrementAndGet();
                     return CompletableFuture.supplyAsync(() -> {
                         reloadStarted.countDown();
@@ -1148,7 +1151,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(Key key) throws Exception {
+                public Value load(@NonNull Key key) throws Exception {
                     throw new UnsupportedOperationException();
                 }
             });
@@ -1410,7 +1413,7 @@ final class DistributedCaffeineIntegrationTests {
                 }
 
                 @Override
-                public CompletableFuture<? extends Value> asyncReload(Key key, Value oldValue, Executor executor) {
+                public @NonNull CompletableFuture<? extends Value> asyncReload(Key key, @NonNull Value oldValue, @NonNull Executor executor) {
                     return key.equals(key2)
                             ? CompletableFuture.failedFuture(new IllegalStateException("unchecked"))
                             : CompletableFuture.completedFuture(Value.of(key.getId(), "reloaded"));
@@ -1481,7 +1484,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(Key key) throws Exception {
+                public Value load(@NonNull Key key) throws Exception {
                     throw new UnsupportedOperationException();
                 }
             });
@@ -1636,7 +1639,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(Key key) throws Exception {
+                public Value load(@NonNull Key key) throws Exception {
                     throw new UnsupportedOperationException();
                 }
             });
@@ -3671,7 +3674,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(Key key) throws Exception {
+                public Value load(@NonNull Key key) throws Exception {
                     throw new UnsupportedOperationException();
                 }
             });
@@ -3813,7 +3816,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(Key key) throws Exception {
+                public Value load(@NonNull Key key) throws Exception {
                     throw new UnsupportedOperationException();
                 }
             });
@@ -4042,7 +4045,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(Key key) throws Exception {
+                public Value load(@NonNull Key key) throws Exception {
                     throw new UnsupportedOperationException();
                 }
             });
@@ -4533,7 +4536,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(Key key) throws Exception {
+                public Value load(@NonNull Key key) throws Exception {
                     throw new UnsupportedOperationException();
                 }
             });
@@ -5144,10 +5147,10 @@ final class DistributedCaffeineIntegrationTests {
         @Test
         void test_Adapter() throws Exception {
             Set<CacheEntry<Key, Value>> retrievedCacheEntries = new HashSet<>();
-            @SuppressWarnings({"Convert2Lambda", "Anonymous2MethodRef"})
+            @SuppressWarnings("Convert2Lambda")
             Retriever<Key, Value> retriever = spy(new Retriever<Key, Value>() {
                 @Override
-                public void retrieveCacheEntries(Collection<CacheEntry<Key, Value>> cacheEntries) {
+                public void retrieveCacheEntries(@NonNull Collection<CacheEntry<Key, Value>> cacheEntries) {
                     retrievedCacheEntries.addAll(cacheEntries);
                 }
             });
@@ -5197,7 +5200,7 @@ final class DistributedCaffeineIntegrationTests {
 
             List<io.github.oberhoff.distributedcaffeine.adapter.CacheEntry<Key, Value>> foundCacheEntries = new ArrayList<>();
             try (Stream<io.github.oberhoff.distributedcaffeine.adapter.CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries(null, null, null, false)) {
+                         repository.streamCacheEntries(null, null, false)) {
                 stream.forEach(foundCacheEntries::add);
             }
 
@@ -5258,60 +5261,112 @@ final class DistributedCaffeineIntegrationTests {
 
             // streamCacheEntries unfiltered
             try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries(null, null, null, false)) {
+                         repository.streamCacheEntries(null, null, false)) {
                 assertThat(stream.toList())
                         .containsExactlyInAnyOrder(cachedEntry1, cachedEntry2, invalidatedEntry3);
             }
 
             // streamCacheEntries filtered by hashes
             try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries(Set.of("h1", "h2"), null, null, false)) {
+                         repository.streamCacheEntries(Set.of("h1", "h2"), null, false)) {
                 assertThat(stream.toList())
                         .containsExactlyInAnyOrder(cachedEntry1, cachedEntry2);
             }
 
             // streamCacheEntries filtered by statuses
             try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries(null, Set.of(CACHED), null, false)) {
+                         repository.streamCacheEntries(null, Set.of(CACHED), false)) {
                 assertThat(stream.toList())
                         .containsExactlyInAnyOrder(cachedEntry1, cachedEntry2);
             }
 
             // streamCacheEntries filtered by hashes and statuses combined
             try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries(Set.of("h1", "h2", "h3"), Set.of(INVALIDATED), null, false)) {
+                         repository.streamCacheEntries(Set.of("h1", "h2", "h3"), Set.of(INVALIDATED), false)) {
                 assertThat(stream.toList())
                         .containsExactly(invalidatedEntry3);
             }
 
             // streamCacheEntries ordered ascending by timestamp
             try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries(null, null, null, true)) {
+                         repository.streamCacheEntries(null, null, true)) {
                 assertThat(stream.toList())
                         .containsExactly(cachedEntry1, cachedEntry2, invalidatedEntry3);
             }
 
-            // streamCacheEntries with a field projection returns only the requested fields (others are not populated)
-            List<CacheEntry<Key, Value>> projectedEntries;
-            try (Stream<CacheEntry<Key, Value>> stream = repository.streamCacheEntries(Set.of("h1"), null,
-                    Set.of(CacheEntry.Field.HASH, CacheEntry.Field.KEY,
-                            CacheEntry.Field.STATUS, CacheEntry.Field.TIMESTAMP), false)) {
-                projectedEntries = stream.toList();
+            // streamCacheEntryMetadata returns everything except key and value, which are the fields it exists to
+            // avoid reading (and deserializing) at all
+            List<CacheEntryMetadata> cacheEntryMetadata;
+            try (Stream<CacheEntryMetadata> stream =
+                         repository.streamCacheEntryMetadata(Set.of("h1"), null, false)) {
+                cacheEntryMetadata = stream.toList();
             }
-            assertThat(projectedEntries).hasSize(1);
-            CacheEntry<Key, Value> projectedEntry = projectedEntries.get(0);
-            assertThat(projectedEntry.getHash()).isEqualTo("h1");
-            assertThat(projectedEntry.getKey()).isEqualTo(Key.of(1));
-            assertThat(projectedEntry.getStatus()).isEqualTo(CACHED);
-            assertThat(projectedEntry.getValue()).isNull();     // excluded field is not populated
-            assertThat(projectedEntry.getOperation()).isNull(); // excluded field is not populated
+            assertThat(cacheEntryMetadata).hasSize(1);
+            assertThat(cacheEntryMetadata.get(0))
+                    .satisfies(metadata -> {
+                        assertThat(metadata.getHash()).isEqualTo("h1");
+                        assertThat(metadata.getOperation()).isEqualTo("op1");
+                        assertThat(metadata.getStatus()).isEqualTo(CACHED);
+                        assertThat(metadata.getTimestamp()).isEqualTo(timestamp1.truncatedTo(MILLIS));
+                    })
+                    // the metadata of a cache entry is unrelated to the cache entry it belongs to, so the two are never
+                    // equal - and a stream of metadata can never turn out to be one of complete cache entries
+                    .isNotEqualTo(cachedEntry1)
+                    .isEqualTo(CacheEntryMetadata.of("h1", "op1", CACHED, timestamp1));
+
+            // streamCacheEntryMetadata applies the same filters and ordering as streamCacheEntries
+            try (Stream<CacheEntryMetadata> stream = repository.streamCacheEntryMetadata(null, Set.of(CACHED), true)) {
+                assertThat(stream.map(CacheEntryMetadata::getHash).toList())
+                        .containsExactly("h1", "h2");
+            }
+
+            // a document carrying a key and a value that cannot be deserialized is what tells the two streams apart:
+            // it is no cache entry (skipped, logged and left out), while its metadata is returned - which it could only
+            // be if reading metadata does not touch the payload at all
+            mongoClient.getDatabase(DATABASE_NAME).getCollection(getCollectionName())
+                    .insertOne(new Document()
+                            .append(CacheEntry.Field.HASH.toString(), "broken")
+                            .append(CacheEntry.Field.OPERATION.toString(), "op4")
+                            .append(CacheEntry.Field.KEY.toString(), "not a serialized key")
+                            .append(CacheEntry.Field.VALUE.toString(), "not a serialized value")
+                            .append(CacheEntry.Field.STATUS.toString(), CACHED.toString())
+                            .append(CacheEntry.Field.TIMESTAMP.toString(), timestamp1)
+                            .append(Repository.DISCRIMINATOR_FIELD, DEFAULT_DISCRIMINATOR));
+            try (Stream<CacheEntry<Key, Value>> stream =
+                         repository.streamCacheEntries(Set.of("broken"), null, false)) {
+                assertThat(stream.toList()).isEmpty();
+            }
+            try (Stream<CacheEntryMetadata> stream =
+                         repository.streamCacheEntryMetadata(Set.of("broken"), null, false)) {
+                assertThat(stream.toList())
+                        .singleElement()
+                        .isEqualTo(CacheEntryMetadata.of("broken", "op4", CACHED, timestamp1));
+            }
+            repository.deleteCacheEntries(Set.of("broken"), null, null);
+
+            // a document not carrying what even metadata cannot do without (no status here) is no cache entry and no
+            // metadata of one either, so both streams skip it
+            mongoClient.getDatabase(DATABASE_NAME).getCollection(getCollectionName())
+                    .insertOne(new Document()
+                            .append(CacheEntry.Field.HASH.toString(), "incomplete")
+                            .append(CacheEntry.Field.TIMESTAMP.toString(), timestamp1)
+                            .append(Repository.DISCRIMINATOR_FIELD, DEFAULT_DISCRIMINATOR));
+            try (Stream<CacheEntry<Key, Value>> stream =
+                         repository.streamCacheEntries(Set.of("incomplete"), null, false)) {
+                assertThat(stream.toList()).isEmpty();
+            }
+            try (Stream<CacheEntryMetadata> stream =
+                         repository.streamCacheEntryMetadata(Set.of("incomplete"), null, false)) {
+                assertThat(stream.toList()).isEmpty();
+            }
+            repository.deleteCacheEntries(Set.of("incomplete"), null, null);
 
             // updateStatusOfCacheEntries updates the status, clears the operation and refreshes the timestamp
             repository.updateStatusOfCacheEntries(Set.of("h1"), Set.of(CACHED), null, INVALIDATED);
 
             List<CacheEntry<Key, Value>> updatedEntries;
             try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries(Set.of("h1"), null, null, false)) {
+                         repository.streamCacheEntries(Set.of("h1"), null, false)) {
                 updatedEntries = stream.toList();
             }
             assertThat(updatedEntries).hasSize(1);
@@ -5346,7 +5401,7 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(repository.countCacheEntries(null)).isEqualTo(2);
             repository.deleteCacheEntries(null, null, Instant.now().minusSeconds(5));
             try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries(null, null, null, false)) {
+                         repository.streamCacheEntries(null, null, false)) {
                 assertThat(stream.toList())
                         .hasSize(1)
                         .allSatisfy(entry -> assertThat(entry.getHash()).isEqualTo("new"));
@@ -5726,7 +5781,7 @@ final class DistributedCaffeineIntegrationTests {
                     .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure
                     .untilAsserted(() -> assertThat(syncedDistributedCache.getIfPresent(key2)).isEqualTo(value2));
 
-            // deserializing an inbound cache entry fails and is skipped (without failing the watcher)
+            // reading an inbound cache entry fails and is skipped (without failing the watcher)
             loggerMongoSynchronizer.startCapturing();
 
             // provoke failure when deserializing inbound cache entries
@@ -5741,7 +5796,7 @@ final class DistributedCaffeineIntegrationTests {
                         assertThat(loggingEvents).isNotEmpty();
                         assertThat(loggingEvents).allMatch(loggingEvent ->
                                 loggingEvent.getLevel().equals(Level.WARN)
-                                        && loggingEvent.getMessage().startsWith("Deserializing of cache entry failed")
+                                        && loggingEvent.getMessage().startsWith("Reading of cache entry failed")
                                         && loggingEvent.getMessage().endsWith("Skipping..."));
                     });
 
@@ -5825,14 +5880,14 @@ final class DistributedCaffeineIntegrationTests {
 
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
-                public Value load(Key key) {
+                public Value load(@NonNull Key key) {
                     return nextInt(10) == 0
                             ? null
                             : Value.of(key.getId(), nameWithMillisAndPrefixes("load"));
                 }
 
                 @Override
-                public Map<? extends Key, ? extends Value> loadAll(Set<? extends Key> keys) {
+                public @NonNull Map<? extends Key, ? extends Value> loadAll(@NonNull Set<? extends Key> keys) {
                     return keys.stream()
                             .collect(toMap(Function.identity(),
                                     key -> Value.of(key.getId(), nameWithMillisAndPrefixes("load"))));
@@ -5975,14 +6030,14 @@ final class DistributedCaffeineIntegrationTests {
 
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
-                public Value load(Key key) {
+                public Value load(@NonNull Key key) {
                     return nextInt(10) == 0
                             ? null
                             : Value.of(key.getId(), nameWithMillisAndPrefixes("load"));
                 }
 
                 @Override
-                public Map<? extends Key, ? extends Value> loadAll(Set<? extends Key> keys) {
+                public @NonNull Map<? extends Key, ? extends Value> loadAll(@NonNull Set<? extends Key> keys) {
                     return keys.stream()
                             .collect(toMap(Function.identity(),
                                     key -> Value.of(key.getId(), nameWithMillisAndPrefixes("load"))));
@@ -6126,14 +6181,14 @@ final class DistributedCaffeineIntegrationTests {
 
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
-                public Value load(Key key) {
+                public Value load(@NonNull Key key) {
                     return nextInt(10) == 0
                             ? null
                             : Value.of(key.getId(), nameWithMillisAndPrefixes("load"));
                 }
 
                 @Override
-                public Map<? extends Key, ? extends Value> loadAll(Set<? extends Key> keys) {
+                public @NonNull Map<? extends Key, ? extends Value> loadAll(@NonNull Set<? extends Key> keys) {
                     return keys.stream()
                             .collect(toMap(Function.identity(),
                                     key -> Value.of(key.getId(), nameWithMillisAndPrefixes("load"))));
@@ -6264,7 +6319,6 @@ final class DistributedCaffeineIntegrationTests {
         }
     }
 
-    @SuppressWarnings({"ResultOfMethodCallIgnored", "NotNullFieldNotInitialized"})
     abstract static class DistributedCaffeineIntegrationTestInstance extends DistributedCaffeineCommonTestInstance {
 
         static final String RUNS_ON_GITHUB = "runsOnGitHub";
@@ -6566,7 +6620,7 @@ final class DistributedCaffeineIntegrationTests {
                     ? null
                     : Set.of(statuses);
             try (Stream<? extends CacheEntry<?, ?>> cacheEntryStream = getFailable(() ->
-                    repository.streamCacheEntries(null, statusesOrNull, null, false))) {
+                    repository.streamCacheEntries(null, statusesOrNull, false))) {
                 cacheEntryStream.forEach(cacheEntry ->
                         System.out.printf("%05d %s%n", counter.incrementAndGet(), cacheEntry));
             }

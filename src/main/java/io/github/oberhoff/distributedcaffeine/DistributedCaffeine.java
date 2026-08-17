@@ -265,6 +265,10 @@ public final class DistributedCaffeine<K, V> {
     /**
      * Specifies extended persistence via the given configurer.
      * <p>
+     * If specified (along with at least one eviction policy), recently evicted cache entries (regardless of whether the
+     * configured {@link DistributionMode} includes evictions) will remain (limitable by size or time) in the underlying
+     * store (if not invalidated) and may be reloaded on demand.
+     * <p>
      * Exemplary usage:
      * <pre>
      * ...
@@ -596,7 +600,7 @@ public final class DistributedCaffeine<K, V> {
 
         /**
          * Specifies the maximum size for the extended persistence up to which recently evicted cache entries will
-         * remain in the underlying store and may be reloaded on demand.
+         * remain in the underlying store (if not invalidated) and may be reloaded on demand.
          * <p>
          * Cache entries with extended persistence can be reloaded using loading strategies configured by
          * {@link #withLoadingStrategy(boolean)}.
@@ -620,7 +624,7 @@ public final class DistributedCaffeine<K, V> {
 
         /**
          * Specifies the maximum amount of time for the extended persistence that recently evicted cache entries will
-         * remain in the underlying store and may be reloaded on demand.
+         * remain in the underlying store (if not invalidated) and may be reloaded on demand.
          * <p>
          * Cache entries with extended persistence can be reloaded using loading strategies configured by
          * {@link #withLoadingStrategy(boolean)}.
@@ -665,11 +669,6 @@ public final class DistributedCaffeine<K, V> {
             this.cacheLoaderStrategy = cacheLoaderStrategy;
             return this;
         }
-
-        // TODO
-        // there is no counterpart for invalidation to configure: invalidating a cache entry reaches the underlying
-        // store whether or not any cache instance still holds it, so one kept there by extended persistence stops
-        // being reloadable without anything having to be enabled for it
 
         Optional<Integer> getMaximumSize() {
             return Optional.ofNullable(maximumSize);

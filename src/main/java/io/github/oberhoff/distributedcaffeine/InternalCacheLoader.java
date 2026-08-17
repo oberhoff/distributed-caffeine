@@ -215,7 +215,6 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
         try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
                 hashes,
                 EVICTED_EXTENDED_GROUP,
-                null,
                 false))) {
             //noinspection NullableProblems
             return cacheEntryStream

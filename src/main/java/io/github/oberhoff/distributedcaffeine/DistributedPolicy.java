@@ -98,8 +98,9 @@ public interface DistributedPolicy<K, V> {
      *
      * @param key            the key whose associated cache entry is to be returned
      * @param includeEvicted {@code true} if evicted cache entries with extended persistence should also be included,
-     *                       {@code false} otherwise
+     *                       otherwise {@code false}
      * @return the cache entry to which the specified key is mapped, or null if no mapping is found
+     * @throws NullPointerException if the specified key is null
      */
     @Nullable CacheEntry<K, V> getFromStore(K key, boolean includeEvicted);
 
@@ -112,8 +113,9 @@ public interface DistributedPolicy<K, V> {
      *
      * @param keys           the keys whose associated cache entries are to be returned
      * @param includeEvicted {@code true} if evicted cache entries with extended persistence should also be included,
-     *                       {@code false} otherwise
+     *                       otherwise {@code false}
      * @return a set of cache entries to which the specified keys are mapped, keys without mapping are omitted
+     * @throws NullPointerException if the specified collection is null or contains a null element
      */
     Set<CacheEntry<K, V>> getAllFromStore(Iterable<? extends K> keys, boolean includeEvicted);
 }

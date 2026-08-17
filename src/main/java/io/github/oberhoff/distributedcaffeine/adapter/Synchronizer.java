@@ -18,6 +18,11 @@ package io.github.oberhoff.distributedcaffeine.adapter;
 /**
  * Interface representing a synchronizer that manages distributed synchronization between cache instances using an
  * underlying store.
+ * <p>
+ * <b>Note:</b> Inbound changes of the underlying store are supposed to be passed on as cache entries by the adapter
+ * using the {@link Retriever}. A cache entry that could not be read for whatever reason (e.g. deserialization fails or
+ * field values do not meet the conditions of a cache entry) should be skipped and logged instead of breaking the
+ * synchronization exceptionally.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache

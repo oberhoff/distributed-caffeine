@@ -83,7 +83,6 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
     // the computed value is null") but cannot express it for a value type that is not nullable, and making it one
     // would declare every other method of this cache as holding nullable values, which none of them do
     @Override
-    @SuppressWarnings({"java:S2638", "NullAway"})
     public @Nullable V get(K key, Function<? super K, ? extends @Nullable V> mappingFunction) {
         requireNonNull(key);
         requireNonNull(mappingFunction);

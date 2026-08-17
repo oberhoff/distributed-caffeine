@@ -108,7 +108,6 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
         try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
                 hasher.getHashes(keySet),
                 statuses,
-                null,
                 false))) {
             return cacheEntryStream
                     .filter(cacheEntry -> nonNull(cacheEntry.getValue()))

@@ -27,15 +27,18 @@ import com.mongodb.ServerAddress;
 import com.mongodb.bulk.BulkWriteError;
 import com.mongodb.bulk.BulkWriteResult;
 import com.mongodb.client.ChangeStreamIterable;
+import com.mongodb.client.FindIterable;
 import com.mongodb.client.MongoChangeStreamCursor;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoCursor;
 import com.mongodb.client.model.BulkWriteOptions;
 import com.mongodb.client.model.UpdateOneModel;
 import com.mongodb.client.model.changestream.ChangeStreamDocument;
 import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
+import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.adapter.Synchronizer;
 import io.github.oberhoff.distributedcaffeine.common.DistributedCaffeineCommonTestInstance;
@@ -47,6 +50,8 @@ import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import org.bson.BsonDocument;
 import org.bson.BsonString;
 import org.bson.Document;
+import org.bson.conversions.Bson;
+import org.jspecify.annotations.NonNull;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -145,12 +150,12 @@ final class DistributedCaffeineUnitTests {
                             dc -> dc.withSerializers(configurer ->
                                     configurer.withKeySerializer(new Serializer<>() {
                                         @Override
-                                        public Object serialize(Key object) {
+                                        public @NonNull Object serialize(@NonNull Key object) {
                                             return _null();
                                         }
 
                                         @Override
-                                        public Key deserialize(Object value) {
+                                        public @NonNull Key deserialize(@NonNull Object value) {
                                             return _null();
                                         }
                                     })),
@@ -164,12 +169,12 @@ final class DistributedCaffeineUnitTests {
                             dc -> dc.withSerializers(configurer ->
                                     configurer.withValueSerializer(new Serializer<>() {
                                         @Override
-                                        public Object serialize(Value object) {
+                                        public @NonNull Object serialize(@NonNull Value object) {
                                             return _null();
                                         }
 
                                         @Override
-                                        public Value deserialize(Object value) {
+                                        public @NonNull Value deserialize(@NonNull Object value) {
                                             return _null();
                                         }
                                     })),
@@ -252,7 +257,7 @@ final class DistributedCaffeineUnitTests {
             when(adapter.getRepository()).thenReturn(repository);
             // answered rather than returned, so that every synchronization gets a stream of its own instead of
             // re-consuming one that an earlier one already closed
-            when(repository.streamCacheEntries(any(), any(), any(), anyBoolean()))
+            when(repository.streamCacheEntries(any(), any(), anyBoolean()))
                     .thenAnswer(invocation -> Stream.empty());
             return adapter;
         }
@@ -335,12 +340,12 @@ final class DistributedCaffeineUnitTests {
                 }
 
                 @Override
-                public CompletableFuture<? extends Value> asyncLoad(Key key, Executor executor) {
+                public @NonNull CompletableFuture<? extends Value> asyncLoad(@NonNull Key key, @NonNull Executor executor) {
                     return CompletableFuture.completedFuture(load(key));
                 }
 
                 @Override
-                public CompletableFuture<? extends Value> asyncReload(Key key, Value oldValue, Executor executor) {
+                public @NonNull CompletableFuture<? extends Value> asyncReload(@NonNull Key key, @NonNull Value oldValue, @NonNull Executor executor) {
                     return CompletableFuture.completedFuture(oldValue);
                 }
             });
@@ -593,6 +598,47 @@ final class DistributedCaffeineUnitTests {
             verify(mongoCollection, times(1)).bulkWrite(anyList(), any(BulkWriteOptions.class));
         }
 
+        @DisplayName("that reading metadata leaves the key and the value out of the query")
+        @Test
+        @SuppressWarnings("unchecked")
+        void test_MongoRepository_projects_metadata_fields_only() throws Exception {
+            MongoClient mongoClient = mock(MongoClient.class, RETURNS_DEEP_STUBS);
+            MongoCollection<Document> mongoCollection = mongoCollectionOf(mongoClient);
+            Repository<Key, Value> repository = repositoryOf(mongoClient);
+
+            FindIterable<Document> findIterable = mock(FindIterable.class);
+            MongoCursor<Document> mongoCursor = mock(MongoCursor.class);
+            when(mongoCollection.find(any(Bson.class))).thenReturn(findIterable);
+            when(findIterable.projection(any())).thenReturn(findIterable);
+            when(findIterable.sort(any())).thenReturn(findIterable);
+            when(findIterable.cursor()).thenReturn(mongoCursor);
+            when(mongoCursor.hasNext()).thenReturn(false);
+
+            ArgumentCaptor<Bson> projectionCaptor = ArgumentCaptor.captor();
+
+            // what the query asks the store for is what decides whether the key and the value are read at all, which
+            // no assertion on the returned metadata could tell (metadata never looks at those fields either way)
+            try (Stream<CacheEntryMetadata> stream = repository.streamCacheEntryMetadata(null, null, false)) {
+                assertThat(stream).isEmpty();
+            }
+            verify(findIterable, times(1)).projection(projectionCaptor.capture());
+            assertThat(projectionCaptor.getValue().toBsonDocument().keySet())
+                    .containsExactlyInAnyOrder(
+                            CacheEntry.Field.HASH.toString(), CacheEntry.Field.OPERATION.toString(),
+                            CacheEntry.Field.STATUS.toString(), CacheEntry.Field.TIMESTAMP.toString())
+                    .doesNotContain(CacheEntry.Field.KEY.toString(), CacheEntry.Field.VALUE.toString());
+
+            // a cache entry, in contrast, is read with all of its fields
+            try (Stream<CacheEntry<Key, Value>> stream = repository.streamCacheEntries(null, null, false)) {
+                assertThat(stream).isEmpty();
+            }
+            verify(findIterable, times(2)).projection(projectionCaptor.capture());
+            assertThat(projectionCaptor.getValue().toBsonDocument().keySet())
+                    .containsExactlyInAnyOrder(Stream.of(CacheEntry.Field.values())
+                            .map(CacheEntry.Field::toString)
+                            .toArray(String[]::new));
+        }
+
         private MongoCollection<Document> mongoCollectionOf(MongoClient mongoClient) {
             // deep stubs return the same collection mock the repository resolves for these names
             return mongoClient.getDatabase(DATABASE_NAME).getCollection(COLLECTION_NAME);
@@ -702,6 +748,119 @@ final class DistributedCaffeineUnitTests {
 
         private void processChangeStreams(Synchronizer<Key, Value> synchronizer) {
             invokeMethod(synchronizer, synchronizer.getClass(), "processChangeStreams", List.of(), List.of());
+        }
+    }
+
+    @Nested
+    @DisplayName("Test CacheEntry and CacheEntryMetadata")
+    final class CacheEntryUnit extends DistributedCaffeineUnitTestInstance {
+
+        // the same instant twice, once with a nanosecond an underlying store cannot be expected to keep
+        private static final Instant TIMESTAMP = Instant.ofEpochMilli(1_700_000_000_000L);
+        private static final Instant TIMESTAMP_WITH_NANOS = TIMESTAMP.plusNanos(1);
+
+        @DisplayName("that field values are checked against the conditions of a cache entry")
+        @Test
+        @SuppressWarnings("java:S5778")
+        void test_CacheEntry_checks_on_field_values() {
+            // the fields no cache entry can do without, whatever its status
+            assertThatThrownBy(() ->
+                    CacheEntry.of(_null(), "op", Key.of(1), Value.of(1), Status.CACHED, TIMESTAMP))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("hash cannot be null");
+            assertThatThrownBy(() ->
+                    CacheEntry.of("h", "op", Key.of(1), Value.of(1), _null(), TIMESTAMP))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("status cannot be null");
+            assertThatThrownBy(() ->
+                    CacheEntry.of("h", "op", Key.of(1), Value.of(1), Status.CACHED, _null()))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("timestamp cannot be null");
+
+            // a key belongs to every cache entry except one carrying a command, and a value to every one except an
+            // invalidated one or one carrying a command - checked for every status, so that a status added later is
+            // covered by whichever of the two rules it falls under
+            Stream.of(Status.values()).forEach(status -> {
+                if (!status.isCommand()) {
+                    assertThatThrownBy(() ->
+                            CacheEntry.of("h", "op", null, Value.of(1), status, TIMESTAMP))
+                            .isInstanceOf(NullPointerException.class)
+                            .hasMessage("key cannot be null");
+                }
+                if (!status.isInvalidated() && !status.isCommand()) {
+                    assertThatThrownBy(() ->
+                            CacheEntry.of("h", "op", Key.of(1), null, status, TIMESTAMP))
+                            .isInstanceOf(NullPointerException.class)
+                            .hasMessage("value cannot be null");
+                }
+            });
+
+            // ... while an absent key or value is what those statuses call for, and an operation is optional throughout
+            Stream.of(Status.values())
+                    .filter(Status::isInvalidated)
+                    .forEach(status -> assertThat(CacheEntry.of("h", "op", Key.of(1), null, status, TIMESTAMP))
+                            .satisfies(cacheEntry -> assertThat(cacheEntry.getValue()).isNull()));
+            assertThat(CacheEntry.of("invalidate_all", "op", null, null, Status.COMMAND, TIMESTAMP))
+                    .satisfies(cacheEntry -> {
+                        assertThat(cacheEntry.getKey()).isNull();
+                        assertThat(cacheEntry.getValue()).isNull();
+                        assertThat(cacheEntry.isCommand()).isTrue();
+                    });
+            assertThat(CacheEntry.of("h", null, Key.of(1), Value.of(1), Status.CACHED, TIMESTAMP).getOperation())
+                    .isNull();
+        }
+
+        @DisplayName("that cache entries are compared at the timestamp resolution of an underlying store")
+        @Test
+        void test_CacheEntry_equals_at_store_resolution() {
+            assertThat(CacheEntry.of("h", "op", Key.of(1), Value.of(1), Status.CACHED, TIMESTAMP))
+                    .isEqualTo(CacheEntry.of("h", "op", Key.of(1), Value.of(1), Status.CACHED, TIMESTAMP_WITH_NANOS))
+                    .hasSameHashCodeAs(CacheEntry.of("h", "op", Key.of(1), Value.of(1), Status.CACHED,
+                            TIMESTAMP_WITH_NANOS));
+        }
+
+        @DisplayName("that field values are checked against the conditions of cache entry metadata")
+        @Test
+        @SuppressWarnings("java:S5778")
+        void test_CacheEntryMetadata_checks_on_field_values() {
+            // metadata has no key and value, so all of its fields but the operation are required
+            assertThatThrownBy(() -> CacheEntryMetadata.of(_null(), "op", Status.CACHED, TIMESTAMP))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("hash cannot be null");
+            assertThatThrownBy(() -> CacheEntryMetadata.of("h", "op", _null(), TIMESTAMP))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("status cannot be null");
+            assertThatThrownBy(() -> CacheEntryMetadata.of("h", "op", Status.CACHED, _null()))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("timestamp cannot be null");
+            assertThat(CacheEntryMetadata.of("h", null, Status.CACHED, TIMESTAMP).getOperation())
+                    .isNull();
+        }
+
+        @DisplayName("that cache entry metadata implements equals(), hashCode() and toString()")
+        @Test
+        void test_CacheEntryMetadata_equals_hashCode_toString() {
+            CacheEntryMetadata metadata = CacheEntryMetadata.of("h1", "op1", Status.CACHED, TIMESTAMP);
+            CacheEntryMetadata equalMetadata = CacheEntryMetadata.of("h1", "op1", Status.CACHED, TIMESTAMP);
+            CacheEntryMetadata otherMetadata = CacheEntryMetadata.of("h2", "op2", Status.CACHED, TIMESTAMP);
+
+            // noinspection ConstantValue
+            assertThat(metadata.equals(null)).isFalse();
+            // noinspection EqualsBetweenInconvertibleTypes
+            assertThat(metadata.equals("other class")).isFalse();
+            // noinspection EqualsWithItself
+            assertThat(metadata.equals(metadata)).isTrue();
+            assertThat(metadata).isEqualTo(equalMetadata)
+                    .hasSameHashCodeAs(equalMetadata)
+                    .isNotEqualTo(otherMetadata);
+            assertThat(metadata.hashCode()).isNotEqualTo(otherMetadata.hashCode());
+            assertThat(metadata.toString()).isNotEqualTo(otherMetadata.toString());
+            // compared at the timestamp resolution of an underlying store, just like a cache entry
+            assertThat(metadata)
+                    .isEqualTo(CacheEntryMetadata.of("h1", "op1", Status.CACHED, TIMESTAMP_WITH_NANOS));
+            // the field names of an underlying store are what it names its values by
+            assertThat(metadata.toString())
+                    .startsWith("CacheEntryMetadata{hash=h1, operation=op1, status=cached, timestamp=");
         }
     }
 
