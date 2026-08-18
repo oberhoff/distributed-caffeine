@@ -5145,6 +5145,7 @@ final class DistributedCaffeineIntegrationTests {
 
         @DisplayName("Test Adapter")
         @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
         void test_Adapter() throws Exception {
             Set<CacheEntry<Key, Value>> retrievedCacheEntries = new HashSet<>();
             @SuppressWarnings("Convert2Lambda")
@@ -5320,6 +5321,13 @@ final class DistributedCaffeineIntegrationTests {
                         .containsExactly("h1", "h2");
             }
 
+            // reading a document that is no cache entry is reported before it is skipped, so the warnings expected
+            // for the two documents seeded below are captured (and asserted) instead of ending up - with their stack
+            // traces - in the test output
+            CaptureLogger loggerMongoRepository = CaptureLoggerFactory
+                    .getCaptureLogger("io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoRepository");
+            loggerMongoRepository.startCapturing();
+
             // a document carrying a key and a value that cannot be deserialized is what tells the two streams apart:
             // it is no cache entry (skipped, logged and left out), while its metadata is returned - which it could only
             // be if reading metadata does not touch the payload at all
@@ -5360,6 +5368,36 @@ final class DistributedCaffeineIntegrationTests {
                 assertThat(stream.toList()).isEmpty();
             }
             repository.deleteCacheEntries(Set.of("incomplete"), null, null);
+
+            // every skipped document is reported, the incomplete one twice because both streams skip it
+            assertThat(loggerMongoRepository.getLoggingEvents()).hasSize(3)
+                    .allSatisfy(loggingEvent -> assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN))
+                    .satisfiesOnlyOnce(loggingEvent -> {
+                        assertThat(loggingEvent.getMessage())
+                                .startsWith("Reading of cache entry failed")
+                                .contains("hash=broken");
+                        assertThat(loggingEvent.getThrowable())
+                                .isExactlyInstanceOf(IllegalStateException.class)
+                                .hasMessage("No Serializer found for deserializing value of type String");
+                    })
+                    .satisfiesOnlyOnce(loggingEvent -> {
+                        assertThat(loggingEvent.getMessage())
+                                .startsWith("Reading of cache entry failed")
+                                .contains("hash=incomplete");
+                        assertThat(loggingEvent.getThrowable())
+                                .isExactlyInstanceOf(NullPointerException.class)
+                                .hasMessage("status cannot be null");
+                    })
+                    .satisfiesOnlyOnce(loggingEvent -> {
+                        assertThat(loggingEvent.getMessage())
+                                .startsWith("Reading of cache entry metadata failed")
+                                .contains("hash=incomplete");
+                        assertThat(loggingEvent.getThrowable())
+                                .isExactlyInstanceOf(NullPointerException.class)
+                                .hasMessage("status cannot be null");
+                    });
+
+            loggerMongoRepository.stopCapturing();
 
             // updateStatusOfCacheEntries updates the status, clears the operation and refreshes the timestamp
             repository.updateStatusOfCacheEntries(Set.of("h1"), Set.of(CACHED), null, INVALIDATED);
