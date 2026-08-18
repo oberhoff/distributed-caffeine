@@ -70,12 +70,20 @@ class InternalUtils {
         return Map.copyOf(map);
     }
 
-    static <T extends @Nullable Object> T getFailable(FailableSupplier<T> failableSupplier) {
+    static void runFailable(FailableRunnable failableRunnable) {
+        FailableNullableSupplier<?> failableNullableSupplier = () -> {
+            failableRunnable.run();
+            return null;
+        };
+        getFailableOrNull(failableNullableSupplier);
+    }
+
+    static <T> T getFailable(FailableSupplier<T> failableSupplier) {
         return getFailable(failableSupplier, RuntimeException::new);
     }
 
-    static <T extends @Nullable Object> T getFailable(FailableSupplier<T> failableSupplier,
-                                                      Function<Throwable, RuntimeException> runtimeExceptionFactory) {
+    static <T> T getFailable(FailableSupplier<T> failableSupplier,
+                             Function<Throwable, RuntimeException> runtimeExceptionFactory) {
         try {
             return failableSupplier.get();
         } catch (RuntimeException e) {
@@ -85,18 +93,19 @@ class InternalUtils {
         }
     }
 
-    static void runFailable(FailableRunnable failableRunnable) {
-        // an explicit target type for the supplier, because the nullable result of a runnable that has none would
-        // otherwise be lost while inferring it from an implicit lambda
-        FailableSupplier<@Nullable Void> failableSupplier = () -> {
-            failableRunnable.run();
-            return null;
-        };
-        getFailable(failableSupplier);
+    static <T> @Nullable T getFailableOrNull(FailableNullableSupplier<T> failableNullableSupplier) {
+        return getFailableOrNull(failableNullableSupplier, RuntimeException::new);
     }
 
-    static <T extends @Nullable Object> @Nullable T getFailableOrNull(FailableSupplier<T> failableSupplier) {
-        return getFailable(failableSupplier);
+    static <T> @Nullable T getFailableOrNull(FailableNullableSupplier<T> failableNullableSupplier,
+                                             Function<Throwable, RuntimeException> runtimeExceptionFactory) {
+        try {
+            return failableNullableSupplier.get();
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw runtimeExceptionFactory.apply(t);
+        }
     }
 
     static <T> @Nullable T nullable(@Nullable T nullable) {
@@ -113,9 +122,16 @@ class InternalUtils {
     }
 
     @FunctionalInterface
-    interface FailableSupplier<T extends @Nullable Object> {
+    interface FailableSupplier<T> {
 
         @SuppressWarnings("java:S112")
         T get() throws Throwable;
+    }
+
+    @FunctionalInterface
+    interface FailableNullableSupplier<T> {
+
+        @SuppressWarnings("java:S112")
+        @Nullable T get() throws Throwable;
     }
 }
