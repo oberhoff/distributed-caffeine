@@ -292,11 +292,32 @@
             <id>nullaway</id>
             <activation>
                 <property>
-                    <name>!skipNullaway</name>
+                    <name>!skipNullAway</name>
                 </property>
             </activation>
             <build>
                 <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-enforcer-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>enforce-java-version</id>
+                                <goals>
+                                    <goal>enforce</goal>
+                                </goals>
+                                <configuration>
+                                    <rules>
+                                        <requireJavaVersion>
+                                            <version>[21,)</version>
+                                            <message>Error Prone (and therefore NullAway) requires JDK 21 or newer to run, either build with such a JDK or skip this profile using -DskipNullAway=true</message>
+                                        </requireJavaVersion>
+                                    </rules>
+                                    <fail>true</fail>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-compiler-plugin</artifactId>
