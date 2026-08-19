@@ -295,6 +295,31 @@
                     <name>!skipNullAway</name>
                 </property>
             </activation>
+            <properties>
+                <errorprone.args>${nullaway.args}</errorprone.args>
+                <nullaway.args>${nullaway.severity} ${nullaway.mode} ${nullaway.checks}</nullaway.args>
+                <nullaway.severity>-Xep:NullAway:ERROR</nullaway.severity>
+                <nullaway.mode>-XepOpt:NullAway:OnlyNullMarked=true -XepOpt:NullAway:JSpecifyMode=true</nullaway.mode>
+                <nullaway.checks>-XepOpt:NullAway:CheckOptionalEmptiness=true</nullaway.checks>
+                <j.api>-J--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED</j.api>
+                <j.file>-J--add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED</j.file>
+                <j.main>-J--add-exports=jdk.compiler/com.sun.tools.javac.main=ALL-UNNAMED</j.main>
+                <j.model>-J--add-exports=jdk.compiler/com.sun.tools.javac.model=ALL-UNNAMED</j.model>
+                <j.parser>-J--add-exports=jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED</j.parser>
+                <j.processing>-J--add-exports=jdk.compiler/com.sun.tools.javac.processing=ALL-UNNAMED</j.processing>
+                <j.tree>-J--add-exports=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED</j.tree>
+                <j.util>-J--add-exports=jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED</j.util>
+                <j.code>-J--add-opens=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED</j.code>
+                <j.comp>-J--add-opens=jdk.compiler/com.sun.tools.javac.comp=ALL-UNNAMED</j.comp>
+            </properties>
+            <dependencies>
+                <dependency>
+                    <groupId>com.google.code.findbugs</groupId>
+                    <artifactId>jsr305</artifactId>
+                    <version>3.0.2</version>
+                    <scope>provided</scope>
+                </dependency>
+            </dependencies>
             <build>
                 <plugins>
                     <plugin>
@@ -332,21 +357,20 @@
                                     <fork>true</fork>
                                     <compilerArgs>
                                         <arg>-XDcompilePolicy=simple</arg>
+                                        <arg>-Xplugin:ErrorProne ${errorprone.args}</arg>
+                                        <arg>-XDaddTypeAnnotationsToSymbol=true</arg>
+                                        <arg>-Werror</arg>
                                         <arg>--should-stop=ifError=FLOW</arg>
-                                        <arg>-Xplugin:ErrorProne -XepDisableAllChecks -Xep:NullAway:ERROR
-                                            -XepOpt:NullAway:OnlyNullMarked=true -XepOpt:NullAway:JSpecifyMode=true
-                                        </arg>
-                                        <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED</arg>
-                                        <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED</arg>
-                                        <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.main=ALL-UNNAMED</arg>
-                                        <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.model=ALL-UNNAMED</arg>
-                                        <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED</arg>
-                                        <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.processing=ALL-UNNAMED
-                                        </arg>
-                                        <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED</arg>
-                                        <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED</arg>
-                                        <arg>-J--add-opens=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED</arg>
-                                        <arg>-J--add-opens=jdk.compiler/com.sun.tools.javac.comp=ALL-UNNAMED</arg>
+                                        <arg>${j.api}</arg>
+                                        <arg>${j.file}</arg>
+                                        <arg>${j.main}</arg>
+                                        <arg>${j.model}</arg>
+                                        <arg>${j.parser}</arg>
+                                        <arg>${j.processing}</arg>
+                                        <arg>${j.tree}</arg>
+                                        <arg>${j.util}</arg>
+                                        <arg>${j.code}</arg>
+                                        <arg>${j.comp}</arg>
                                     </compilerArgs>
                                     <annotationProcessorPaths>
                                         <path>
