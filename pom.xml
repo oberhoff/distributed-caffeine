@@ -310,7 +310,10 @@
                                     <rules>
                                         <requireJavaVersion>
                                             <version>[21,)</version>
-                                            <message>Error Prone (and therefore NullAway) requires JDK 21 or newer to run, either build with such a JDK or skip this profile using -DskipNullAway=true</message>
+                                            <message>Error Prone (and therefore NullAway) requires JDK 21 or newer to
+                                                run, either build with such a JDK or skip this profile using
+                                                -DskipNullAway
+                                            </message>
                                         </requireJavaVersion>
                                     </rules>
                                     <fail>true</fail>
@@ -330,13 +333,16 @@
                                     <compilerArgs>
                                         <arg>-XDcompilePolicy=simple</arg>
                                         <arg>--should-stop=ifError=FLOW</arg>
-                                        <arg>-Xplugin:ErrorProne -XepDisableAllChecks -Xep:NullAway:ERROR -XepOpt:NullAway:OnlyNullMarked=true -XepOpt:NullAway:JSpecifyMode=true</arg>
+                                        <arg>-Xplugin:ErrorProne -XepDisableAllChecks -Xep:NullAway:ERROR
+                                            -XepOpt:NullAway:OnlyNullMarked=true -XepOpt:NullAway:JSpecifyMode=true
+                                        </arg>
                                         <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED</arg>
                                         <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED</arg>
                                         <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.main=ALL-UNNAMED</arg>
                                         <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.model=ALL-UNNAMED</arg>
                                         <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED</arg>
-                                        <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.processing=ALL-UNNAMED</arg>
+                                        <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.processing=ALL-UNNAMED
+                                        </arg>
                                         <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED</arg>
                                         <arg>-J--add-exports=jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED</arg>
                                         <arg>-J--add-opens=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED</arg>

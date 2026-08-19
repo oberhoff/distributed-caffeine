@@ -23,4 +23,4 @@ jobs:
           distribution: 'temurin'
           cache: maven
       - name: Verify with Maven
-        run: mvn clean verify -DrunsOnGitHub=true
+        run: mvn clean verify -DrunsOnGitHub
