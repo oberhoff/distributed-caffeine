@@ -289,10 +289,10 @@
 
     <profiles>
         <profile>
-            <id>nullaway</id>
+            <id>errorprone</id>
             <activation>
                 <property>
-                    <name>!skipNullAway</name>
+                    <name>!skipErrorProne</name>
                 </property>
             </activation>
             <properties>
@@ -337,7 +337,7 @@
                                             <version>[21,)</version>
                                             <message>Error Prone (and therefore NullAway) requires JDK 21 or newer to
                                                 run, either build with such a JDK or skip this profile using
-                                                -DskipNullAway
+                                                -DskipErrorProne
                                             </message>
                                         </requireJavaVersion>
                                     </rules>

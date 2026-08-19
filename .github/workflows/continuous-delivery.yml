@@ -25,7 +25,7 @@ jobs:
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase: GPG_PASSPHRASE
       - name: Deploy with Maven
-        run: mvn clean deploy -DskipTests -DskipNullAway
+        run: mvn clean deploy -DskipTests -DskipErrorProne
         env:
           MAVEN_CENTRAL_USERNAME_TOKEN: ${{ secrets.MAVEN_CENTRAL_USERNAME_TOKEN }}
           MAVEN_CENTRAL_PASSWORD_TOKEN: ${{ secrets.MAVEN_CENTRAL_PASSWORD_TOKEN }}
