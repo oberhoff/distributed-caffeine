@@ -90,15 +90,15 @@ public interface SerializerAware<K, V> {
         T deserializedValue;
         if (isNull(value)) {
             deserializedValue = null;
-        } else if (serializer instanceof ByteArraySerializer && value instanceof byte[]) {
+        } else if (serializer instanceof ByteArraySerializer && value instanceof byte[] byteArrayValue) {
             ByteArraySerializer<T> byteArraySerializer = (ByteArraySerializer<T>) serializer;
-            deserializedValue = byteArraySerializer.deserialize((byte[]) value);
-        } else if (serializer instanceof JsonSerializer && value instanceof String) {
+            deserializedValue = byteArraySerializer.deserialize(byteArrayValue);
+        } else if (serializer instanceof JsonSerializer && value instanceof String stringValue) {
             JsonSerializer<T> jsonSerializer = (JsonSerializer<T>) serializer;
-            deserializedValue = jsonSerializer.deserialize((String) value);
-        } else if (serializer instanceof StringSerializer && value instanceof String) {
+            deserializedValue = jsonSerializer.deserialize(stringValue);
+        } else if (serializer instanceof StringSerializer && value instanceof String stringValue) {
             StringSerializer<T> stringSerializer = (StringSerializer<T>) serializer;
-            deserializedValue = stringSerializer.deserialize((String) value);
+            deserializedValue = stringSerializer.deserialize(stringValue);
         } else {
             throw new IllegalStateException("No %s found for deserializing value of type %s"
                     .formatted(Serializer.class.getSimpleName(), value.getClass().getSimpleName()));

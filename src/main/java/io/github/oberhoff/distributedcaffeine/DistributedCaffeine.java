@@ -59,6 +59,7 @@ import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailableOrNull;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
 import static java.lang.String.format;
+import static java.util.Locale.ROOT;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
@@ -387,7 +388,7 @@ public final class DistributedCaffeine<K, V> {
         Scheduler caffeineScheduler = getFailableOrNull(() ->
                 (@Nullable Scheduler) SCHEDULER_FIELD.get(caffeine));
         if (!(caffeineScheduler instanceof InternalScheduler)) {
-            Scheduler scheduler = (isNull(caffeineScheduler) || caffeineScheduler == Scheduler.disabledScheduler())
+            Scheduler scheduler = (isNull(caffeineScheduler) || Scheduler.disabledScheduler().equals(caffeineScheduler))
                     ? Scheduler.systemScheduler()
                     : caffeineScheduler;
             runFailable(() -> SCHEDULER_FIELD.set(caffeine, new InternalScheduler(scheduler)));
@@ -458,7 +459,7 @@ public final class DistributedCaffeine<K, V> {
             field.setAccessible(true);
             return field;
         } catch (NoSuchFieldException e) {
-            throw incompatibleCaffeine(Field.class.getSimpleName().toLowerCase(), name, e);
+            throw incompatibleCaffeine(Field.class.getSimpleName().toLowerCase(ROOT), name, e);
         }
     }
 
@@ -469,7 +470,7 @@ public final class DistributedCaffeine<K, V> {
             method.setAccessible(true);
             return method;
         } catch (NoSuchMethodException e) {
-            throw incompatibleCaffeine(Method.class.getSimpleName().toLowerCase(), name, e);
+            throw incompatibleCaffeine(Method.class.getSimpleName().toLowerCase(ROOT), name, e);
         }
     }
 

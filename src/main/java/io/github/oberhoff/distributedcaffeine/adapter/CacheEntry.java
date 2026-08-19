@@ -24,6 +24,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Stream;
 
+import static java.util.Locale.ROOT;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -81,7 +82,7 @@ public final class CacheEntry<K, V> {
         private final String value;
 
         Field() {
-            this.value = name().toLowerCase();
+            this.value = name().toLowerCase(ROOT);
         }
 
         @Override
@@ -194,7 +195,7 @@ public final class CacheEntry<K, V> {
         private final String value;
 
         Status() {
-            this.value = name().toLowerCase();
+            this.value = name().toLowerCase(ROOT);
         }
 
         /**
@@ -299,7 +300,7 @@ public final class CacheEntry<K, V> {
         private final String value;
 
         Command() {
-            this.value = name().toLowerCase();
+            this.value = name().toLowerCase(ROOT);
         }
 
         @Override

@@ -102,6 +102,7 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
         return isActivated.get();
     }
 
+    @SuppressWarnings("FutureReturnValueIgnored") // the shutdown callback below is attached for its side effect
     private void scheduleMaintenanceWork() {
         RetryPolicy<Void> retryPolicy = RetryPolicy.<Void>builder()
                 .handleResultIf(result -> isActivated())

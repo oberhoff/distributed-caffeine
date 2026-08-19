@@ -217,7 +217,7 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalInitia
         requireNonNull(remappingFunction);
         return synchronizationLock.getLockedOrNull(() -> {
             V oldValue = get(key);
-            V newValue = (isNull(oldValue))
+            V newValue = isNull(oldValue)
                     ? value
                     : remappingFunction.apply(oldValue, value);
             if (nonNull(newValue)) {

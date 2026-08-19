@@ -161,6 +161,7 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
                 }, executor);
     }
 
+    @SuppressWarnings("FutureReturnValueIgnored") // the callback below is attached for its side effects only
     private CompletableFuture<@Nullable V> getOrCreateRefreshOperation(K key, @Nullable V oldValue) {
         AtomicReference<@Nullable CompletableFuture<@Nullable V>> createdRefreshOperation = new AtomicReference<>();
         // retain the original 'only one concurrent refresh operation per key' semantics

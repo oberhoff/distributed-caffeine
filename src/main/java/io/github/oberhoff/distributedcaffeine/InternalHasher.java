@@ -54,14 +54,14 @@ class InternalHasher<K> {
         } else {
             if (key instanceof Hashable hashable) {
                 return hashable.getHash(Hasher::new);
-            } else if (key instanceof String s) {
-                return new Hasher().putString(s).getHash();
-            } else if (key instanceof Long l) {
-                return new Hasher().putLong(l).getHash();
-            } else if (key instanceof Integer i) {
-                return new Hasher().putInt(i).getHash();
-            } else if (key instanceof UUID u) {
-                return new Hasher().putUUID(u).getHash();
+            } else if (key instanceof String stringValue) {
+                return new Hasher().putString(stringValue).getHash();
+            } else if (key instanceof Long longValue) {
+                return new Hasher().putLong(longValue).getHash();
+            } else if (key instanceof Integer integerValue) {
+                return new Hasher().putInt(integerValue).getHash();
+            } else if (key instanceof UUID uuidValue) {
+                return new Hasher().putUUID(uuidValue).getHash();
             } else {
                 throw new IllegalStateException(
                         "Keys of type %s are not hashable out of the box (only %s, %s, %s and %s are), "
