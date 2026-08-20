@@ -73,12 +73,14 @@ import static java.util.Objects.requireNonNull;
 class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriever<K, V> {
 
     private final AtomicBoolean isActivated;
-    // an operation is this identifier followed by a counter, which makes it identify a single write (as the random
-    // value it replaces did) and additionally order that write against the other ones issued here. The identifier is
-    // renewed with every activation on purpose: ordering is only meaningful within one of them, because it compares
-    // a local mutation against an event this very activation published. Renewing it lets a stamp left behind by an
-    // earlier activation simply not match, instead of being compared against a counter unrelated to it
-    private final AtomicReference<@Nullable String> operationId;
+    // the identifier of the activation this cache instance is in, renewed with every one of them. It says which
+    // activation a value is content of (see InternalValue), and an operation is it followed by a counter, which
+    // makes that identify a single write and additionally order that write against the other ones issued here.
+    // Renewing it is what makes both work: ordering is only meaningful within one activation, because it compares a
+    // local mutation against an event this very activation published, so a stamp left behind by an earlier one
+    // simply does not match instead of being compared against a counter unrelated to it - and everything held from
+    // before stops being of the current activation without a single value having to be touched
+    private final AtomicReference<@Nullable String> activationId;
     private final AtomicLong operationCounter;
 
     @SuppressWarnings("NotNullFieldNotInitialized")
@@ -105,7 +107,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalCacheManager() {
         this.isActivated = new AtomicBoolean();
-        this.operationId = new AtomicReference<>();
+        this.activationId = new AtomicReference<>();
         this.operationCounter = new AtomicLong();
         // see also initialize()
     }
@@ -125,12 +127,25 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     }
 
     void activate() {
-        operationId.set(Long.toHexString(ThreadLocalRandom.current().nextLong()));
+        // Renewing the identifier is what invalidates everything held from before, without touching a single value:
+        // none of it is of this activation any more, so nothing published from here on can rest on it and
+        // synchronizing keeps only what the data store confirms. Which also reaches what no pass over the cache
+        // could - a value already evicted, whose eviction is reported asynchronously and would otherwise be
+        // distributed as if it had taken place after starting again
+        activationId.set(Long.toHexString(ThreadLocalRandom.current().nextLong()));
         isActivated.set(true);
     }
 
     void deactivate() {
         isActivated.set(false);
+    }
+
+    // whether this value is content of the current activation, meaning this cache instance wrote or retrieved it
+    // while taking part in synchronization. Only such a value may have a change to it distributed, and only such a
+    // value survives synchronizing
+    boolean hasCurrentActivationId(InternalValue<V> value) {
+        String currentActivationId = activationId.get();
+        return nonNull(currentActivationId) && currentActivationId.equals(value.getActivationId());
     }
 
     boolean isActivated() {
@@ -168,6 +183,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     InternalValue<V> putDistributedRefreshAfterWrite(InternalKey<K> key, InternalValue<V> newValue,
                                                      InternalValue<V> oldValue) {
         // special handling (activated, async, old value, not managed, no cache change)
+        // handling activationId in loader
         if (isActivated()) {
             if (distributionMode.isPopulationConsidered()) {
                 publishCacheEntriesAsync(Map.of(key, newValue), CACHED_REFRESHED_AFTER_WRITE);
@@ -233,6 +249,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
 
     @Nullable InternalValue<V> invalidateDistributedRefreshAfterWrite(InternalKey<K> key, InternalValue<V> oldValue) {
         // special handling (activated, async, old value, not managed, no cache change)
+        // handling activationId in loader
         if (isActivated()) {
             if (distributionMode.isInvalidationConsidered()) {
                 Map<InternalKey<K>, @Nullable InternalValue<V>> map = new HashMap<>(); // allow null values
@@ -251,6 +268,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     @SuppressWarnings("java:S3776")
     void evictDistributed(InternalKey<K> key, InternalValue<V> value, RemovalCause removalCause) {
         // special handling (activated, eviction support, async, not managed, cache change)
+        // handling activationId in listener
         if (isActivated() && (removalCause.equals(RemovalCause.SIZE) || removalCause.equals(RemovalCause.EXPIRED))) {
             Status status;
             if (extendedPersistenceConfigurer.isConfigured()) {
@@ -271,14 +289,22 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
         }
     }
 
+    // the activation identifier goes on alongside the operation, but only while this cache instance takes part in
+    // synchronization: what it writes while stopped is content of no activation, so nothing is distributed for it
+    // afterwards and synchronizing removes it unless the store turns out to back it
     private void stampOperations(Map<? extends InternalKey<K>, ? extends @Nullable InternalValue<V>> map) {
+        String currentActivationId = isActivated()
+                ? activationId.get()
+                : null;
         map.values().stream()
                 .filter(Objects::nonNull)
-                .forEach(value -> value.setOperation(nextOperation()));
+                .forEach(value -> value
+                        .setOperation(nextOperation())
+                        .setActivationId(currentActivationId));
     }
 
     private String nextOperation() {
-        return operationId.get() + ":" + operationCounter.incrementAndGet();
+        return activationId.get() + ":" + operationCounter.incrementAndGet();
     }
 
     // An operation identifies a single write (self-echo filter) and, through the identifier it begins with, orders
@@ -297,7 +323,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
         if (isNull(arriving) || isNull(held)) {
             return false;
         }
-        String prefix = operationId.get() + ":";
+        String prefix = activationId.get() + ":";
         if (!arriving.startsWith(prefix) || !held.startsWith(prefix)) {
             return false;
         }
@@ -306,9 +332,11 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     }
 
     // the three callers of this method publish outside the synchronization lock because they run where taking it
-    // would deadlock with Caffeine's internal lock. Whatever the returned future carries is therefore the only trace
-    // a failure leaves, and dropping it hides a store that is refusing writes: the distribution is simply lost, while
-    // locally everything looks like it succeeded
+    // would deadlock with Caffeine's internal lock. It is also the one way a publish can be decided while this cache
+    // instance takes part in synchronization and be carried out when it no longer does, so every caller declines an
+    // entry the data store has not confirmed before it gets here (see the pointers on the three of them).
+    // Whatever the returned future carries is the only trace a failure leaves, and dropping it hides a store that is
+    // refusing writes: the distribution is simply lost, while locally everything looks like it succeeded
     // TODO logging makes such a failure visible but does not make the instances converge again. Retrying is not
     // enough on its own, because upsertCacheEntries() writes the status unconditionally, so a delayed retry can
     // overwrite a newer CACHED write for the same key with a stale EVICTED one. Letting the data store drive the
@@ -322,7 +350,11 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
         // it. Every other cache instance then drops the cache entry while this one keeps it, and nothing reads the
         // store again to notice. Losing the population everywhere is wrong too, but at least it is not a divergence
         // between the instances - see the corresponding disabled test
-        CompletableFuture.runAsync(() -> publishCacheEntries(map, status, false), executor)
+        CompletableFuture.runAsync(() -> {
+                    if (isActivated()) { // just if the future runs late
+                        publishCacheEntries(map, status, false);
+                    }
+                }, executor)
                 .exceptionally(throwable -> {
                     logger.log(Level.WARNING, format("Distributing %s for %s failed for cache at '%s'",
                             status, map.keySet(), identifier), throwable);
@@ -431,12 +463,13 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
                                 if (nonNull(present)
                                         && (isSupersededLocally(operation, present.getOperation())
                                         || (nonNull(operation) && operation.equals(present.getOperation())))) {
-                                    present.setStale(false);
+                                    present.setActivationId(activationId.get());
                                 } else {
                                     // a cached status always comes with a value - only invalidated and evicted
                                     // ones carry none, which no annotation can express here either
                                     toAdd.put(key, iv(requireNonNull(cacheEntry.getValue()))
-                                            .setOperation(operation));
+                                            .setOperation(operation)
+                                            .setActivationId(activationId.get()));
                                 }
                             } else {
                                 // only remove from cache if value is present - and only if it was not written here
@@ -457,15 +490,13 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
 
     // while synchronization was stopped the cache kept serving locally, so local writes never reached the data store
     // and changes made elsewhere never arrived. Retrieving below only ever adds what the store holds, which would
-    // leave entries the store no longer backs in place to be served as if they were still valid. Every entry present
-    // up front is therefore marked as stale and anything the store still knows clears that mark again, so that only
-    // what is left marked has to be removed afterwards. Marking happens in place, which keeps the cache readable
-    // throughout instead of replacing it with an empty one that answers every read with a miss
+    // leave entries the store no longer backs in place to be served as if they were still valid. Everything present
+    // is marked by then (stopping and activating do that), so what the store still knows clears its mark again and
+    // only what stays marked is removed here - in place, which keeps the cache readable throughout instead of
+    // replacing it with an empty one that answers every read with a miss
     void synchronizeCacheEntries() {
         if (isActivated()) {
             synchronizationLock.ensureLock();
-            cache.asMap().values()
-                    .forEach(value -> value.setStale(true));
             if (distributionMode.isPopulationConsidered()) {
                 // process the store cursor directly instead of buffering it into a set first (avoids a second full
                 // copy in memory and the needless CacheEntry hashCode/equals a set would compute)
@@ -479,7 +510,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
             // without population being considered nothing clears the marks, so everything present is dropped - the
             // same outcome as before, where a restart always continued with an empty cache
             cache.asMap().values()
-                    .removeIf(InternalValue::isStale);
+                    .removeIf(value -> !hasCurrentActivationId(value));
         }
     }
 

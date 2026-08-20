@@ -151,6 +151,15 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
     public CompletableFuture<? extends @Nullable InternalValue<V>> asyncReload(InternalKey<K> key,
                                                                                InternalValue<V> oldValue,
                                                                                Executor executor) {
+        // An entry the data store has not confirmed since synchronization was stopped is not this cache instance's
+        // to distribute, while refreshing it locally is still what the application asked for. So the reload goes
+        // through the application's cache loader alone - reading the store would bring back what synchronizing is
+        // about to settle - and reaches neither publishing method. What comes back is of no activation either, so
+        // nothing is distributed for it and synchronizing removes it unless the store turns out to back it
+        if (!cacheManager.hasCurrentActivationId(oldValue)) {
+            return getFailable(() -> cacheLoader.asyncReload(k(key), v(oldValue), executor))
+                    .thenApply(InternalValue::ivn);
+        }
         return (extendedPersistenceConfigurer.hasCacheLoaderStrategy()
                 ? CompletableFuture.supplyAsync(() -> loadExtendedFromStore(key), executor)
                 : CompletableFuture.completedFuture((V) null))

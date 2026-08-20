@@ -45,14 +45,11 @@ class InternalEvictionListener<K, V> implements RemovalListener<InternalKey<K>, 
 
     @Override
     public void onRemoval(@Nullable InternalKey<K> key, @Nullable InternalValue<V> value, RemovalCause removalCause) {
-        // a stale entry is one the data store has not confirmed since synchronization was (re)started, and it keeps
-        // occupying the size budget until the sweep removes it. Distributing its eviction would hand the cluster a
-        // value this instance is in the middle of discarding, and reporting it would announce an eviction for an
-        // entry that only still exists because reconciling with the store has not caught up yet
-        if (nonNull(value) && value.isStale()) {
-            return;
-        }
-        if (nonNull(key) && nonNull(value)) {
+        // an eviction is reported asynchronously, so it can arrive once this cache instance counts as activated
+        // again although it took place while it did not - which the value says, because it carries the activation it
+        // became content of and only that activation's content is this cache instance's to distribute. Reporting it
+        // below is another matter
+        if (nonNull(key) && nonNull(value) && cacheManager.hasCurrentActivationId(value)) {
             // special handling, no lock required
             cacheManager.evictDistributed(key, value, removalCause);
         }

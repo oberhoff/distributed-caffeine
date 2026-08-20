@@ -3666,6 +3666,64 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(fromA).isEqualTo(fromB);
         }
 
+        @DisplayName("Test that an entry expiring while synchronization is stopped is not distributed as an eviction")
+        @Test
+        void test_DistributionMode_expired_entry_is_not_distributed_when_starting_synchronization() {
+            // An entry whose expiration has passed counts as gone for every read while it stays resident until
+            // maintenance reclaims it, and a cache instance that served locally while synchronization was stopped has
+            // no reason to have run any. Such an entry cannot be reached any more either: asMap(),
+            // getIfPresentQuietly() and even the expiration policy's oldest() all hide it, and cleanUp() reclaims it
+            // only once its expiration lies more than the coarsest expiration bucket in the past. The eviction the
+            // underlying cache eventually reports for it is delivered asynchronously, so it can arrive once
+            // synchronization has been started again - and distributing it then would drop a cache entry from every
+            // other cache instance which the data store still holds as cached and which nobody removed.
+            // What prevents that is stopping synchronization marking every entry it can still reach, so that the
+            // eviction arriving later is recognized as belonging to the time before synchronization was started again
+            // rather than to what happened after it. Which is why this test asserts that starting it leaves the other
+            // cache instance and the data store exactly as they were.
+            DistributedCache<Key, Value> distributedCacheA = createCache(
+                    dc -> dc.withDistributionMode(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                            .withCaffeine(Caffeine.newBuilder()
+                                    .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration()))),
+                    DistributedCaffeine::build);
+            DistributedCache<Key, Value> distributedCacheB = createCache(
+                    dc -> dc.withDistributionMode(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                            .withCaffeine(Caffeine.newBuilder()
+                                    .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration()))),
+                    DistributedCaffeine::build);
+
+            Key key = Key.of(1);
+            Value value = Value.of(1);
+
+            distributedCacheA.put(key, value);
+
+            await("synchronization between cache instances")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(distributedCacheB.getIfPresent(key)).isEqualTo(value));
+
+            distributedCacheB.distributedPolicy().stopSynchronization();
+
+            // expiring it while synchronization is stopped is what leaves the entry behind: nothing reads or writes
+            // this cache instance afterwards, so no maintenance of its own reclaims it before it is started again
+            distributedCacheB.policy().expireVariably().orElseThrow().setExpiresAfter(key, Duration.ZERO);
+
+            // the state the assertions below are about, asserted rather than assumed so that this test fails loudly
+            // instead of becoming vacuous should an expired entry ever stop being resident
+            assertThat(distributedCacheB.asMap()).doesNotContainKey(key);
+            assertThat(distributedCacheB.estimatedSize()).isEqualTo(1);
+
+            distributedCacheB.distributedPolicy().startSynchronization();
+
+            // no awaiting: the point is not that something arrives eventually but what everything has settled on, and
+            // awaiting would be satisfied by a state passed through on the way there
+            sleep(Duration.ofSeconds(2));
+
+            assertThat(distributedCacheA.getIfPresent(key)).isEqualTo(value);
+            assertThat(distributedCacheB.getIfPresent(key)).isEqualTo(value);
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
+        }
+
         @DisplayName("Test refresh")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")

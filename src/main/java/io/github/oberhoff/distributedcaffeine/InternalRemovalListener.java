@@ -21,7 +21,6 @@ import org.jspecify.annotations.Nullable;
 
 import static io.github.oberhoff.distributedcaffeine.InternalKey.kn;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.vn;
-import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
 class InternalRemovalListener<K, V> implements RemovalListener<InternalKey<K>, InternalValue<V>>,
@@ -41,12 +40,6 @@ class InternalRemovalListener<K, V> implements RemovalListener<InternalKey<K>, I
 
     @Override
     public void onRemoval(@Nullable InternalKey<K> key, @Nullable InternalValue<V> value, RemovalCause removalCause) {
-        // a stale entry is one the data store has not confirmed since synchronization was (re)started, so it is being
-        // removed (or replaced) by reconciling with the store rather than by anything done to the cache. Reporting it
-        // would announce removals for entries the application never removed
-        if (nonNull(value) && value.isStale()) {
-            return;
-        }
         removalListener.onRemoval(kn(key), vn(value), removalCause);
     }
 }
