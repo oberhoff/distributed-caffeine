@@ -155,6 +155,11 @@ public final class CacheEntry<K, V> {
         EVICTED_TIME_EXTENDED,
 
         /**
+         * Status of a cache entry that is stale.
+         */
+        STALE,
+
+        /**
          * Status of a cache entry that carries a command instead of belonging to a key.
          */
         COMMAND;
@@ -186,11 +191,11 @@ public final class CacheEntry<K, V> {
 
         /**
          * Group of statuses representing invalidated and evicted cache entries while extended persistence was not
-         * configured, along with cache entries carrying a command.
+         * configured, along with stale cache entries and cache entries carrying a command.
          */
         public static final Set<Status> SHORT_LIVING_GROUP =
                 Set.of(INVALIDATED, INVALIDATED_REFRESHED, INVALIDATED_REFRESHED_AFTER_WRITE,
-                        EVICTED_SIZE, EVICTED_TIME, COMMAND);
+                        EVICTED_SIZE, EVICTED_TIME, STALE, COMMAND);
 
         private final String value;
 
@@ -227,12 +232,21 @@ public final class CacheEntry<K, V> {
         }
 
         /**
-         * Indicates whether a cache entry was evicted or not while extended persistence was not configured.
+         * Indicates whether a cache entry was evicted or not while extended persistence was configured.
          *
          * @return {@code true} if cache entry was evicted, otherwise {@code false}
          */
         public boolean isEvictedExtended() {
             return isMemberOf(EVICTED_EXTENDED_GROUP);
+        }
+
+        /**
+         * Indicates whether a cache entry is stale or not.
+         *
+         * @return {@code true} if cache entry is stale, otherwise {@code false}
+         */
+        public boolean isStale() {
+            return this == STALE;
         }
 
         /**
@@ -257,6 +271,8 @@ public final class CacheEntry<K, V> {
                 return distributionMode.isInvalidationConsidered();
             } else if (isEvicted()) {
                 return distributionMode.isEvictionConsidered();
+            } else if (isStale()) {
+                return false;
             } else {
                 return isCommand();
             }
@@ -441,12 +457,21 @@ public final class CacheEntry<K, V> {
     }
 
     /**
-     * Indicates whether the cache entry was evicted or not while extended persistence was not configured.
+     * Indicates whether the cache entry was evicted or not while extended persistence was configured.
      *
      * @return {@code true} if cache entry was evicted, otherwise {@code false}
      */
     public boolean isEvictedExtended() {
         return status.isEvictedExtended();
+    }
+
+    /**
+     * Indicates whether the cache entry is stale or not.
+     *
+     * @return {@code true} if cache entry is stale, otherwise {@code false}
+     */
+    public boolean isStale() {
+        return status.isStale();
     }
 
     /**

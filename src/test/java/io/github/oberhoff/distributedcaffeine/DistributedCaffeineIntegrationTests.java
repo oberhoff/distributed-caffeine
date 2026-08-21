@@ -146,6 +146,7 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.I
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED_AFTER_WRITE;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.SHORT_LIVING_GROUP;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.STALE;
 import static io.github.oberhoff.distributedcaffeine.adapter.Repository.DEFAULT_DISCRIMINATOR;
 import static java.lang.Math.min;
 import static java.lang.String.format;
@@ -3724,6 +3725,59 @@ final class DistributedCaffeineIntegrationTests {
                     Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
         }
 
+        @DisplayName("Test that pruning extended persistence does not remove an entry elsewhere")
+        @Test
+        void test_DistributionMode_pruning_extended_persistence_does_not_remove_entry_elsewhere() {
+            // Same pair of cache instances as above, only with extended persistence bounded so tightly that
+            // maintenance prunes what the eviction put there. Pruning transitions the status rather than deleting the
+            // document, so unlike a delete it reaches every cache instance on the change stream - which must not be
+            // an invalidation, because the other cache instance still holds the cache entry and this distribution
+            // mode excludes exactly that: one cache instance's local eviction removing it everywhere.
+            DistributedCache<Key, Value> expiringDistributedCache = createCache(
+                    dc -> dc.withDistributionMode(POPULATION_AND_INVALIDATION)
+                            .withCaffeine(Caffeine.newBuilder()
+                                    .expireAfterWrite(Duration.ofMillis(500)))
+                            .withExtendedPersistence(configurer -> configurer
+                                    .withMaximumTime(Duration.ofMillis(1))),
+                    DistributedCaffeine::build);
+            DistributedCache<Key, Value> retainingDistributedCache = createCache(
+                    dc -> dc.withDistributionMode(POPULATION_AND_INVALIDATION)
+                            .withCaffeine(Caffeine.newBuilder()
+                                    .maximumSize(10))
+                            .withExtendedPersistence(configurer -> configurer
+                                    .withMaximumTime(Duration.ofMillis(1))),
+                    DistributedCaffeine::build);
+
+            Key key = Key.of(1);
+            Value value = Value.of(1);
+
+            expiringDistributedCache.put(key, value);
+
+            await("synchronization between cache instances")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(retainingDistributedCache.getIfPresent(key)).isEqualTo(value));
+
+            await("eviction of the expiring cache instance")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(1))));
+
+            // only the pruning, without the short-living sweep processMaintenance() would run after it, so that what
+            // pruning leaves behind can be observed before it is removed from the data store
+            invokeMethod(getInstanceRegistry(expiringDistributedCache).getMaintenanceWorker(),
+                    InternalMaintenanceWorker.class, "processExtendedPersistenceByTime", List.of(), List.of());
+
+            assertThatDataStoreHasCounts(
+                    Count.of(STALE, assertion -> assertion.isEqualTo(1)));
+
+            // no awaiting: the point is not that something arrives eventually but what everything has settled on, and
+            // awaiting would be satisfied by a state passed through on the way there
+            sleep(Duration.ofSeconds(2));
+
+            assertThat(retainingDistributedCache.getIfPresent(key)).isEqualTo(value);
+        }
+
         @DisplayName("Test refresh")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
@@ -5760,8 +5814,9 @@ final class DistributedCaffeineIntegrationTests {
             doCallRealMethod().when(cacheManager).cleanup();
 
             // with the failure fixed, the background maintenance recovers on its own (no explicit trigger) and prunes
-            // extended-by-size entries down to the extended maximum size; the pruned overflow is invalidated (and only
-            // later removed as short-living, so it still lingers within the test's waiting duration)
+            // extended-by-size entries down to the extended maximum size; this distribution mode distributes
+            // evictions, so residency is a property of every cache instance alike and the pruned overflow is
+            // invalidated (and only later removed as short-living, so it still lingers within the waiting duration)
             await("recovery")
                     .atMost(WAITING_DURATION)
                     .untilAsserted(() -> assertThatDataStoreHasCounts(

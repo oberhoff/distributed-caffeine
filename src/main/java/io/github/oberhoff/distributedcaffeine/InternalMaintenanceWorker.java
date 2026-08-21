@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import dev.failsafe.Failsafe;
 import dev.failsafe.RetryPolicy;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.ExtendedPersistenceConfigurer;
+import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 
@@ -39,6 +40,7 @@ import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_EXTENDED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.SHORT_LIVING_GROUP;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.STALE;
 import static java.lang.Math.min;
 import static java.lang.String.format;
 
@@ -62,6 +64,8 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
     private InternalCacheManager<K, V> cacheManager;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    private DistributionMode distributionMode;
 
     @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalMaintenanceWorker() {
@@ -77,6 +81,7 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
         this.repository = instanceRegistry.getAdapter().getRepository();
         this.cacheManager = instanceRegistry.getCacheManager();
         this.extendedPersistenceConfigurer = instanceRegistry.getExtendedPersistenceConfigurer();
+        this.distributionMode = instanceRegistry.getDistributionMode();
     }
 
     void activate() {
@@ -150,9 +155,9 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
             Instant deadline = maximumTime.compareTo(Duration.between(min, now)) > 0
                     ? min
                     : now.minus(maximumTime);
-            // invalidate (instead of hard delete)
+            // transition the status (instead of hard delete)
             runFailable(() -> repository.updateStatusOfCacheEntries(null,
-                    EVICTED_EXTENDED_GROUP, deadline, INVALIDATED));
+                    EVICTED_EXTENDED_GROUP, deadline, pruningStatus()));
         });
     }
 
@@ -174,12 +179,28 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
                             .forEach(hashes::add);
                 }
                 if (!hashes.isEmpty()) {
-                    // invalidate (instead of hard delete)
+                    // transition the status (instead of hard delete)
                     runFailable(() -> repository.updateStatusOfCacheEntries(hashes,
-                            EVICTED_EXTENDED_GROUP, null, INVALIDATED));
+                            EVICTED_EXTENDED_GROUP, null, pruningStatus()));
                 }
             }
         });
+    }
+
+    // The data store is the authority on what a cache entry's value is and on whether it was invalidated. Which
+    // cache instance keeps which key in memory is a different matter, and who owns that decision is what the
+    // distribution mode says - which is why pruning the extended persistence tier cannot mean the same thing in
+    // every mode.
+    // Where evictions are distributed, residency is a property of the whole set of cache instances: none of them
+    // holds what the data store no longer backs, so the removal is theirs to follow and an invalidation states it.
+    // Where evictions are not distributed, residency is deliberately local - a cache instance is meant to go on
+    // serving a key another one evicted - so the same transition must state nothing about anyone's content. It only
+    // records that the data store is done keeping the value, which is what STALE says and what no distribution mode
+    // considers
+    private Status pruningStatus() {
+        return distributionMode.isEvictionConsidered()
+                ? INVALIDATED
+                : STALE;
     }
 
     private void processShortLived(Duration shortLivingDuration) {
