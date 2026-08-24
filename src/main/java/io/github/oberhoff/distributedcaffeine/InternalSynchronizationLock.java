@@ -69,6 +69,8 @@ class InternalSynchronizationLock {
         return lock.isLocked();
     }
 
+    // deliberately isLocked() rather than isHeldByCurrentThread(): the invariant to assert is that a
+    // synchronization lock is active at all, whichever thread holds it - not that this thread is the holder
     void ensureLock() {
         if (!isLocked()) {
             throw new IllegalStateException("No synchronization lock found");
