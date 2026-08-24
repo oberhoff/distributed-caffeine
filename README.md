@@ -72,7 +72,7 @@ method) to distinguish between cache entries from different caches that share a 
 
 ```java
 MongoAdapter<Key, Value> adapter = MongoAdapter.newBuilder(mongoClient, databaseName, collectionName)
-    .withDiscriminator("discriminator") // optional with default
+    .withDiscriminator("discriminator") // optional
     .build();
 ```
 
@@ -137,8 +137,8 @@ DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(a
     .build();
 ```
 
-Alternatively, the key class can implement the `Hashable` interface. The supplied hasher can be used to compute and
-return a hash based on values of the key instance.
+Alternatively, the key class can implement the `Hashable` interface and override the `getHash(hasher)` method. The
+supplied hasher can be used to compute and return a hash based on values of the key object.
 
 ```java
 public class Key implements Hashable {
