@@ -194,6 +194,21 @@ public final class DistributedCaffeine<K, V> {
     }
 
     /**
+     * Specifies the mode used for distributed synchronization between cache instances.
+     * <p>
+     * <b>Note:</b> {@link DistributionMode#POPULATION_AND_INVALIDATION_AND_EVICTION} is used as default if this method
+     * is skipped.
+     *
+     * @param distributionMode distribution mode used for distributed synchronization
+     * @return a builder pattern instance for chaining additional methods
+     */
+    public DistributedCaffeine<K, V> withDistributionMode(DistributionMode distributionMode) {
+        requireNonNull(distributionMode, "distributionMode cannot be null");
+        this.distributionMode = distributionMode;
+        return this;
+    }
+
+    /**
      * Specifies the hash provider used for generating hashes for key objects. This method can be skipped for keys of
      * type {@link String}, {@link Long}, {@link Integer} or {@link UUID}, which are hashed out of the box, and for key
      * objects implementing the {@link Hashable} interface.
@@ -217,21 +232,6 @@ public final class DistributedCaffeine<K, V> {
     public DistributedCaffeine<K, V> withHashProvider(HashProvider<K> hashProvider) {
         requireNonNull(hashProvider, "hashProvider cannot be null");
         this.hasher = new InternalHasher<>(hashProvider);
-        return this;
-    }
-
-    /**
-     * Specifies the mode used for distributed synchronization between cache instances.
-     * <p>
-     * <b>Note:</b> {@link DistributionMode#POPULATION_AND_INVALIDATION_AND_EVICTION} is used as default if this method
-     * is skipped.
-     *
-     * @param distributionMode distribution mode used for distributed synchronization
-     * @return a builder pattern instance for chaining additional methods
-     */
-    public DistributedCaffeine<K, V> withDistributionMode(DistributionMode distributionMode) {
-        requireNonNull(distributionMode, "distributionMode cannot be null");
-        this.distributionMode = distributionMode;
         return this;
     }
 
@@ -517,6 +517,11 @@ public final class DistributedCaffeine<K, V> {
          * </ul>
          * <p>
          * <b>Note:</b> {@link ForySerializer} is used as default if this method is skipped.
+         * <p>
+         * <b>Attention:</b> Using the default {@link ForySerializer}, class registration is not enforced by default,
+         * which means that arbitrary classes can be deserialized. Values should therefore only be deserialized from a
+         * trusted data store. If strict enforcement is required,
+         * {@link ForySerializer#ForySerializer(ForyBuilder, Class[])} can be used with a Fory builder enforcing this.
          *
          * @param keySerializer the custom serializer for key objects
          * @return a configurer instance for chaining additional methods
@@ -547,6 +552,11 @@ public final class DistributedCaffeine<K, V> {
          * </ul>
          * <p>
          * <b>Note:</b> {@link ForySerializer} is used as default if this method is skipped.
+         * <p>
+         * <b>Attention:</b> Using the default {@link ForySerializer}, class registration is not enforced by default,
+         * which means that arbitrary classes can be deserialized. Values should therefore only be deserialized from a
+         * trusted data store. If strict enforcement is required,
+         * {@link ForySerializer#ForySerializer(ForyBuilder, Class[])} can be used with a Fory builder enforcing this.
          *
          * @param valueSerializer the custom serializer for value objects
          * @return a configurer instance for chaining additional methods
