@@ -41,7 +41,6 @@ import org.jspecify.annotations.Nullable;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.time.Duration;
-import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -54,16 +53,20 @@ import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
 
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer.LoadingStrategy.CACHE_LOADER;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailableOrNull;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
 import static java.lang.String.format;
+import static java.util.Collections.newSetFromMap;
+import static java.util.Collections.synchronizedSet;
 import static java.util.Locale.ROOT;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
+import static java.util.stream.Collectors.toUnmodifiableSet;
 
 /**
  * Starting point for configuring and constructing Distributed Caffeine cache instances using a builder pattern instance
@@ -85,6 +88,7 @@ import static java.util.stream.Collectors.joining;
  * @author Andreas Oberhoff
  * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
  */
+@SuppressWarnings("java:S1192")
 public final class DistributedCaffeine<K, V> {
 
     // Caffeine exposes no public API to inspect or replace these before build(), so they are accessed reflectively.
@@ -112,15 +116,14 @@ public final class DistributedCaffeine<K, V> {
     // once the application itself drops the adapter, and no value is held for it, so nothing references the key
     // back and keeps it alive. Note that this identifies adapters by equals(), which no adapter overrides, so it
     // is identity in practice
-    private static final Set<Adapter<?, ?>> CLAIMED_ADAPTERS =
-            Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
+    private static final Set<Adapter<?, ?>> CLAIMED_ADAPTERS = synchronizedSet(newSetFromMap(new WeakHashMap<>()));
 
     private final Adapter<K, V> adapter;
     private Caffeine<Object, Object> caffeine;
     private InternalHasher<K> hasher;
     private DistributionMode distributionMode;
     private SerializersConfigurer<K, V> serializersConfigurer;
-    private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
+    private PersistenceConfigurer persistenceConfigurer;
 
     private DistributedCaffeine(Adapter<K, V> adapter) {
         this.adapter = adapter;
@@ -129,7 +132,7 @@ public final class DistributedCaffeine<K, V> {
         this.hasher = new InternalHasher<>(null);
         this.distributionMode = POPULATION_AND_INVALIDATION_AND_EVICTION;
         this.serializersConfigurer = new SerializersConfigurer<>();
-        this.extendedPersistenceConfigurer = new ExtendedPersistenceConfigurer();
+        this.persistenceConfigurer = new PersistenceConfigurer();
     }
 
     /**
@@ -259,33 +262,42 @@ public final class DistributedCaffeine<K, V> {
      */
     public DistributedCaffeine<K, V> withSerializers(Configurer<SerializersConfigurer<K, V>> configurer) {
         requireNonNull(configurer, "configurer cannot be null");
-        this.serializersConfigurer = configurer.apply(this.serializersConfigurer);
+        this.serializersConfigurer = requireNonNull(configurer.apply(this.serializersConfigurer),
+                "configurer cannot return null");
         return this;
     }
 
     /**
-     * Specifies extended persistence via the given configurer.
+     * Specifies persistence of cache entries in the underlying store via the given configurer.
      * <p>
-     * If specified (along with at least one eviction policy), recently evicted cache entries (regardless of whether the
-     * configured {@link DistributionMode} includes evictions) will remain (limitable by size or time) in the underlying
-     * store (if not invalidated) and may be reloaded on demand.
+     * Persistence is configured separately for the two kinds of cache entries the underlying store can retain:
+     * <ul>
+     *     <li>{@link PersistenceConfigurer#withCachedEntries(Configurer)} for cache entries that are currently
+     *     cached, which can be synchronized into a cache instance when synchronization starts</li>
+     *     <li>{@link PersistenceConfigurer#withEvictedEntries(Configurer)} for cache entries that have recently been
+     *     evicted, which may be reloaded on demand</li>
+     * </ul>
      * <p>
      * Exemplary usage:
      * <pre>
      * ...
-     * .withExtendedPersistence(configurer -> configurer
-     *     .withMaximumSize(1_000_000)
-     *     .withMaximumTime(Duration.ofDays(10)))
+     * .withPersistence(configurer -> configurer
+     *     .withCachedEntries(cachedEntries -> cachedEntries
+     *         .withCacheResidency())
+     *     .withEvictedEntries(evictedEntries -> evictedEntries
+     *         .withMaximumSize(1_000_000)
+     *         .withMaximumTime(Duration.ofDays(10))))
      * ...
      * </pre>
-     * <b>Note:</b> No extended persistence is used if this method is skipped.
+     * <b>Note:</b> No persistence is used if this method is skipped.
      *
-     * @param configurer configurer for extended persistence
+     * @param configurer configurer for persistence
      * @return a builder pattern instance for chaining additional methods
      */
-    public DistributedCaffeine<K, V> withExtendedPersistence(Configurer<ExtendedPersistenceConfigurer> configurer) {
+    public DistributedCaffeine<K, V> withPersistence(Configurer<PersistenceConfigurer> configurer) {
         requireNonNull(configurer, "configurer cannot be null");
-        this.extendedPersistenceConfigurer = configurer.apply(this.extendedPersistenceConfigurer);
+        this.persistenceConfigurer = requireNonNull(configurer.apply(this.persistenceConfigurer),
+                "configurer cannot return null");
         return this;
     }
 
@@ -341,7 +353,10 @@ public final class DistributedCaffeine<K, V> {
         instanceRegistry.setHasher(this.hasher);
         instanceRegistry.setDistributionMode(this.distributionMode);
         instanceRegistry.setSerializersConfigurer(this.serializersConfigurer);
-        instanceRegistry.setExtendedPersistenceConfigurer(this.extendedPersistenceConfigurer);
+        instanceRegistry.setCachedEntryPersistenceConfigurer(
+                this.persistenceConfigurer.getCachedEntryPersistenceConfigurer());
+        instanceRegistry.setEvictedEntryPersistenceConfigurer(
+                this.persistenceConfigurer.getEvictedEntryPersistenceConfigurer());
         instanceRegistry.setCacheLoader(cacheLoader);
 
         // throw exception if weak or soft references are configured
@@ -423,7 +438,7 @@ public final class DistributedCaffeine<K, V> {
 
         // validate configurers
         this.serializersConfigurer.validate(instanceRegistry.getCache());
-        this.extendedPersistenceConfigurer.validate(instanceRegistry.getCache());
+        this.persistenceConfigurer.validate(instanceRegistry.getCache(), this.distributionMode);
 
         // reset caffeine
         runFailable(() -> REMOVAL_LISTENER_FIELD.set(caffeine, caffeineRemovalListener));
@@ -581,51 +596,146 @@ public final class DistributedCaffeine<K, V> {
         void validate(Cache<?, ?> cache) {
             List<Class<?>> serializers = List.of(
                     ByteArraySerializer.class, StringSerializer.class, JsonSerializer.class);
-            Stream.of(getKeySerializer(), getValueSerializer()).forEach(serializer -> {
-                if (serializers.stream()
-                        .noneMatch(serializerClass -> serializerClass.isInstance(serializer))) {
-                    throw new IllegalArgumentException(format(
-                            "Serializers must implement one of the following interfaces: %s",
-                            serializers.stream()
-                                    .map(Class::getSimpleName)
-                                    .collect(joining(", "))));
-                }
-            });
+            Stream.of(getKeySerializer(), getValueSerializer())
+                    .forEach(serializer -> {
+                        if (serializers.stream()
+                                .noneMatch(serializerClass -> serializerClass.isInstance(serializer))) {
+                            throw new IllegalArgumentException(format(
+                                    "Serializers must implement one of the following interfaces: %s",
+                                    serializers.stream()
+                                            .map(Class::getSimpleName)
+                                            .collect(joining(", "))));
+                        }
+                    });
         }
     }
 
     /**
-     * Configurer to specify extended persistence.
+     * Configurer to specify persistence of cache entries to retain them (conditionally) in the underlying store
+     * (separately for cached and evicted entries).
      *
      * @author Andreas Oberhoff
      */
-    public static final class ExtendedPersistenceConfigurer {
+    public static final class PersistenceConfigurer {
 
-        private @Nullable Integer maximumSize;
-        private @Nullable Duration maximumTime;
-        private boolean cacheLoaderStrategy;
+        private CachedEntryPersistenceConfigurer cachedEntryPersistenceConfigurer;
+        private EvictedEntryPersistenceConfigurer evictedEntryPersistenceConfigurer;
 
-        private ExtendedPersistenceConfigurer() {
-            this.cacheLoaderStrategy = false;
+        private PersistenceConfigurer() {
+            this.cachedEntryPersistenceConfigurer = new CachedEntryPersistenceConfigurer();
+            this.evictedEntryPersistenceConfigurer = new EvictedEntryPersistenceConfigurer();
         }
 
         /**
-         * Specifies the maximum size for the extended persistence up to which recently evicted cache entries will
-         * remain in the underlying store (if not invalidated) and may be reloaded on demand.
+         * Specifies persistence of cached entries via the given configurer.
+         *
+         * @param configurer configurer for persistence of cached entries
+         * @return a configurer instance for chaining additional methods
+         */
+        public PersistenceConfigurer withCachedEntries(Configurer<CachedEntryPersistenceConfigurer> configurer) {
+            requireNonNull(configurer, "configurer cannot be null");
+            this.cachedEntryPersistenceConfigurer = requireNonNull(
+                    configurer.apply(this.cachedEntryPersistenceConfigurer),
+                    "configurer cannot return null");
+            return this;
+        }
+
+        /**
+         * Specifies persistence of evicted entries via the given configurer.
+         *
+         * @param configurer configurer for persistence of evicted entries
+         * @return a configurer instance for chaining additional methods
+         */
+        public PersistenceConfigurer withEvictedEntries(Configurer<EvictedEntryPersistenceConfigurer> configurer) {
+            requireNonNull(configurer, "configurer cannot be null");
+            this.evictedEntryPersistenceConfigurer = requireNonNull(
+                    configurer.apply(this.evictedEntryPersistenceConfigurer),
+                    "configurer cannot return null");
+            return this;
+        }
+
+        CachedEntryPersistenceConfigurer getCachedEntryPersistenceConfigurer() {
+            return cachedEntryPersistenceConfigurer;
+        }
+
+        EvictedEntryPersistenceConfigurer getEvictedEntryPersistenceConfigurer() {
+            return evictedEntryPersistenceConfigurer;
+        }
+
+        void validate(Cache<?, ?> cache, DistributionMode distributionMode) {
+            cachedEntryPersistenceConfigurer.validate(cache, distributionMode);
+            evictedEntryPersistenceConfigurer.validate(cache);
+        }
+
+        private static boolean hasEvictionPolicy(Cache<?, ?> cache) {
+            Policy<?, ?> policy = cache.policy();
+            return Stream.of(policy.eviction(), policy.expireAfterAccess(), policy.expireAfterWrite(),
+                            policy.expireVariably())
+                    .anyMatch(Optional::isPresent);
+        }
+    }
+
+    /**
+     * Configurer to specify persistence of cached entries to retain them (conditionally) in the underlying store.
+     *
+     * @author Andreas Oberhoff
+     */
+    public static final class CachedEntryPersistenceConfigurer {
+
+        private @Nullable Integer maximumSize;
+        private @Nullable Duration maximumTime;
+        private boolean cacheResidency;
+        private boolean coldStart;
+
+        private CachedEntryPersistenceConfigurer() {
+            // noop
+        }
+
+        /**
+         * Specifies the persistence of cached entries so that all of them are retained in the underlying store (unless
+         * invalidated or evicted).
          * <p>
-         * Cache entries with extended persistence can be reloaded using loading strategies configured by
-         * {@link #withLoadingStrategy(boolean)}.
+         * All retained cache entries are synchronized back into this cache as warm-up.
          * <p>
          * Alternatively, {@link DistributedPolicy#getFromStore(Object, boolean)} or
          * {@link DistributedPolicy#getAllFromStore(Iterable, boolean)} can be used to load those cache entries directly
          * from the underlying store bypassing this cache instance.
          * <p>
-         * <b>Note:</b> If extended persistence is configured, at least one eviction policy must be configured.
+         * <b>Note:</b> This is mutually exclusive with {@link #withMaximumSize(int)} and
+         * {@link #withMaximumTime(Duration)}, which bound retention independently of whether cache entries are still
+         * cached.
+         * <p>
+         * <b>Note:</b> If persistence of cached entries is configured, the configured {@link DistributionMode} must
+         * include population, and eviction as well if an eviction policy is configured.
          *
-         * @param maximumSize the maximum size for the extended persistence (must be positive)
          * @return a configurer instance for chaining additional methods
          */
-        public ExtendedPersistenceConfigurer withMaximumSize(int maximumSize) {
+        public CachedEntryPersistenceConfigurer withCacheResidency() {
+            this.cacheResidency = true;
+            return this;
+        }
+
+        /**
+         * Specifies the maximum size for the persistence of cached entries up to which the most recently cached ones
+         * are retained in the underlying store (if not invalidated or evicted).
+         * <p>
+         * Retained cache entries are synchronized back into this cache as warm-up (unless a cold start is configured
+         * explicitly using {@link #withColdStart()}).
+         * <p>
+         * Alternatively, {@link DistributedPolicy#getFromStore(Object, boolean)} or
+         * {@link DistributedPolicy#getAllFromStore(Iterable, boolean)} can be used to load those cache entries directly
+         * from the underlying store bypassing this cache instance.
+         * <p>
+         * <b>Note:</b> This is mutually exclusive with {@link #withCacheResidency()} and can be combined with
+         * {@link #withMaximumTime(Duration)}.
+         * <p>
+         * <b>Note:</b> If persistence of cached entries is configured, the configured {@link DistributionMode} must
+         * include population.
+         *
+         * @param maximumSize the maximum size for the persistence of cached entries (must be positive)
+         * @return a configurer instance for chaining additional methods
+         */
+        public CachedEntryPersistenceConfigurer withMaximumSize(int maximumSize) {
             if (maximumSize <= 0) {
                 throw new IllegalArgumentException("maximumSize must be positive");
             }
@@ -634,22 +744,26 @@ public final class DistributedCaffeine<K, V> {
         }
 
         /**
-         * Specifies the maximum amount of time for the extended persistence that recently evicted cache entries will
-         * remain in the underlying store (if not invalidated) and may be reloaded on demand.
+         * Specifies the maximum amount of time for the persistence of cached entries within they are retained in the
+         * underlying store (if not invalidated or evicted).
          * <p>
-         * Cache entries with extended persistence can be reloaded using loading strategies configured by
-         * {@link #withLoadingStrategy(boolean)}.
+         * Retained cache entries are synchronized back into this cache as warm-up (unless a cold start is configured
+         * explicitly using {@link #withColdStart()}).
          * <p>
          * Alternatively, {@link DistributedPolicy#getFromStore(Object, boolean)} or
          * {@link DistributedPolicy#getAllFromStore(Iterable, boolean)} can be used to load those cache entries directly
          * from the underlying store bypassing this cache instance.
          * <p>
-         * <b>Note:</b> If extended persistence is configured, at least one eviction policy must be configured.
+         * <b>Note:</b> This is mutually exclusive with {@link #withCacheResidency()} and can be combined with
+         * {@link #withMaximumSize(int)}.
+         * <p>
+         * <b>Note:</b> If persistence of cached entries is configured, the configured {@link DistributionMode} must
+         * include population.
          *
-         * @param maximumTime the maximum amount of time for the extended persistence (must be positive)
+         * @param maximumTime the maximum amount of time for the persistence of cached entries (must be positive)
          * @return a configurer instance for chaining additional methods
          */
-        public ExtendedPersistenceConfigurer withMaximumTime(Duration maximumTime) {
+        public CachedEntryPersistenceConfigurer withMaximumTime(Duration maximumTime) {
             requireNonNull(maximumTime, "maximumTime cannot be null");
             if (maximumTime.isZero() || maximumTime.isNegative()) {
                 throw new IllegalArgumentException("maximumTime must be positive");
@@ -659,25 +773,179 @@ public final class DistributedCaffeine<K, V> {
         }
 
         /**
-         * Specifies loading strategies used to reload evicted cache entries with extended persistence on demand.
-         * <p>
-         * Loading strategy for cache loader can be enabled using {@code cacheLoaderStrategy}. This means that a
-         * provided {@link CacheLoader} is only invoked to obtain missing cache entries if these could not be reloaded
-         * from the underlying store beforehand.
-         * <p>
-         * By default, no loading strategies are enabled.
+         * Specifies that a cache instance starts empty instead of synchronizing retained cache entries back into this
+         * cache as warm-up (which otherwise is the default).
          * <p>
          * Alternatively, {@link DistributedPolicy#getFromStore(Object, boolean)} or
          * {@link DistributedPolicy#getAllFromStore(Iterable, boolean)} can be used to load those cache entries directly
          * from the underlying store bypassing this cache instance.
          * <p>
-         * <b>Note:</b> If extended persistence is configured, at least one eviction policy must be configured.
+         * <b>Note:</b> This is mutually exclusive with {@link #withCacheResidency()}, which cannot be honored
+         * without reading those cache entries back, because nothing else takes ownership of them again.
          *
-         * @param cacheLoaderStrategy {@code true} to enable loading strategy for cache loader, otherwise {@code false}
          * @return a configurer instance for chaining additional methods
          */
-        public ExtendedPersistenceConfigurer withLoadingStrategy(boolean cacheLoaderStrategy) {
-            this.cacheLoaderStrategy = cacheLoaderStrategy;
+        public CachedEntryPersistenceConfigurer withColdStart() {
+            this.coldStart = true;
+            return this;
+        }
+
+        Optional<Integer> getMaximumSize() {
+            return Optional.ofNullable(maximumSize);
+        }
+
+        Optional<Duration> getMaximumTime() {
+            return Optional.ofNullable(maximumTime);
+        }
+
+        boolean isConfigured() {
+            return cacheResidency || Stream.of(getMaximumSize(), getMaximumTime())
+                    .anyMatch(Optional::isPresent);
+        }
+
+        // reading back is what retaining is for, so it follows from being configured rather than from a
+        // setting of its own - and a cold start declined on a tier that retains nothing stays inert
+        boolean hasInitialSynchronizationStrategy() {
+            return isConfigured() && !coldStart;
+        }
+
+        void validate(Cache<?, ?> cache, DistributionMode distributionMode) {
+            if (isConfigured()) {
+                if (!distributionMode.isPopulationConsidered()) {
+                    throw new IllegalStateException(
+                            "If persistence of cached entries is configured, "
+                                    .concat("the distribution mode must include population"));
+                }
+                if (cacheResidency && Stream.of(getMaximumSize(), getMaximumTime())
+                        .anyMatch(Optional::isPresent)) {
+                    throw new IllegalStateException(
+                            "If persistence of cached entries is configured, cache residency must not be "
+                                    .concat("combined with a maximum size or a maximum amount of time"));
+                }
+                // residency can only be honored if leaving a cache instance is recorded at all, which an eviction
+                // is only if the distribution mode includes it - a cache that cannot evict never poses the question
+                if (cacheResidency && PersistenceConfigurer.hasEvictionPolicy(cache)
+                        && !distributionMode.isEvictionConsidered()) {
+                    throw new IllegalStateException(
+                            "If persistence of cached entries is configured with cache residency and an "
+                                    .concat("eviction policy is set, the distribution mode must include evictions"));
+                }
+                // last of the residency checks, so that the more fundamental ones above are reported first.
+                // Cache residency alone is the one retention that is neither bounded nor reclaimable: what a cache
+                // instance leaves behind when it stops is not an eviction, so nothing transitions those cache
+                // entries and no maximum size or amount of time ages them out either. Reading them back is what
+                // takes ownership of them again, and because that reads every retained cache entry rather than the
+                // ones this cache instance wrote, a single one starting up adopts what all of them left
+                if (cacheResidency && coldStart) {
+                    throw new IllegalStateException(
+                            "If persistence of cached entries is configured with cache residency, "
+                                    .concat("a cold start must not be specified"));
+                }
+            }
+        }
+    }
+
+    /**
+     * Configurer to specify persistence of evicted entries to retain them (conditionally) in the underlying store.
+     *
+     * @author Andreas Oberhoff
+     */
+    public static final class EvictedEntryPersistenceConfigurer {
+
+        /**
+         * Loading strategies used to reload retained evicted cache entries on demand.
+         *
+         * @author Andreas Oberhoff
+         */
+        public enum LoadingStrategy {
+
+            /**
+             * Loading strategy for a provided {@link CacheLoader} that is only invoked to obtain missing cache entries
+             * if these could not be reloaded from the underlying store beforehand.
+             */
+            CACHE_LOADER
+        }
+
+        private @Nullable Integer maximumSize;
+        private @Nullable Duration maximumTime;
+        private Set<LoadingStrategy> loadingStrategies;
+
+        private EvictedEntryPersistenceConfigurer() {
+            this.loadingStrategies = Set.of();
+        }
+
+        /**
+         * Specifies the maximum size for the persistence of evicted entries up to which the most recently evicted ones
+         * are retained in the underlying store (unless invalidated) and may be reloaded on demand.
+         * <p>
+         * Retained evicted cache entries can be reloaded using loading strategies configured by
+         * {@link #withLoadingStrategies(LoadingStrategy...)}.
+         * <p>
+         * Alternatively, {@link DistributedPolicy#getFromStore(Object, boolean)} or
+         * {@link DistributedPolicy#getAllFromStore(Iterable, boolean)} can be used to load those cache entries directly
+         * from the underlying store bypassing this cache instance.
+         * <p>
+         * <b>Note:</b> If persistence of evicted entries is configured, at least one eviction policy must be
+         * configured.
+         *
+         * @param maximumSize the maximum size for the persistence of evicted entries (must be positive)
+         * @return a configurer instance for chaining additional methods
+         */
+        public EvictedEntryPersistenceConfigurer withMaximumSize(int maximumSize) {
+            if (maximumSize <= 0) {
+                throw new IllegalArgumentException("maximumSize must be positive");
+            }
+            this.maximumSize = maximumSize;
+            return this;
+        }
+
+        /**
+         * Specifies the maximum amount of time for the persistence of evicted entries within they are retained in the
+         * underlying store (unless invalidated) and may be reloaded on demand.
+         * <p>
+         * Retained evicted cache entries can be reloaded using loading strategies configured by
+         * {@link #withLoadingStrategies(LoadingStrategy...)}.
+         * <p>
+         * Alternatively, {@link DistributedPolicy#getFromStore(Object, boolean)} or
+         * {@link DistributedPolicy#getAllFromStore(Iterable, boolean)} can be used to load those cache entries directly
+         * from the underlying store bypassing this cache instance.
+         * <p>
+         * <b>Note:</b> If persistence of evicted entries is configured, at least one eviction policy must be
+         * configured.
+         *
+         * @param maximumTime the maximum amount of time for the persistence of evicted entries (must be positive)
+         * @return a configurer instance for chaining additional methods
+         */
+        public EvictedEntryPersistenceConfigurer withMaximumTime(Duration maximumTime) {
+            requireNonNull(maximumTime, "maximumTime cannot be null");
+            if (maximumTime.isZero() || maximumTime.isNegative()) {
+                throw new IllegalArgumentException("maximumTime must be positive");
+            }
+            this.maximumTime = maximumTime;
+            return this;
+        }
+
+        /**
+         * Specifies loading strategies used to reload retained evicted cache entries on demand.
+         * <p>
+         * By default, no loading strategies are enabled, which is also expressed by passing no strategy at all.
+         * <p>
+         * Alternatively, {@link DistributedPolicy#getFromStore(Object, boolean)} or
+         * {@link DistributedPolicy#getAllFromStore(Iterable, boolean)} can be used to load those cache entries directly
+         * from the underlying store bypassing this cache instance.
+         * <p>
+         * <b>Note:</b> If persistence of evicted entries is configured, at least one eviction policy must be
+         * configured.
+         *
+         * @param loadingStrategies the loading strategies to enable (must not be null or contain null)
+         * @return a configurer instance for chaining additional methods
+         */
+        public EvictedEntryPersistenceConfigurer withLoadingStrategies(LoadingStrategy... loadingStrategies) {
+            requireNonNull(loadingStrategies, "loadingStrategies cannot be null");
+            this.loadingStrategies = Stream.of(loadingStrategies)
+                    .map(loadingStrategy -> requireNonNull(loadingStrategy,
+                            "loadingStrategies cannot contain null"))
+                    .collect(toUnmodifiableSet());
             return this;
         }
 
@@ -694,23 +962,29 @@ public final class DistributedCaffeine<K, V> {
                     .anyMatch(Optional::isPresent);
         }
 
+        // see the cached tier: a loading strategy without a retention is rejected below
         boolean hasCacheLoaderStrategy() {
-            return isConfigured() && cacheLoaderStrategy;
+            return loadingStrategies.contains(CACHE_LOADER);
         }
 
         void validate(Cache<?, ?> cache) {
+            // see the corresponding check for cached entries: a loading strategy on its own retains nothing,
+            // so there would be nothing to read back even though reading back is what it asks for
+            if (!loadingStrategies.isEmpty() && !isConfigured()) {
+                throw new IllegalStateException(
+                        "If a loading strategy is enabled, persistence of evicted entries must be "
+                                .concat("configured with a maximum size or a maximum amount of time"));
+            }
             if (isConfigured()) {
-                Policy<?, ?> policy = cache.policy();
-                if (Stream.of(policy.eviction(), policy.expireAfterAccess(), policy.expireAfterWrite(),
-                                policy.expireVariably())
-                        .allMatch(Optional::isEmpty)) {
+                if (!PersistenceConfigurer.hasEvictionPolicy(cache)) {
                     throw new IllegalStateException(
-                            "If extended persistence is configured, at least one eviction strategy must be set");
+                            "If persistence of evicted entries is configured, "
+                                    .concat("at least one eviction strategy must be set"));
                 }
-                if (cacheLoaderStrategy && !(cache instanceof LoadingCache)) {
+                if (hasCacheLoaderStrategy() && !(cache instanceof LoadingCache)) {
                     throw new IllegalStateException(
-                            "If extended persistence is configured and loading strategy for cache loader is enabled, "
-                                    .concat("cache must be build as loading cache"));
+                            "If persistence of evicted entries is configured and loading strategy "
+                                    .concat("for cache loader is enabled, cache must be built as loading cache"));
                 }
             }
         }

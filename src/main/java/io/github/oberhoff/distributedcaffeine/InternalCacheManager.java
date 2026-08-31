@@ -18,7 +18,8 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.RemovalCause;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.ExtendedPersistenceConfigurer;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
@@ -56,11 +57,11 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.C
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_REFRESHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_REFRESHED_AFTER_WRITE;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.COMMAND;
-import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_EXTENDED_GROUP;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_RETAINED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_SIZE;
-import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_SIZE_EXTENDED;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_SIZE_RETAINED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_TIME;
-import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_TIME_EXTENDED;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_TIME_RETAINED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED_AFTER_WRITE;
@@ -96,7 +97,9 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     @SuppressWarnings("NotNullFieldNotInitialized")
     private Repository<K, V> repository;
     @SuppressWarnings("NotNullFieldNotInitialized")
-    private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
+    private CachedEntryPersistenceConfigurer cachedEntryPersistenceConfigurer;
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    private EvictedEntryPersistenceConfigurer evictedEntryPersistenceConfigurer;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalSynchronizationLock synchronizationLock;
     @SuppressWarnings("NotNullFieldNotInitialized")
@@ -120,7 +123,8 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
         this.policy = instanceRegistry.getCache().policy();
         this.distributionMode = instanceRegistry.getDistributionMode();
         this.repository = instanceRegistry.getAdapter().getRepository();
-        this.extendedPersistenceConfigurer = instanceRegistry.getExtendedPersistenceConfigurer();
+        this.cachedEntryPersistenceConfigurer = instanceRegistry.getCachedEntryPersistenceConfigurer();
+        this.evictedEntryPersistenceConfigurer = instanceRegistry.getEvictedEntryPersistenceConfigurer();
         this.synchronizationLock = instanceRegistry.getSynchronizationLock();
         this.hasher = instanceRegistry.getHasher();
         this.executor = instanceRegistry.getExecutor();
@@ -213,15 +217,15 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     // enumerate what it holds itself, and without population being distributed nothing else knows what the others
     // hold. So instead of one cache entry per key, a command is written, and every cache instance decides from its own
     // content what it removes when that arrives (see retrieveCacheEntries). Where population is distributed the store
-    // keeps a record of what is cached, which has to go as well - otherwise a reactivation reads it back and extended
-    // persistence reloads from it, undoing what was just invalidated
+    // keeps a record of what is cached, which has to go as well - otherwise a reactivation reads it back and a
+    // retained evicted cache entry is reloaded from it, undoing what was just invalidated
     void invalidateAllDistributed() {
         if (isActivated() && COMMAND.isConsideredBy(distributionMode)) {
             synchronizationLock.ensureLock();
             if (distributionMode.isPopulationConsidered()) {
                 Set<Status> statuses = new HashSet<>(CACHED_GROUP);
-                if (extendedPersistenceConfigurer.isConfigured()) {
-                    statuses.addAll(EVICTED_EXTENDED_GROUP);
+                if (evictedEntryPersistenceConfigurer.isConfigured()) {
+                    statuses.addAll(EVICTED_RETAINED_GROUP);
                 }
                 // transitions what is there and writes nothing for what is not, which also means it cannot resurrect
                 // a key as invalidated that no longer exists. Ahead of the cache entry below, so that a population
@@ -271,10 +275,10 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
         // handling activationId in listener
         if (isActivated() && (removalCause.equals(RemovalCause.SIZE) || removalCause.equals(RemovalCause.EXPIRED))) {
             Status status;
-            if (extendedPersistenceConfigurer.isConfigured()) {
+            if (evictedEntryPersistenceConfigurer.isConfigured()) {
                 status = removalCause.equals(RemovalCause.SIZE)
-                        ? EVICTED_SIZE_EXTENDED
-                        : EVICTED_TIME_EXTENDED;
+                        ? EVICTED_SIZE_RETAINED
+                        : EVICTED_TIME_RETAINED;
             } else {
                 status = removalCause.equals(RemovalCause.SIZE)
                         ? EVICTED_SIZE
@@ -282,9 +286,9 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
             }
             // of the three asynchronous publishers this is the one that cannot be made good later: the entry is
             // already gone from the cache, and nothing reads it again to notice and retry. A lost eviction leaves
-            // the other instances serving what this one dropped and, with extended persistence configured, leaves
-            // the entry CACHED in the store instead of evicted - so it is never pruned and comes back on the next
-            // restart. See the TODO on publishCacheEntriesAsync
+            // the other instances serving what this one dropped and, where evicted cache entries are retained,
+            // leaves the entry CACHED in the store instead of evicted - so it is never pruned and comes back on
+            // the next restart. See the TODO on publishCacheEntriesAsync
             publishCacheEntriesAsync(Map.of(key, value), status);
         }
     }
@@ -340,7 +344,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     // TODO logging makes such a failure visible but does not make the instances converge again. Retrying is not
     // enough on its own, because upsertCacheEntries() writes the status unconditionally, so a delayed retry can
     // overwrite a newer CACHED write for the same key with a stale EVICTED one. Letting the data store drive the
-    // correction (as invalidate-on-prune does for extended persistence) is the more promising direction
+    // correction (as invalidate-on-prune does for persistence of evicted entries) is the more promising direction
     private void publishCacheEntriesAsync(Map<? extends InternalKey<K>, ? extends @Nullable InternalValue<V>> map,
                                           Status status) {
         // Deliberately without an operation, so that what is published here arrives like a change of any other cache
@@ -373,8 +377,8 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
         if (manage) {
             stampOperations(map);
         }
-        // extended persistence should work regardless of the distribution mode
-        if (isActivated() && (status.isConsideredBy(distributionMode) || status.isEvictedExtended())) {
+        // persistence of evicted entries should work regardless of the distribution mode
+        if (isActivated() && (status.isConsideredBy(distributionMode) || status.isEvictedRetained())) {
             if (manage) {
                 synchronizationLock.ensureLock();
             }
@@ -497,7 +501,10 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     void synchronizeCacheEntries() {
         if (isActivated()) {
             synchronizationLock.ensureLock();
-            if (distributionMode.isPopulationConsidered()) {
+            // without a synchronization strategy nothing is read back, which is also why nothing was retained: the
+            // marks below are then left in place for everything, so the cache is emptied rather than reconciled
+            if (cachedEntryPersistenceConfigurer.hasInitialSynchronizationStrategy()
+                    && distributionMode.isPopulationConsidered()) {
                 // process the store cursor directly instead of buffering it into a set first (avoids a second full
                 // copy in memory and the needless CacheEntry hashCode/equals a set would compute)
                 try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(

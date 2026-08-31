@@ -145,14 +145,14 @@ public final class CacheEntry<K, V> {
         EVICTED_TIME,
 
         /**
-         * Status of a cache entry that was evicted by size while extended persistence was configured.
+         * Status of a cache entry that was evicted by size but retained in the underlying store.
          */
-        EVICTED_SIZE_EXTENDED,
+        EVICTED_SIZE_RETAINED,
 
         /**
-         * Status of a cache entry that was evicted by time while extended persistence was configured.
+         * Status of a cache entry that was evicted by time but retained in the underlying store.
          */
-        EVICTED_TIME_EXTENDED,
+        EVICTED_TIME_RETAINED,
 
         /**
          * Status of a cache entry that is stale.
@@ -177,23 +177,23 @@ public final class CacheEntry<K, V> {
                 Set.of(INVALIDATED, INVALIDATED_REFRESHED, INVALIDATED_REFRESHED_AFTER_WRITE);
 
         /**
-         * Group of statuses representing evicted cache entries regardless of whether extended persistence was
-         * configured or not.
+         * Group of statuses representing evicted cache entries regardless of whether they are retained in the
+         * underlying store or not.
          */
         public static final Set<Status> EVICTED_GROUP =
-                Set.of(EVICTED_SIZE, EVICTED_TIME, EVICTED_SIZE_EXTENDED, EVICTED_TIME_EXTENDED);
+                Set.of(EVICTED_SIZE, EVICTED_TIME, EVICTED_SIZE_RETAINED, EVICTED_TIME_RETAINED);
 
         /**
-         * Group of statuses representing evicted cache entries while extended persistence was configured.
+         * Group of statuses representing evicted cache entries that are retained in the underlying store.
          */
-        public static final Set<Status> EVICTED_EXTENDED_GROUP =
-                Set.of(EVICTED_SIZE_EXTENDED, EVICTED_TIME_EXTENDED);
+        public static final Set<Status> EVICTED_RETAINED_GROUP =
+                Set.of(EVICTED_SIZE_RETAINED, EVICTED_TIME_RETAINED);
 
         /**
-         * Group of statuses representing invalidated and evicted cache entries while extended persistence was not
-         * configured, along with stale cache entries and cache entries carrying a command.
+         * Group of statuses representing cache entries that are only distributed but never retained in the underlying
+         * store.
          */
-        public static final Set<Status> SHORT_LIVING_GROUP =
+        public static final Set<Status> DISTRIBUTION_ONLY_GROUP =
                 Set.of(INVALIDATED, INVALIDATED_REFRESHED, INVALIDATED_REFRESHED_AFTER_WRITE,
                         EVICTED_SIZE, EVICTED_TIME, STALE, COMMAND);
 
@@ -222,8 +222,8 @@ public final class CacheEntry<K, V> {
         }
 
         /**
-         * Indicates whether a cache entry was evicted or not regardless of whether extended persistence was configured
-         * or not.
+         * Indicates whether a cache entry was evicted or not regardless of whether it is retained in the underlying
+         * store or not.
          *
          * @return {@code true} if cache entry was evicted, otherwise {@code false}
          */
@@ -232,12 +232,12 @@ public final class CacheEntry<K, V> {
         }
 
         /**
-         * Indicates whether a cache entry was evicted or not while extended persistence was configured.
+         * Indicates whether a cache entry was evicted and retained in the underlying store or not.
          *
          * @return {@code true} if cache entry was evicted, otherwise {@code false}
          */
-        public boolean isEvictedExtended() {
-            return isMemberOf(EVICTED_EXTENDED_GROUP);
+        public boolean isEvictedRetained() {
+            return isMemberOf(EVICTED_RETAINED_GROUP);
         }
 
         /**
@@ -447,8 +447,8 @@ public final class CacheEntry<K, V> {
     }
 
     /**
-     * Indicates whether the cache entry was evicted or not regardless of whether extended persistence was configured or
-     * not.
+     * Indicates whether the cache entry was evicted or not regardless of whether it is retained in the underlying store
+     * or not.
      *
      * @return {@code true} if cache entry was evicted, otherwise {@code false}
      */
@@ -457,12 +457,12 @@ public final class CacheEntry<K, V> {
     }
 
     /**
-     * Indicates whether the cache entry was evicted or not while extended persistence was configured.
+     * Indicates whether the cache entry was evicted and retained in the underlying store or not.
      *
      * @return {@code true} if cache entry was evicted, otherwise {@code false}
      */
-    public boolean isEvictedExtended() {
-        return status.isEvictedExtended();
+    public boolean isEvictedRetained() {
+        return status.isEvictedRetained();
     }
 
     /**
@@ -470,6 +470,7 @@ public final class CacheEntry<K, V> {
      *
      * @return {@code true} if cache entry is stale, otherwise {@code false}
      */
+    @SuppressWarnings("unused")
     public boolean isStale() {
         return status.isStale();
     }
@@ -512,8 +513,6 @@ public final class CacheEntry<K, V> {
                 Field.TIMESTAMP, alignTimestamp(timestamp));
     }
 
-    // the underlying store may keep a timestamp at a coarser resolution than the one handed to it, so comparing them
-    // has to happen at the resolution both sides can represent
     static Instant alignTimestamp(Instant timestamp) {
         return timestamp.truncatedTo(ChronoUnit.MILLIS);
     }

@@ -69,7 +69,7 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
 
     @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalDistributedLoadingCache() {
-        this.refreshOperations = new ConcurrentHashMap<>();
+        this.refreshOperations = new ConcurrentHashMap<K, CompletableFuture<@Nullable V>>();
         // see also initialize()
     }
 

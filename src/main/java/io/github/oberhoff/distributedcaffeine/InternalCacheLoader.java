@@ -16,7 +16,7 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.CacheLoader;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.ExtendedPersistenceConfigurer;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import org.jspecify.annotations.Nullable;
@@ -38,7 +38,7 @@ import static io.github.oberhoff.distributedcaffeine.InternalUtils.im;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.nullable;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
-import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_EXTENDED_GROUP;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_RETAINED_GROUP;
 import static java.util.Objects.nonNull;
 import static java.util.stream.Collectors.toCollection;
 import static java.util.stream.Collectors.toMap;
@@ -57,7 +57,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
     @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalCacheManager<K, V> cacheManager;
     @SuppressWarnings("NotNullFieldNotInitialized")
-    private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
+    private EvictedEntryPersistenceConfigurer evictedEntryPersistenceConfigurer;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalHasher<K> hasher;
     private boolean hasLoadAll;
@@ -72,7 +72,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
     public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
         this.repository = instanceRegistry.getAdapter().getRepository();
         this.cacheManager = instanceRegistry.getCacheManager();
-        this.extendedPersistenceConfigurer = instanceRegistry.getExtendedPersistenceConfigurer();
+        this.evictedEntryPersistenceConfigurer = instanceRegistry.getEvictedEntryPersistenceConfigurer();
         this.hasher = instanceRegistry.getHasher();
         this.hasLoadAll = hasLoadAll();
     }
@@ -80,8 +80,8 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
     @Override
     @SuppressWarnings("java:S2638")
     public @Nullable InternalValue<V> load(InternalKey<K> key) throws Exception {
-        V value = extendedPersistenceConfigurer.hasCacheLoaderStrategy()
-                ? loadExtendedFromStore(key)
+        V value = evictedEntryPersistenceConfigurer.hasCacheLoaderStrategy()
+                ? loadFromStore(key)
                 : null;
         value = nonNull(value)
                 ? value
@@ -98,8 +98,8 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
         Set<K> keysToLoad = keys.stream()
                 .map(InternalKey::k)
                 .collect(toCollection(HashSet::new));
-        if (extendedPersistenceConfigurer.hasCacheLoaderStrategy()) {
-            keyToValue.putAll(loadAllExtendedFromStore(keys));
+        if (evictedEntryPersistenceConfigurer.hasCacheLoaderStrategy()) {
+            keyToValue.putAll(loadAllFromStore(keys));
             keysToLoad.removeAll(keyToValue.keySet());
         }
         if (!keysToLoad.isEmpty()) {
@@ -160,8 +160,8 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
             return getFailable(() -> cacheLoader.asyncReload(k(key), v(oldValue), executor))
                     .thenApply(InternalValue::ivn);
         }
-        return (extendedPersistenceConfigurer.hasCacheLoaderStrategy()
-                ? CompletableFuture.supplyAsync(() -> loadExtendedFromStore(key), executor)
+        return (evictedEntryPersistenceConfigurer.hasCacheLoaderStrategy()
+                ? CompletableFuture.supplyAsync(() -> loadFromStore(key), executor)
                 : CompletableFuture.completedFuture((V) null))
                 .thenComposeAsync(newValue -> nonNull(newValue)
                                 ? CompletableFuture.completedFuture(newValue)
@@ -180,8 +180,8 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
     // invoked by custom implementation
     @SuppressWarnings("unchecked")
     CompletableFuture<@Nullable V> asyncLoadDelegated(K key, Executor executor) {
-        return (extendedPersistenceConfigurer.hasCacheLoaderStrategy()
-                ? CompletableFuture.supplyAsync(() -> loadExtendedFromStore(ik(key)), executor)
+        return (evictedEntryPersistenceConfigurer.hasCacheLoaderStrategy()
+                ? CompletableFuture.supplyAsync(() -> loadFromStore(ik(key)), executor)
                 : CompletableFuture.completedFuture((V) null))
                 .thenComposeAsync(newValue -> nonNull(newValue)
                                 ? CompletableFuture.completedFuture(newValue)
@@ -193,8 +193,8 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
     // invoked by custom implementation
     @SuppressWarnings("unchecked")
     CompletableFuture<@Nullable V> asyncReloadDelegated(K key, V oldValue, Executor executor) {
-        return (extendedPersistenceConfigurer.hasCacheLoaderStrategy()
-                ? CompletableFuture.supplyAsync(() -> loadExtendedFromStore(ik(key)), executor)
+        return (evictedEntryPersistenceConfigurer.hasCacheLoaderStrategy()
+                ? CompletableFuture.supplyAsync(() -> loadFromStore(ik(key)), executor)
                 : CompletableFuture.completedFuture((V) null))
                 .thenComposeAsync(newValue -> nonNull(newValue)
                                 ? CompletableFuture.completedFuture(newValue)
@@ -211,11 +211,11 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
         return !Objects.equals(defaultLoadAll, instanceLoadAll);
     }
 
-    private @Nullable V loadExtendedFromStore(InternalKey<K> key) {
-        return loadAllExtendedFromStore(Set.of(key)).get(k(key));
+    private @Nullable V loadFromStore(InternalKey<K> key) {
+        return loadAllFromStore(Set.of(key)).get(k(key));
     }
 
-    private Map<K, V> loadAllExtendedFromStore(Set<? extends InternalKey<K>> keys) {
+    private Map<K, V> loadAllFromStore(Set<? extends InternalKey<K>> keys) {
         // the memoizing overload caches each hash on its key instance, so a subsequent publish that reuses the same
         // instance (putDistributedLoaded / refreshAfterWrite on the single-key load path) does not recompute it
         Set<String> hashes = keys.stream()
@@ -223,7 +223,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
                 .collect(toSet());
         try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
                 hashes,
-                EVICTED_EXTENDED_GROUP,
+                EVICTED_RETAINED_GROUP,
                 false))) {
             //noinspection NullableProblems
             return cacheEntryStream

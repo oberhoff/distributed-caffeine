@@ -17,7 +17,8 @@ package io.github.oberhoff.distributedcaffeine;
 
 import dev.failsafe.Failsafe;
 import dev.failsafe.RetryPolicy;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.ExtendedPersistenceConfigurer;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
@@ -37,19 +38,24 @@ import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
-import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_EXTENDED_GROUP;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_GROUP;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.DISTRIBUTION_ONLY_GROUP;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_RETAINED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED;
-import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.SHORT_LIVING_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.STALE;
 import static java.lang.Math.min;
 import static java.lang.String.format;
+import static java.util.stream.Collectors.toUnmodifiableSet;
 
 @SuppressWarnings("java:S1450")
 class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
 
-    private static final Duration SHORT_LIVING_DURATION = Duration.ofMinutes(1);
     @SuppressWarnings({"java:S116", "FieldMayBeFinal", "CanBeFinal"}) // not static final for testing
     private Duration MAINTENANCE_INTERVAL = Duration.ofMinutes(1);
+    private static final Duration DISTRIBUTION_DURATION = Duration.ofMinutes(1);
+    private static final Set<Status> NOT_RETAINED_GROUP = Stream
+            .concat(DISTRIBUTION_ONLY_GROUP.stream(), CACHED_GROUP.stream())
+            .collect(toUnmodifiableSet());
 
     private final AtomicBoolean isActivated;
     private CompletableFuture<Void> maintenanceCompletableFuture;
@@ -63,7 +69,9 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
     @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalCacheManager<K, V> cacheManager;
     @SuppressWarnings("NotNullFieldNotInitialized")
-    private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
+    private CachedEntryPersistenceConfigurer cachedEntryPersistenceConfigurer;
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    private EvictedEntryPersistenceConfigurer evictedEntryPersistenceConfigurer;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private DistributionMode distributionMode;
 
@@ -80,7 +88,8 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
         this.identifier = instanceRegistry.getAdapter().getIdentifier();
         this.repository = instanceRegistry.getAdapter().getRepository();
         this.cacheManager = instanceRegistry.getCacheManager();
-        this.extendedPersistenceConfigurer = instanceRegistry.getExtendedPersistenceConfigurer();
+        this.cachedEntryPersistenceConfigurer = instanceRegistry.getCachedEntryPersistenceConfigurer();
+        this.evictedEntryPersistenceConfigurer = instanceRegistry.getEvictedEntryPersistenceConfigurer();
         this.distributionMode = instanceRegistry.getDistributionMode();
     }
 
@@ -127,20 +136,22 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
         // loop keeps running - and reports isDone() == true, which would let activate() skip its join() below)
         CompletableFuture<Void> failsafeCompletableFuture = Failsafe.with(retryPolicy)
                 .with(executorService)
-                .runAsync(() -> processMaintenance(SHORT_LIVING_DURATION));
+                .runAsync(() -> processMaintenance(DISTRIBUTION_DURATION));
         failsafeCompletableFuture.whenComplete((result, throwable) -> executorService.shutdown());
         maintenanceCompletableFuture = failsafeCompletableFuture;
     }
 
     @SuppressWarnings("SameParameterValue")
-    private void processMaintenance(Duration shortLivingDuration) {
+    private void processMaintenance(Duration distributionDuration) {
         if (isActivated()) {
             // TODO check for real activities
             processCleanUp();
-            processExtendedPersistenceByTime();
-            processExtendedPersistenceBySize();
+            processCachedEntryPersistenceByTime(distributionDuration);
+            processCachedEntryPersistenceBySize(distributionDuration);
+            processEvictedEntryPersistenceByTime(distributionDuration);
+            processEvictedEntryPersistenceBySize();
             // intentionally at last position
-            processShortLived(shortLivingDuration);
+            processNotRetained(distributionDuration);
         }
     }
 
@@ -148,30 +159,53 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
         cacheManager.cleanup();
     }
 
-    private void processExtendedPersistenceByTime() {
-        extendedPersistenceConfigurer.getMaximumTime().ifPresent(maximumTime -> {
-            Instant now = Instant.now();
+    private void processCachedEntryPersistenceBySize(Duration distributionDuration) {
+        cachedEntryPersistenceConfigurer.getMaximumSize().ifPresent(maximumSize -> {
+            Long count = getFailable(() ->
+                    repository.countCacheEntries(CACHED_GROUP));
+            if (count > maximumSize) {
+                long limit = count - maximumSize;
+                Set<String> hashes = new HashSet<>();
+                try (Stream<CacheEntryMetadata> cacheEntryMetadataStream = getFailable(() ->
+                        repository.streamCacheEntryMetadata(
+                                null,
+                                CACHED_GROUP,
+                                true))) {
+                    cacheEntryMetadataStream
+                            .limit(limit)
+                            .map(CacheEntryMetadata::getHash)
+                            .forEach(hashes::add);
+                }
+                if (!hashes.isEmpty()) {
+                    Instant deadline = Instant.now().minus(distributionDuration);
+                    runFailable(() -> repository.deleteCacheEntries(hashes, CACHED_GROUP, deadline));
+                }
+            }
+        });
+    }
+
+    private void processCachedEntryPersistenceByTime(Duration distributionDuration) {
+        cachedEntryPersistenceConfigurer.getMaximumTime().ifPresent(maximumTime -> {
+            Instant now = Instant.now().minus(distributionDuration);
             Instant min = Instant.ofEpochMilli(Long.MIN_VALUE);
             Instant deadline = maximumTime.compareTo(Duration.between(min, now)) > 0
                     ? min
                     : now.minus(maximumTime);
-            // transition the status (instead of hard delete)
-            runFailable(() -> repository.updateStatusOfCacheEntries(null,
-                    EVICTED_EXTENDED_GROUP, deadline, pruningStatus()));
+            runFailable(() -> repository.deleteCacheEntries(null, CACHED_GROUP, deadline));
         });
     }
 
-    private void processExtendedPersistenceBySize() {
-        extendedPersistenceConfigurer.getMaximumSize().ifPresent(maximumSize -> {
+    private void processEvictedEntryPersistenceBySize() {
+        evictedEntryPersistenceConfigurer.getMaximumSize().ifPresent(maximumSize -> {
             Long count = getFailable(() ->
-                    repository.countCacheEntries(EVICTED_EXTENDED_GROUP));
+                    repository.countCacheEntries(EVICTED_RETAINED_GROUP));
             if (count > maximumSize) {
                 long limit = count - maximumSize;
                 Set<String> hashes = new HashSet<>(maximumSize);
                 try (Stream<CacheEntryMetadata> cacheEntryMetadataStream = getFailable(() ->
                         repository.streamCacheEntryMetadata(
                                 null,
-                                EVICTED_EXTENDED_GROUP,
+                                EVICTED_RETAINED_GROUP,
                                 true))) {
                     cacheEntryMetadataStream
                             .limit(limit)
@@ -181,15 +215,40 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
                 if (!hashes.isEmpty()) {
                     // transition the status (instead of hard delete)
                     runFailable(() -> repository.updateStatusOfCacheEntries(hashes,
-                            EVICTED_EXTENDED_GROUP, null, pruningStatus()));
+                            EVICTED_RETAINED_GROUP, null, pruningStatus()));
                 }
             }
         });
     }
 
+    private void processEvictedEntryPersistenceByTime(Duration distributionDuration) {
+        evictedEntryPersistenceConfigurer.getMaximumTime().ifPresent(maximumTime -> {
+            Instant now = Instant.now().minus(distributionDuration);
+            Instant min = Instant.ofEpochMilli(Long.MIN_VALUE);
+            Instant deadline = maximumTime.compareTo(Duration.between(min, now)) > 0
+                    ? min
+                    : now.minus(maximumTime);
+            // transition the status (instead of hard delete)
+            runFailable(() -> repository.updateStatusOfCacheEntries(null,
+                    EVICTED_RETAINED_GROUP, deadline, pruningStatus()));
+        });
+    }
+
+    // Without persistence configured for them, cached entries are kept for distribution only as well, so
+    // they go the same way a removal does. Deliberately a delete: a transition could only be to STALE, which no
+    // distribution mode considers, so it would just add change stream events every cache instance discards
+    private void processNotRetained(Duration distributionDuration) {
+        Instant deadline = Instant.now().minus(distributionDuration);
+        Set<Status> statuses = cachedEntryPersistenceConfigurer.isConfigured()
+                ? DISTRIBUTION_ONLY_GROUP
+                : NOT_RETAINED_GROUP;
+        runFailable(() -> repository.deleteCacheEntries(null,
+                statuses, deadline));
+    }
+
     // The data store is the authority on what a cache entry's value is and on whether it was invalidated. Which
     // cache instance keeps which key in memory is a different matter, and who owns that decision is what the
-    // distribution mode says - which is why pruning the extended persistence tier cannot mean the same thing in
+    // distribution mode says - which is why pruning the tier of evicted cache entries cannot mean the same thing in
     // every mode.
     // Where evictions are distributed, residency is a property of the whole set of cache instances: none of them
     // holds what the data store no longer backs, so the removal is theirs to follow and an invalidation states it.
@@ -201,11 +260,5 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
         return distributionMode.isEvictionConsidered()
                 ? INVALIDATED
                 : STALE;
-    }
-
-    private void processShortLived(Duration shortLivingDuration) {
-        Instant deadline = Instant.now().minus(shortLivingDuration);
-        runFailable(() -> repository.deleteCacheEntries(null,
-                SHORT_LIVING_GROUP, deadline));
     }
 }

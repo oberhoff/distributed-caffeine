@@ -37,6 +37,7 @@ import com.mongodb.client.FindIterable;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import com.mongodb.client.model.Sorts;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
 import io.github.oberhoff.distributedcaffeine.adapter.AbstractAdapter;
 import io.github.oberhoff.distributedcaffeine.adapter.AbstractSynchronizer;
 import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
@@ -122,6 +123,7 @@ import java.util.function.UnaryOperator;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer.LoadingStrategy.CACHE_LOADER;
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.DockerImage;
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.RUNS_ON_GITHUB;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION;
@@ -136,16 +138,16 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.C
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_REFRESHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_REFRESHED_AFTER_WRITE;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.COMMAND;
-import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_EXTENDED_GROUP;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_RETAINED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_SIZE;
-import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_SIZE_EXTENDED;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_SIZE_RETAINED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_TIME;
-import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_TIME_EXTENDED;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_TIME_RETAINED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED_AFTER_WRITE;
-import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.SHORT_LIVING_GROUP;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.DISTRIBUTION_ONLY_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.STALE;
 import static io.github.oberhoff.distributedcaffeine.adapter.Repository.DEFAULT_DISCRIMINATOR;
 import static java.lang.Math.min;
@@ -298,8 +300,7 @@ final class DistributedCaffeineIntegrationTests {
 
             processMaintenance();
 
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
+            assertThatDataStoreIsEmpty();
         }
 
         @DisplayName("Test putAll() and getAllPresent()")
@@ -350,8 +351,7 @@ final class DistributedCaffeineIntegrationTests {
 
             processMaintenance();
 
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
+            assertThatDataStoreIsEmpty();
         }
 
         @DisplayName("Test get() and getAll()")
@@ -444,8 +444,7 @@ final class DistributedCaffeineIntegrationTests {
 
             processMaintenance();
 
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED, assertion -> assertion.isEqualTo(7)));
+            assertThatDataStoreIsEmpty();
         }
 
         @DisplayName("Test invalidate() and invalidateAll()")
@@ -651,8 +650,7 @@ final class DistributedCaffeineIntegrationTests {
 
             processMaintenance();
 
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(3)));
+            assertThatDataStoreIsEmpty();
         }
 
         @DisplayName("Test getAll() with cache loader")
@@ -766,8 +764,7 @@ final class DistributedCaffeineIntegrationTests {
 
             processMaintenance();
 
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(6)));
+            assertThatDataStoreIsEmpty();
         }
 
         @DisplayName("Test refresh() with cache loader")
@@ -1614,9 +1611,7 @@ final class DistributedCaffeineIntegrationTests {
 
             processMaintenance();
 
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED, assertion -> assertion.isEqualTo(2)),
-                    Count.of(CACHED_REFRESHED_AFTER_WRITE, assertion -> assertion.isEqualTo(1)));
+            assertThatDataStoreIsEmpty();
 
             loggerBoundedLocalCache.stopCapturing();
         }
@@ -1761,11 +1756,7 @@ final class DistributedCaffeineIntegrationTests {
 
             processMaintenance();
 
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED, assertion -> assertion.isEqualTo(3)),
-                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
-                    Count.of(CACHED_REFRESHED, assertion -> assertion.isEqualTo(2)),
-                    Count.of(CACHED_REFRESHED_AFTER_WRITE, assertion -> assertion.isEqualTo(1)));
+            assertThatDataStoreIsEmpty();
 
             StatsCounter statsCounter = getInstanceRegistry(distributedLoadingCache).getStatsCounter();
 
@@ -1869,8 +1860,7 @@ final class DistributedCaffeineIntegrationTests {
 
             processMaintenance();
 
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED, assertion -> assertion.isEqualTo(4)));
+            assertThatDataStoreIsEmpty();
         }
 
         @DisplayName("Test replace()")
@@ -1938,8 +1928,7 @@ final class DistributedCaffeineIntegrationTests {
 
             processMaintenance();
 
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED, assertion -> assertion.isEqualTo(2)));
+            assertThatDataStoreIsEmpty();
         }
 
         @DisplayName("Test remove(), contains*() and clear()")
@@ -2174,8 +2163,7 @@ final class DistributedCaffeineIntegrationTests {
 
             processMaintenance();
 
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED, assertion -> assertion.isEqualTo(6)));
+            assertThatDataStoreIsEmpty();
         }
 
         @DisplayName("Test keySet()")
@@ -2678,8 +2666,7 @@ final class DistributedCaffeineIntegrationTests {
 
             processMaintenance();
 
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
+            assertThatDataStoreIsEmpty();
         }
 
         @DisplayName("Test distributedPolicy()")
@@ -2688,8 +2675,12 @@ final class DistributedCaffeineIntegrationTests {
             DistributedCache<Key, Value> distributedCache = createCache(
                     dc -> dc.withCaffeine(Caffeine.newBuilder()
                                     .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration())))
-                            .withExtendedPersistence(configurer -> configurer
-                                    .withMaximumTime(FOREVER.getDuration())),
+                            .withPersistence(configurer -> configurer
+                                    // both tiers, because both are what getFromStore reports on
+                                    .withCachedEntries(cachedEntries -> cachedEntries
+                                            .withMaximumTime(FOREVER.getDuration()))
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withMaximumTime(FOREVER.getDuration()))),
                     DistributedCaffeine::build);
             DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
 
@@ -2718,7 +2709,7 @@ final class DistributedCaffeineIntegrationTests {
                     .untilAsserted(() ->
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
-                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(1))));
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(1))));
 
             // test equals() and hashCode() and toString()
             CacheEntry<Key, Value> cacheEntry1 = distributedPolicy.getFromStore(key1, true);
@@ -2753,19 +2744,20 @@ final class DistributedCaffeineIntegrationTests {
                                 .allSatisfy(entry -> assertThat(entry.isCached()).isTrue())
                                 .allSatisfy(entry -> assertThat(entry.isInvalidated()).isFalse())
                                 .allSatisfy(entry -> assertThat(entry.isEvicted()).isFalse())
-                                .allSatisfy(entry -> assertThat(entry.isEvictedExtended()).isFalse());
+                                .allSatisfy(entry -> assertThat(entry.isEvictedRetained()).isFalse());
                         assertThat(distributedPolicy.getAllFromStore(Set.of(key1, key2), true))
                                 .containsOnly(cacheEntry1, cacheEntry2);
                         assertThatDataStoreHasCounts(
                                 Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
-                                Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(1)));
+                                Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(1)));
                     });
 
             processMaintenance();
 
+            // both tiers are configured to hold, so maintenance prunes neither of them
             assertThatDataStoreHasCounts(
                     Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
-                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(1)));
+                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(1)));
         }
 
         @DisplayName("Test population")
@@ -3073,8 +3065,8 @@ final class DistributedCaffeineIntegrationTests {
             // This mode excludes eviction from being distributed, so a cache entry evicted here locally stays cached
             // in the store and in the other cache instance - a key the calling cache instance cannot enumerate either,
             // this time although the store does know it. Emptying every cache instance is not enough while the store
-            // keeps its own record of it, because that record is what a reactivation and extended persistence read
-            // back, so the cached cache entries have to be gone from the store as well
+            // keeps its own record of it, because that record is what a reactivation and a reload read
+            // back, so the cached entries have to be gone from the store as well
             DistributedCache<Key, Value> distributedCacheA = createCache(
                     dc -> dc.withDistributionMode(POPULATION_AND_INVALIDATION)
                             .withCaffeine(Caffeine.newBuilder()
@@ -3107,7 +3099,7 @@ final class DistributedCaffeineIntegrationTests {
                     .untilAsserted(() -> {
                         assertThat(distributedCacheA.estimatedSize()).isEqualTo(0);
                         assertThat(distributedCacheB.estimatedSize()).isEqualTo(0);
-                        // both keys, the one evicted here included - and no cached cache entry left behind
+                        // both keys, the one evicted here included - and no cached entry left behind
                         assertThatDataStoreHasCounts(
                                 Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2)),
                                 Count.of(COMMAND, assertion -> assertion.isEqualTo(1)));
@@ -3682,15 +3674,19 @@ final class DistributedCaffeineIntegrationTests {
             // eviction arriving later is recognized as belonging to the time before synchronization was started again
             // rather than to what happened after it. Which is why this test asserts that starting it leaves the other
             // cache instance and the data store exactly as they were.
-            DistributedCache<Key, Value> distributedCacheA = createCache(
+            CacheBuilder<Key, Value> cacheBuilder =
                     dc -> dc.withDistributionMode(POPULATION_AND_INVALIDATION_AND_EVICTION)
                             .withCaffeine(Caffeine.newBuilder()
-                                    .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration()))),
+                                    .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration())))
+                            // what this test asserts is that starting synchronization leaves the data store as it
+                            // was, which presupposes that it holds the cache entry at all
+                            .withPersistence(configurer -> configurer
+                                    .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency));
+            DistributedCache<Key, Value> distributedCacheA = createCache(
+                    cacheBuilder,
                     DistributedCaffeine::build);
             DistributedCache<Key, Value> distributedCacheB = createCache(
-                    dc -> dc.withDistributionMode(POPULATION_AND_INVALIDATION_AND_EVICTION)
-                            .withCaffeine(Caffeine.newBuilder()
-                                    .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration()))),
+                    cacheBuilder,
                     DistributedCaffeine::build);
 
             Key key = Key.of(1);
@@ -3725,10 +3721,10 @@ final class DistributedCaffeineIntegrationTests {
                     Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
         }
 
-        @DisplayName("Test that pruning extended persistence does not remove an entry elsewhere")
+        @DisplayName("Test that pruning evicted cache entries does not remove an entry elsewhere")
         @Test
-        void test_DistributionMode_pruning_extended_persistence_does_not_remove_entry_elsewhere() {
-            // Same pair of cache instances as above, only with extended persistence bounded so tightly that
+        void test_DistributionMode_pruning_evicted_cache_entries_does_not_remove_entry_elsewhere() {
+            // Same pair of cache instances as above, only with evicted cache entries bounded so tightly that
             // maintenance prunes what the eviction put there. Pruning transitions the status rather than deleting the
             // document, so unlike a delete it reaches every cache instance on the change stream - which must not be
             // an invalidation, because the other cache instance still holds the cache entry and this distribution
@@ -3737,15 +3733,23 @@ final class DistributedCaffeineIntegrationTests {
                     dc -> dc.withDistributionMode(POPULATION_AND_INVALIDATION)
                             .withCaffeine(Caffeine.newBuilder()
                                     .expireAfterWrite(Duration.ofMillis(500)))
-                            .withExtendedPersistence(configurer -> configurer
-                                    .withMaximumTime(Duration.ofMillis(1))),
+                            // cache residency is unavailable in a mode excluding evictions, so retention is bounded
+                            // by time instead - generously, since pruning the evicted tier is what is under test
+                            .withPersistence(configurer -> configurer
+                                    .withCachedEntries(cachedEntries -> cachedEntries
+                                            .withMaximumTime(Duration.ofDays(1)))
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withMaximumTime(Duration.ofMillis(1)))),
                     DistributedCaffeine::build);
             DistributedCache<Key, Value> retainingDistributedCache = createCache(
                     dc -> dc.withDistributionMode(POPULATION_AND_INVALIDATION)
                             .withCaffeine(Caffeine.newBuilder()
                                     .maximumSize(10))
-                            .withExtendedPersistence(configurer -> configurer
-                                    .withMaximumTime(Duration.ofMillis(1))),
+                            .withPersistence(configurer -> configurer
+                                    .withCachedEntries(cachedEntries -> cachedEntries
+                                            .withMaximumTime(Duration.ofDays(1)))
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withMaximumTime(Duration.ofMillis(1)))),
                     DistributedCaffeine::build);
 
             Key key = Key.of(1);
@@ -3761,12 +3765,13 @@ final class DistributedCaffeineIntegrationTests {
                     .atMost(WAITING_DURATION)
                     .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(1))));
+                            Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(1))));
 
-            // only the pruning, without the short-living sweep processMaintenance() would run after it, so that what
+            // only the pruning, without the sweep processMaintenance() would run after it, so that what
             // pruning leaves behind can be observed before it is removed from the data store
             invokeMethod(getInstanceRegistry(expiringDistributedCache).getMaintenanceWorker(),
-                    InternalMaintenanceWorker.class, "processExtendedPersistenceByTime", List.of(), List.of());
+                    InternalMaintenanceWorker.class, "processEvictedEntryPersistenceByTime",
+                    List.of(Duration.class), List.of(Duration.ZERO.minus(Duration.ofMillis(1))));
 
             assertThatDataStoreHasCounts(
                     Count.of(STALE, assertion -> assertion.isEqualTo(1)));
@@ -4133,12 +4138,12 @@ final class DistributedCaffeineIntegrationTests {
             }
         }
 
-        @DisplayName("Test extended persistence by size")
+        @DisplayName("Test persistence of evicted entries by size")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
-        void test_DistributionMode_extended_persistence_by_size(CacheFactory<Key, Value> cacheFactory) throws Exception {
+        void test_DistributionMode_evicted_entry_persistence_by_size(CacheFactory<Key, Value> cacheFactory) throws Exception {
             int maximumSize = 1;
-            int extendedMaximumSize = 2;
+            int retainedMaximumSize = 2;
 
             @SuppressWarnings("unchecked")
             RemovalListener<Key, Value> evictionListener = mock(RemovalListener.class);
@@ -4147,11 +4152,12 @@ final class DistributedCaffeineIntegrationTests {
                     dc -> dc.withCaffeine(Caffeine.newBuilder()
                                     .evictionListener(evictionListener)
                                     .maximumSize(maximumSize))
-                            .withExtendedPersistence(configurer -> configurer
-                                    .withMaximumSize(extendedMaximumSize)
-                                    // just to test the distinction in logic
-                                    .withMaximumTime(FOREVER.getDuration())
-                                    .withLoadingStrategy(true));
+                            .withPersistence(configurer -> configurer
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withMaximumSize(retainedMaximumSize)
+                                            // just to test the distinction in logic
+                                            .withMaximumTime(FOREVER.getDuration())
+                                            .withLoadingStrategies(CACHE_LOADER)));
 
             @SuppressWarnings("Convert2Lambda")
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
@@ -4254,7 +4260,7 @@ final class DistributedCaffeineIntegrationTests {
                                     .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
-                                    Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(1)));
+                                    Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(maximumSize);
@@ -4311,7 +4317,7 @@ final class DistributedCaffeineIntegrationTests {
                                     .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
-                                    Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(1)));
+                                    Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(maximumSize);
@@ -4371,7 +4377,7 @@ final class DistributedCaffeineIntegrationTests {
                                     .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
-                                    Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(2)));
+                                    Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(maximumSize);
@@ -4386,7 +4392,7 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key3, true)).isNull();
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(1)));
+                                    Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(1)));
                         }
                     });
 
@@ -4434,7 +4440,7 @@ final class DistributedCaffeineIntegrationTests {
                                     .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
-                                    Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(2)));
+                                    Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(maximumSize);
@@ -4449,11 +4455,11 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key3, true)).isNull();
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(1)));
+                                    Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(1)));
                         }
                     });
 
-            // create more cache entries (extended by size) than the maximum size allows
+            // create more cache entries (retained by size) than the maximum size allows
             Value loadedValue4 = distributedLoadingCacheA.get(key4); // implicit eviction
 
             verify(cacheLoader, times(4)).load(any(Key.class));
@@ -4501,7 +4507,7 @@ final class DistributedCaffeineIntegrationTests {
                                     .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue4));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
-                                    Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(3)));
+                                    Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(3)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(maximumSize);
@@ -4519,7 +4525,7 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedPolicy.getFromStore(key4, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key4, true)).isNull();
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(2)));
+                                    Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(2)));
                         }
                     });
 
@@ -4529,17 +4535,17 @@ final class DistributedCaffeineIntegrationTests {
                     || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
                 assertThatDataStoreHasCounts(
                         Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
-                        Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(extendedMaximumSize)));
+                        Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(retainedMaximumSize)));
             } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                     distributionMode.equals(INVALIDATION)) {
                 assertThatDataStoreHasCounts(
-                        Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(extendedMaximumSize)));
+                        Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(retainedMaximumSize)));
             }
 
             // test cache without loading strategy
             DistributedLoadingCache<Key, Value> distributedLoadingCacheWithoutLoadingStrategy = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
-                    dc -> dc.withExtendedPersistence(configurer -> configurer
-                            .withLoadingStrategy(false)),
+                    dc -> dc.withPersistence(configurer -> configurer
+                            .withEvictedEntries(DistributedCaffeine.EvictedEntryPersistenceConfigurer::withLoadingStrategies)),
                     dc -> dc.build(cacheLoader));
 
             doAnswer(invocation -> Value.of(invocation.<Key>getArgument(0).getId(), "loaded but not from store"))
@@ -4559,12 +4565,13 @@ final class DistributedCaffeineIntegrationTests {
 
         @DisplayName("Test invalidation of a cache entry only the underlying store still holds")
         @Test
-        void test_ExtendedPersistence_invalidation_of_passivated_cache_entry() {
+        void test_EvictedEntryPersistence_invalidation_of_passivated_cache_entry() {
             DistributedCache<Key, Value> distributedCache = createCache(
                     dc -> dc.withCaffeine(Caffeine.newBuilder()
                                     .maximumSize(1))
-                            .withExtendedPersistence(configurer ->
-                                    configurer.withMaximumSize(10)),
+                            .withPersistence(configurer -> configurer
+                                    .withEvictedEntries(evictedEntries ->
+                                            evictedEntries.withMaximumSize(10))),
                     DistributedCaffeine::build);
             DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
 
@@ -4573,7 +4580,7 @@ final class DistributedCaffeineIntegrationTests {
 
             distributedCache.put(key1, value1);
             distributedCache.put(Key.of(2), Value.of(2));
-            distributedCache.cleanUp(); // evicts key1, which extended persistence keeps reloadable
+            distributedCache.cleanUp(); // evicts key1, which is retained and stays reloadable
 
             await("passivation")
                     .atMost(WAITING_DURATION)
@@ -4594,12 +4601,13 @@ final class DistributedCaffeineIntegrationTests {
 
         @DisplayName("Test that invalidating all reaches a cache entry only the underlying store still holds")
         @Test
-        void test_ExtendedPersistence_invalidate_all_of_passivated_cache_entry() {
+        void test_EvictedEntryPersistence_invalidate_all_of_passivated_cache_entry() {
             DistributedCache<Key, Value> distributedCache = createCache(
                     dc -> dc.withCaffeine(Caffeine.newBuilder()
                                     .maximumSize(1))
-                            .withExtendedPersistence(configurer ->
-                                    configurer.withMaximumSize(10)),
+                            .withPersistence(configurer -> configurer
+                                    .withEvictedEntries(evictedEntries ->
+                                            evictedEntries.withMaximumSize(10))),
                     DistributedCaffeine::build);
             DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
 
@@ -4607,7 +4615,7 @@ final class DistributedCaffeineIntegrationTests {
 
             distributedCache.put(key1, Value.of(1));
             distributedCache.put(Key.of(2), Value.of(2));
-            distributedCache.cleanUp(); // evicts key1, which extended persistence keeps reloadable
+            distributedCache.cleanUp(); // evicts key1, which is retained and stays reloadable
 
             await("passivation")
                     .atMost(WAITING_DURATION)
@@ -4626,10 +4634,367 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNull());
         }
 
-        @DisplayName("Test extended persistence by time")
+        @DisplayName("Test that cached entries are not retained without a synchronization strategy")
+        @Test
+        void test_CachedEntryPersistence_cache_entries_are_not_retained() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+
+            distributedCache.put(key1, value1);
+
+            // the cache entry is written either way - that is how it is distributed at all. What differs is only
+            // whether it is retained beyond that, which is why getFromStore reports nothing even now, while the
+            // cache entry is demonstrably there: it answers what persistence keeps, not what a write left behind
+            await("distribution to data store")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        assertThatDataStoreHasCounts(
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
+                        assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                    });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(0)));
+            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+
+            // swept from the data store, but not withdrawn from the cache instances holding it: a delete is not
+            // reported as a change stream event, so the cache keeps serving what it has
+            assertThat(distributedCache.getIfPresent(key1)).isEqualTo(value1);
+        }
+
+        @DisplayName("Test that synchronization starts empty without a synchronization strategy")
+        @Test
+        void test_CachedEntryPersistence_synchronization_starts_empty() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+
+            distributedCache.put(key1, value1);
+
+            await("distribution to data store")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(1))));
+
+            distributedCache.distributedPolicy().stopSynchronization();
+            distributedCache.distributedPolicy().startSynchronization();
+
+            // nothing is read back, so nothing clears the marks and the cache is emptied rather than reconciled -
+            // even though the data store still happens to hold the cache entry at this point
+            assertThat(distributedCache.asMap()).isEmpty();
+        }
+
+        @DisplayName("Test persistence of cached entries with a cold start")
+        @Test
+        void test_CachedEntryPersistence_with_cold_start() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    // retained, but deliberately not read back - the one configuration where the underlying store
+                    // outlives what any cache instance holds without anything taking ownership of it again
+                    dc -> dc.withPersistence(configurer -> configurer
+                            .withCachedEntries(cachedEntries -> cachedEntries
+                                    .withMaximumTime(FOREVER.getDuration())
+                                    .withColdStart())),
+                    DistributedCaffeine::build);
+            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+
+            distributedCache.put(key1, value1);
+
+            await("distribution to data store")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(1))));
+
+            distributedPolicy.stopSynchronization();
+            distributedPolicy.startSynchronization();
+
+            // the retention holds, so what is asserted here is the cold start alone and not that the cache entry
+            // was swept: it is still there to be read, just not by this cache instance
+            assertThat(distributedCache.asMap()).isEmpty();
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
+            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull();
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
+        }
+
+        @DisplayName("Test that population is still distributed without a synchronization strategy")
+        @Test
+        void test_CachedEntryPersistence_population_is_still_distributed() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> syncedDistributedCache = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+
+            distributedCache.put(key1, value1);
+
+            // retaining cache entries and distributing them are different matters: without a synchronization
+            // strategy the data store is only a medium, and warming other cache instances still works through it
+            await("synchronization between cache instances")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() ->
+                            assertThat(syncedDistributedCache.getIfPresent(key1)).isEqualTo(value1));
+        }
+
+        @DisplayName("Test evicted cache entry persistence without a synchronization strategy")
+        @Test
+        void test_CachedEntryPersistence_without_strategy_but_with_evicted_entry_persistence() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
+                                    .maximumSize(1))
+                            .withPersistence(configurer -> configurer
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withMaximumSize(10))),
+                    DistributedCaffeine::build);
+            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+            Key key2 = Key.of(2);
+
+            distributedCache.put(key1, value1);
+            distributedCache.put(key2, Value.of(2));
+            distributedCache.cleanUp(); // evicts key1, which evicted entry persistence keeps reloadable
+
+            await("passivation")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull());
+
+            // read rather than asserted: a maximum size of one is degenerate enough for Caffeine to deny admission
+            // to both entries, so how many end up evicted is none of this test's business - only that the sweep
+            // below leaves however many there are untouched
+            Repository<?, ?> repository = repositoryOf(distributedCache);
+            long evictedCountBeforeMaintenance = getFailable(() ->
+                    repository.countCacheEntries(EVICTED_RETAINED_GROUP));
+            assertThat(evictedCountBeforeMaintenance).isPositive();
+
+            processMaintenance();
+
+            // the two tiers are retained independently: cached entries are swept along with the removals
+            // ones, whereas evicted ones are kept for as long as their own bound allows - so the underlying store
+            // ends up holding exactly what memory does not
+            assertThatDataStoreHasCounts(
+                    CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(0)),
+                    CountGrouped.of(EVICTED_RETAINED_GROUP,
+                            assertion -> assertion.isEqualTo(evictedCountBeforeMaintenance)));
+            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull();
+        }
+
+        @DisplayName("Test persistence of cached entries with cache residency")
+        @Test
+        void test_CachedEntryPersistence_with_cache_residency() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    // no eviction policy, so nothing ever ends the residency this retention rests on - which is
+                    // also why the distribution mode is not required to include evictions here
+                    dc -> dc.withPersistence(configurer -> configurer
+                            .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency)),
+                    DistributedCaffeine::build);
+            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+
+            distributedCache.put(key1, value1);
+
+            await("distribution to data store")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(1))));
+
+            // the very sweep that removes a cache entry which is not retained at all (see the test asserting that),
+            // deliberately run with the same accelerated window, so what is asserted below is the retention itself
+            // and not that the sweep happened to leave the cache entry alone for lack of time
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
+            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull();
+
+            // and neither pruning by time nor by size applies, so repeating it changes nothing
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
+        }
+
+        @DisplayName("Test persistence of cached entries by time")
+        @Test
+        void test_CachedEntryPersistence_by_time() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withPersistence(configurer -> configurer
+                            .withCachedEntries(cachedEntries -> cachedEntries
+                                    .withMaximumTime(Duration.ofMillis(1)))),
+                    DistributedCaffeine::build);
+            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+
+            distributedCache.put(key1, value1);
+
+            await("distribution to data store")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(1))));
+
+            // deliberately the variant that leaves the transient window alone, so that what removes the cache entry
+            // below can only be pruning by time and not the sweep for cache entries that are not retained at all
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(0)));
+            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+
+            // pruning is a delete, so it is not reported as a change stream event and the cache keeps serving
+            assertThat(distributedCache.getIfPresent(key1)).isEqualTo(value1);
+        }
+
+        @DisplayName("Test persistence of cached entries by size")
+        @Test
+        void test_CachedEntryPersistence_by_size() {
+            int maximumSize = 2;
+            int numberOfCacheEntries = 5;
+
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withPersistence(configurer -> configurer
+                            .withCachedEntries(cachedEntries -> cachedEntries
+                                    .withMaximumSize(maximumSize))),
+                    DistributedCaffeine::build);
+
+            // no eviction policy is configured, so every cache entry stays cached and the data store is bounded by
+            // its own maximum size rather than by what the cache instance happens to hold
+            IntStream.rangeClosed(1, numberOfCacheEntries)
+                    .forEach(id -> distributedCache.put(Key.of(id), Value.of(id)));
+
+            await("distribution to data store")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(numberOfCacheEntries))));
+
+            processMaintenance();
+
+            // which cache entries are dropped follows from write order alone, so only the count is asserted here
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)));
+            assertThat(distributedCache.estimatedSize()).isEqualTo(numberOfCacheEntries);
+        }
+
+        @DisplayName("Test persistence of cached entries with cache residency and of evicted cache entries")
+        @Test
+        void test_CachedEntryPersistence_with_cache_residency_and_evicted_entry_persistence() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    // an eviction policy is what ends a residency, which is why the distribution mode has to
+                    // include evictions here - and it is the very same eviction that hands a cache entry from the
+                    // one tier over to the other
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
+                                    .maximumSize(1))
+                            .withPersistence(configurer -> configurer
+                                    .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency)
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withMaximumSize(10))),
+                    DistributedCaffeine::build);
+            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
+
+            Key key1 = Key.of(1);
+            Key key2 = Key.of(2);
+
+            distributedCache.put(key1, Value.of(1));
+            distributedCache.put(key2, Value.of(2));
+            distributedCache.cleanUp(); // evicts key1, which is what moves it into the other tier
+
+            await("passivation")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull());
+
+            // read rather than asserted, see the test above: with a maximum size of one it is Caffeine's business
+            // how many cache entries end up evicted and how many stay resident alongside them
+            Repository<?, ?> repository = repositoryOf(distributedCache);
+            long cachedCountBeforeMaintenance = getFailable(() ->
+                    repository.countCacheEntries(CACHED_GROUP));
+            long evictedCountBeforeMaintenance = getFailable(() ->
+                    repository.countCacheEntries(EVICTED_RETAINED_GROUP));
+            assertThat(evictedCountBeforeMaintenance).isPositive();
+            // what cache residency amounts to, whichever cache entries Caffeine admitted
+            assertThat(cachedCountBeforeMaintenance).isEqualTo(distributedCache.estimatedSize());
+
+            processMaintenance();
+
+            // both retentions hold at once and neither reaches into the other: residency keeps what is still
+            // cached, the evicted tier keeps what is not, and each answers for its own phase of a cache entry
+            assertThatDataStoreHasCounts(
+                    CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(cachedCountBeforeMaintenance)),
+                    CountGrouped.of(EVICTED_RETAINED_GROUP,
+                            assertion -> assertion.isEqualTo(evictedCountBeforeMaintenance)));
+            assertThat(cachedCountBeforeMaintenance).isEqualTo(distributedCache.estimatedSize());
+        }
+
+        @DisplayName("Test persistence of cached entries by time and of evicted cache entries")
+        @Test
+        void test_CachedEntryPersistence_by_time_and_evicted_entry_persistence() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    // time-based rather than size-based eviction, so that it is this cache entry which is evicted
+                    // and not whichever one Caffeine decides to deny admission to
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
+                                    .expireAfterWrite(Duration.ofSeconds(2)))
+                            .withPersistence(configurer -> configurer
+                                    .withCachedEntries(cachedEntries -> cachedEntries
+                                            .withMaximumTime(Duration.ofMillis(1)))
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withMaximumSize(10))),
+                    DistributedCaffeine::build);
+            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+
+            distributedCache.put(key1, value1);
+
+            await("distribution to data store")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(1))));
+
+            processMaintenance();
+
+            // the cached tier is done with the cache entry, and because pruning it is a delete rather than a
+            // transition, no change stream event reports that - so the cache instance goes on holding it
+            assertThatDataStoreIsEmpty();
+            assertThat(distributedCache.policy().getIfPresentQuietly(key1)).isEqualTo(value1);
+
+            // and once it is evicted the other tier writes it anew: the two tiers are phases of the same cache
+            // entry's life, so what the one stopped keeping the other one takes on, counting from the eviction
+            await("passivation")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> {
+                        assertThatDataStoreHasCounts(
+                                Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(1)));
+                        assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull();
+                    });
+        }
+
+        @DisplayName("Test persistence of evicted entries by time")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
-        void test_DistributionMode_extended_persistence_by_time(CacheFactory<Key, Value> cacheFactory) throws Exception {
+        void test_DistributionMode_evicted_entry_persistence_by_time(CacheFactory<Key, Value> cacheFactory) throws Exception {
             @SuppressWarnings("unchecked")
             RemovalListener<Key, Value> evictionListener = mock(RemovalListener.class);
 
@@ -4638,11 +5003,12 @@ final class DistributedCaffeineIntegrationTests {
                                     .evictionListener(evictionListener)
                                     // variable expiration policy provides more control over evictions
                                     .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration())))
-                            .withExtendedPersistence(configurer -> configurer
-                                    .withMaximumTime(FOREVER.getDuration())
-                                    // just to test the distinction in logic
-                                    .withMaximumSize(Integer.MAX_VALUE)
-                                    .withLoadingStrategy(true));
+                            .withPersistence(configurer -> configurer
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withMaximumTime(FOREVER.getDuration())
+                                            // just to test the distinction in logic
+                                            .withMaximumSize(Integer.MAX_VALUE)
+                                            .withLoadingStrategies(CACHE_LOADER)));
 
             @SuppressWarnings("Convert2Lambda")
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
@@ -4749,7 +5115,7 @@ final class DistributedCaffeineIntegrationTests {
                                     .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
-                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(1)));
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(0);
@@ -4761,7 +5127,7 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNull();
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(1)));
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(1)));
                         }
                     });
 
@@ -4808,7 +5174,7 @@ final class DistributedCaffeineIntegrationTests {
                                     .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
-                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(1)));
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(1)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
@@ -4821,7 +5187,7 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
                                     .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(2)));
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(2)));
                         }
                     });
 
@@ -4870,7 +5236,7 @@ final class DistributedCaffeineIntegrationTests {
                                     .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
-                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(2)));
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(0);
@@ -4885,7 +5251,7 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key3, true)).isNull();
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(2)));
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(2)));
                         }
                     });
 
@@ -4934,7 +5300,7 @@ final class DistributedCaffeineIntegrationTests {
                                     .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
-                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(2)));
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
@@ -4950,7 +5316,7 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
                                     .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(3)));
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(3)));
                         }
                     });
 
@@ -5004,7 +5370,7 @@ final class DistributedCaffeineIntegrationTests {
                                     .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue4));
                             assertThatDataStoreHasCounts(
                                     Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(2)),
-                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(2)));
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(2)));
                         } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
                                 distributionMode.equals(INVALIDATION)) {
                             assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(2);
@@ -5023,7 +5389,7 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedPolicy.getFromStore(key4, false)).isNull();
                             assertThat(distributedPolicy.getFromStore(key4, true)).isNull();
                             assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(3)));
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(3)));
                         }
                     });
 
@@ -5033,17 +5399,17 @@ final class DistributedCaffeineIntegrationTests {
                     || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
                 assertThatDataStoreHasCounts(
                         Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(2)),
-                        Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(2)));
+                        Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(2)));
             } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
                     || distributionMode.equals(INVALIDATION)) {
                 assertThatDataStoreHasCounts(
-                        Count.of(EVICTED_TIME_EXTENDED, assertion -> assertion.isEqualTo(3)));
+                        Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(3)));
             }
 
             // test cache without loading strategy
             DistributedLoadingCache<Key, Value> distributedLoadingCacheWithoutLoadingStrategy = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
-                    dc -> dc.withExtendedPersistence(configurer -> configurer
-                            .withLoadingStrategy(false)),
+                    dc -> dc.withPersistence(configurer -> configurer
+                            .withEvictedEntries(DistributedCaffeine.EvictedEntryPersistenceConfigurer::withLoadingStrategies)),
                     dc -> dc.build(cacheLoader));
 
             doAnswer(invocation -> Value.of(invocation.<Key>getArgument(0).getId(), "loaded but not from store"))
@@ -5064,8 +5430,12 @@ final class DistributedCaffeineIntegrationTests {
         @DisplayName("Test synchronization")
         @Test
         void test_DistributedCaffeine_synchronization() {
+            // the second cache instance below is created after the first write, so synchronizing from the data
+            // store is the only way it can arrive at that cache entry
+            CacheBuilder<Key, Value> cacheBuilder = dc -> dc.withPersistence(configurer -> configurer
+                            .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency));
             DistributedCache<Key, Value> distributedCache = createCache(
-                    CacheBuilder.identity(),
+                    cacheBuilder,
                     DistributedCaffeine::build);
 
             Key key1 = Key.of(1);
@@ -5078,7 +5448,7 @@ final class DistributedCaffeineIntegrationTests {
             distributedCache.put(key1, value1);
 
             DistributedCache<Key, Value> syncedDistributedCache = createCache(
-                    CacheBuilder.identity(),
+                    cacheBuilder,
                     DistributedCaffeine::build);
 
             await("synchronization between cache instances")
@@ -5147,7 +5517,11 @@ final class DistributedCaffeineIntegrationTests {
         @Test
         void test_DistributedCaffeine_restart_reconciles_and_preserves_stats() {
             DistributedCache<Key, Value> distributedCache = createCache(
-                    dc -> dc.withCaffeine(Caffeine.newBuilder().recordStats()),
+                    dc -> dc.withCaffeine(Caffeine.newBuilder().recordStats())
+                            // reconciling against the data store is what this test is about, so the cache entries
+                            // have to be persisted there in the first place
+                            .withPersistence(configurer -> configurer
+                                    .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency)),
                     DistributedCaffeine::build);
 
             Key key1 = Key.of(1);
@@ -5219,8 +5593,17 @@ final class DistributedCaffeineIntegrationTests {
                                 Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
                     });
 
-            Instant timestamp = distributedCache.distributedPolicy()
-                    .getFromStore(key1, false).getTimestamp();
+            // the store itself rather than the persistence view: nothing is retained here, the cache entry is
+            // only written so that it can be distributed
+            Repository<Key, Value> repository = distributedCache.distributedPolicy()
+                    .getAdapter().getRepository();
+            Supplier<Instant> cachedTimestamp = () -> getFailable(() -> {
+                try (Stream<CacheEntry<Key, Value>> cacheEntryStream =
+                             repository.streamCacheEntries(null, Set.of(CACHED), false)) {
+                    return cacheEntryStream.findFirst().orElseThrow().getTimestamp();
+                }
+            });
+            Instant timestamp = cachedTimestamp.get();
 
             distributedCache.put(key1, value1); // same value instance should produce new timestamp
             distributedCache.invalidate(Key.of(0, "not present"));
@@ -5237,9 +5620,7 @@ final class DistributedCaffeineIntegrationTests {
                         // identity checks (self-echo filter)
                         assertThat(distributedCache.getIfPresent(key1)).isSameAs(value1);
                         assertThat(syncedDistributedCache.getIfPresent(key1)).isNotSameAs(value1);
-                        assertThat(distributedCache.distributedPolicy()
-                                .getFromStore(key1, false).getTimestamp())
-                                .isAfter(timestamp);
+                        assertThat(cachedTimestamp.get()).isAfter(timestamp);
                         assertThatDataStoreHasCounts(
                                 Count.of(CACHED, assertion -> assertion.isEqualTo(1)),
                                 // invalidating a key this cache instance does not hold still reaches the
@@ -5248,11 +5629,10 @@ final class DistributedCaffeineIntegrationTests {
                                 Count.of(INVALIDATED, assertion -> assertion.isEqualTo(1)));
                     });
 
-            // the cache entry written for the absent key is short-living and does not accumulate
+            // the cache entry written for the absent key is kept for distribution only and does not accumulate
             processMaintenance();
 
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
+            assertThatDataStoreIsEmpty();
         }
 
         @DisplayName("Test Adapter")
@@ -5711,7 +6091,7 @@ final class DistributedCaffeineIntegrationTests {
         @ResourceLock(LOGGER_RESOURCE_LOCK)
         void test_MaintenanceWorker_fails_and_retries() {
             int maximumSize = 1;
-            int extendedMaximumSize = 2;
+            int retainedMaximumSize = 2;
 
             CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
                     .getCaptureLogger(DistributedCaffeine.class);
@@ -5719,8 +6099,9 @@ final class DistributedCaffeineIntegrationTests {
             DistributedCache<Key, Value> distributedCache = createCache(
                     dc -> dc.withCaffeine(Caffeine.newBuilder()
                                     .maximumSize(maximumSize))
-                            .withExtendedPersistence(configurer -> configurer
-                                    .withMaximumSize(extendedMaximumSize)),
+                            .withPersistence(configurer -> configurer
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withMaximumSize(retainedMaximumSize))),
                     DistributedCaffeine::build);
 
             // inject a spy into the maintenance worker (to provoke a failure later) and shorten the (otherwise
@@ -5751,7 +6132,7 @@ final class DistributedCaffeineIntegrationTests {
                     .untilAsserted(() -> assertThatDataStoreHasCounts(
                             Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize))));
 
-            // create extended-by-size entries up to (but not exceeding) the extended maximum size;
+            // create retained-by-size entries up to (but not exceeding) the retained maximum size;
             // the background maintenance runs continuously but has nothing to prune yet
             distributedCache.put(key2, value); // implicit eviction
 
@@ -5760,7 +6141,7 @@ final class DistributedCaffeineIntegrationTests {
                     .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> assertThatDataStoreHasCounts(
                             Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)),
-                            Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(1))));
+                            Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(1))));
 
             distributedCache.put(key3, value); // implicit eviction
 
@@ -5769,7 +6150,7 @@ final class DistributedCaffeineIntegrationTests {
                     .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> assertThatDataStoreHasCounts(
                             Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)),
-                            Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(extendedMaximumSize))));
+                            Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(retainedMaximumSize))));
 
             loggerDistributedCaffeine.startCapturing();
 
@@ -5790,7 +6171,7 @@ final class DistributedCaffeineIntegrationTests {
 
             loggerDistributedCaffeine.stopCapturing();
 
-            // create more extended-by-size entries than the extended maximum size allows;
+            // create more retained-by-size entries than the retained maximum size allows;
             // the background maintenance keeps failing, so the overflow is left unpruned
             distributedCache.put(key4, value); // implicit eviction
 
@@ -5799,7 +6180,7 @@ final class DistributedCaffeineIntegrationTests {
                     .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> assertThatDataStoreHasCounts(
                             Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)),
-                            Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(extendedMaximumSize + 1))));
+                            Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(retainedMaximumSize + 1))));
 
             distributedCache.put(key5, value); // implicit eviction
 
@@ -5808,20 +6189,20 @@ final class DistributedCaffeineIntegrationTests {
                     .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> assertThatDataStoreHasCounts(
                             Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)),
-                            Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(extendedMaximumSize + 2))));
+                            Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(retainedMaximumSize + 2))));
 
             // fix failure
             doCallRealMethod().when(cacheManager).cleanup();
 
             // with the failure fixed, the background maintenance recovers on its own (no explicit trigger) and prunes
-            // extended-by-size entries down to the extended maximum size; this distribution mode distributes
+            // retained-by-size entries down to the retained maximum size; this distribution mode distributes
             // evictions, so residency is a property of every cache instance alike and the pruned overflow is
-            // invalidated (and only later removed as short-living, so it still lingers within the waiting duration)
+            // invalidated (and only later removed as distribution-only, so it still lingers within the waiting duration)
             await("recovery")
                     .atMost(WAITING_DURATION)
                     .untilAsserted(() -> assertThatDataStoreHasCounts(
                             Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)),
-                            Count.of(EVICTED_SIZE_EXTENDED, assertion -> assertion.isEqualTo(extendedMaximumSize)),
+                            Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(retainedMaximumSize)),
                             Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2))));
         }
 
@@ -6021,7 +6402,7 @@ final class DistributedCaffeineIntegrationTests {
         @Test
         void stress_test_DistributedCaffeine_synchronization_from_data_store() throws Exception {
             int maximumSize = runsOnGitHub(10_000, 100_000);
-            int extendedMaximumSize = maximumSize / 100;
+            int retainedMaximumSize = maximumSize / 100;
             int numberOfOperations = 10_000;
 
             @SuppressWarnings("unchecked")
@@ -6053,9 +6434,13 @@ final class DistributedCaffeineIntegrationTests {
                                         .evictionListener(evictionListener)
                                         .maximumSize(maximumSize)
                                         .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration())))
-                                .withExtendedPersistence(configurer -> configurer
-                                        .withMaximumSize(extendedMaximumSize)
-                                        .withLoadingStrategy(true)),
+                                // a reactivated cache instance synchronizing from the data store is the whole
+                                // subject of this test
+                                .withPersistence(configurer -> configurer
+                                        .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency)
+                                        .withEvictedEntries(evictedEntries -> evictedEntries
+                                                .withMaximumSize(retainedMaximumSize)
+                                                .withLoadingStrategies(CACHE_LOADER))),
                         dc -> dc.build(cacheLoader));
                 return (DistributedLoadingCache<Key, Value>) cache;
             };
@@ -6133,7 +6518,7 @@ final class DistributedCaffeineIntegrationTests {
                                 .containsExactlyInAnyOrderEntriesOf(syncedDistributedLoadingCache.asMap());
                         assertThatDataStoreHasCounts(
                                 CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(distributedLoadingCache.estimatedSize())),
-                                CountGrouped.of(EVICTED_EXTENDED_GROUP, assertion -> assertion.isGreaterThanOrEqualTo(extendedMaximumSize)));
+                                CountGrouped.of(EVICTED_RETAINED_GROUP, assertion -> assertion.isGreaterThanOrEqualTo(retainedMaximumSize)));
                     });
 
             await("maintenance")
@@ -6142,8 +6527,8 @@ final class DistributedCaffeineIntegrationTests {
                     .failFast("process maintenance", this::processMaintenance)
                     .untilAsserted(() ->
                             assertThatDataStoreHasCounts(
-                                    CountGrouped.of(SHORT_LIVING_GROUP, assertion -> assertion.isEqualTo(0)),
-                                    CountGrouped.of(EVICTED_EXTENDED_GROUP, assertion -> assertion.isEqualTo(extendedMaximumSize))));
+                                    CountGrouped.of(DISTRIBUTION_ONLY_GROUP, assertion -> assertion.isEqualTo(0)),
+                                    CountGrouped.of(EVICTED_RETAINED_GROUP, assertion -> assertion.isEqualTo(retainedMaximumSize))));
 
             verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPLICIT));
             verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.REPLACED));
@@ -6170,7 +6555,7 @@ final class DistributedCaffeineIntegrationTests {
         @ValueSource(strings = {"same thread", "single thread", "common pool", "cached thread pool", "work stealing thread pool"})
         void stress_test_DistributedCaffeine_thread_safety(String valueSource) throws Exception {
             int maximumSize = 100;
-            int extendedMaximumSize = maximumSize / 10;
+            int retainedMaximumSize = maximumSize / 10;
             int numberOfOperations = 1_000;
             int levelOfParallelism = runsOnGitHub(3, 10);
 
@@ -6219,9 +6604,15 @@ final class DistributedCaffeineIntegrationTests {
                                         .maximumSize(maximumSize)
                                         .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration()))
                                         .refreshAfterWrite(Duration.ofNanos(1)))
-                                .withExtendedPersistence(configurer -> configurer
-                                        .withMaximumSize(extendedMaximumSize)
-                                        .withLoadingStrategy(true)),
+                                // these stress tests stop and start synchronization midway and then assert that
+                                // the cache instances converge, which is what synchronizing from the data store
+                                // does - and they assert a count of cached entries there, which presupposes
+                                // that those are retained rather than swept once distributed
+                                .withPersistence(configurer -> configurer
+                                        .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency)
+                                        .withEvictedEntries(evictedEntries -> evictedEntries
+                                                .withMaximumSize(retainedMaximumSize)
+                                                .withLoadingStrategies(CACHE_LOADER))),
                         dc -> dc.build(cacheLoader));
                 return (DistributedLoadingCache<Key, Value>) cache;
             };
@@ -6277,7 +6668,7 @@ final class DistributedCaffeineIntegrationTests {
                                 .containsExactlyInAnyOrderEntriesOf(syncedDistributedLoadingCache.asMap());
                         assertThatDataStoreHasCounts(
                                 CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(distributedLoadingCache.estimatedSize())),
-                                CountGrouped.of(EVICTED_EXTENDED_GROUP, assertion -> assertion.isGreaterThanOrEqualTo(extendedMaximumSize)));
+                                CountGrouped.of(EVICTED_RETAINED_GROUP, assertion -> assertion.isGreaterThanOrEqualTo(retainedMaximumSize)));
                     });
 
             await("maintenance")
@@ -6286,8 +6677,8 @@ final class DistributedCaffeineIntegrationTests {
                     .failFast("process maintenance", this::processMaintenance)
                     .untilAsserted(() ->
                             assertThatDataStoreHasCounts(
-                                    CountGrouped.of(SHORT_LIVING_GROUP, assertion -> assertion.isEqualTo(0)),
-                                    CountGrouped.of(EVICTED_EXTENDED_GROUP, assertion -> assertion.isEqualTo(extendedMaximumSize))));
+                                    CountGrouped.of(DISTRIBUTION_ONLY_GROUP, assertion -> assertion.isEqualTo(0)),
+                                    CountGrouped.of(EVICTED_RETAINED_GROUP, assertion -> assertion.isEqualTo(retainedMaximumSize))));
 
             verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPLICIT));
             verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.REPLACED));
@@ -6321,7 +6712,7 @@ final class DistributedCaffeineIntegrationTests {
         @Test
         void stress_test_DistributedCaffeine_multiple_threads() throws Exception {
             int maximumSize = 1_000;
-            int extendedMaximumSize = maximumSize / 2;
+            int retainedMaximumSize = maximumSize / 2;
             int numberOfOperations = 10_000;
             int levelOfParallelism = runsOnGitHub(3, 10);
 
@@ -6356,9 +6747,15 @@ final class DistributedCaffeineIntegrationTests {
                                         .maximumSize(maximumSize)
                                         .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration()))
                                         .refreshAfterWrite(Duration.ofNanos(1)))
-                                .withExtendedPersistence(configurer -> configurer
-                                        .withMaximumSize(extendedMaximumSize)
-                                        .withLoadingStrategy(true)),
+                                // these stress tests stop and start synchronization midway and then assert that
+                                // the cache instances converge, which is what synchronizing from the data store
+                                // does - and they assert a count of cached entries there, which presupposes
+                                // that those are retained rather than swept once distributed
+                                .withPersistence(configurer -> configurer
+                                        .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency)
+                                        .withEvictedEntries(evictedEntries -> evictedEntries
+                                                .withMaximumSize(retainedMaximumSize)
+                                                .withLoadingStrategies(CACHE_LOADER))),
                         dc -> dc.build(cacheLoader));
                 return (DistributedLoadingCache<Key, Value>) cache;
             };
@@ -6437,8 +6834,8 @@ final class DistributedCaffeineIntegrationTests {
                                 .allSatisfy(distributedLoadingCache -> assertThat(distributedLoadingCache.estimatedSize()).isEqualTo(0));
                         assertThatDataStoreHasCounts(
                                 CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(0)),
-                                CountGrouped.of(EVICTED_EXTENDED_GROUP, assertion -> assertion.isEqualTo(0)),
-                                CountGrouped.of(INVALIDATED_GROUP, assertion -> assertion.isGreaterThanOrEqualTo(extendedMaximumSize)));
+                                CountGrouped.of(EVICTED_RETAINED_GROUP, assertion -> assertion.isEqualTo(0)),
+                                CountGrouped.of(INVALIDATED_GROUP, assertion -> assertion.isGreaterThanOrEqualTo(retainedMaximumSize)));
                     });
 
             await("maintenance")
@@ -6447,8 +6844,8 @@ final class DistributedCaffeineIntegrationTests {
                     .failFast("process maintenance", this::processMaintenance)
                     .untilAsserted(() ->
                             assertThatDataStoreHasCounts(
-                                    CountGrouped.of(SHORT_LIVING_GROUP, assertion -> assertion.isEqualTo(0)),
-                                    CountGrouped.of(EVICTED_EXTENDED_GROUP, assertion -> assertion.isEqualTo(0))));
+                                    CountGrouped.of(DISTRIBUTION_ONLY_GROUP, assertion -> assertion.isEqualTo(0)),
+                                    CountGrouped.of(EVICTED_RETAINED_GROUP, assertion -> assertion.isEqualTo(0))));
 
             verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPLICIT));
             verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.REPLACED));
@@ -6578,7 +6975,17 @@ final class DistributedCaffeineIntegrationTests {
             return Stream.of(DistributionMode.values())
                     .map(distributionMode -> new DistributedCaffeineConfiguration<>(
                             format("with %s.%s", distributionMode.getClass().getSimpleName(), distributionMode.name()),
-                            dc -> dc.withDistributionMode(distributionMode)));
+                            dc -> {
+                                DistributedCaffeine<Key, Value> builder = dc.withDistributionMode(distributionMode);
+                                // bounded by time rather than by cache residency, because tests using this provider
+                                // add eviction policies of their own and residency would then require the mode to
+                                // include evictions, which half of these deliberately do not
+                                return distributionMode.isPopulationConsidered()
+                                        ? builder.withPersistence(configurer -> configurer
+                                                .withCachedEntries(cachedEntries -> cachedEntries
+                                                        .withMaximumTime(Duration.ofDays(1))))
+                                        : builder;
+                            }));
         }
 
         <K, V> Stream<Named<CacheFactory<K, V>>> createNamedCacheFactoriesForParametrizedTests(Stream<DistributedCaffeineConfiguration<K, V>> distributedCaffeineConfigurations) {
@@ -6611,14 +7018,18 @@ final class DistributedCaffeineIntegrationTests {
                 InternalInstanceRegistry<?, ?> instanceRegistry = getInstanceRegistry(distributedCache);
                 InternalMaintenanceWorker<?, ?> maintenanceWorker = instanceRegistry.getMaintenanceWorker();
                 // minus one milli as operator for data store is '<' not '<='
-                Duration shortLivingDuration = Duration.ZERO.minus(Duration.ofMillis(1));
+                Duration distributionDuration = Duration.ZERO.minus(Duration.ofMillis(1));
                 invokeMethod(maintenanceWorker, InternalMaintenanceWorker.class,
-                        "processMaintenance", List.of(Duration.class), List.of(shortLivingDuration));
+                        "processMaintenance", List.of(Duration.class), List.of(distributionDuration));
             });
         }
 
         void cleanUp() {
             distributedCacheInstances.forEach(DistributedCache::cleanUp);
+        }
+
+        void assertThatDataStoreIsEmpty() {
+            assertThatDataStoreHasCounts(new Count[0]);
         }
 
         void assertThatDataStoreHasCounts(Count... counts) {

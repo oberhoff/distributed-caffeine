@@ -15,6 +15,8 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.SerializersConfigurer;
 import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
@@ -31,7 +33,7 @@ import java.util.stream.Stream;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullIterable;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_GROUP;
-import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_EXTENDED_GROUP;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_RETAINED_GROUP;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
@@ -48,6 +50,10 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
     private Repository<K, V> repository;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalHasher<K> hasher;
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    private CachedEntryPersistenceConfigurer cachedEntryPersistenceConfigurer;
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    private EvictedEntryPersistenceConfigurer evictedEntryPersistenceConfigurer;
 
     @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalDistributedPolicy() {
@@ -61,6 +67,8 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
         this.serializersConfigurer = instanceRegistry.getSerializersConfigurer();
         this.repository = instanceRegistry.getAdapter().getRepository();
         this.hasher = instanceRegistry.getHasher();
+        this.cachedEntryPersistenceConfigurer = instanceRegistry.getCachedEntryPersistenceConfigurer();
+        this.evictedEntryPersistenceConfigurer = instanceRegistry.getEvictedEntryPersistenceConfigurer();
     }
 
     @Override
@@ -101,9 +109,18 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
     @Override
     public Set<CacheEntry<K, V>> getAllFromStore(Iterable<? extends K> keys, boolean includeEvicted) {
         Set<K> keySet = requireNonNullIterable(keys);
-        Set<Status> statuses = new HashSet<>(CACHED_GROUP);
-        if (includeEvicted) {
-            statuses.addAll(EVICTED_EXTENDED_GROUP);
+        // what a persistence tier retains, not what a write leaves behind until it is swept: cached entries
+        // are written for distribution whether or not persistence is configured for them, so without it they would
+        // be visible here for the distribution duration alone and turn up empty afterwards
+        Set<Status> statuses = new HashSet<>();
+        if (cachedEntryPersistenceConfigurer.isConfigured()) {
+            statuses.addAll(CACHED_GROUP);
+        }
+        if (includeEvicted && evictedEntryPersistenceConfigurer.isConfigured()) {
+            statuses.addAll(EVICTED_RETAINED_GROUP);
+        }
+        if (statuses.isEmpty()) {
+            return Set.of();
         }
         try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
                 hasher.getHashes(keySet),

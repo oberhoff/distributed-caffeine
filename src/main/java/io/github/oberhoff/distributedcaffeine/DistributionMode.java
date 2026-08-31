@@ -28,7 +28,7 @@ public enum DistributionMode {
 
     /**
      * Includes population (manual or loading), invalidation (explicit removal) and eviction (size- or time-based
-     * removal).
+     * removal). This is the default distribution mode.
      */
     POPULATION_AND_INVALIDATION_AND_EVICTION(true, true, true),
 

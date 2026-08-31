@@ -71,6 +71,13 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
 
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Configurer;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.PersistenceConfigurer;
+
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer.LoadingStrategy.CACHE_LOADER;
+import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION;
+import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.adapter.Repository.DEFAULT_DISCRIMINATOR;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatException;
@@ -131,6 +138,20 @@ final class DistributedCaffeineUnitTests {
 
             assertThatThrownBy(() ->
                     createCache(adapter,
+                            dc -> dc.withSerializers(_null()),
+                            DistributedCaffeine::build))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("configurer cannot be null");
+
+            assertThatThrownBy(() ->
+                    createCache(adapter,
+                            dc -> dc.withSerializers(configurer -> _null()),
+                            DistributedCaffeine::build))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("configurer cannot return null");
+
+            assertThatThrownBy(() ->
+                    createCache(adapter,
                             dc -> dc.withSerializers(configurer -> configurer
                                     .withKeySerializer(_null())),
                             DistributedCaffeine::build))
@@ -183,51 +204,170 @@ final class DistributedCaffeineUnitTests {
                     .hasMessage("Serializers must implement one of the following interfaces: "
                             .concat("ByteArraySerializer, StringSerializer, JsonSerializer"));
 
-            assertThatThrownBy(() ->
-                    createCache(adapter,
-                            dc -> dc.withExtendedPersistence(configurer -> configurer
-                                    .withMaximumSize(0)),
-                            DistributedCaffeine::build))
-                    .isInstanceOf(IllegalArgumentException.class)
-                    .hasMessage("maximumSize must be positive");
+            Stream.<Configurer<PersistenceConfigurer>>of(
+                            _null(),
+                            configurer -> configurer.withCachedEntries(_null()),
+                            configurer -> configurer.withEvictedEntries(_null()))
+                    .forEach(persistence -> assertThatThrownBy(() ->
+                            createCache(adapter,
+                                    dc -> dc.withPersistence(persistence),
+                                    DistributedCaffeine::build))
+                            .isInstanceOf(NullPointerException.class)
+                            .hasMessage("configurer cannot be null"));
+
+            // a configurer is expected to hand back the configurer it was given, so a null return breaks its
+            // contract rather than the caller's - and it is caught here instead of deep inside the build
+            Stream.<Configurer<PersistenceConfigurer>>of(
+                            configurer -> _null(),
+                            configurer -> configurer.withCachedEntries(tier -> _null()),
+                            configurer -> configurer.withEvictedEntries(tier -> _null()))
+                    .forEach(persistence -> assertThatThrownBy(() ->
+                            createCache(adapter,
+                                    dc -> dc.withPersistence(persistence),
+                                    DistributedCaffeine::build))
+                            .isInstanceOf(NullPointerException.class)
+                            .hasMessage("configurer cannot return null"));
+
+            // both persistence tiers check their arguments the same way, so neither is exercised on its own
+            Stream.<Configurer<PersistenceConfigurer>>of(
+                            configurer -> configurer.withCachedEntries(tier -> tier.withMaximumSize(0)),
+                            configurer -> configurer.withEvictedEntries(tier -> tier.withMaximumSize(0)))
+                    .forEach(persistence -> assertThatThrownBy(() ->
+                            createCache(adapter,
+                                    dc -> dc.withPersistence(persistence),
+                                    DistributedCaffeine::build))
+                            .isInstanceOf(IllegalArgumentException.class)
+                            .hasMessage("maximumSize must be positive"));
+
+            Stream.<Configurer<PersistenceConfigurer>>of(
+                            configurer -> configurer.withCachedEntries(tier -> tier.withMaximumTime(_null())),
+                            configurer -> configurer.withEvictedEntries(tier -> tier.withMaximumTime(_null())))
+                    .forEach(persistence -> assertThatThrownBy(() ->
+                            createCache(adapter,
+                                    dc -> dc.withPersistence(persistence),
+                                    DistributedCaffeine::build))
+                            .isInstanceOf(NullPointerException.class)
+                            .hasMessage("maximumTime cannot be null"));
+
+            Stream.<Configurer<PersistenceConfigurer>>of(
+                            configurer -> configurer.withCachedEntries(tier ->
+                                    tier.withMaximumTime(Duration.ZERO)),
+                            configurer -> configurer.withEvictedEntries(tier ->
+                                    tier.withMaximumTime(Duration.ZERO)),
+                            configurer -> configurer.withCachedEntries(tier ->
+                                    tier.withMaximumTime(Duration.ofMillis(-1))),
+                            configurer -> configurer.withEvictedEntries(tier ->
+                                    tier.withMaximumTime(Duration.ofMillis(-1))))
+                    .forEach(persistence -> assertThatThrownBy(() ->
+                            createCache(adapter,
+                                    dc -> dc.withPersistence(persistence),
+                                    DistributedCaffeine::build))
+                            .isInstanceOf(IllegalArgumentException.class)
+                            .hasMessage("maximumTime must be positive"));
 
             assertThatThrownBy(() ->
                     createCache(adapter,
-                            dc -> dc.withExtendedPersistence(configurer -> configurer
-                                    .withMaximumTime(_null())),
+                            dc -> dc.withPersistence(configurer -> configurer
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withLoadingStrategies(_null()))),
                             DistributedCaffeine::build))
                     .isInstanceOf(NullPointerException.class)
-                    .hasMessage("maximumTime cannot be null");
+                    .hasMessage("loadingStrategies cannot be null");
 
+            // a null next to a valid strategy, because the elements are checked and not just the array
             assertThatThrownBy(() ->
                     createCache(adapter,
-                            dc -> dc.withExtendedPersistence(configurer -> configurer
-                                    .withMaximumTime(Duration.ZERO)),
+                            dc -> dc.withPersistence(configurer -> configurer
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withLoadingStrategies(CACHE_LOADER, _null()))),
                             DistributedCaffeine::build))
-                    .isInstanceOf(IllegalArgumentException.class)
-                    .hasMessage("maximumTime must be positive");
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("loadingStrategies cannot contain null");
 
             Stream.<CacheConstructor<Key, Value>>of(DistributedCaffeine::build, dc -> dc.build(key -> null))
                     .forEach(cacheConstructor -> assertThatThrownBy(() ->
                             createCache(adapter,
-                                    dc -> dc.withExtendedPersistence(configurer -> configurer
-                                            .withMaximumSize(1)),
+                                    dc -> dc.withPersistence(configurer -> configurer
+                                            .withEvictedEntries(evictedEntries -> evictedEntries
+                                                    .withMaximumSize(1))),
                                     cacheConstructor))
                             .isInstanceOf(IllegalStateException.class)
-                            .hasMessage("If extended persistence is configured, "
+                            .hasMessage("If persistence of evicted entries is configured, "
                                     .concat("at least one eviction strategy must be set")));
 
             assertThatThrownBy(() ->
                     createCache(adapter,
                             dc -> dc.withCaffeine(Caffeine.newBuilder()
                                             .maximumSize(1))
-                                    .withExtendedPersistence(configurer -> configurer
-                                            .withMaximumSize(1)
-                                            .withLoadingStrategy(true)),
+                                    .withPersistence(configurer -> configurer
+                                            .withEvictedEntries(evictedEntries -> evictedEntries
+                                                    .withMaximumSize(1)
+                                                    .withLoadingStrategies(CACHE_LOADER))),
                             DistributedCaffeine::build))
                     .isInstanceOf(IllegalStateException.class)
-                    .hasMessage("If extended persistence is configured and loading strategy for cache loader is enabled, "
-                            .concat("cache must be build as loading cache"));
+                    .hasMessage("If persistence of evicted entries is configured and loading strategy "
+                            .concat("for cache loader is enabled, cache must be built as loading cache"));
+
+            // only an explicit strategy is objected to - the default is not chosen against any distribution mode
+            assertThatThrownBy(() ->
+                    createCache(adapter,
+                            dc -> dc.withDistributionMode(INVALIDATION)
+                                    .withPersistence(configurer -> configurer
+                                            .withCachedEntries(CachedEntryPersistenceConfigurer
+                                                    ::withCacheResidency)),
+                            DistributedCaffeine::build))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("If persistence of cached entries is configured, "
+                            .concat("the distribution mode must include population"));
+
+            assertThatThrownBy(() ->
+                    createCache(adapter,
+                            dc -> dc.withPersistence(configurer -> configurer
+                                    .withCachedEntries(cachedEntries -> cachedEntries
+                                            .withCacheResidency()
+                                            .withMaximumSize(1))),
+                            DistributedCaffeine::build))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("If persistence of cached entries is configured, cache residency must not be "
+                            .concat("combined with a maximum size or a maximum amount of time"));
+
+            // residency is only objected to where the cache can actually evict, which is what raises the question
+            assertThatThrownBy(() ->
+                    createCache(adapter,
+                            dc -> dc.withCaffeine(Caffeine.newBuilder()
+                                            .maximumSize(1))
+                                    .withDistributionMode(POPULATION_AND_INVALIDATION)
+                                    .withPersistence(configurer -> configurer
+                                            .withCachedEntries(CachedEntryPersistenceConfigurer
+                                                    ::withCacheResidency)),
+                            DistributedCaffeine::build))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("If persistence of cached entries is configured with cache residency and an "
+                            .concat("eviction policy is set, the distribution mode must include evictions"));
+
+            // cache residency is neither bounded nor reclaimable without something reading it back, so the two
+            // are asserted against each other rather than against a setting the user might merely have forgotten
+            assertThatThrownBy(() ->
+                    createCache(adapter,
+                            dc -> dc.withPersistence(configurer -> configurer
+                                    .withCachedEntries(cachedEntries -> cachedEntries
+                                            .withCacheResidency()
+                                            .withColdStart())),
+                            DistributedCaffeine::build))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("If persistence of cached entries is configured with cache residency, "
+                            .concat("a cold start must not be specified"));
+
+            // a loading strategy on its own retains nothing, so it can never take effect
+            assertThatThrownBy(() ->
+                    createCache(adapter,
+                            dc -> dc.withPersistence(configurer -> configurer
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withLoadingStrategies(CACHE_LOADER))),
+                            DistributedCaffeine::build))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("If a loading strategy is enabled, persistence of evicted entries must be "
+                            .concat("configured with a maximum size or a maximum amount of time"));
 
             assertThatThrownBy(() ->
                     createCache(adapter,

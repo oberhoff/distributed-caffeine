@@ -47,9 +47,12 @@ public interface DistributedPolicy<K, V> {
     /**
      * Starts distributed synchronization for this cache instance if it was stopped before. After starting, changes to
      * this cache instance are distributed to other cache instances and changes to other cache instances are distributed
-     * to this cache instance. Persisted cache entries from the underlying store are synchronized into this cache
-     * instance with priority (only if the configured {@link DistributionMode} includes population), so that previously
-     * existing cache entries in this cache instance might be overwritten or removed.
+     * to this cache instance.
+     * <p>
+     * If persistence is configured using {@link DistributedCaffeine#withPersistence(Configurer)} for cached entries
+     * (and a {@link DistributionMode} that includes population is configured but without configuring a cold start
+     * explicitly), those retained cache entries from the underlying store are synchronized into this cache instance
+     * with priority, so that previously existing cache entries might be overwritten or even removed.
      */
     void startSynchronization();
 
@@ -90,30 +93,30 @@ public interface DistributedPolicy<K, V> {
     Serializer<V, ?> getValueSerializer();
 
     /**
-     * Returns the cache entry mapped to the specified key directly from the underlying store bypassing this cache
-     * instance.
+     * Returns the retained cache entry mapped to the specified key directly from the underlying store bypassing this
+     * cache instance.
      * <p>
-     * Already evicted cache entries with extended persistence can also be included, if extended persistence is
-     * configured using {@link DistributedCaffeine#withExtendedPersistence(Configurer)}.
+     * Retention depends on the persistence configured using {@link DistributedCaffeine#withPersistence(Configurer)}
+     * (separately for cached and evicted entries).
      *
      * @param key            the key whose associated cache entry is to be returned
-     * @param includeEvicted {@code true} if evicted cache entries with extended persistence should also be included,
-     *                       otherwise {@code false}
+     * @param includeEvicted {@code true} if retained evicted cache entries should also be included, otherwise
+     *                       {@code false}
      * @return the cache entry to which the specified key is mapped, or null if no mapping is found
      * @throws NullPointerException if the specified key is null
      */
     @Nullable CacheEntry<K, V> getFromStore(K key, boolean includeEvicted);
 
     /**
-     * Returns the cache entries mapped to the specified keys directly from the underlying store bypassing this cache
-     * instance.
+     * Returns the retained cache entries mapped to the specified keys directly from the underlying store bypassing this
+     * cache instance.
      * <p>
-     * Already evicted cache entries with extended persistence can also be included, if extended persistence is
-     * configured using {@link DistributedCaffeine#withExtendedPersistence(Configurer)}.
+     * Retention depends on the persistence configured using {@link DistributedCaffeine#withPersistence(Configurer)}
+     * (separately for cached and evicted entries).
      *
      * @param keys           the keys whose associated cache entries are to be returned
-     * @param includeEvicted {@code true} if evicted cache entries with extended persistence should also be included,
-     *                       otherwise {@code false}
+     * @param includeEvicted {@code true} if retained evicted cache entries should also be included, otherwise
+     *                       {@code false}
      * @return a set of cache entries to which the specified keys are mapped, keys without mapping are omitted
      * @throws NullPointerException if the specified collection is null or contains a null element
      */

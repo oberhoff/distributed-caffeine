@@ -17,7 +17,8 @@ package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.stats.StatsCounter;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.ExtendedPersistenceConfigurer;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.SerializersConfigurer;
 import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
 import org.jspecify.annotations.Nullable;
@@ -45,7 +46,9 @@ class InternalInstanceRegistry<K, V> {
     @SuppressWarnings("NotNullFieldNotInitialized")
     private SerializersConfigurer<K, V> serializersConfigurer;
     @SuppressWarnings("NotNullFieldNotInitialized")
-    private ExtendedPersistenceConfigurer extendedPersistenceConfigurer;
+    private CachedEntryPersistenceConfigurer cachedEntryPersistenceConfigurer;
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    private EvictedEntryPersistenceConfigurer evictedEntryPersistenceConfigurer;
     private @Nullable InternalCacheLoader<K, V> cacheLoader;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalRemovalListener<K, V> removalListener;
@@ -189,12 +192,21 @@ class InternalInstanceRegistry<K, V> {
         this.serializersConfigurer = serializersConfigurer;
     }
 
-    public ExtendedPersistenceConfigurer getExtendedPersistenceConfigurer() {
-        return extendedPersistenceConfigurer;
+    public CachedEntryPersistenceConfigurer getCachedEntryPersistenceConfigurer() {
+        return cachedEntryPersistenceConfigurer;
     }
 
-    public void setExtendedPersistenceConfigurer(ExtendedPersistenceConfigurer extendedPersistenceConfigurer) {
-        this.extendedPersistenceConfigurer = extendedPersistenceConfigurer;
+    public void setCachedEntryPersistenceConfigurer(
+            CachedEntryPersistenceConfigurer cachedEntryPersistenceConfigurer) {
+        this.cachedEntryPersistenceConfigurer = cachedEntryPersistenceConfigurer;
+    }
+
+    public EvictedEntryPersistenceConfigurer getEvictedEntryPersistenceConfigurer() {
+        return evictedEntryPersistenceConfigurer;
+    }
+
+    public void setEvictedEntryPersistenceConfigurer(EvictedEntryPersistenceConfigurer evictedEntryPersistenceConfigurer) {
+        this.evictedEntryPersistenceConfigurer = evictedEntryPersistenceConfigurer;
     }
 
     public @Nullable InternalCacheLoader<K, V> getCacheLoader() {
