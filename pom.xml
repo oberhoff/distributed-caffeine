@@ -16,7 +16,7 @@
         <jspecify.version>1.0.1</jspecify.version>
         <caffeine.version>3.2.4</caffeine.version>
         <mongodb.version>5.10.0</mongodb.version>
-        <fory.version>1.6.1</fory.version>
+        <fory.version>1.7.0</fory.version>
         <jackson.version>3.2.2</jackson.version>
         <hash4j.version>0.30.0</hash4j.version>
         <failsafe.version>3.3.2</failsafe.version>
@@ -158,7 +158,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
-                <version>3.5.0</version>
+                <version>3.5.1</version>
                 <configuration>
                     <archive>
                         <manifestEntries>
@@ -236,7 +236,7 @@
             <plugin>
                 <groupId>com.mycila</groupId>
                 <artifactId>license-maven-plugin</artifactId>
-                <version>5.1.1</version>
+                <version>5.1.2</version>
                 <executions>
                     <execution>
                         <id>format-license</id>
