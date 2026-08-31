@@ -16,7 +16,7 @@
         <jspecify.version>1.0.1</jspecify.version>
         <caffeine.version>3.2.4</caffeine.version>
         <mongodb.version>5.10.0</mongodb.version>
-        <fory.version>1.6.1</fory.version>
+        <fory.version>1.7.0</fory.version>
         <jackson.version>3.2.2</jackson.version>
         <hash4j.version>0.30.0</hash4j.version>
         <failsafe.version>3.3.2</failsafe.version>
