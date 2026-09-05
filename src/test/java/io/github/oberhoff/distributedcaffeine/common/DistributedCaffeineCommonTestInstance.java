@@ -102,7 +102,7 @@ public abstract class DistributedCaffeineCommonTestInstance {
         }
     }
 
-    @SuppressWarnings("SameReturnValue")
+    @SuppressWarnings({"SameReturnValue", "TypeParameterUnusedInFormals"})
     protected <T> T _null() {
         return null;
     }
@@ -142,7 +142,7 @@ public abstract class DistributedCaffeineCommonTestInstance {
         }
     }
 
-    @SuppressWarnings({"unchecked", "UnusedReturnValue", "SameParameterValue"})
+    @SuppressWarnings({"unchecked", "UnusedReturnValue", "SameParameterValue", "TypeParameterUnusedInFormals"})
     protected <T, R> R invokeMethod(Object instanceObject, Class<T> instanceClass, String methodName, List<Class<?>> parameterClasses, List<Object> parameterObjects) {
         return (R) ReflectionUtils.invokeMethod(
                 ReflectionUtils.findMethod(instanceClass, methodName, parameterClasses.toArray(Class[]::new))

@@ -61,7 +61,7 @@ class InternalValue<V> {
     }
 
     @Override
-    public boolean equals(Object object) {
+    public boolean equals(@Nullable Object object) {
         return object instanceof InternalValue<?> that && Objects.equals(this.value, that.value);
     }
 

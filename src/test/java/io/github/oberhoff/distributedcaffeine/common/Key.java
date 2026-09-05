@@ -76,6 +76,7 @@ public class Key implements Hashable, Serializable {
     }
 
     @Override
+    @SuppressWarnings("EqualsGetClass") // exact-type equality is deliberate for this value fixture
     public boolean equals(Object object) {
         if (object == this) return true;
         if (object == null || object.getClass() != getClass()) return false;

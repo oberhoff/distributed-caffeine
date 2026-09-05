@@ -34,6 +34,9 @@ import static java.util.stream.Collectors.toUnmodifiableSet;
 
 class InternalUtils {
 
+    private InternalUtils() {
+    }
+
     // the value type carries whatever nullness the caller passes in, instead of forcing a nullable one on callers
     // that hand over a value which cannot be null
     static <K, V extends @Nullable Object> Entry<K, V> entry(K key, V value) {

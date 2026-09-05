@@ -304,7 +304,7 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
                     Status.of(requireNonNull(document.getString(STATUS.toString()), "status cannot be null")),
                     requireNonNull(document.getDate(TIMESTAMP.toString()), "timestamp cannot be null")
                             .toInstant());
-        } catch (Exception e) {
+        } catch (RuntimeException e) {
             LOGGER.log(Level.WARNING,
                     format("Reading of cache entry metadata failed for document '%s' at '%s'. Skipping...",
                             document, identifier), e);

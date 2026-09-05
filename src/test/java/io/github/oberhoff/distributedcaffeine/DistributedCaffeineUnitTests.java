@@ -979,6 +979,7 @@ final class DistributedCaffeineUnitTests {
 
         @DisplayName("that cache entry metadata implements equals(), hashCode() and toString()")
         @Test
+        @SuppressWarnings("EqualsIncompatibleType") // comparing unrelated types is the point of the equals() contract test
         void test_CacheEntryMetadata_equals_hashCode_toString() {
             CacheEntryMetadata metadata = CacheEntryMetadata.of("h1", "op1", Status.CACHED, TIMESTAMP);
             CacheEntryMetadata equalMetadata = CacheEntryMetadata.of("h1", "op1", Status.CACHED, TIMESTAMP);

@@ -308,11 +308,28 @@
                 </property>
             </activation>
             <properties>
-                <errorprone.args>${nullaway.args}</errorprone.args>
+                <errorprone.args>${nullaway.args} ${errorprone.checks}</errorprone.args>
+                <errorprone.testargs>${nullaway.testargs} ${errorprone.checks}</errorprone.testargs>
+                <errorprone.checks>${errorprone.nullness} ${errorprone.hygiene}</errorprone.checks>
+                <errorprone.nullness>-Xep:EqualsMissingNullable:ERROR</errorprone.nullness>
+                <errorprone.hygiene>${errorprone.catching} ${errorprone.utility}</errorprone.hygiene>
+                <errorprone.catching>-Xep:CatchingUnchecked:ERROR</errorprone.catching>
+                <errorprone.utility>-Xep:PrivateConstructorForUtilityClass:ERROR</errorprone.utility>
                 <nullaway.args>${nullaway.severity} ${nullaway.mode} ${nullaway.checks}</nullaway.args>
+                <!-- NullAway is scoped to the main sources, as test code deliberately passes and dereferences
+                     nulls to exercise rejection paths. Its options have to stay set even with the check switched
+                     off, because Error Prone instantiates every plugin regardless of severity. -->
+                <nullaway.testargs>-Xep:NullAway:OFF ${nullaway.mode}</nullaway.testargs>
                 <nullaway.severity>-Xep:NullAway:ERROR</nullaway.severity>
                 <nullaway.mode>-XepOpt:NullAway:OnlyNullMarked=true -XepOpt:NullAway:JSpecifyMode=true</nullaway.mode>
-                <nullaway.checks>-XepOpt:NullAway:CheckOptionalEmptiness=true</nullaway.checks>
+                <nullaway.checks>${nullaway.optional} ${nullaway.flow} ${nullaway.overrides}</nullaway.checks>
+                <nullaway.optional>-XepOpt:NullAway:CheckOptionalEmptiness=true</nullaway.optional>
+                <nullaway.flow>${nullaway.contracts} ${nullaway.asserts}</nullaway.flow>
+                <nullaway.contracts>-XepOpt:NullAway:CheckContracts=true</nullaway.contracts>
+                <nullaway.asserts>-XepOpt:NullAway:AssertsEnabled=true</nullaway.asserts>
+                <nullaway.overrides>${nullaway.restrictive} ${nullaway.exhaustive}</nullaway.overrides>
+                <nullaway.restrictive>-XepOpt:NullAway:AcknowledgeRestrictiveAnnotations=true</nullaway.restrictive>
+                <nullaway.exhaustive>-XepOpt:NullAway:ExhaustiveOverride=true</nullaway.exhaustive>
                 <j.api>-J--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED</j.api>
                 <j.file>-J--add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED</j.file>
                 <j.main>-J--add-exports=jdk.compiler/com.sun.tools.javac.main=ALL-UNNAMED</j.main>
@@ -370,6 +387,41 @@
                                     <compilerArgs>
                                         <arg>-XDcompilePolicy=simple</arg>
                                         <arg>-Xplugin:ErrorProne ${errorprone.args}</arg>
+                                        <arg>-XDaddTypeAnnotationsToSymbol=true</arg>
+                                        <arg>-Werror</arg>
+                                        <arg>--should-stop=ifError=FLOW</arg>
+                                        <arg>${j.api}</arg>
+                                        <arg>${j.file}</arg>
+                                        <arg>${j.main}</arg>
+                                        <arg>${j.model}</arg>
+                                        <arg>${j.parser}</arg>
+                                        <arg>${j.processing}</arg>
+                                        <arg>${j.tree}</arg>
+                                        <arg>${j.util}</arg>
+                                        <arg>${j.code}</arg>
+                                        <arg>${j.comp}</arg>
+                                    </compilerArgs>
+                                    <annotationProcessorPaths>
+                                        <path>
+                                            <groupId>com.google.errorprone</groupId>
+                                            <artifactId>error_prone_core</artifactId>
+                                            <version>2.50.0</version>
+                                        </path>
+                                        <path>
+                                            <groupId>com.uber.nullaway</groupId>
+                                            <artifactId>nullaway</artifactId>
+                                            <version>0.14.1</version>
+                                        </path>
+                                    </annotationProcessorPaths>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>default-testCompile</id>
+                                <configuration>
+                                    <fork>true</fork>
+                                    <compilerArgs>
+                                        <arg>-XDcompilePolicy=simple</arg>
+                                        <arg>-Xplugin:ErrorProne ${errorprone.testargs}</arg>
                                         <arg>-XDaddTypeAnnotationsToSymbol=true</arg>
                                         <arg>-Werror</arg>
                                         <arg>--should-stop=ifError=FLOW</arg>

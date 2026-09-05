@@ -99,6 +99,7 @@ import java.util.Collection;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.NoSuchElementException;
@@ -2671,6 +2672,7 @@ final class DistributedCaffeineIntegrationTests {
 
         @DisplayName("Test distributedPolicy()")
         @Test
+        @SuppressWarnings("EqualsIncompatibleType") // comparing unrelated types is the point of the equals() contract test
         void test_DistributedPolicy() {
             DistributedCache<Key, Value> distributedCache = createCache(
                     dc -> dc.withCaffeine(Caffeine.newBuilder()
@@ -6400,6 +6402,7 @@ final class DistributedCaffeineIntegrationTests {
 
         @DisplayName("Stress test synchronization from data store")
         @Test
+        @SuppressWarnings("FutureReturnValueIgnored") // background load, awaited through loopCondition/loopCounter
         void stress_test_DistributedCaffeine_synchronization_from_data_store() throws Exception {
             int maximumSize = runsOnGitHub(10_000, 100_000);
             int retainedMaximumSize = maximumSize / 100;
@@ -6553,6 +6556,7 @@ final class DistributedCaffeineIntegrationTests {
         @DisplayName("Stress test thread safety")
         @ParameterizedTest(name = "with {0}-executor")
         @ValueSource(strings = {"same thread", "single thread", "common pool", "cached thread pool", "work stealing thread pool"})
+        @SuppressWarnings("FutureReturnValueIgnored") // delayed executor shutdown, deliberately not awaited
         void stress_test_DistributedCaffeine_thread_safety(String valueSource) throws Exception {
             int maximumSize = 100;
             int retainedMaximumSize = maximumSize / 10;
@@ -6631,7 +6635,7 @@ final class DistributedCaffeineIntegrationTests {
                             executeRandomOperation(distributedLoadingCache, maximumSize);
                             if (threadIndex == levelOfParallelism / 2 && operationIndex == numberOfOperations / 2) {
                                 distributedLoadingCache.distributedPolicy().stopSynchronization();
-                                sleep(Duration.ofMillis(1_000));
+                                sleep(Duration.ofSeconds(1));
                                 distributedLoadingCache.distributedPolicy().startSynchronization();
                                 // set ticker to start triggering expiration/refreshing
                                 ticker.addAndGet(Duration.ofHours(1).toNanos());
@@ -6765,7 +6769,7 @@ final class DistributedCaffeineIntegrationTests {
 
             IntStream.rangeClosed(1, levelOfParallelism).forEach(cacheIndex ->
                     completableFutures.add(CompletableFuture.runAsync(() -> {
-                        sleep(Duration.ofMillis(1_000).multipliedBy(min(10, cacheIndex - 1)));
+                        sleep(Duration.ofSeconds(1).multipliedBy(min(10, cacheIndex - 1)));
                         AtomicLong ticker = new AtomicLong(0);
                         DistributedLoadingCache<Key, Value> distributedLoadingCache = cacheSupplier.apply(ticker);
                         distributedLoadingCaches.add(distributedLoadingCache);
@@ -6773,7 +6777,7 @@ final class DistributedCaffeineIntegrationTests {
                             executeRandomOperation(distributedLoadingCache, maximumSize);
                             if (operationIndex == numberOfOperations / 2) {
                                 distributedLoadingCache.distributedPolicy().stopSynchronization();
-                                sleep(Duration.ofMillis(1_000).multipliedBy(min(10, cacheIndex)));
+                                sleep(Duration.ofSeconds(1).multipliedBy(min(10, cacheIndex)));
                                 distributedLoadingCache.distributedPolicy().startSynchronization();
                                 // set ticker to start triggering expiration/refreshing
                                 ticker.addAndGet(Duration.ofHours(1).toNanos());
@@ -6908,7 +6912,7 @@ final class DistributedCaffeineIntegrationTests {
                             .readTimeout(30, TimeUnit.SECONDS))
                     .build());
 
-            isMongo = dockerImageName.asCanonicalNameString().toLowerCase().contains("mongo");
+            isMongo = dockerImageName.asCanonicalNameString().toLowerCase(Locale.ROOT).contains("mongo");
         }
 
         @AfterAll
@@ -6974,7 +6978,7 @@ final class DistributedCaffeineIntegrationTests {
         Stream<DistributedCaffeineConfiguration<Key, Value>> createDistributedCaffeineConfigurationsWithDifferentDistributionModes() {
             return Stream.of(DistributionMode.values())
                     .map(distributionMode -> new DistributedCaffeineConfiguration<>(
-                            format("with %s.%s", distributionMode.getClass().getSimpleName(), distributionMode.name()),
+                            format("with %s.%s", DistributionMode.class.getSimpleName(), distributionMode.name()),
                             dc -> {
                                 DistributedCaffeine<Key, Value> builder = dc.withDistributionMode(distributionMode);
                                 // bounded by time rather than by cache residency, because tests using this provider
@@ -7032,6 +7036,7 @@ final class DistributedCaffeineIntegrationTests {
             assertThatDataStoreHasCounts(new Count[0]);
         }
 
+        @SuppressWarnings("ReturnValueIgnored") // the assertion runs inside apply(), its result is of no interest
         void assertThatDataStoreHasCounts(Count... counts) {
             Repository<?, ?> repository = getInstanceRegistry(distributedCacheInstances.stream()
                     .findFirst()
@@ -7049,6 +7054,7 @@ final class DistributedCaffeineIntegrationTests {
                                     .describedAs("%nCount for %s", count.status().name())));
         }
 
+        @SuppressWarnings("ReturnValueIgnored") // the assertion runs inside apply(), its result is of no interest
         void assertThatDataStoreHasCounts(CountGrouped... countsGrouped) {
             Repository<?, ?> repository = getInstanceRegistry(distributedCacheInstances.stream()
                     .findFirst()
@@ -7247,7 +7253,7 @@ final class DistributedCaffeineIntegrationTests {
                 this.initialized = true;
             }
 
-            @SuppressWarnings("unchecked")
+            @SuppressWarnings({"unchecked", "TypeParameterUnusedInFormals"})
             <T> T getObject() {
                 return (T) object;
             }

@@ -45,7 +45,7 @@ class InternalKey<K> {
     }
 
     @Override
-    public boolean equals(Object object) {
+    public boolean equals(@Nullable Object object) {
         return object instanceof InternalKey<?> that && Objects.equals(this.key, that.key);
     }
 

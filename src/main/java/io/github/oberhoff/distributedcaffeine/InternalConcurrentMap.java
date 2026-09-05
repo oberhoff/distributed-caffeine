@@ -506,7 +506,7 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalInitia
     }
 
     @Override
-    public boolean equals(Object object) {
+    public boolean equals(@Nullable Object object) {
         return object instanceof Map<?, ?> map && Objects.equals(m(concurrentMap), map);
     }
 

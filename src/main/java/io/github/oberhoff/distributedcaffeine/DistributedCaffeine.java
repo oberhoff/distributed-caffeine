@@ -461,7 +461,7 @@ public final class DistributedCaffeine<K, V> {
         }
         try {
             return build.get();
-        } catch (Exception e) {
+        } catch (RuntimeException e) {
             CLAIMED_ADAPTERS.remove(this.adapter);
             throw e;
         }
