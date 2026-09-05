@@ -54,10 +54,10 @@ public abstract class AbstractSynchronizer<K, V> implements Synchronizer<K, V> {
     protected Serializer<V, ?> valueSerializer;
 
     /**
-     * The key retriever to be used by this adapter.
+     * The receiver to be used by this adapter.
      */
     @SuppressWarnings("NotNullFieldNotInitialized")
-    protected Retriever<K, V> retriever;
+    protected Receiver<K, V> receiver;
 
     /**
      * Constructs a new synchronizer.
@@ -92,8 +92,8 @@ public abstract class AbstractSynchronizer<K, V> implements Synchronizer<K, V> {
     }
 
     @Override
-    public void setRetriever(Retriever<K, V> retriever) {
-        requireNonNull(retriever, "retriever cannot be null");
-        this.retriever = retriever;
+    public void setReceiver(Receiver<K, V> receiver) {
+        requireNonNull(receiver, "receiver cannot be null");
+        this.receiver = receiver;
     }
 }

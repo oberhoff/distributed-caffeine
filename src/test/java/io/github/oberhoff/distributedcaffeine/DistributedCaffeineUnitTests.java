@@ -422,7 +422,7 @@ final class DistributedCaffeineUnitTests {
 
             // the rejected attempts must not have rewired the adapter of the cache instance holding it
             verify(adapter, times(1))
-                    .setRetriever(any());
+                    .setReceiver(any());
 
             // an own adapter for each cache instance is what the rejection asks for, so that has to work
             assertThat(createCache(mockAdapter("database.other"), CacheBuilder.identity(),

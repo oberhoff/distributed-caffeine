@@ -139,8 +139,8 @@ public abstract class AbstractAdapter<K, V> implements Adapter<K, V> {
     }
 
     @Override
-    public void setRetriever(Retriever<K, V> retriever) {
-        requireNonNull(retriever, "retriever cannot be null");
-        this.synchronizer.setRetriever(retriever);
+    public void setReceiver(Receiver<K, V> receiver) {
+        requireNonNull(receiver, "receiver cannot be null");
+        this.synchronizer.setReceiver(receiver);
     }
 }

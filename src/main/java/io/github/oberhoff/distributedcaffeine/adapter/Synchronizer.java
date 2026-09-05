@@ -20,7 +20,7 @@ package io.github.oberhoff.distributedcaffeine.adapter;
  * underlying store.
  * <p>
  * <b>Note:</b> Inbound changes of the underlying store are supposed to be passed on as cache entries by the adapter
- * using the {@link Retriever}. A cache entry that could not be read for whatever reason (e.g. deserialization fails or
+ * using the {@link Receiver}. A cache entry that could not be read for whatever reason (e.g. deserialization fails or
  * field values do not meet the conditions of a cache entry) should be skipped and logged instead of breaking the
  * synchronization exceptionally.
  *
@@ -29,5 +29,5 @@ package io.github.oberhoff.distributedcaffeine.adapter;
  * @author Andreas Oberhoff
  */
 public interface Synchronizer<K, V> extends IdentifierAware, DiscriminatorAware, StateAware, SerializerAware<K, V>,
-        RetrieverAware<K, V> {
+        ReceiverAware<K, V> {
 }

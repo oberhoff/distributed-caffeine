@@ -16,18 +16,18 @@
 package io.github.oberhoff.distributedcaffeine.adapter;
 
 /**
- * Interface representing objects that are aware of a retriever.
+ * Interface representing objects that are aware of a receiver.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
-public interface RetrieverAware<K, V> {
+public interface ReceiverAware<K, V> {
 
     /**
-     * Sets the retriever for this object.
+     * Sets the receiver for this object.
      *
-     * @param retriever the retriever to be set
+     * @param receiver the receiver to be set
      */
-    void setRetriever(Retriever<K, V> retriever);
+    void setReceiver(Receiver<K, V> receiver);
 }

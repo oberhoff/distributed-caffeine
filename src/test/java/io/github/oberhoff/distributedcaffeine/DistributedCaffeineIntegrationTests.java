@@ -45,7 +45,7 @@ import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
-import io.github.oberhoff.distributedcaffeine.adapter.Retriever;
+import io.github.oberhoff.distributedcaffeine.adapter.Receiver;
 import io.github.oberhoff.distributedcaffeine.adapter.Synchronizer;
 import io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoAdapter;
 import io.github.oberhoff.distributedcaffeine.common.DistributedCaffeineCommonTestInstance;
@@ -5639,12 +5639,12 @@ final class DistributedCaffeineIntegrationTests {
         @Test
         @ResourceLock(LOGGER_RESOURCE_LOCK)
         void test_Adapter() throws Exception {
-            Set<CacheEntry<Key, Value>> retrievedCacheEntries = new HashSet<>();
+            Set<CacheEntry<Key, Value>> receivedCacheEntries = new HashSet<>();
             @SuppressWarnings("Convert2Lambda")
-            Retriever<Key, Value> retriever = spy(new Retriever<Key, Value>() {
+            Receiver<Key, Value> receiver = spy(new Receiver<Key, Value>() {
                 @Override
-                public void retrieveCacheEntries(@NonNull Collection<CacheEntry<Key, Value>> cacheEntries) {
-                    retrievedCacheEntries.addAll(cacheEntries);
+                public void receiveCacheEntries(@NonNull Collection<CacheEntry<Key, Value>> cacheEntries) {
+                    receivedCacheEntries.addAll(cacheEntries);
                 }
             });
 
@@ -5652,7 +5652,7 @@ final class DistributedCaffeineIntegrationTests {
                     CacheBuilder.identity(),
                     DistributedCaffeine::build);
             Adapter<Key, Value> adapter = distributedCache.distributedPolicy().getAdapter();
-            adapter.setRetriever(retriever);
+            adapter.setReceiver(receiver);
             Repository<Key, Value> repository = adapter.getRepository();
 
             assertThat(adapter.isActivated()).isTrue();
@@ -5697,12 +5697,12 @@ final class DistributedCaffeineIntegrationTests {
                 stream.forEach(foundCacheEntries::add);
             }
 
-            await("retrieving")
+            await("receiving")
                     .atMost(WAITING_DURATION)
                     .untilAsserted(() -> {
-                        verify(retriever, times(4))
-                                .retrieveCacheEntries(anySet());
-                        assertThat(retrievedCacheEntries)
+                        verify(receiver, times(4))
+                                .receiveCacheEntries(anySet());
+                        assertThat(receivedCacheEntries)
                                 .containsExactlyInAnyOrder(
                                         insertCacheEntry1, insertCacheEntry2,
                                         updateCacheEntry1, updateCacheEntry2);
@@ -6242,12 +6242,12 @@ final class DistributedCaffeineIntegrationTests {
                     DistributedCaffeine::build);
 
             // reach the synced instance's change stream watcher to provoke inbound-processing failures in the background;
-            // the watcher applies inbound changes via its retriever and deserializes them with its value serializer
+            // the watcher applies inbound changes via its receiver and deserializes them with its value serializer
             Adapter<Key, Value> syncedAdapter = getInstanceRegistry(syncedDistributedCache).getAdapter();
             Synchronizer<Key, Value> syncedSynchronizer = readFieldValue(syncedAdapter, AbstractAdapter.class,
                     "synchronizer", Synchronizer.class);
-            Retriever<Key, Value> syncedRetriever = injectSpy(syncedSynchronizer, AbstractSynchronizer.class,
-                    "retriever", Retriever.class);
+            Receiver<Key, Value> syncedReceiver = injectSpy(syncedSynchronizer, AbstractSynchronizer.class,
+                    "receiver", Receiver.class);
             Serializer<Value, ?> syncedValueSerializer = injectSpy(syncedSynchronizer, AbstractSynchronizer.class,
                     "valueSerializer", Serializer.class);
 
@@ -6286,7 +6286,7 @@ final class DistributedCaffeineIntegrationTests {
             loggerMongoSynchronizer.startCapturing();
 
             // provoke failure in the inbound apply step of the synced instance's watcher
-            doThrow(new IllegalStateException()).when(syncedRetriever).retrieveCacheEntries(any());
+            doThrow(new IllegalStateException()).when(syncedReceiver).receiveCacheEntries(any());
 
             distributedCache.put(key2, value2);
 
@@ -6307,7 +6307,7 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(syncedDistributedCache.getIfPresent(key2)).isNull();
 
             // fix failure: the watcher recovers on its own and applies the missed update
-            doCallRealMethod().when(syncedRetriever).retrieveCacheEntries(any());
+            doCallRealMethod().when(syncedReceiver).receiveCacheEntries(any());
 
             await("recovery")
                     .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure

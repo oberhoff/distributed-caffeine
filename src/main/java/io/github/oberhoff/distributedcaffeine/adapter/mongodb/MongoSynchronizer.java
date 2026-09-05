@@ -239,7 +239,7 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
                     changeStreamDocument.getFullDocument(), LOGGER, identifier);
             Optional.ofNullable(cacheEntry)
                     .map(Set::of)
-                    .ifPresent(cacheEntries -> retriever.retrieveCacheEntries(cacheEntries));
+                    .ifPresent(cacheEntries -> receiver.receiveCacheEntries(cacheEntries));
         }
     }
 

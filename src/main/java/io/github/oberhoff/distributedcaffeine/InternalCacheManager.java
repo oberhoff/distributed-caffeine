@@ -23,7 +23,7 @@ import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPe
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
-import io.github.oberhoff.distributedcaffeine.adapter.Retriever;
+import io.github.oberhoff.distributedcaffeine.adapter.Receiver;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.System.Logger;
@@ -71,7 +71,7 @@ import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
 @SuppressWarnings({"java:S1452"})
-class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriever<K, V> {
+class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receiver<K, V> {
 
     private final AtomicBoolean isActivated;
     // the identifier of the activation this cache instance is in, renewed with every one of them. It says which
@@ -144,7 +144,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
         isActivated.set(false);
     }
 
-    // whether this value is content of the current activation, meaning this cache instance wrote or retrieved it
+    // whether this value is content of the current activation, meaning this cache instance wrote or received it
     // while taking part in synchronization. Only such a value may have a change to it distributed, and only such a
     // value survives synchronizing
     boolean hasCurrentActivationId(InternalValue<V> value) {
@@ -216,7 +216,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     // Invalidating all cache entries cannot be expressed as a set of keys: the calling cache instance can only
     // enumerate what it holds itself, and without population being distributed nothing else knows what the others
     // hold. So instead of one cache entry per key, a command is written, and every cache instance decides from its own
-    // content what it removes when that arrives (see retrieveCacheEntries). Where population is distributed the store
+    // content what it removes when that arrives (see receiveCacheEntries). Where population is distributed the store
     // keeps a record of what is cached, which has to go as well - otherwise a reactivation reads it back and a
     // retained evicted cache entry is reloaded from it, undoing what was just invalidated
     void invalidateAllDistributed() {
@@ -385,13 +385,13 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
             // deliberately without a check of whether this cache instance holds the key: whether it does says
             // nothing about the other ones, which may well be serving it, so skipping the write here would leave
             // them doing so indefinitely. Filtering by what is held belongs on the receiving side (see
-            // retrieveCacheEntries), where it is a fact rather than a guess
+            // receiveCacheEntries), where it is a fact rather than a guess
             List<CacheEntry<K, V>> cacheEntries = map.entrySet().stream()
                     .map(entry -> {
                         InternalValue<V> value = entry.getValue();
                         return CacheEntry.of(
                                 // memoizing overload: reuses the hash cached on the key instance (e.g. stamped when
-                                // the entry was put/loaded/retrieved) instead of recomputing it under the lock
+                                // the entry was put/loaded/received) instead of recomputing it under the lock
                                 hasher.getHash(entry.getKey()),
                                 manage ? operationOf(value) : null,
                                 k(entry.getKey()),
@@ -409,14 +409,14 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     }
 
     @Override
-    public void retrieveCacheEntries(Collection<CacheEntry<K, V>> cacheEntries) {
-        // no filtering by discriminator here: a retriever belongs to exactly one cache, and the adapter handing over
+    public void receiveCacheEntries(Collection<CacheEntry<K, V>> cacheEntries) {
+        // no filtering by discriminator here: a receiver belongs to exactly one cache, and the adapter handing over
         // these cache entries is scoped to that cache's discriminator - so whatever arrives is already its own
-        retrieveCacheEntries(cacheEntries.stream());
+        receiveCacheEntries(cacheEntries.stream());
     }
 
     @SuppressWarnings("java:S3776")
-    private void retrieveCacheEntries(Stream<CacheEntry<K, V>> cacheEntries) {
+    private void receiveCacheEntries(Stream<CacheEntry<K, V>> cacheEntries) {
         if (isActivated()) {
             synchronizationLock.runLocked(() -> {
                 Map<InternalKey<K>, InternalValue<V>> toAdd = new HashMap<>();
@@ -462,7 +462,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
                                 // The store still backs the entry either way, so it has to survive a stale sweep
                                 // even though it is not written again. Clearing the mark here rather than only via
                                 // toAdd matters because an entry that is in sync when synchronization stops always
-                                // takes this branch: both publishing and retrieving stamp the local value with the
+                                // takes this branch: both publishing and receiving stamp the local value with the
                                 // very operation held in the store
                                 if (nonNull(present)
                                         && (isSupersededLocally(operation, present.getOperation())
@@ -493,7 +493,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
     }
 
     // while synchronization was stopped the cache kept serving locally, so local writes never reached the data store
-    // and changes made elsewhere never arrived. Retrieving below only ever adds what the store holds, which would
+    // and changes made elsewhere never arrived. Receiving below only ever adds what the store holds, which would
     // leave entries the store no longer backs in place to be served as if they were still valid. Everything present
     // is marked by then (stopping and activating do that), so what the store still knows clears its mark again and
     // only what stays marked is removed here - in place, which keeps the cache readable throughout instead of
@@ -511,7 +511,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Retriev
                         null,
                         CACHED_GROUP,
                         true))) {
-                    retrieveCacheEntries(cacheEntryStream);
+                    receiveCacheEntries(cacheEntryStream);
                 }
             }
             // without population being considered nothing clears the marks, so everything present is dropped - the

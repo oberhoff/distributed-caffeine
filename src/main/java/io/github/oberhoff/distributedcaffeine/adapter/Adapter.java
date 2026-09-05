@@ -25,7 +25,7 @@ package io.github.oberhoff.distributedcaffeine.adapter;
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
-public interface Adapter<K, V> extends StateAware, SerializerAware<K, V>, RetrieverAware<K, V> {
+public interface Adapter<K, V> extends StateAware, SerializerAware<K, V>, ReceiverAware<K, V> {
 
     /**
      * Returns the repository used by this adapter

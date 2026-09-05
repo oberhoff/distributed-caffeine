@@ -87,7 +87,7 @@ class InternalInstanceRegistry<K, V> {
 
         adapter.setKeySerializer(serializersConfigurer.getKeySerializer());
         adapter.setValueSerializer(serializersConfigurer.getValueSerializer());
-        adapter.setRetriever(cacheManager);
+        adapter.setReceiver(cacheManager);
     }
 
     // for the parts that are created on demand after building (the cache facade and the views it hands out)
@@ -111,7 +111,7 @@ class InternalInstanceRegistry<K, V> {
                 cacheManager.activate();
                 maintenanceWorker.activate();
                 adapter.activate();
-                // synchronization after retrieving by adapter so that no changes are missed
+                // synchronization after the adapter started receiving so that no changes are missed
                 cacheManager.synchronizeCacheEntries();
             } catch (RuntimeException e) {
                 // activating is not atomic by itself, and a half activated instance cannot be recovered from the

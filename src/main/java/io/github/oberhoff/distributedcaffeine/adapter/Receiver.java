@@ -18,24 +18,24 @@ package io.github.oberhoff.distributedcaffeine.adapter;
 import java.util.Collection;
 
 /**
- * Interface representing a retriever that manages distributed synchronization between cache instances using an
+ * Interface representing a receiver that manages distributed synchronization between cache instances using an
  * underlying store.
  * <p>
  * <b>Note:</b> Inbound changes of the underlying store are supposed to be passed on as cache entries by the
- * {@link Adapter} using the retriever.
+ * {@link Adapter} using the receiver.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
-public interface Retriever<K, V> {
+public interface Receiver<K, V> {
 
     /**
-     * Retrieves cache entries from the underlying store.
+     * Receives cache entries originating from the underlying store.
      *
-     * @param cacheEntries retrieved cache entries
+     * @param cacheEntries the cache entries to be received
      */
-    void retrieveCacheEntries(Collection<CacheEntry<K, V>> cacheEntries);
+    void receiveCacheEntries(Collection<CacheEntry<K, V>> cacheEntries);
 
-    // TODO list of statuses in relation of distribution mode for more efficient retrieving
+    // TODO list of statuses in relation of distribution mode for more efficient receiving
 }

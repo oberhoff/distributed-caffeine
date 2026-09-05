@@ -27,7 +27,7 @@ class InternalValue<V> {
     private final V value;
     private @Nullable String operation;
     // the activation this value became content of. Unrelated to the operation above beyond sharing its identifier
-    // when this cache instance wrote the value: a retrieved one keeps the writing instance's operation, so only this
+    // when this cache instance wrote the value: a received one keeps the writing instance's operation, so only this
     // says whether this cache instance was taking part when the value arrived. Since activating renews the
     // identifier, everything held from before stops being of the current activation without a single value having to
     // be touched - which decides both whether a change to it may be distributed and whether synchronizing keeps it
