@@ -44,6 +44,7 @@ import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
+import io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.adapter.Receiver;
 import io.github.oberhoff.distributedcaffeine.adapter.Synchronizer;
@@ -150,7 +151,7 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.I
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED_AFTER_WRITE;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.DISTRIBUTION_ONLY_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.STALE;
-import static io.github.oberhoff.distributedcaffeine.adapter.Repository.DEFAULT_DISCRIMINATOR;
+import static io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware.DEFAULT_DISCRIMINATOR;
 import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.lang.System.getProperty;
@@ -5598,7 +5599,7 @@ final class DistributedCaffeineIntegrationTests {
             // the store itself rather than the persistence view: nothing is retained here, the cache entry is
             // only written so that it can be distributed
             Repository<Key, Value> repository = distributedCache.distributedPolicy()
-                    .getAdapter().getRepository();
+                    .getAdapter().getRepository().orElseThrow();
             Supplier<Instant> cachedTimestamp = () -> getFailable(() -> {
                 try (Stream<CacheEntry<Key, Value>> cacheEntryStream =
                              repository.streamCacheEntries(null, Set.of(CACHED), false)) {
@@ -5655,7 +5656,7 @@ final class DistributedCaffeineIntegrationTests {
                     DistributedCaffeine::build);
             Adapter<Key, Value> adapter = distributedCache.distributedPolicy().getAdapter();
             adapter.setReceiver(receiver);
-            Repository<Key, Value> repository = adapter.getRepository();
+            Repository<Key, Value> repository = adapter.getRepository().orElseThrow();
 
             assertThat(adapter.isActivated()).isTrue();
 
@@ -5674,7 +5675,7 @@ final class DistributedCaffeineIntegrationTests {
                     CACHED,
                     Instant.now());
 
-            repository.upsertCacheEntries(Set.of(insertCacheEntry1, insertCacheEntry2));
+            repository.publishCacheEntries(Set.of(insertCacheEntry1, insertCacheEntry2));
 
             CacheEntry<Key, Value> updateCacheEntry1 = CacheEntry.of(
                     insertCacheEntry1.getHash(),
@@ -5691,7 +5692,7 @@ final class DistributedCaffeineIntegrationTests {
                     insertCacheEntry2.getStatus(),
                     Instant.now());
 
-            repository.upsertCacheEntries(Set.of(updateCacheEntry1, updateCacheEntry2));
+            repository.publishCacheEntries(Set.of(updateCacheEntry1, updateCacheEntry2));
 
             List<io.github.oberhoff.distributedcaffeine.adapter.CacheEntry<Key, Value>> foundCacheEntries = new ArrayList<>();
             try (Stream<io.github.oberhoff.distributedcaffeine.adapter.CacheEntry<Key, Value>> stream =
@@ -5744,7 +5745,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheEntry<Key, Value> invalidatedEntry3 = CacheEntry.of(
                     "h3", "op3", Key.of(3), Value.of(3), INVALIDATED, timestamp3);
 
-            repository.upsertCacheEntries(Set.of(cachedEntry1, cachedEntry2, invalidatedEntry3));
+            repository.publishCacheEntries(Set.of(cachedEntry1, cachedEntry2, invalidatedEntry3));
 
             assertThat(repository.countCacheEntries(null)).isEqualTo(3);
 
@@ -5833,7 +5834,7 @@ final class DistributedCaffeineIntegrationTests {
                             .append(CacheEntry.Field.VALUE.toString(), "not a serialized value")
                             .append(CacheEntry.Field.STATUS.toString(), CACHED.toString())
                             .append(CacheEntry.Field.TIMESTAMP.toString(), timestamp1)
-                            .append(Repository.DISCRIMINATOR_FIELD, DEFAULT_DISCRIMINATOR));
+                            .append(DiscriminatorAware.DISCRIMINATOR_FIELD, DEFAULT_DISCRIMINATOR));
             try (Stream<CacheEntry<Key, Value>> stream =
                          repository.streamCacheEntries(Set.of("broken"), null, false)) {
                 assertThat(stream.toList()).isEmpty();
@@ -5852,7 +5853,7 @@ final class DistributedCaffeineIntegrationTests {
                     .insertOne(new Document()
                             .append(CacheEntry.Field.HASH.toString(), "incomplete")
                             .append(CacheEntry.Field.TIMESTAMP.toString(), timestamp1)
-                            .append(Repository.DISCRIMINATOR_FIELD, DEFAULT_DISCRIMINATOR));
+                            .append(DiscriminatorAware.DISCRIMINATOR_FIELD, DEFAULT_DISCRIMINATOR));
             try (Stream<CacheEntry<Key, Value>> stream =
                          repository.streamCacheEntries(Set.of("incomplete"), null, false)) {
                 assertThat(stream.toList()).isEmpty();
@@ -5927,7 +5928,7 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(repository.countCacheEntries(null)).isEqualTo(0);
 
             // deleteCacheEntries filtered by olderThan
-            repository.upsertCacheEntries(Set.of(
+            repository.publishCacheEntries(Set.of(
                     CacheEntry.of("old", "op1", Key.of(10), Value.of(10), CACHED, Instant.now().minusSeconds(10)),
                     CacheEntry.of("new", "op2", Key.of(11), Value.of(11), CACHED, Instant.now())));
             assertThat(repository.countCacheEntries(null)).isEqualTo(2);
@@ -6040,7 +6041,7 @@ final class DistributedCaffeineIntegrationTests {
             Status[] statuses = Status.values();
             for (Repository<Key, Value> repository : List.of(
                     repositoryOf(cacheWithDiscriminator), repositoryOf(cacheInDefaultScope))) {
-                repository.upsertCacheEntries(IntStream.range(0, 500)
+                repository.publishCacheEntries(IntStream.range(0, 500)
                         .mapToObj(i -> CacheEntry.of("h" + i, "op" + i, Key.of(i), Value.of(i),
                                 statuses[i % statuses.length], Instant.now().minusSeconds(i)))
                         .collect(toSet()));
@@ -7042,7 +7043,8 @@ final class DistributedCaffeineIntegrationTests {
                     .findFirst()
                     .orElseThrow())
                     .getAdapter()
-                    .getRepository();
+                    .getRepository()
+                    .orElseThrow();
             Map<Status, Count> statusToCount = Stream.of(counts)
                     .collect(toMap(Count::status, Function.identity()));
             Stream.of(Status.values())
@@ -7060,7 +7062,8 @@ final class DistributedCaffeineIntegrationTests {
                     .findFirst()
                     .orElseThrow())
                     .getAdapter()
-                    .getRepository();
+                    .getRepository()
+                    .orElseThrow();
             Stream.of(countsGrouped)
                     .forEach(count -> count.assertion()
                             .apply(assertThat(getFailable(() ->
@@ -7073,7 +7076,7 @@ final class DistributedCaffeineIntegrationTests {
         }
 
         <K, V> Repository<K, V> repositoryOf(DistributedCache<K, V> distributedCache) {
-            return distributedCache.distributedPolicy().getAdapter().getRepository();
+            return distributedCache.distributedPolicy().getAdapter().getRepository().orElseThrow();
         }
 
         void executeRandomOperation(DistributedCache<Key, Value> distributedCache, int cacheSize) {
@@ -7182,7 +7185,7 @@ final class DistributedCaffeineIntegrationTests {
                     .findFirst()
                     .map(this::getInstanceRegistry)
                     .map(InternalInstanceRegistry::getAdapter)
-                    .map(Adapter::getRepository)
+                    .flatMap(Adapter::getRepository)
                     .orElseThrow();
             Set<Status> statusesOrNull = statuses.length == 0
                     ? null

@@ -22,6 +22,7 @@ import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPer
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
+import io.github.oberhoff.distributedcaffeine.adapter.Publisher;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.adapter.Receiver;
 import org.jspecify.annotations.Nullable;
@@ -47,6 +48,7 @@ import java.util.stream.Stream;
 import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
 import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireRepository;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.vn;
@@ -95,7 +97,8 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     @SuppressWarnings("NotNullFieldNotInitialized")
     private DistributionMode distributionMode;
     @SuppressWarnings("NotNullFieldNotInitialized")
-    private Repository<K, V> repository;
+    private Publisher<K, V> publisher;
+    private @Nullable Repository<K, V> repository;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private CachedEntryPersistenceConfigurer cachedEntryPersistenceConfigurer;
     @SuppressWarnings("NotNullFieldNotInitialized")
@@ -122,7 +125,8 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         this.cache = instanceRegistry.getCache();
         this.policy = instanceRegistry.getCache().policy();
         this.distributionMode = instanceRegistry.getDistributionMode();
-        this.repository = instanceRegistry.getAdapter().getRepository();
+        this.publisher = instanceRegistry.getAdapter().getPublisher();
+        this.repository = instanceRegistry.getAdapter().getRepository().orElse(null);
         this.cachedEntryPersistenceConfigurer = instanceRegistry.getCachedEntryPersistenceConfigurer();
         this.evictedEntryPersistenceConfigurer = instanceRegistry.getEvictedEntryPersistenceConfigurer();
         this.synchronizationLock = instanceRegistry.getSynchronizationLock();
@@ -222,7 +226,9 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     void invalidateAllDistributed() {
         if (isActivated() && COMMAND.isConsideredBy(distributionMode)) {
             synchronizationLock.ensureLock();
-            if (distributionMode.isPopulationConsidered()) {
+            @Nullable Repository<K, V> retaining = repository;
+            if (distributionMode.isPopulationConsidered() && nonNull(retaining)) {
+                Repository<K, V> retainingRepository = retaining;
                 Set<Status> statuses = new HashSet<>(CACHED_GROUP);
                 if (evictedEntryPersistenceConfigurer.isConfigured()) {
                     statuses.addAll(EVICTED_RETAINED_GROUP);
@@ -230,9 +236,9 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                 // transitions what is there and writes nothing for what is not, which also means it cannot resurrect
                 // a key as invalidated that no longer exists. Ahead of the cache entry below, so that a population
                 // following this operation cannot be overwritten by it afterwards
-                runFailable(() -> repository.updateStatusOfCacheEntries(null, statuses, null, INVALIDATED));
+                runFailable(() -> retainingRepository.updateStatusOfCacheEntries(null, statuses, null, INVALIDATED));
             }
-            runFailable(() -> repository.upsertCacheEntries(List.of(CacheEntry.of(
+            runFailable(() -> publisher.publishCacheEntries(List.of(CacheEntry.of(
                     INVALIDATE_ALL.toString(),
                     // stamped like any other operation of this cache instance, which is what keeps whatever it does
                     // after this from being undone once this arrives back here
@@ -403,7 +409,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                     // computing CacheEntry hashCode/equals on the write path
                     .toList();
             if (!cacheEntries.isEmpty()) {
-                runFailable(() -> repository.upsertCacheEntries(cacheEntries));
+                runFailable(() -> publisher.publishCacheEntries(cacheEntries));
             }
         }
     }
@@ -507,7 +513,8 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                     && distributionMode.isPopulationConsidered()) {
                 // process the store cursor directly instead of buffering it into a set first (avoids a second full
                 // copy in memory and the needless CacheEntry hashCode/equals a set would compute)
-                try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
+                Repository<K, V> retaining = requireRepository(repository, identifier);
+                try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> retaining.streamCacheEntries(
                         null,
                         CACHED_GROUP,
                         true))) {

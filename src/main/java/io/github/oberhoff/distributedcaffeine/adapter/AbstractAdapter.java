@@ -16,6 +16,9 @@
 package io.github.oberhoff.distributedcaffeine.adapter;
 
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
+import org.jspecify.annotations.Nullable;
+
+import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
@@ -30,9 +33,14 @@ import static java.util.Objects.requireNonNull;
 public abstract class AbstractAdapter<K, V> implements Adapter<K, V> {
 
     /**
-     * The repository to be used by the adapter.
+     * The publisher to be used by the adapter.
      */
-    protected final Repository<K, V> repository;
+    protected final Publisher<K, V> publisher;
+
+    /**
+     * The repository to be used by the adapter, or {@code null} if persistence is not supported.
+     */
+    protected final @Nullable Repository<K, V> repository;
 
     /**
      * The synchronizer to be used by this adapter.
@@ -50,18 +58,20 @@ public abstract class AbstractAdapter<K, V> implements Adapter<K, V> {
     protected final String discriminator;
 
     /**
-     * Constructs a new adapter defined by the specified parameters, using {@link Repository#DEFAULT_DISCRIMINATOR}.
+     * Constructs a new adapter defined by the specified parameters, using
+     * {@link DiscriminatorAware#DEFAULT_DISCRIMINATOR}.
      * <p>
      * <b>Note:</b> Discriminators are used to distinguish between cache entries from different caches that share a
      * dataset in the underlying store.
      *
-     * @param repository   the repository to be used by the adapter
+     * @param publisher    the publisher to be used by the adapter (a {@link Repository} if it retains what it
+     *                     publishes, which is what allows persistence to be configured)
      * @param synchronizer the synchronizer to be used by this adapter
      * @param identifier   the identifier to be used by this adapter
      */
     @SuppressWarnings("unused")
-    protected AbstractAdapter(Repository<K, V> repository, Synchronizer<K, V> synchronizer, String identifier) {
-        this(repository, synchronizer, identifier, Repository.DEFAULT_DISCRIMINATOR);
+    protected AbstractAdapter(Publisher<K, V> publisher, Synchronizer<K, V> synchronizer, String identifier) {
+        this(publisher, synchronizer, identifier, DiscriminatorAware.DEFAULT_DISCRIMINATOR);
     }
 
     /**
@@ -70,33 +80,41 @@ public abstract class AbstractAdapter<K, V> implements Adapter<K, V> {
      * <b>Note:</b> Discriminators are used to distinguish between cache entries from different caches that share a
      * dataset in the underlying store.
      *
-     * @param repository    the repository to be used by the adapter
+     * @param publisher     the publisher to be used by the adapter (a {@link Repository} if persistence is supported)
      * @param synchronizer  the synchronizer to be used by this adapter
      * @param identifier    the identifier to be used by this adapter
      * @param discriminator the discriminator to be used by this adapter
      */
-    protected AbstractAdapter(Repository<K, V> repository, Synchronizer<K, V> synchronizer, String identifier,
+    protected AbstractAdapter(Publisher<K, V> publisher, Synchronizer<K, V> synchronizer, String identifier,
                               String discriminator) {
-        requireNonNull(repository, "repository cannot be null");
+        requireNonNull(publisher, "publisher cannot be null");
         requireNonNull(synchronizer, "synchronizer cannot be null");
         requireNonNull(identifier, "identifier cannot be null");
         requireNonNull(discriminator, "discriminator cannot be null");
         if (discriminator.isBlank()) {
             throw new IllegalArgumentException("discriminator cannot be blank");
         }
-        this.repository = repository;
+        this.publisher = publisher;
+        this.repository = publisher instanceof Repository<K, V> publishingRepository
+                ? publishingRepository
+                : null;
         this.synchronizer = synchronizer;
         this.identifier = identifier;
         this.discriminator = discriminator;
-        this.repository.setIdentifier(identifier);
+        this.publisher.setIdentifier(identifier);
         this.synchronizer.setIdentifier(identifier);
-        this.repository.setDiscriminator(discriminator);
+        this.publisher.setDiscriminator(discriminator);
         this.synchronizer.setDiscriminator(discriminator);
     }
 
     @Override
-    public Repository<K, V> getRepository() {
-        return repository;
+    public Publisher<K, V> getPublisher() {
+        return publisher;
+    }
+
+    @Override
+    public Optional<Repository<K, V>> getRepository() {
+        return Optional.ofNullable(repository);
     }
 
     @Override
@@ -127,14 +145,14 @@ public abstract class AbstractAdapter<K, V> implements Adapter<K, V> {
     @Override
     public void setKeySerializer(Serializer<K, ?> keySerializer) {
         requireNonNull(keySerializer, "keySerializer cannot be null");
-        this.repository.setKeySerializer(keySerializer);
+        this.publisher.setKeySerializer(keySerializer);
         this.synchronizer.setKeySerializer(keySerializer);
     }
 
     @Override
     public void setValueSerializer(Serializer<V, ?> valueSerializer) {
         requireNonNull(valueSerializer, "valueSerializer cannot be null");
-        this.repository.setValueSerializer(valueSerializer);
+        this.publisher.setValueSerializer(valueSerializer);
         this.synchronizer.setValueSerializer(valueSerializer);
     }
 

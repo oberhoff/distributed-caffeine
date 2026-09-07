@@ -89,7 +89,7 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
     }
 
     @Override
-    public void upsertCacheEntries(Collection<CacheEntry<K, V>> cacheEntries) {
+    public void publishCacheEntries(Collection<CacheEntry<K, V>> cacheEntries) {
         if (!cacheEntries.isEmpty()) {
             List<UpdateOneModel<Document>> updates = new ArrayList<>();
             cacheEntries.forEach(cacheEntry -> {

@@ -34,6 +34,7 @@ import java.util.stream.Stream;
 import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
 import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireRepository;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.im;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.nullable;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
@@ -52,8 +53,9 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
 
     private final CacheLoader<K, V> cacheLoader;
 
+    private @Nullable Repository<K, V> repository;
     @SuppressWarnings("NotNullFieldNotInitialized")
-    private Repository<K, V> repository;
+    private String identifier;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalCacheManager<K, V> cacheManager;
     @SuppressWarnings("NotNullFieldNotInitialized")
@@ -70,7 +72,8 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
 
     @Override
     public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
-        this.repository = instanceRegistry.getAdapter().getRepository();
+        this.repository = instanceRegistry.getAdapter().getRepository().orElse(null);
+        this.identifier = instanceRegistry.getAdapter().getIdentifier();
         this.cacheManager = instanceRegistry.getCacheManager();
         this.evictedEntryPersistenceConfigurer = instanceRegistry.getEvictedEntryPersistenceConfigurer();
         this.hasher = instanceRegistry.getHasher();
@@ -221,7 +224,8 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
         Set<String> hashes = keys.stream()
                 .map(hasher::getHash)
                 .collect(toSet());
-        try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
+        Repository<K, V> retaining = requireRepository(repository, identifier);
+        try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> retaining.streamCacheEntries(
                 hashes,
                 EVICTED_RETAINED_GROUP,
                 false))) {

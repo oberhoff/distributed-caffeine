@@ -62,6 +62,7 @@ import java.lang.reflect.Field;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -78,7 +79,7 @@ import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.PersistenceCon
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer.LoadingStrategy.CACHE_LOADER;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION;
-import static io.github.oberhoff.distributedcaffeine.adapter.Repository.DEFAULT_DISCRIMINATOR;
+import static io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware.DEFAULT_DISCRIMINATOR;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -110,10 +111,29 @@ final class DistributedCaffeineUnitTests {
         void test_Builder_checks_on_arguments_and_states() {
             Adapter<Key, Value> adapter = mock(Adapter.class);
 
+            when(adapter.getRepository()).thenReturn(Optional.of(mock(Repository.class)));
+
             assertThatThrownBy(() ->
                     DistributedCaffeine.newBuilder(_null()))
                     .isInstanceOf(NullPointerException.class)
                     .hasMessage("adapter cannot be null");
+
+            Adapter<Key, Value> publishingAdapter = mock(Adapter.class);
+            when(publishingAdapter.getIdentifier()).thenReturn("broker.topic");
+            when(publishingAdapter.getRepository()).thenReturn(Optional.empty());
+            Stream.<Configurer<PersistenceConfigurer>>of(
+                            configurer -> configurer.withCachedEntries(tier ->
+                                    tier.withCacheResidency()),
+                            configurer -> configurer.withCachedEntries(tier ->
+                                    tier.withMaximumSize(1)),
+                            configurer -> configurer.withEvictedEntries(tier ->
+                                    tier.withMaximumSize(1)))
+                    .forEach(persistence -> assertThatThrownBy(() ->
+                            createCache(publishingAdapter,
+                                    dc -> dc.withPersistence(persistence),
+                                    DistributedCaffeine::build))
+                            .isInstanceOf(IllegalStateException.class)
+                            .hasMessage("Persistence is not supported by this adapter"));
 
             assertThatThrownBy(() ->
                     createCache(adapter,
@@ -394,7 +414,8 @@ final class DistributedCaffeineUnitTests {
             Adapter<Key, Value> adapter = mock(Adapter.class);
             Repository<Key, Value> repository = mock(Repository.class);
             when(adapter.getIdentifier()).thenReturn(identifier);
-            when(adapter.getRepository()).thenReturn(repository);
+            when(adapter.getPublisher()).thenReturn(repository);
+            when(adapter.getRepository()).thenReturn(Optional.of(repository));
             // answered rather than returned, so that every synchronization gets a stream of its own instead of
             // re-consuming one that an earlier one already closed
             when(repository.streamCacheEntries(any(), any(), anyBoolean()))
@@ -704,7 +725,7 @@ final class DistributedCaffeineUnitTests {
                             new BulkWriteError(11000, "E11000 duplicate key error", new BsonDocument(), 1)))
                     .thenReturn(BulkWriteResult.unacknowledged());
 
-            repository.upsertCacheEntries(List.of(cacheEntry("hash1", 1), cacheEntry("hash2", 2)));
+            repository.publishCacheEntries(List.of(cacheEntry("hash1", 1), cacheEntry("hash2", 2)));
 
             ArgumentCaptor<List<UpdateOneModel<Document>>> updatesCaptor = ArgumentCaptor.captor();
             ArgumentCaptor<BulkWriteOptions> optionsCaptor = ArgumentCaptor.captor();
@@ -731,7 +752,7 @@ final class DistributedCaffeineUnitTests {
             when(mongoCollection.bulkWrite(anyList(), any(BulkWriteOptions.class)))
                     .thenThrow(validationException);
 
-            assertThatThrownBy(() -> repository.upsertCacheEntries(List.of(cacheEntry("hash1", 1))))
+            assertThatThrownBy(() -> repository.publishCacheEntries(List.of(cacheEntry("hash1", 1))))
                     .isSameAs(validationException);
 
             // failed once and was not retried

@@ -54,7 +54,7 @@ import java.util.stream.Stream;
 
 import static com.mongodb.client.model.changestream.OperationType.INSERT;
 import static com.mongodb.client.model.changestream.OperationType.UPDATE;
-import static io.github.oberhoff.distributedcaffeine.adapter.Repository.DISCRIMINATOR_FIELD;
+import static io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware.DISCRIMINATOR_FIELD;
 import static io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoRepository.toCacheEntryOrNull;
 import static java.lang.Math.min;
 import static java.lang.String.format;

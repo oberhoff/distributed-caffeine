@@ -23,6 +23,16 @@ package io.github.oberhoff.distributedcaffeine.adapter;
 public interface DiscriminatorAware {
 
     /**
+     * Canonical name of the discriminator field.
+     */
+    String DISCRIMINATOR_FIELD = "discriminator";
+
+    /**
+     * Canonical value of a default discriminator.
+     */
+    String DEFAULT_DISCRIMINATOR = "default";
+
+    /**
      * Sets the discriminator for this object.
      *
      * @param discriminator the discriminator to be set

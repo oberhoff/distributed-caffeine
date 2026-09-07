@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import org.jspecify.annotations.Nullable;
 
 import java.util.AbstractMap.SimpleEntry;
@@ -29,6 +30,8 @@ import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
 import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
+import static java.lang.String.format;
+import static java.util.Objects.isNull;
 import static java.util.stream.Collectors.toUnmodifiableMap;
 import static java.util.stream.Collectors.toUnmodifiableSet;
 
@@ -109,6 +112,17 @@ class InternalUtils {
         } catch (Throwable t) {
             throw runtimeExceptionFactory.apply(t);
         }
+    }
+
+    // for the paths a configured persistence tier already implies: an adapter that retains nothing is rejected at
+    // build time as soon as any tier is configured, so reaching this means that check was bypassed rather than that
+    // a cache instance is legitimately running without a repository
+    static <K, V> Repository<K, V> requireRepository(@Nullable Repository<K, V> repository, String identifier) {
+        if (isNull(repository)) {
+            throw new IllegalStateException(format("The adapter for cache at '%s' retains nothing, so there is "
+                    .concat("no repository to read from or to maintain"), identifier));
+        }
+        return repository;
     }
 
     static <T> @Nullable T nullable(@Nullable T nullable) {

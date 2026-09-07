@@ -15,6 +15,8 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter;
 
+import java.util.Optional;
+
 /**
  * Interface representing an adapter that manages distributed synchronization between cache instances using an
  * underlying store.
@@ -28,11 +30,18 @@ package io.github.oberhoff.distributedcaffeine.adapter;
 public interface Adapter<K, V> extends StateAware, SerializerAware<K, V>, ReceiverAware<K, V> {
 
     /**
-     * Returns the repository used by this adapter
+     * Returns the publisher of this adapter
      *
-     * @return the repository
+     * @return the publisher
      */
-    Repository<K, V> getRepository();
+    Publisher<K, V> getPublisher();
+
+    /**
+     * Returns the repository of this adapter, or an empty optional if persistence is not supported.
+     *
+     * @return the repository, or an empty optional if persistence is not supported
+     */
+    Optional<Repository<K, V>> getRepository();
 
     /**
      * Returns the identifier of this adapter

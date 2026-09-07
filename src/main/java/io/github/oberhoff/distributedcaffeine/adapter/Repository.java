@@ -29,37 +29,15 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
  * underlying store.
  * <p>
  * <b>Note:</b> Every operation must implicitly be restricted to a discriminator set via
- * {@link DiscriminatorAware#setDiscriminator(String)} and stored in a {@link Repository#DISCRIMINATOR_FIELD}, along
- * with fields from {@link CacheEntry.Field}.
+ * {@link DiscriminatorAware#setDiscriminator(String)} and stored in a
+ * {@link DiscriminatorAware#DISCRIMINATOR_FIELD}, along with fields from {@link CacheEntry.Field}.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
 @SuppressWarnings({"RedundantThrows", "java:S112"})
-public interface Repository<K, V> extends IdentifierAware, DiscriminatorAware, SerializerAware<K, V> {
-
-    /**
-     * Canonical name of the discriminator field.
-     */
-    String DISCRIMINATOR_FIELD = "discriminator";
-
-    /**
-     * Canonical value of a default discriminator.
-     */
-    String DEFAULT_DISCRIMINATOR = "default";
-
-    /**
-     * Upserts cache entries into the underlying store.
-     * <p>
-     * <b>Note:</b> The unique identifier for an upsert is the combination of the discriminator and the hash of a cache
-     * entry (neither of them is ever {@code null}). The uniqueness must be ensured by the underlying store (e.g. by a
-     * unique index on both fields).
-     *
-     * @param cacheEntries the cache entries to store
-     * @throws Exception if upserting fails
-     */
-    void upsertCacheEntries(Collection<CacheEntry<K, V>> cacheEntries) throws Exception;
+public interface Repository<K, V> extends Publisher<K, V> {
 
     /**
      * Returns a (optionally ordered) stream of cache entries from the underlying store that match the specified

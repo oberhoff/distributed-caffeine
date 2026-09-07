@@ -17,9 +17,9 @@ package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
 
 import com.mongodb.client.MongoClient;
 import io.github.oberhoff.distributedcaffeine.adapter.AbstractAdapter;
-import io.github.oberhoff.distributedcaffeine.adapter.Repository;
+import io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware;
 
-import static io.github.oberhoff.distributedcaffeine.adapter.Repository.DEFAULT_DISCRIMINATOR;
+import static io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware.DEFAULT_DISCRIMINATOR;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -93,7 +93,7 @@ public final class MongoAdapter<K, V> extends AbstractAdapter<K, V> {
          * Specifies the discriminator used by the adapter to distinguish between cache entries from different caches
          * that share a collection in MongoDB.
          * <p>
-         * <b>Note:</b> {@link Repository#DEFAULT_DISCRIMINATOR} is used as default if this method is skipped.
+         * <b>Note:</b> {@link DiscriminatorAware#DEFAULT_DISCRIMINATOR} is used as default if this method is skipped.
          *
          * @param discriminator the discriminator used by the adapter
          * @return a builder pattern instance for chaining additional methods

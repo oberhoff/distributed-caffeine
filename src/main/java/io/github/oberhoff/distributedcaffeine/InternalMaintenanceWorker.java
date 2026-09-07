@@ -22,6 +22,7 @@ import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPe
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
+import org.jspecify.annotations.Nullable;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -37,6 +38,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireRepository;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.DISTRIBUTION_ONLY_GROUP;
@@ -45,6 +47,7 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.I
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.STALE;
 import static java.lang.Math.min;
 import static java.lang.String.format;
+import static java.util.Objects.nonNull;
 import static java.util.stream.Collectors.toUnmodifiableSet;
 
 @SuppressWarnings("java:S1450")
@@ -64,8 +67,7 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
     private Logger logger;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private String identifier;
-    @SuppressWarnings("NotNullFieldNotInitialized")
-    private Repository<K, V> repository;
+    private @Nullable Repository<K, V> repository;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalCacheManager<K, V> cacheManager;
     @SuppressWarnings("NotNullFieldNotInitialized")
@@ -86,7 +88,7 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
     public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
         this.logger = instanceRegistry.getLogger();
         this.identifier = instanceRegistry.getAdapter().getIdentifier();
-        this.repository = instanceRegistry.getAdapter().getRepository();
+        this.repository = instanceRegistry.getAdapter().getRepository().orElse(null);
         this.cacheManager = instanceRegistry.getCacheManager();
         this.cachedEntryPersistenceConfigurer = instanceRegistry.getCachedEntryPersistenceConfigurer();
         this.evictedEntryPersistenceConfigurer = instanceRegistry.getEvictedEntryPersistenceConfigurer();
@@ -161,13 +163,14 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
 
     private void processCachedEntryPersistenceBySize(Duration distributionDuration) {
         cachedEntryPersistenceConfigurer.getMaximumSize().ifPresent(maximumSize -> {
+            Repository<K, V> retaining = requireRepository(repository, identifier);
             Long count = getFailable(() ->
-                    repository.countCacheEntries(CACHED_GROUP));
+                    retaining.countCacheEntries(CACHED_GROUP));
             if (count > maximumSize) {
                 long limit = count - maximumSize;
                 Set<String> hashes = new HashSet<>();
                 try (Stream<CacheEntryMetadata> cacheEntryMetadataStream = getFailable(() ->
-                        repository.streamCacheEntryMetadata(
+                        retaining.streamCacheEntryMetadata(
                                 null,
                                 CACHED_GROUP,
                                 true))) {
@@ -178,7 +181,7 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
                 }
                 if (!hashes.isEmpty()) {
                     Instant deadline = Instant.now().minus(distributionDuration);
-                    runFailable(() -> repository.deleteCacheEntries(hashes, CACHED_GROUP, deadline));
+                    runFailable(() -> retaining.deleteCacheEntries(hashes, CACHED_GROUP, deadline));
                 }
             }
         });
@@ -186,24 +189,26 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
 
     private void processCachedEntryPersistenceByTime(Duration distributionDuration) {
         cachedEntryPersistenceConfigurer.getMaximumTime().ifPresent(maximumTime -> {
+            Repository<K, V> retaining = requireRepository(repository, identifier);
             Instant now = Instant.now().minus(distributionDuration);
             Instant min = Instant.ofEpochMilli(Long.MIN_VALUE);
             Instant deadline = maximumTime.compareTo(Duration.between(min, now)) > 0
                     ? min
                     : now.minus(maximumTime);
-            runFailable(() -> repository.deleteCacheEntries(null, CACHED_GROUP, deadline));
+            runFailable(() -> retaining.deleteCacheEntries(null, CACHED_GROUP, deadline));
         });
     }
 
     private void processEvictedEntryPersistenceBySize() {
         evictedEntryPersistenceConfigurer.getMaximumSize().ifPresent(maximumSize -> {
+            Repository<K, V> retaining = requireRepository(repository, identifier);
             Long count = getFailable(() ->
-                    repository.countCacheEntries(EVICTED_RETAINED_GROUP));
+                    retaining.countCacheEntries(EVICTED_RETAINED_GROUP));
             if (count > maximumSize) {
                 long limit = count - maximumSize;
                 Set<String> hashes = new HashSet<>(maximumSize);
                 try (Stream<CacheEntryMetadata> cacheEntryMetadataStream = getFailable(() ->
-                        repository.streamCacheEntryMetadata(
+                        retaining.streamCacheEntryMetadata(
                                 null,
                                 EVICTED_RETAINED_GROUP,
                                 true))) {
@@ -214,7 +219,7 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
                 }
                 if (!hashes.isEmpty()) {
                     // transition the status (instead of hard delete)
-                    runFailable(() -> repository.updateStatusOfCacheEntries(hashes,
+                    runFailable(() -> retaining.updateStatusOfCacheEntries(hashes,
                             EVICTED_RETAINED_GROUP, null, pruningStatus()));
                 }
             }
@@ -223,13 +228,14 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
 
     private void processEvictedEntryPersistenceByTime(Duration distributionDuration) {
         evictedEntryPersistenceConfigurer.getMaximumTime().ifPresent(maximumTime -> {
+            Repository<K, V> retaining = requireRepository(repository, identifier);
             Instant now = Instant.now().minus(distributionDuration);
             Instant min = Instant.ofEpochMilli(Long.MIN_VALUE);
             Instant deadline = maximumTime.compareTo(Duration.between(min, now)) > 0
                     ? min
                     : now.minus(maximumTime);
             // transition the status (instead of hard delete)
-            runFailable(() -> repository.updateStatusOfCacheEntries(null,
+            runFailable(() -> retaining.updateStatusOfCacheEntries(null,
                     EVICTED_RETAINED_GROUP, deadline, pruningStatus()));
         });
     }
@@ -238,12 +244,19 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
     // they go the same way a removal does. Deliberately a delete: a transition could only be to STALE, which no
     // distribution mode considers, so it would just add change stream events every cache instance discards
     private void processNotRetained(Duration distributionDuration) {
-        Instant deadline = Instant.now().minus(distributionDuration);
-        Set<Status> statuses = cachedEntryPersistenceConfigurer.isConfigured()
-                ? DISTRIBUTION_ONLY_GROUP
-                : NOT_RETAINED_GROUP;
-        runFailable(() -> repository.deleteCacheEntries(null,
-                statuses, deadline));
+        // what a write leaves behind until it is swept only exists because the underlying store is what distributes
+        // it as well. Where distributing does not retain, the delivery is the whole of the record and there is
+        // nothing left over to collect
+        @Nullable Repository<K, V> retaining = repository;
+        if (nonNull(retaining)) {
+            Repository<K, V> retainingRepository = retaining;
+            Instant deadline = Instant.now().minus(distributionDuration);
+            Set<Status> statuses = cachedEntryPersistenceConfigurer.isConfigured()
+                    ? DISTRIBUTION_ONLY_GROUP
+                    : NOT_RETAINED_GROUP;
+            runFailable(() -> retainingRepository.deleteCacheEntries(null,
+                    statuses, deadline));
+        }
     }
 
     // The data store is the authority on what a cache entry's value is and on whether it was invalidated. Which

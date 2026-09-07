@@ -41,7 +41,7 @@ public final class CacheEntry<K, V> {
 
     /**
      * Fields of a cache entry used to store it in an underlying store, along with
-     * {@link Repository#DISCRIMINATOR_FIELD}.
+     * {@link DiscriminatorAware#DISCRIMINATOR_FIELD}.
      *
      * @author Andreas Oberhoff
      */

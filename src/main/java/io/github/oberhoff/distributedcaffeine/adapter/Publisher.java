@@ -15,20 +15,27 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter;
 
+import java.util.Collection;
+
 /**
- * Class to extend when implementing a custom repository that manages distributed synchronization between cache
- * instances using an underlying store.
+ * Interface representing a publisher that manages distributed synchronization between cache instances using an
+ * underlying store.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
-public abstract class AbstractRepository<K, V> extends AbstractPublisher<K, V> implements Repository<K, V> {
+@SuppressWarnings({"RedundantThrows", "java:S112"})
+public interface Publisher<K, V> extends IdentifierAware, DiscriminatorAware, SerializerAware<K, V> {
 
     /**
-     * Constructs a new repository.
+     * Publishes cache entries to other cache instances.
+     * <p>
+     * <b>Note:</b> If persistence is supported, discriminators should be handled in accordance with the associated
+     * {@link Repository}.
+     *
+     * @param cacheEntries the cache entries to publish
+     * @throws Exception if publishing fails
      */
-    protected AbstractRepository() {
-        // noop
-    }
+    void publishCacheEntries(Collection<CacheEntry<K, V>> cacheEntries) throws Exception;
 }

@@ -31,6 +31,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireRepository;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullIterable;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_RETAINED_GROUP;
@@ -46,8 +47,7 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
     private Adapter<K, V> adapter;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private SerializersConfigurer<K, V> serializersConfigurer;
-    @SuppressWarnings("NotNullFieldNotInitialized")
-    private Repository<K, V> repository;
+    private @Nullable Repository<K, V> repository;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalHasher<K> hasher;
     @SuppressWarnings("NotNullFieldNotInitialized")
@@ -65,7 +65,7 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
         this.instanceRegistry = instanceRegistry;
         this.adapter = instanceRegistry.getAdapter();
         this.serializersConfigurer = instanceRegistry.getSerializersConfigurer();
-        this.repository = instanceRegistry.getAdapter().getRepository();
+        this.repository = instanceRegistry.getAdapter().getRepository().orElse(null);
         this.hasher = instanceRegistry.getHasher();
         this.cachedEntryPersistenceConfigurer = instanceRegistry.getCachedEntryPersistenceConfigurer();
         this.evictedEntryPersistenceConfigurer = instanceRegistry.getEvictedEntryPersistenceConfigurer();
@@ -122,7 +122,8 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
         if (statuses.isEmpty()) {
             return Set.of();
         }
-        try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> repository.streamCacheEntries(
+        Repository<K, V> retaining = requireRepository(repository, adapter.getIdentifier());
+        try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> retaining.streamCacheEntries(
                 hasher.getHashes(keySet),
                 statuses,
                 false))) {

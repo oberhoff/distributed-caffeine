@@ -438,7 +438,7 @@ public final class DistributedCaffeine<K, V> {
 
         // validate configurers
         this.serializersConfigurer.validate(instanceRegistry.getCache());
-        this.persistenceConfigurer.validate(instanceRegistry.getCache(), this.distributionMode);
+        this.persistenceConfigurer.validate(instanceRegistry.getCache(), this.adapter, this.distributionMode);
 
         // reset caffeine
         runFailable(() -> REMOVAL_LISTENER_FIELD.set(caffeine, caffeineRemovalListener));
@@ -662,7 +662,12 @@ public final class DistributedCaffeine<K, V> {
             return evictedEntryPersistenceConfigurer;
         }
 
-        void validate(Cache<?, ?> cache, DistributionMode distributionMode) {
+        void validate(Cache<?, ?> cache, Adapter<?, ?> adapter, DistributionMode distributionMode) {
+            if (adapter.getRepository().isEmpty()
+                    && (cachedEntryPersistenceConfigurer.isConfigured()
+                    || evictedEntryPersistenceConfigurer.isConfigured())) {
+                throw new IllegalStateException("Persistence is not supported by this adapter");
+            }
             cachedEntryPersistenceConfigurer.validate(cache, distributionMode);
             evictedEntryPersistenceConfigurer.validate(cache);
         }
