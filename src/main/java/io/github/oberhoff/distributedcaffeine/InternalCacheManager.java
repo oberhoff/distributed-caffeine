@@ -76,28 +76,31 @@ import static java.util.Objects.requireNonNull;
 @SuppressWarnings({"java:S1452"})
 class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receiver<K, V> {
 
-    // a safety bound on the invalidations kept below, for a cache instance invalidating faster than the records
-    // expire. Dropping the oldest of them is safe, see the field
-    private static final int INVALIDATIONS_MAXIMUM_SIZE = 100_000;
+    // a safety bound on the operations kept below, for a cache instance writing faster than the records expire.
+    // Dropping the oldest of them is safe, see the field
+    private static final int OPERATIONS_MAXIMUM_SIZE = 100_000;
 
     private final AtomicBoolean isActivated;
     // the identifier of the activation this cache instance is in, renewed with every one of them. It says which
     // activation a value is content of (see InternalValue), and an operation is it followed by a counter, which
-    // makes that identify a single write and additionally order that write against the other ones issued here.
-    // Renewing it is what makes both work: ordering is only meaningful within one activation, because it compares a
-    // local mutation against an event this very activation published, so a stamp left behind by an earlier one
-    // simply does not match instead of being compared against a counter unrelated to it - and everything held from
-    // before stops being of the current activation without a single value having to be touched
+    // makes that operation recognisable as one this very activation published and tells it apart from what any
+    // other cache instance publishes. Renewing it is what makes both work: an operation of an earlier activation is
+    // none of the publishes tracked below any more, so it simply does not match instead of being compared against a
+    // counter unrelated to it - and everything held from before stops being of the current activation without a
+    // single value having to be touched
     private final AtomicReference<@Nullable String> activationId;
     private final AtomicLong operationCounter;
-    // the operation of the last invalidation this cache instance issued for a key. Invalidating removes the value
-    // that carries the operation the ordering guard compares against, so without a record of it a cache entry
-    // published before that invalidation and delivered after it is applied as if it were the newer one (see
-    // receiveCacheEntry). Kept only for as long as such a cache entry can still be delivered, and bounded on top
-    // of that, because losing a record is not unsafe - it only leaves the key as unguarded as it was before.
-    // Deliberately not cleared when the key is written again either: the counter comparison already lets a later
-    // operation through, which keeps every write path free of having to remember this
-    private final Cache<InternalKey<K>, String> invalidations;
+    // The counter of the last operation this cache instance carried out for a key, whether or not anything was
+    // published for it. Remembering it here rather than on the value is the whole point: a value is a lossy record
+    // of what happened to a key - invalidating removes it, an eviction removes it, a cache entry of another cache
+    // instance overwrites it - and every one of those leaves this cache instance unable to tell whether one of its
+    // own cache entries coming back has been overtaken since.
+    // Kept for as long as such a cache entry can still be delivered, and bounded on top of that, because losing a
+    // record is not unsafe - it only leaves the key as unguarded as it was before
+    private final Cache<InternalKey<K>, Long> operations;
+    // the same for the command written by invalidating all: it belongs to no key, so what it says covers every one
+    // of them and a single counter is all it needs
+    private final AtomicLong commandOperation;
 
     @SuppressWarnings("NotNullFieldNotInitialized")
     private Logger logger;
@@ -128,10 +131,11 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         this.isActivated = new AtomicBoolean();
         this.activationId = new AtomicReference<>();
         this.operationCounter = new AtomicLong();
-        this.invalidations = Caffeine.newBuilder()
+        this.operations = Caffeine.newBuilder()
                 .expireAfterWrite(DISTRIBUTION_DURATION)
-                .maximumSize(INVALIDATIONS_MAXIMUM_SIZE)
+                .maximumSize(OPERATIONS_MAXIMUM_SIZE)
                 .build();
+        this.commandOperation = new AtomicLong();
         // see also initialize()
     }
 
@@ -158,6 +162,10 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         // could - a value already evicted, whose eviction is reported asynchronously and would otherwise be
         // distributed as if it had taken place after starting again
         activationId.set(Long.toHexString(ThreadLocalRandom.current().nextLong()));
+        // nothing published before this activation is one of its publishes, so none of it may hold an arriving
+        // cache entry back any more
+        operations.invalidateAll();
+        commandOperation.set(0);
         isActivated.set(true);
     }
 
@@ -243,7 +251,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     void invalidateAllDistributed() {
         if (isActivated() && COMMAND.isConsideredBy(distributionMode)) {
             synchronizationLock.ensureLock();
-             Repository<K, V> retaining = repository;
+            Repository<K, V> retaining = repository;
             if (distributionMode.isPopulationConsidered() && nonNull(retaining)) {
                 Set<Status> statuses = new HashSet<>(CACHED_GROUP);
                 if (evictedEntryPersistenceConfigurer.isConfigured()) {
@@ -254,14 +262,12 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                 // following this operation cannot be overwritten by it afterwards
                 runFailable(() -> retaining.updateStatusOfCacheEntries(null, statuses, null, INVALIDATED));
             }
-            // Stamped like any other operation of this cache instance, which is what keeps whatever it does after
-            // this from being undone once this arrives back here. Remembered for every key held at this moment as
-            // well, for the same reason a single invalidation is: those are the ones this command takes out, and
-            // once their values are gone nothing is left to order a cache entry published before it against. Taken
-            // before the caller empties the cache, which is why they are still there to be enumerated
-            String operation = nextOperation();
-            cache.asMap().keySet()
-                    .forEach(presentKey -> invalidations.put(presentKey, operation));
+            // Minted and remembered like any other publish of this cache instance, only for all keys at once
+            // rather than for one: what it does covers every one of them, which is what keeps whatever this cache
+            // instance writes after it from being undone once this arrives back here
+            long counter = operationCounter.incrementAndGet();
+            commandOperation.set(counter);
+            String operation = activationId.get() + ":" + counter;
             runFailable(() -> publisher.publishCacheEntries(List.of(CacheEntry.of(
                     INVALIDATE_ALL.toString(),
                     operation,
@@ -321,58 +327,101 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         }
     }
 
-    // the activation identifier goes on alongside the operation, but only while this cache instance takes part in
+    // An operation identifies a single write of this cache instance and is remembered for the key it belongs to,
+    // which is what a cache entry of its own delivered later is measured against. Deliberately for every managed
+    // write and not only for the ones something is published for: whether a cache entry is published says nothing
+    // about whether the value handed over here stays in this cache - without population being distributed nothing
+    // is published for a population at all, and that is exactly where a removal by this very cache instance must
+    // not be allowed to undo it.
+    // The activation identifier goes on alongside, but only while this cache instance takes part in
     // synchronization: what it writes while stopped is content of no activation, so nothing is distributed for it
     // afterwards and synchronizing removes it unless the store turns out to back it
     private void stampOperations(Map<? extends InternalKey<K>, ? extends @Nullable InternalValue<V>> map) {
         String currentActivationId = isActivated()
                 ? activationId.get()
                 : null;
-        map.values().stream()
-                .filter(Objects::nonNull)
-                .forEach(value -> value
-                        .setOperation(nextOperation())
-                        .setActivationId(currentActivationId));
+        map.forEach((key, value) -> {
+            long counter = operationCounter.incrementAndGet();
+            operations.put(key, counter);
+            if (nonNull(value)) {
+                value.setOperation(activationId.get() + ":" + counter)
+                        .setActivationId(currentActivationId);
+            }
+        });
     }
 
-    private String nextOperation() {
-        return activationId.get() + ":" + operationCounter.incrementAndGet();
-    }
-
-    // An operation identifies a single write (self-echo filter) and, through the identifier it begins with, orders
-    // that write against the other ones this activation issued. Where it comes from differs by what is published:
-    // a populated or evicted cache entry takes the one its value was stamped with before publishing was considered
-    // at all, because that value stays in this cache either way and the stamp is what protects it. An invalidated
-    // one has no value to have been stamped and only needs an operation on the cache entry written for it - which
-    // is then the only trace of when it happened, so it is remembered for the key as well
+    // the operation stamped above: on the value where there is one, and reconstructed from what was remembered for
+    // the key where there is not, which is the case for an invalidation - it has no value to have been stamped
     private @Nullable String operationOf(InternalKey<K> key, @Nullable InternalValue<V> value) {
         if (nonNull(value)) {
             return value.getOperation();
         }
-        String operation = nextOperation();
-        invalidations.put(key, operation);
-        return operation;
+        Long counter = operations.getIfPresent(key);
+        return nonNull(counter)
+                ? activationId.get() + ":" + counter
+                : null;
     }
 
-    // whether the operation was issued by this cache instance in the activation it is in right now, which is what
-    // makes it an operation this one has certainly carried out itself and what makes the counter it ends with
-    // comparable to the other ones of that activation at all
-    private boolean isNotOwnOperation(@Nullable String operation) {
+    // the counter an operation ends with, if this cache instance issued it in the activation it is in now. Only its
+    // own operations say anything here: one of another cache instance is not comparable to what is remembered
+    // above, and one of an earlier activation belongs to publishes no longer remembered at all
+    private @Nullable Long ownCounterOf(@Nullable String operation) {
         String currentActivationId = activationId.get();
-        return isNull(operation) || isNull(currentActivationId)
-                || !operation.startsWith(currentActivationId + ":");
+        if (isNull(operation) || isNull(currentActivationId)) {
+            return null;
+        }
+        String prefix = currentActivationId + ":";
+        return operation.startsWith(prefix)
+                ? Long.valueOf(operation.substring(prefix.length()))
+                : null;
     }
 
-    // whether the cache entry held here was written by this cache instance after it published the operation the
-    // arriving one carries. Only comparable within one activation, so a stamp of an earlier one never matches and
-    // the arriving cache entry is applied as it would have been before
-    private boolean isSupersededLocally(@Nullable String arriving, @Nullable String held) {
-        if (isNull(arriving) || isNull(held) || isNotOwnOperation(arriving) || isNotOwnOperation(held)) {
-            return false;
+    // Whether an arriving cache entry may be applied here.
+    // What another cache instance published is always applied, which is what following the one order every cache
+    // instance observes amounts to: whatever is delivered last for a key is what all of them end up holding. It is
+    // deliberately applied even where it undoes a write this cache instance has just made and not seen come back
+    // yet - that write is delivered in its turn and reinstated then, whereas holding the arriving cache entry back
+    // would discard it for good, since nothing delivers it a second time.
+    // What this cache instance published itself is applied only where it is still the last thing it published for
+    // the key, so that an echo delivered after a later write of its own - or after an invalidation, which leaves no
+    // value behind at all - cannot put back what that write or that invalidation already replaced. Which is also
+    // why a key it no longer holds because Caffeine evicted it or it expired keeps being restored: nothing was
+    // published for it afterwards, so what the data store still backs is applied and this cache instance catches up
+    private boolean isApplicable(InternalKey<K> key, @Nullable Long ownCounter) {
+        if (isNull(ownCounter)) {
+            return true;
         }
-        String prefix = activationId.get() + ":";
-        return Long.parseLong(held.substring(prefix.length()))
-                > Long.parseLong(arriving.substring(prefix.length()));
+        long counter = ownCounter;
+        Long lastOperation = operations.getIfPresent(key);
+        // no record left for the key - expired or dropped by the bound above - so there is nothing saying this was
+        // overtaken and it is applied as it would have been before any of this was remembered. Which is the only
+        // safe way round: holding it back on a record that is merely gone would lose it for good, since nothing
+        // delivers it a second time
+        return (isNull(lastOperation) || lastOperation == counter) && commandOperation.get() < counter;
+    }
+
+    // What invalidating all removes is not something the cache instance publishing it could know, so it is decided
+    // here, from what this one holds at the moment the command arrives: what it published for a key after the
+    // command stays, everything else goes. For a command of another cache instance, none of whose operations are
+    // comparable here, that is the whole content, and following it means exactly that.
+    // Collected before removing, unlike everywhere else here, because what is iterated over is the content of the
+    // cache itself and that cannot be removed from while doing so
+    private void receiveInvalidateAll(@Nullable String operation) {
+        Long ownCounter = ownCounterOf(operation);
+        if (nonNull(ownCounter) && commandOperation.get() != ownCounter) {
+            // a command of this cache instance overtaken by a later one of its own, which has already done more
+            // than this one would
+            return;
+        }
+        long floor = nonNull(ownCounter) ? ownCounter : Long.MAX_VALUE;
+        Set<InternalKey<K>> toRemove = new HashSet<>();
+        cache.asMap().keySet().forEach(presentKey -> {
+            Long lastOperation = operations.getIfPresent(presentKey);
+            if (isNull(lastOperation) || lastOperation < floor) {
+                toRemove.add(presentKey);
+            }
+        });
+        cache.invalidateAll(toRemove);
     }
 
     // the three callers of this method publish outside the synchronization lock because they run where taking it
@@ -408,12 +457,11 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
 
     private void publishCacheEntries(Map<? extends InternalKey<K>, ? extends @Nullable InternalValue<V>> map,
                                      Status status, boolean manage) {
-        // Stamped ahead of everything below, because whether a cache entry is published says nothing about whether
+        // Marked ahead of everything below, because whether a cache entry is published says nothing about whether
         // the value handed over here stays in this cache: without population being distributed nothing is published
-        // for a population at all, and that is exactly where a removal by this very cache instance must not be
-        // allowed to undo it. Only for the managed operations though, which are the ones taking place right here -
-        // the asynchronous ones are stamped by publishCacheEntriesAsync when they take place, not when they are
-        // finally published
+        // for a population at all, and the value still belongs to this activation. Only for the managed operations
+        // though, which are the ones taking place right here - the asynchronous ones are marked by the listener and
+        // the loader deciding them, not when they are finally published
         if (manage) {
             stampOperations(map);
         }
@@ -469,7 +517,6 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         }
     }
 
-    @SuppressWarnings("java:S3776")
     private void receiveCacheEntry(CacheEntry<K, V> cacheEntry) {
         // A command belongs to no key, so it is handled ahead of everything below, which all works with one.
         // Dispatched by the name it carries as its hash, and one that is not known here is skipped rather than
@@ -477,21 +524,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         // already understanding it
         if (cacheEntry.isCommand()) {
             if (INVALIDATE_ALL.toString().equals(cacheEntry.getHash())) {
-                // What it removes is not something the cache instance publishing it could know, so it is decided
-                // here, from what this one holds at the moment it arrives. The ordering guard is the same as for a
-                // single key, only applied to each of them: what this cache instance has written since publishing
-                // it stays, everything else goes. A command of another one carries an operation of its own, so
-                // nothing is superseded by it and the cache is emptied entirely, which is what following it means
-                // here.
-                // Collected before removing, unlike everywhere else here, because what is iterated over is the
-                // content of the cache itself and that cannot be removed from while doing so
-                Set<InternalKey<K>> toRemove = new HashSet<>();
-                cache.asMap().forEach((presentKey, present) -> {
-                    if (!isSupersededLocally(cacheEntry.getOperation(), present.getOperation())) {
-                        toRemove.add(presentKey);
-                    }
-                });
-                cache.invalidateAll(toRemove);
+                receiveInvalidateAll(cacheEntry.getOperation());
             }
             return;
         }
@@ -501,32 +534,23 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         // contradicts its own status, which no annotation can express here
         InternalKey<K> key = ik(requireNonNull(cacheEntry.getKey()))
                 .setHash(cacheEntry.getHash());
-        InternalValue<V> present = policy.getIfPresentQuietly(key);
+        // whether this is one of the publishes of this cache instance coming back, and which of them
+        Long ownCounter = ownCounterOf(cacheEntry.getOperation());
+        if (!isApplicable(key, ownCounter)) {
+            return;
+        }
         if (cacheEntry.isCached()) {
+            InternalValue<V> present = policy.getIfPresentQuietly(key);
             String operation = cacheEntry.getOperation();
-            // The same ordering guard as below, for the case it cannot be expressed in: an invalidation of this
-            // cache instance left no value behind to carry an operation, so what it remembered for the key stands
-            // in as the one held here and a cache entry published before it is not applied. Only its own
-            // invalidations are covered, because only its own operations are comparable - whether an insertion of
-            // another cache instance happened before or after one of them cannot be told from here, and treating
-            // it as if it did would drop a repopulation that is genuinely newer.
-            // Deliberately nothing else than an invalidation is remembered: a key this cache instance no longer
-            // holds because Caffeine evicted it or it expired must keep being restored from what the data store
-            // still backs, which is how a cache instance catches up on a key it dropped on its own
-            if (isNull(present) && isSupersededLocally(operation, invalidations.getIfPresent(key))) {
-                return;
-            }
-            // Left as it is when the arriving cache entry is the echo of the very write behind the one held here
-            // (self-echo filter), and when this cache instance has written this key again since publishing it -
-            // the same ordering guard as below, which here keeps an insertion delivered as it once was from
-            // reinstating a value already replaced by a later action of this very cache instance.
-            // The store still backs the entry either way, so it has to survive a stale sweep even though it is not
-            // written again. Clearing the mark here rather than only by writing it matters because an entry that is
-            // in sync when synchronization stops always takes this branch: both publishing and receiving stamp the
-            // local value with the very operation held in the store
-            if (nonNull(present)
-                    && (isSupersededLocally(operation, present.getOperation())
-                    || (nonNull(operation) && operation.equals(present.getOperation())))) {
+            // Left as it is where what arrives is the echo of the very write the value held here came from - which
+            // says nothing about the order and is only an identity check: writing it again would replace the value
+            // with an equal one, which reports a removal for it and restarts what Caffeine measures from a write.
+            // A write of another cache instance may well have landed in between, and then this is not its echo any
+            // more and the value has to be applied after all.
+            // The mark is refreshed either way, because the store backs the entry and it has to survive a stale
+            // sweep even where nothing is written for it - an entry that is in sync when synchronization stops
+            // always takes this branch
+            if (nonNull(present) && nonNull(operation) && operation.equals(present.getOperation())) {
                 present.setActivationId(activationId.get());
             } else {
                 // a cached status always comes with a value - only invalidated and evicted ones carry none,
@@ -536,13 +560,9 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                         .setActivationId(activationId.get()));
             }
         } else {
-            // only remove from cache if value is present - and only if it was not written here after the arriving
-            // cache entry was published, which would mean undoing a later action of this very cache instance with
-            // an earlier one of its own
-            if (nonNull(present)
-                    && !isSupersededLocally(cacheEntry.getOperation(), present.getOperation())) {
-                cache.invalidate(key);
-            }
+            // a no-op where the key is not held, which is the ordinary case for an invalidation of this cache
+            // instance coming back: it removed the value when it was issued
+            cache.invalidate(key);
         }
     }
 

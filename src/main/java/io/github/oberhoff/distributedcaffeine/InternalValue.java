@@ -25,12 +25,15 @@ import static java.util.Objects.requireNonNull;
 class InternalValue<V> {
 
     private final V value;
+    // the operation of the write this value came from, kept for one purpose only: recognising the cache entry
+    // written for it when it is delivered back, so that what is already held is not written a second time. How
+    // that write is ordered against the others is deliberately not kept here but remembered by the cache instance
+    // that published it (see InternalCacheManager), because a value is gone as soon as it is invalidated, evicted
+    // or overwritten, while the ordering has to outlive exactly that
     private @Nullable String operation;
-    // the activation this value became content of. Unrelated to the operation above beyond sharing its identifier
-    // when this cache instance wrote the value: a received one keeps the writing instance's operation, so only this
-    // says whether this cache instance was taking part when the value arrived. Since activating renews the
-    // identifier, everything held from before stops being of the current activation without a single value having to
-    // be touched - which decides both whether a change to it may be distributed and whether synchronizing keeps it
+    // the activation this value became content of. Since activating renews the identifier,
+    // everything held from before stops being of the current activation without a single value having to be
+    // touched - which decides both whether a change to it may be distributed and whether synchronizing keeps it
     private @Nullable String activationId;
 
     private InternalValue(V value) {
