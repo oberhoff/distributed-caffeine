@@ -15,7 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter;
 
-import java.util.Collection;
+import java.util.List;
 
 /**
  * Interface representing a receiver that manages distributed synchronization between cache instances using an
@@ -31,11 +31,11 @@ import java.util.Collection;
 public interface Receiver<K, V> {
 
     /**
-     * Receives cache entries originating from the underlying store.
+     * Receives cache entries originating from the underlying store (in the order the underlying store produced them).
      *
      * @param cacheEntries the cache entries to be received
      */
-    void receiveCacheEntries(Collection<CacheEntry<K, V>> cacheEntries);
+    void receiveCacheEntries(List<CacheEntry<K, V>> cacheEntries);
 
     // TODO list of statuses in relation of distribution mode for more efficient receiving
 }

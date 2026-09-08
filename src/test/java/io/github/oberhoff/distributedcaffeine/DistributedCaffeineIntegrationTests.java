@@ -96,7 +96,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -169,6 +168,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.params.ParameterizedInvocationConstants.ARGUMENTS_WITH_NAMES_PLACEHOLDER;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
@@ -3032,6 +3032,88 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(distributedCache.getIfPresent(key)).isEqualTo(value);
         }
 
+        @DisplayName("Test that an invalidation is not reverted by a delayed echo of the population preceding it")
+        @Test
+        void test_DistributionMode_invalidation_is_not_reverted_by_delayed_own_population_echo() {
+            // The population and the invalidation happen one after the other on the same cache instance, so the
+            // invalidation is unambiguously the later one - but it leaves no value behind for it to be stamped on,
+            // so there is nothing left here carrying an operation to compare a delayed echo of the population
+            // against. This mode is the one to test it in: only where population is distributed is a cache entry
+            // written for it that can be echoed back at all.
+            // The echo is handed over rather than awaited, because the change stream applies it long before the
+            // invalidation is even issued. What has to be reproduced is an event of the underlying store arriving
+            // after a local removal that precedes it - a matter of when it is delivered, not of what it says
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withDistributionMode(POPULATION_AND_INVALIDATION),
+                    DistributedCaffeine::build);
+
+            Key key = Key.of(1);
+            Value value = Value.of(1);
+
+            distributedCache.put(key, value);
+
+            // the cache entry written for the population, exactly as a cache instance is handed it
+            CacheEntry<Key, Value> population;
+            try (Stream<CacheEntry<Key, Value>> cacheEntries = getFailable(() ->
+                    repositoryOf(distributedCache).streamCacheEntries(null, CACHED_GROUP, false))) {
+                population = cacheEntries.findFirst().orElseThrow();
+            }
+
+            distributedCache.invalidate(key);
+
+            assertThat(distributedCache.getIfPresent(key)).isNull();
+
+            getInstanceRegistry(distributedCache).getCacheManager()
+                    .receiveCacheEntries(List.of(population));
+
+            assertThat(distributedCache.getIfPresent(key)).isNull();
+        }
+
+        @DisplayName("Test that an eviction is not upheld by the delayed echo of the population preceding it")
+        @Test
+        void test_DistributionMode_eviction_is_not_upheld_by_delayed_own_population_echo() {
+            // The counterpart of the test above, and the reason its guard is limited to invalidations: a key this
+            // cache instance no longer holds because Caffeine evicted it is restored by the very same delayed echo,
+            // which is how a cache instance catches up on a key it dropped on its own while the data store still
+            // backs it. A guard going by "not held here and published by me" instead of by what was invalidated
+            // takes that away and lets the cache instances diverge
+            int maximumSize = 1;
+
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withDistributionMode(POPULATION_AND_INVALIDATION)
+                            .withCaffeine(Caffeine.newBuilder()
+                                    .maximumSize(maximumSize)),
+                    DistributedCaffeine::build);
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+            Key key2 = Key.of(2);
+            Value value2 = Value.of(2);
+
+            distributedCache.put(key1, value1);
+
+            // the cache entry written for the population, exactly as a cache instance is handed it
+            CacheEntry<Key, Value> population;
+            try (Stream<CacheEntry<Key, Value>> cacheEntries = getFailable(() ->
+                    repositoryOf(distributedCache).streamCacheEntries(null, CACHED_GROUP, false))) {
+                population = cacheEntries.findFirst().orElseThrow();
+            }
+
+            distributedCache.put(key2, value2); // implicit eviction
+
+            await("eviction by size")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        assertThat(distributedCache.estimatedSize()).isEqualTo(maximumSize);
+                        assertThat(distributedCache.getIfPresent(key1)).isNull();
+                    });
+
+            getInstanceRegistry(distributedCache).getCacheManager()
+                    .receiveCacheEntries(List.of(population));
+
+            assertThat(distributedCache.getIfPresent(key1)).isEqualTo(value1);
+        }
+
         @DisplayName("Test that invalidating all reaches cache entries held by another cache instance")
         @Test
         void test_DistributionMode_invalidate_all_reaches_other_cache_instances() {
@@ -5646,7 +5728,7 @@ final class DistributedCaffeineIntegrationTests {
             @SuppressWarnings("Convert2Lambda")
             Receiver<Key, Value> receiver = spy(new Receiver<Key, Value>() {
                 @Override
-                public void receiveCacheEntries(@NonNull Collection<CacheEntry<Key, Value>> cacheEntries) {
+                public void receiveCacheEntries(@NonNull List<CacheEntry<Key, Value>> cacheEntries) {
                     receivedCacheEntries.addAll(cacheEntries);
                 }
             });
@@ -5704,7 +5786,7 @@ final class DistributedCaffeineIntegrationTests {
                     .atMost(WAITING_DURATION)
                     .untilAsserted(() -> {
                         verify(receiver, times(4))
-                                .receiveCacheEntries(anySet());
+                                .receiveCacheEntries(anyList());
                         assertThat(receivedCacheEntries)
                                 .containsExactlyInAnyOrder(
                                         insertCacheEntry1, insertCacheEntry2,

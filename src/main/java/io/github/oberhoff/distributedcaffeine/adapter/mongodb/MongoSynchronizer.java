@@ -44,7 +44,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -54,7 +53,6 @@ import java.util.stream.Stream;
 
 import static com.mongodb.client.model.changestream.OperationType.INSERT;
 import static com.mongodb.client.model.changestream.OperationType.UPDATE;
-import static io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware.DISCRIMINATOR_FIELD;
 import static io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoRepository.toCacheEntryOrNull;
 import static java.lang.Math.min;
 import static java.lang.String.format;
@@ -238,7 +236,7 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
             CacheEntry<K, V> cacheEntry = toCacheEntryOrNull(keySerializer, valueSerializer,
                     changeStreamDocument.getFullDocument(), LOGGER, identifier);
             Optional.ofNullable(cacheEntry)
-                    .map(Set::of)
+                    .map(List::of)
                     .ifPresent(cacheEntries -> receiver.receiveCacheEntries(cacheEntries));
         }
     }

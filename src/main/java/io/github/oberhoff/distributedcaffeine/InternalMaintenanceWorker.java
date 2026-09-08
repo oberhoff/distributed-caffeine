@@ -55,7 +55,11 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
 
     @SuppressWarnings({"java:S116", "FieldMayBeFinal", "CanBeFinal"}) // not static final for testing
     private Duration MAINTENANCE_INTERVAL = Duration.ofMinutes(1);
-    private static final Duration DISTRIBUTION_DURATION = Duration.ofMinutes(1);
+    // How long a write is treated as still being on its way to the other cache instances. Shared with
+    // InternalCacheManager, which remembers an invalidation for exactly as long: what is kept here of a record
+    // written for distribution only says how long a cache entry can still be delivered, and that is how long
+    // being able to order one against a local invalidation matters
+    static final Duration DISTRIBUTION_DURATION = Duration.ofMinutes(1);
     private static final Set<Status> NOT_RETAINED_GROUP = Stream
             .concat(DISTRIBUTION_ONLY_GROUP.stream(), CACHED_GROUP.stream())
             .collect(toUnmodifiableSet());
@@ -247,14 +251,13 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
         // what a write leaves behind until it is swept only exists because the underlying store is what distributes
         // it as well. Where distributing does not retain, the delivery is the whole of the record and there is
         // nothing left over to collect
-        @Nullable Repository<K, V> retaining = repository;
+        Repository<K, V> retaining = repository;
         if (nonNull(retaining)) {
-            Repository<K, V> retainingRepository = retaining;
             Instant deadline = Instant.now().minus(distributionDuration);
             Set<Status> statuses = cachedEntryPersistenceConfigurer.isConfigured()
                     ? DISTRIBUTION_ONLY_GROUP
                     : NOT_RETAINED_GROUP;
-            runFailable(() -> retainingRepository.deleteCacheEntries(null,
+            runFailable(() -> retaining.deleteCacheEntries(null,
                     statuses, deadline));
         }
     }
