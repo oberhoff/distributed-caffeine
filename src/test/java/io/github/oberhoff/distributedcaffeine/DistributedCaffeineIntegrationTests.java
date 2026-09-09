@@ -177,6 +177,7 @@ import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.atMost;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -3099,10 +3100,23 @@ final class DistributedCaffeineIntegrationTests {
                 population = cacheEntries.findFirst().orElseThrow();
             }
 
+            // Kept away from here on, because with a maximum size of one and both keys backed by the data store
+            // the echoes would keep restoring whichever key was just evicted and evicting the other one - the very
+            // behaviour under test, which cannot be observed while it is also being provoked
+            Adapter<Key, Value> adapter = getInstanceRegistry(distributedCache).getAdapter();
+            Synchronizer<Key, Value> synchronizer = readFieldValue(adapter, AbstractAdapter.class,
+                    "synchronizer", Synchronizer.class);
+            Receiver<Key, Value> receiver = injectSpy(synchronizer, AbstractSynchronizer.class,
+                    "receiver", Receiver.class);
+            doNothing().when(receiver).receiveCacheEntries(anyList());
+
             distributedCache.put(key2, value2); // implicit eviction
 
+            // driving the clean up along, like the other tests around eviction do: Caffeine performs it when it
+            // gets round to it, which under load is not within the waiting duration
             await("eviction by size")
                     .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
                         assertThat(distributedCache.estimatedSize()).isEqualTo(maximumSize);
                         assertThat(distributedCache.getIfPresent(key1)).isNull();
@@ -5000,6 +5014,17 @@ final class DistributedCaffeineIntegrationTests {
 
             Key key1 = Key.of(1);
             Key key2 = Key.of(2);
+
+            // Kept away from here on, because what an evicted cache entry leaves in the data store is also
+            // delivered back, and the cache entry written for its population restores it - which puts the cache
+            // over its maximum again and hands the residency of the other key over to the evicted tier while this
+            // test is measuring both. What is under test is the two tiers, not that echo
+            Adapter<Key, Value> adapter = getInstanceRegistry(distributedCache).getAdapter();
+            Synchronizer<Key, Value> synchronizer = readFieldValue(adapter, AbstractAdapter.class,
+                    "synchronizer", Synchronizer.class);
+            Receiver<Key, Value> receiver = injectSpy(synchronizer, AbstractSynchronizer.class,
+                    "receiver", Receiver.class);
+            doNothing().when(receiver).receiveCacheEntries(anyList());
 
             distributedCache.put(key1, Value.of(1));
             distributedCache.put(key2, Value.of(2));
