@@ -21,7 +21,6 @@ import org.jspecify.annotations.Nullable;
 
 import static io.github.oberhoff.distributedcaffeine.InternalKey.kn;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.vn;
-import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
 class InternalEvictionListener<K, V> implements RemovalListener<InternalKey<K>, InternalValue<V>>,
@@ -45,14 +44,9 @@ class InternalEvictionListener<K, V> implements RemovalListener<InternalKey<K>, 
 
     @Override
     public void onRemoval(@Nullable InternalKey<K> key, @Nullable InternalValue<V> value, RemovalCause removalCause) {
-        // an eviction is reported asynchronously, so it can arrive once this cache instance counts as activated
-        // again although it took place while it did not - which the value says, because it carries the activation it
-        // became content of and only that activation's content is this cache instance's to distribute. Reporting it
-        // below is another matter
-        if (nonNull(key) && nonNull(value) && cacheManager.hasCurrentActivationId(value)) {
-            // special handling, no lock required
-            cacheManager.evictDistributed(key, value, removalCause);
-        }
+        // handed over as reported and without a lock: which evictions are distributed is decided there, so that
+        // every condition for it stays in one place. Reporting it below is another matter and happens either way
+        cacheManager.evictDistributed(key, value, removalCause);
         evictionListener.onRemoval(kn(key), vn(value), removalCause);
     }
 }

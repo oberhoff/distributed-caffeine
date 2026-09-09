@@ -304,27 +304,43 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     }
 
     @SuppressWarnings("java:S3776")
-    void evictDistributed(InternalKey<K> key, InternalValue<V> value, RemovalCause removalCause) {
-        // special handling (activated, eviction support, async, not managed, cache change)
-        // handling activationId in listener
-        if (isActivated() && (removalCause.equals(RemovalCause.SIZE) || removalCause.equals(RemovalCause.EXPIRED))) {
-            Status status;
-            if (evictedEntryPersistenceConfigurer.isConfigured()) {
-                status = removalCause.equals(RemovalCause.SIZE)
-                        ? EVICTED_SIZE_RETAINED
-                        : EVICTED_TIME_RETAINED;
-            } else {
-                status = removalCause.equals(RemovalCause.SIZE)
-                        ? EVICTED_SIZE
-                        : EVICTED_TIME;
-            }
-            // of the three asynchronous publishers this is the one that cannot be made good later: the entry is
-            // already gone from the cache, and nothing reads it again to notice and retry. A lost eviction leaves
-            // the other instances serving what this one dropped and, where evicted cache entries are retained,
-            // leaves the entry CACHED in the store instead of evicted - so it is never pruned and comes back on
-            // the next restart. See the TODO on publishCacheEntriesAsync
-            publishCacheEntriesAsync(Map.of(key, value), status);
+    // special handling (activated, eviction support, async, not managed, cache change).
+    // Every condition for distributing an eviction is here rather than partly at the listener reporting it, so
+    // that what reaches the underlying store and what does not can be read in one place
+    void evictDistributed(@Nullable InternalKey<K> key, @Nullable InternalValue<V> value,
+                          RemovalCause removalCause) {
+        // a reference that was collected is reported without the key or the value it had, so there is nothing to
+        // distribute for it
+        if (isNull(key) || isNull(value)) {
+            return;
         }
+        // An eviction is reported asynchronously, so it can arrive once this cache instance counts as activated
+        // again although it took place while it did not - which the value says, because it carries the activation
+        // it became content of, and only that activation's content is this cache instance's to distribute
+        if (!isActivated() || !hasCurrentActivationId(value)) {
+            return;
+        }
+        // the two causes an eviction is distributed for; the collected one is already out above, and every other
+        // cause is a removal this cache instance has distributed itself where it decided on it
+        if (!removalCause.equals(RemovalCause.SIZE) && !removalCause.equals(RemovalCause.EXPIRED)) {
+            return;
+        }
+        Status status;
+        if (evictedEntryPersistenceConfigurer.isConfigured()) {
+            status = removalCause.equals(RemovalCause.SIZE)
+                    ? EVICTED_SIZE_RETAINED
+                    : EVICTED_TIME_RETAINED;
+        } else {
+            status = removalCause.equals(RemovalCause.SIZE)
+                    ? EVICTED_SIZE
+                    : EVICTED_TIME;
+        }
+        // of the three asynchronous publishers this is the one that cannot be made good later: the entry is
+        // already gone from the cache, and nothing reads it again to notice and retry. A lost eviction leaves
+        // the other instances serving what this one dropped and, where evicted cache entries are retained,
+        // leaves the entry CACHED in the store instead of evicted - so it is never pruned and comes back on
+        // the next restart. See the TODO on publishCacheEntriesAsync
+        publishCacheEntriesAsync(Map.of(key, value), status);
     }
 
     // An operation identifies a single write of this cache instance and is remembered for the key it belongs to,
@@ -406,6 +422,13 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     // comparable here, that is the whole content, and following it means exactly that.
     // Collected before removing, unlike everywhere else here, because what is iterated over is the content of the
     // cache itself and that cannot be removed from while doing so
+    // whether what arrives is the echo of the very write the value held here came from. Purely an identity check
+    // and no statement about the order: a write of another cache instance may well have landed in between, and
+    // then this is not its echo any more and the value has to be applied after all
+    private boolean isEchoOf(InternalValue<V> present, @Nullable String operation) {
+        return nonNull(operation) && operation.equals(present.getOperation());
+    }
+
     private void receiveInvalidateAll(@Nullable String operation) {
         Long ownCounter = ownCounterOf(operation);
         if (nonNull(ownCounter) && commandOperation.get() != ownCounter) {
@@ -496,14 +519,28 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         }
     }
 
+    // Where arriving cache entries come from, which is what decides whether one that is already held may be left
+    // as it is instead of being written again.
+    // A change the adapter delivers arrives on its own, so leaving it alone is both safe and worth it - writing an
+    // equal value would report a removal for it and restart what Caffeine measures from a write.
+    // Reading the whole data store back is the opposite: it writes over a cache that is already at its maximum and
+    // therefore evicts while it runs, and Caffeine hands a value to a reader while its removal is still under way.
+    // A value left alone can be gone a moment later, taking the mark with it - and since nothing was written for
+    // the key either, it is simply missing while the data store goes on backing it, with no cache instance holding
+    // it and nothing reading the store again to notice
+    private enum Arrival {
+        DELIVERED,
+        READ_BACK
+    }
+
     @Override
     public void receiveCacheEntries(List<CacheEntry<K, V>> cacheEntries) {
         // no filtering by discriminator here: a receiver belongs to exactly one cache, and the adapter handing over
         // these cache entries is scoped to that cache's discriminator - so whatever arrives is already its own
-        receiveCacheEntries(cacheEntries.stream());
+        receiveCacheEntries(cacheEntries.stream(), Arrival.DELIVERED);
     }
 
-    private void receiveCacheEntries(Stream<CacheEntry<K, V>> cacheEntries) {
+    private void receiveCacheEntries(Stream<CacheEntry<K, V>> cacheEntries, Arrival arrival) {
         if (isActivated()) {
             // Applied one at a time rather than collected and applied afterwards, so that every cache entry is
             // decided against what the ones handed over before it have already done. Collecting decides all of them
@@ -513,11 +550,11 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
             // there is nothing to be gained by collecting either
             synchronizationLock.runLocked(() -> cacheEntries
                     .filter(cacheEntry -> cacheEntry.getStatus().isConsideredBy(distributionMode))
-                    .forEach(this::receiveCacheEntry));
+                    .forEach(cacheEntry -> receiveCacheEntry(cacheEntry, arrival)));
         }
     }
 
-    private void receiveCacheEntry(CacheEntry<K, V> cacheEntry) {
+    private void receiveCacheEntry(CacheEntry<K, V> cacheEntry, Arrival arrival) {
         // A command belongs to no key, so it is handled ahead of everything below, which all works with one.
         // Dispatched by the name it carries as its hash, and one that is not known here is skipped rather than
         // treated as a cache entry - which is what allows a command to be added without every cache instance
@@ -542,15 +579,11 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         if (cacheEntry.isCached()) {
             InternalValue<V> present = policy.getIfPresentQuietly(key);
             String operation = cacheEntry.getOperation();
-            // Left as it is where what arrives is the echo of the very write the value held here came from - which
-            // says nothing about the order and is only an identity check: writing it again would replace the value
-            // with an equal one, which reports a removal for it and restarts what Caffeine measures from a write.
-            // A write of another cache instance may well have landed in between, and then this is not its echo any
-            // more and the value has to be applied after all.
-            // The mark is refreshed either way, because the store backs the entry and it has to survive a stale
-            // sweep even where nothing is written for it - an entry that is in sync when synchronization stops
-            // always takes this branch
-            if (nonNull(present) && nonNull(operation) && operation.equals(present.getOperation())) {
+            // Left as it is where it is already held and nothing evicts alongside (see Arrival). The mark is
+            // refreshed either way, because the data store backs the entry and it has to survive a stale sweep
+            // even where nothing is written for it - an entry that is in sync when synchronization stops always
+            // takes this branch
+            if (arrival == Arrival.DELIVERED && nonNull(present) && isEchoOf(present, operation)) {
                 present.setActivationId(activationId.get());
             } else {
                 // a cached status always comes with a value - only invalidated and evicted ones carry none,
@@ -586,7 +619,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                         null,
                         CACHED_GROUP,
                         true))) {
-                    receiveCacheEntries(cacheEntryStream);
+                    receiveCacheEntries(cacheEntryStream, Arrival.READ_BACK);
                 }
             }
             // without population being considered nothing clears the marks, so everything present is dropped - the
