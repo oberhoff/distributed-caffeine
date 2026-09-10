@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.CacheLoader;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.Expiry;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
@@ -61,15 +62,24 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.UnaryOperator;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
@@ -83,6 +93,9 @@ import static io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware.
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static java.time.temporal.ChronoUnit.FOREVER;
+import static java.util.stream.Collectors.toCollection;
+import static java.util.stream.Collectors.toList;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -487,6 +500,150 @@ final class DistributedCaffeineUnitTests {
     @DisplayName("Test Caffeine")
     @SuppressWarnings("java:S5838")
     final class CaffeineUnit extends DistributedCaffeineUnitTestInstance {
+
+        @DisplayName("that every key is either still held or was reported as removed, under the full operation mix")
+        @Test
+        void test_Caffeine_accounts_for_every_key_under_the_full_operation_mix() throws Exception {
+            // The control above only writes, and it accounts for every key. This one adds the paths the stress
+            // test also drives - loading through a cache loader, refreshing after every write, computing through
+            // getAll, and explicit invalidation - because a key was seen leaving a cache instance there with no
+            // removal reported for it at all, and only a path that skips the notification can do that. This class
+            // already records one such path in the test below, where a refresh returning the old value is not
+            // reported, so refreshing is the one to cover
+            int maximumSize = 500;
+            int keys = 2_000;
+            int rounds = 30;
+            int operationsPerWorker = 2_000;
+            int workers = 4;
+
+            for (int round = 0; round < rounds; round++) {
+                ThreadPoolExecutor executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(8);
+                ExecutorService workerExecutor = Executors.newFixedThreadPool(workers);
+                Set<Integer> touched = ConcurrentHashMap.newKeySet();
+                Set<Integer> removed = ConcurrentHashMap.newKeySet();
+                try {
+                    CacheLoader<Integer, String> cacheLoader = key -> {
+                        touched.add(key);
+                        return "loaded-" + key;
+                    };
+                    LoadingCache<Integer, String> cache = Caffeine.newBuilder()
+                            .executor(executor)
+                            .maximumSize(maximumSize)
+                            .expireAfter(Expiry.creating((Integer key, String value) -> FOREVER.getDuration()))
+                            .refreshAfterWrite(Duration.ofNanos(1))
+                            .removalListener((Integer key, String value, RemovalCause cause) -> {
+                                if (key != null && cause != RemovalCause.REPLACED) {
+                                    removed.add(key);
+                                }
+                            })
+                            .build(cacheLoader);
+
+                    int currentRound = round;
+                    List<Future<?>> running = IntStream.range(0, workers)
+                            .mapToObj(worker -> workerExecutor.submit(() -> {
+                                Random random = new Random(currentRound * 31L + worker);
+                                for (int operation = 0; operation < operationsPerWorker; operation++) {
+                                    int id = random.nextInt(keys);
+                                    switch (random.nextInt(5)) {
+                                        case 0 -> {
+                                            touched.add(id);
+                                            cache.put(id, "put-" + id);
+                                        }
+                                        case 1 -> {
+                                            var unusedValue = cache.get(id);
+                                        }
+                                        case 2 -> {
+                                            // a set, so the two ids colliding is not a duplicate element
+                                            var unusedValues = cache.getAll(
+                                                    new HashSet<>(List.of(id, random.nextInt(keys))));
+                                        }
+                                        case 3 -> cache.invalidate(id);
+                                        default -> cache.asMap().remove(id);
+                                    }
+                                }
+                            }))
+                            .collect(toList());
+                    for (Future<?> future : running) {
+                        future.get();
+                    }
+
+                    // everything the cache still has to do, so that no notification is merely late
+                    cache.cleanUp();
+                    await("pending cache work")
+                            .atMost(Duration.ofSeconds(10))
+                            .until(() -> executor.getActiveCount() == 0 && executor.getQueue().isEmpty());
+                    cache.cleanUp();
+                    Thread.sleep(200);
+
+                    Set<Integer> held = cache.asMap().keySet();
+                    Set<Integer> unaccountedFor = touched.stream()
+                            .filter(id -> !held.contains(id) && !removed.contains(id))
+                            .collect(toCollection(LinkedHashSet::new));
+                    assertThat(unaccountedFor)
+                            .describedAs("round %d: keys neither held nor reported as removed, out of %d touched",
+                                    round, touched.size())
+                            .isEmpty();
+                } finally {
+                    workerExecutor.shutdownNow();
+                    executor.shutdownNow();
+                }
+            }
+        }
+
+        @DisplayName("that every key put is either still held or was reported as removed")
+        @Test
+        void test_Caffeine_accounts_for_every_key_under_size_pressure() throws Exception {
+            // Distributed Caffeine relies on being told about every removal: an eviction is what it distributes,
+            // so a key that leaves a cache unannounced is one the other cache instances go on serving. A stress
+            // run turned up exactly that shape - a key gone from the cache with no removal reported for it - so
+            // this checks the assumption directly, with no distribution involved at all.
+            // The configuration is the one that run used: a maximum size with more keys than it holds, variable
+            // expiry that never expires, and writes from several threads against a real executor
+            int maximumSize = 1_000;
+            int keys = 4_000;
+            int writers = 4;
+            ExecutorService executor = Executors.newFixedThreadPool(8);
+            Set<Object> removed = ConcurrentHashMap.newKeySet();
+            try {
+                Cache<Integer, String> cache = Caffeine.newBuilder()
+                        .executor(executor)
+                        .maximumSize(maximumSize)
+                        .expireAfter(Expiry.creating((Integer key, String value) -> FOREVER.getDuration()))
+                        .removalListener((Integer key, String value, RemovalCause cause) -> {
+                            // a replacement leaves the key in place, so it is not a removal of the key
+                            if (key != null && cause != RemovalCause.REPLACED) {
+                                removed.add(key);
+                            }
+                        })
+                        .build();
+
+                List<Future<?>> written = IntStream.range(0, writers)
+                        .mapToObj(writer -> executor.submit(() -> IntStream.range(0, keys)
+                                .filter(id -> id % writers == writer)
+                                .forEach(id -> cache.put(id, "value-" + id))))
+                        .collect(toList());
+                for (Future<?> future : written) {
+                    future.get();
+                }
+                cache.cleanUp();
+                await("pending removal notifications")
+                        .atMost(Duration.ofSeconds(10))
+                        .until(() -> cache.estimatedSize() <= maximumSize);
+                cache.cleanUp();
+                Thread.sleep(500); // removal notifications are handed to the executor, so they arrive after the fact
+
+                Set<Integer> held = cache.asMap().keySet();
+                Set<Integer> unaccountedFor = IntStream.range(0, keys)
+                        .boxed()
+                        .filter(id -> !held.contains(id) && !removed.contains(id))
+                        .collect(toCollection(LinkedHashSet::new));
+                assertThat(unaccountedFor)
+                        .describedAs("keys neither held nor reported as removed, out of %d put", keys)
+                        .isEmpty();
+            } finally {
+                executor.shutdownNow();
+            }
+        }
 
         @DisplayName("that removal listener is not invoked if refresh returns old value")
         @Test

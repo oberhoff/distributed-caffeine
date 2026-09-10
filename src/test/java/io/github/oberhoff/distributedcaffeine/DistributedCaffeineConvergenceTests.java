@@ -16,15 +16,14 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.RemovalCause;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
 import io.github.oberhoff.distributedcaffeine.adapter.AbstractAdapter;
-import io.github.oberhoff.distributedcaffeine.adapter.AbstractPublisher;
+import io.github.oberhoff.distributedcaffeine.adapter.AbstractRepository;
 import io.github.oberhoff.distributedcaffeine.adapter.AbstractSynchronizer;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
-import io.github.oberhoff.distributedcaffeine.adapter.AbstractRepository;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
-import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.common.Key;
 import io.github.oberhoff.distributedcaffeine.common.Value;
 import org.jspecify.annotations.Nullable;
@@ -33,24 +32,31 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
-import java.util.Set;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.stream.Stream;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.IntStream;
-import java.time.Instant;
+import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION;
+import static java.lang.String.format;
 import static java.util.Comparator.comparing;
 import static java.util.Objects.isNull;
-import static java.lang.String.format;
+import static java.util.stream.Collectors.toCollection;
+import static java.util.stream.Collectors.toList;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -184,6 +190,146 @@ class DistributedCaffeineConvergenceTests {
         }
     }
 
+    @DisplayName("Test that a stopped cache instance drops what was evicted elsewhere while it was not listening")
+    @ParameterizedTest(name = "seed {0}")
+    @ValueSource(longs = {1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L})
+    void test_stopped_instance_drops_what_was_evicted_elsewhere(long seed) {
+        // An eviction elsewhere is published while this cache instance is not taking part, so the cache entry
+        // written for it never reaches it - and reading the data store back on reactivation is the only thing that
+        // can tell it the key is gone, because what it still holds for it is of no activation any more. Which is
+        // the shape of a divergence seen in the stress test: one cache instance serving what another one dropped
+        int maximumSize = 4;
+        InMemoryBroker<Key, Value> broker = new InMemoryBroker<>();
+        AbstractAdapter<Key, Value> evictingAdapter = broker.newAdapter("in-memory-evicting-" + seed);
+        AbstractAdapter<Key, Value> stoppedAdapter = broker.newAdapter("in-memory-stopped-" + seed);
+        DistributedCache<Key, Value> evicting = restorableCache(evictingAdapter, maximumSize);
+        DistributedCache<Key, Value> stopped = restorableCache(stoppedAdapter, maximumSize);
+        try {
+            IntStream.rangeClosed(1, maximumSize).forEach(id ->
+                    evicting.put(Key.of(id), Value.of(id, "init")));
+            broker.deliverAll();
+            assertThat(stopped.asMap()).hasSize(maximumSize);
+
+            // not listening from here on, so nothing published reaches it
+            stopped.distributedPolicy().stopSynchronization();
+
+            // one key over the maximum, which evicts another one and publishes that eviction
+            evicting.put(Key.of(maximumSize + 1), Value.of(maximumSize + 1, "over-the-maximum"));
+            evicting.cleanUp();
+            broker.deliverAll();
+
+            Set<Key> backedByStore = broker.keysBackedByStore();
+            assertThat(backedByStore)
+                    .describedAs("the eviction has to have taken the key out of the cached group")
+                    .hasSizeLessThan(maximumSize + 1);
+
+            // listening again: reading the data store back is what has to bring it in line, both by adding what
+            // it missed and by dropping what the store no longer backs
+            stopped.distributedPolicy().startSynchronization();
+            broker.deliverAll();
+
+            assertThat(stopped.asMap().keySet())
+                    .describedAs("what the reactivated cache instance holds against what the store backs")
+                    .containsExactlyInAnyOrderElementsOf(backedByStore);
+        } finally {
+            stopped.distributedPolicy().stopSynchronization();
+            evicting.distributedPolicy().stopSynchronization();
+        }
+    }
+
+    @DisplayName("Test that no key leaves a cache instance without a removal being reported for it")
+    @Test
+    void test_no_key_leaves_a_cache_instance_unreported() throws Exception {
+        // Plain Caffeine accounts for every key under this workload (see the unit tests), so if a key can leave a
+        // Distributed Caffeine instance with nothing reported for it, the difference is in what this library does
+        // with Caffeine rather than in Caffeine. That is the shape of the residual still open on the stress test:
+        // one key gone from a cache instance with no removal of any cause recorded for it
+        int maximumSize = 200;
+        int keys = 800;
+        int rounds = 20;
+        int operationsPerWorker = 1_000;
+        int workers = 3;
+
+        for (int round = 0; round < rounds; round++) {
+            ExecutorService workerExecutor = Executors.newFixedThreadPool(workers + 1);
+            Set<Key> touched = ConcurrentHashMap.newKeySet();
+            Set<Key> removed = ConcurrentHashMap.newKeySet();
+            InMemoryBroker<Key, Value> broker = new InMemoryBroker<>();
+            AbstractAdapter<Key, Value> adapter = broker.newAdapter("in-memory-accounting-" + round);
+            DistributedCache<Key, Value> cache = DistributedCaffeine.<Key, Value>newBuilder(adapter)
+                    .withDistributionMode(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                    .withCaffeine(Caffeine.newBuilder()
+                            .maximumSize(maximumSize)
+                            .removalListener((Key key, Value value, RemovalCause cause) -> {
+                                if (key != null && cause != RemovalCause.REPLACED) {
+                                    removed.add(key);
+                                }
+                            }))
+                    .build();
+            try {
+                int currentRound = round;
+                AtomicBoolean delivering = new AtomicBoolean(true);
+                Future<?> deliverer = workerExecutor.submit(() -> {
+                    while (delivering.get()) {
+                        broker.deliverAll();
+                    }
+                });
+                List<Future<?>> running = IntStream.range(0, workers)
+                        .mapToObj(worker -> workerExecutor.submit(() -> {
+                            Random random = new Random(currentRound * 131L + worker);
+                            for (int operation = 0; operation < operationsPerWorker; operation++) {
+                                Key key = Key.of(random.nextInt(keys));
+                                switch (random.nextInt(3)) {
+                                    case 0 -> {
+                                        touched.add(key);
+                                        cache.put(key, Value.of(key.getId(), "put"));
+                                    }
+                                    case 1 -> cache.invalidate(key);
+                                    default -> {
+                                        var unusedValue = cache.getIfPresent(key);
+                                    }
+                                }
+                            }
+                        }))
+                        .collect(toList());
+                for (Future<?> future : running) {
+                    future.get();
+                }
+                delivering.set(false);
+                deliverer.get();
+                broker.deliverAll();
+                cache.cleanUp();
+                broker.deliverAll();
+                Thread.sleep(100);
+
+                Set<Key> held = cache.asMap().keySet();
+                Set<Key> unaccountedFor = touched.stream()
+                        .filter(key -> !held.contains(key) && !removed.contains(key))
+                        .collect(toCollection(LinkedHashSet::new));
+                assertThat(unaccountedFor)
+                        .describedAs("round %d: keys neither held nor reported as removed, out of %d touched",
+                                round, touched.size())
+                        .isEmpty();
+            } finally {
+                cache.distributedPolicy().stopSynchronization();
+                workerExecutor.shutdownNow();
+            }
+        }
+    }
+
+    // a cache instance that reads the data store back when it is activated, which is what persistence of cached
+    // entries with cache residency asks for - and evictions have to be distributed alongside it
+    private DistributedCache<Key, Value> restorableCache(AbstractAdapter<Key, Value> adapter, int maximumSize) {
+        return DistributedCaffeine.<Key, Value>newBuilder(adapter)
+                .withDistributionMode(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                .withCaffeine(Caffeine.newBuilder()
+                        .executor(Runnable::run)
+                        .maximumSize(maximumSize))
+                .withPersistence(configurer -> configurer
+                        .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency))
+                .build();
+    }
+
     // the content the published cache entries add up to: the last one written for a key decides, which is what the
     // underlying store ends up holding and therefore what every cache instance has to end up holding as well
     private Map<Key, Value> replay(List<CacheEntry<Key, Value>> log) {
@@ -243,8 +389,11 @@ class DistributedCaffeineConvergenceTests {
         private final List<InMemorySynchronizer<K, V>> synchronizers;
 
         private InMemoryBroker() {
-            this.log = new ArrayList<>();
-            this.retained = new LinkedHashMap<>();
+            // both are written by whichever thread publishes and read by whichever thread delivers, and a test
+            // may well drive those concurrently. The log is only ever appended to, so reading an index below its
+            // size stays stable
+            this.log = java.util.Collections.synchronizedList(new ArrayList<>());
+            this.retained = new ConcurrentHashMap<>();
             this.synchronizers = new ArrayList<>();
         }
 

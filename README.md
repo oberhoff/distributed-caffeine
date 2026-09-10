@@ -112,9 +112,9 @@ DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(a
 
 #### Configuration of hashing (for keys of cache entries)
 
-Cache entries need to be identifiable in the underlying store by a hash computed for their keys. Keys of type `String`,
-`Long`, `Integer` or `UUID` are hashed out of the box. For other types of keys two ways for computation of hashes are
-supported.
+Cache entries need to be identifiable during distributed synchronization and for persistence by a hash computed for
+their keys. Keys of type `String`, `Long`, `Integer` or `UUID` are hashed out of the box. For other types of keys two
+ways for computation of hashes are supported.
 
 If the implementation of the key class cannot or should not be changed, a hash provider can be configured. The supplied
 hasher can be used to compute and return a hash based on values of the given key.

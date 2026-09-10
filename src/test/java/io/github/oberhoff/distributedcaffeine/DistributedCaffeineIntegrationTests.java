@@ -3070,6 +3070,67 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(distributedCache.getIfPresent(key)).isNull();
         }
 
+        @DisplayName("Test that a population is not reverted by a delayed cache entry of another cache instance")
+        @Test
+        void test_DistributionMode_population_is_not_reverted_by_delayed_foreign_cache_entry() {
+            // A cache entry of another cache instance, written before this one populated the key and delivered
+            // after it. Nothing it carries says which of the two came first - its operation belongs to another
+            // cache instance and is not comparable here - so the one thing that can decide it is that this cache
+            // instance has not seen its own population come back yet.
+            // The echo is kept away rather than raced against: the receiver of the synchronizer is stubbed out, so
+            // what the change stream delivers never reaches the cache and the population stays unconfirmed
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withDistributionMode(POPULATION_AND_INVALIDATION),
+                    DistributedCaffeine::build);
+
+            Key key = Key.of(1);
+            Value staleValue = Value.of(1, "stale");
+            Value value = Value.of(1);
+
+            Adapter<Key, Value> adapter = getInstanceRegistry(distributedCache).getAdapter();
+            Synchronizer<Key, Value> synchronizer = readFieldValue(adapter, AbstractAdapter.class,
+                    "synchronizer", Synchronizer.class);
+            Receiver<Key, Value> receiver = injectSpy(synchronizer, AbstractSynchronizer.class,
+                    "receiver", Receiver.class);
+            doNothing().when(receiver).receiveCacheEntries(anyList());
+
+            distributedCache.put(key, value);
+
+            // the hash of the cache entry written for the population, so the delayed one addresses the same key
+            String hash;
+            try (Stream<CacheEntry<Key, Value>> cacheEntries = getFailable(() ->
+                    repositoryOf(distributedCache).streamCacheEntries(null, CACHED_GROUP, false))) {
+                hash = cacheEntries.findFirst().orElseThrow().getHash();
+            }
+
+            // the cache entry written for the population, to be handed over as its echo afterwards
+            CacheEntry<Key, Value> population;
+            try (Stream<CacheEntry<Key, Value>> cacheEntries = getFailable(() ->
+                    repositoryOf(distributedCache).streamCacheEntries(null, CACHED_GROUP, false))) {
+                population = cacheEntries.findFirst().orElseThrow();
+            }
+
+            CacheEntry<Key, Value> foreign = CacheEntry.of(
+                    hash,
+                    "otherCacheInstance:1",
+                    key,
+                    staleValue,
+                    CACHED,
+                    Instant.now());
+
+            getInstanceRegistry(distributedCache).getCacheManager()
+                    .receiveCacheEntries(List.of(foreign));
+
+            // the delayed cache entry takes the key while the population is still unconfirmed
+            assertThat(distributedCache.getIfPresent(key)).isEqualTo(staleValue);
+
+            getInstanceRegistry(distributedCache).getCacheManager()
+                    .receiveCacheEntries(List.of(population));
+
+            // and the echo of the population restores it, so the divergence lasts until the echo arrives
+            assertThat(distributedCache.getIfPresent(key)).isEqualTo(value);
+        }
+
         @DisplayName("Test that an eviction is not upheld by the delayed echo of the population preceding it")
         @Test
         void test_DistributionMode_eviction_is_not_upheld_by_delayed_own_population_echo() {
