@@ -24,7 +24,7 @@ import static java.util.Objects.requireNonNull;
 
 /**
  * Class to extend when implementing a custom adapter that manages distributed synchronization between cache instances
- * using an underlying store.
+ * and, optionally, persistence of cache entries.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache

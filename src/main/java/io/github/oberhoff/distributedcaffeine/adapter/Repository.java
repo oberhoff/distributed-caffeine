@@ -18,15 +18,13 @@ package io.github.oberhoff.distributedcaffeine.adapter;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Instant;
-import java.util.Collection;
 import java.util.Set;
 import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 
 /**
- * Interface representing a repository that manages distributed synchronization between cache instances using an
- * underlying store.
+ * Interface representing a repository that manages persistence of cache entries using an underlying store.
  * <p>
  * <b>Note:</b> Every operation must implicitly be restricted to a discriminator set via
  * {@link DiscriminatorAware#setDiscriminator(String)} and stored in a

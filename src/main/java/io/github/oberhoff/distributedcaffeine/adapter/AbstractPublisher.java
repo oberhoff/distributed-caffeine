@@ -20,7 +20,8 @@ import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Class to extend when implementing a custom publisher that distributes cache operations to other cache instances.
+ * Class to extend when implementing a custom publisher that manages distributed synchronization between cache
+ * instances.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache

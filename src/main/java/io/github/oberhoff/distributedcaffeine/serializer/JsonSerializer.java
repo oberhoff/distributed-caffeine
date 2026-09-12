@@ -24,8 +24,7 @@ package io.github.oberhoff.distributedcaffeine.serializer;
 public interface JsonSerializer<T> extends StringSerializer<T> {
 
     /**
-     * Indicates whether the JSON representation should be encoded as BSON or as string when persisted in the underlying
-     * store.
+     * Indicates whether the JSON representation should be encoded as BSON or as string.
      *
      * @return {@code true} for BSON encoding or {@code false} for string encoding
      */

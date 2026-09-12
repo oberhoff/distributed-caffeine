@@ -18,11 +18,10 @@ package io.github.oberhoff.distributedcaffeine.adapter;
 import java.util.List;
 
 /**
- * Interface representing a receiver that manages distributed synchronization between cache instances using an
- * underlying store.
+ * Interface representing a receiver that manages distributed synchronization between cache instances.
  * <p>
- * <b>Note:</b> Inbound changes of the underlying store are supposed to be passed on as cache entries by the
- * {@link Adapter} using the receiver.
+ * <b>Note:</b> Inbound cache operations are supposed to be passed on as cache entries by the {@link Adapter} using
+ * the receiver.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache

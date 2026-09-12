@@ -38,7 +38,8 @@ import java.util.Set;
 public interface DistributedPolicy<K, V> {
 
     /**
-     * Get the adapter that manages distributed synchronization between cache instances using an underlying store.
+     * Get the adapter that manages distributed synchronization between cache instances and, optionally, persistence of
+     * cache entries.
      *
      * @return the adapter
      */
@@ -60,7 +61,7 @@ public interface DistributedPolicy<K, V> {
      * Stops distributed synchronization for this cache instance. After stopping, changes to this cache instance are not
      * distributed to other cache instances, nor are changes to other cache instances distributed to this cache
      * instance. Therefore, this cache instance behaves like a cache instance without distributed synchronization
-     * functionality. This also releases the connection to underlying store if not shared.
+     * functionality. This also releases connections an adapter has established.
      */
     void stopSynchronization();
 

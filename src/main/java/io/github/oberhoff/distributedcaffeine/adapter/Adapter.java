@@ -18,8 +18,8 @@ package io.github.oberhoff.distributedcaffeine.adapter;
 import java.util.Optional;
 
 /**
- * Interface representing an adapter that manages distributed synchronization between cache instances using an
- * underlying store.
+ * Interface representing an adapter that manages distributed synchronization between cache instances and,
+ * optionally, persistence of cache entries.
  * <p>
  * <b>Note:</b> An adapter instance belongs to exactly one cache instance and cannot be shared between them.
  *

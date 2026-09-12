@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 /**
- * This package contains an adapter based on MongoDB as underlying store.
+ * This package contains an adapter based on MongoDB.
  *
  * @author Andreas Oberhoff
  * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>

@@ -18,8 +18,7 @@ package io.github.oberhoff.distributedcaffeine.adapter;
 import java.util.Collection;
 
 /**
- * Interface representing a publisher that manages distributed synchronization between cache instances using an
- * underlying store.
+ * Interface representing a publisher that manages distributed synchronization between cache instances.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
@@ -29,7 +28,7 @@ import java.util.Collection;
 public interface Publisher<K, V> extends IdentifierAware, DiscriminatorAware, SerializerAware<K, V> {
 
     /**
-     * Publishes cache entries to other cache instances.
+     * Publishes cache entries for distributed synchronization between cache instances.
      * <p>
      * <b>Note:</b> If persistence is supported, discriminators should be handled in accordance with the associated
      * {@link Repository}.

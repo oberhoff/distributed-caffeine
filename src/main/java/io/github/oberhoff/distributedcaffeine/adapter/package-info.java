@@ -14,7 +14,14 @@
  * limitations under the License.
  */
 /**
- * This package contains classes and interfaces used to implement adapters for underlying stores.
+ * This package contains classes and interfaces used to implement adapters that manages distributed synchronization
+ * between cache instances and, optionally, persistence of cache entries.
+ * <p>
+ * <b>Note:</b> An adapter may use separate technologies for distribution and persistence, provided that every
+ * mutation enters through a single serialization point and the other side is derived from it. Either direction
+ * works: a store whose change log feeds distribution, or a log whose consumer maintains the store. Writing to both
+ * independently is not supported, because two independent orders deciding the same cache entry cannot be
+ * reconciled afterwards.
  *
  * @author Andreas Oberhoff
  * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>

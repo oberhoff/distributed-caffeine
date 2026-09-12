@@ -16,8 +16,8 @@
 package io.github.oberhoff.distributedcaffeine.adapter;
 
 /**
- * Class to extend when implementing a custom repository that manages distributed synchronization between cache
- * instances using an underlying store.
+ * Class to extend when implementing a custom repository that manages persistence of cache entries using an underlying
+ * store.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache

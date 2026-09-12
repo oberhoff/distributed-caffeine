@@ -23,7 +23,7 @@ import static io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware.
 import static java.util.Objects.requireNonNull;
 
 /**
- * Implementation of an adapter based on MongoDB as the underlying store.
+ * Implementation of an adapter based on MongoDB.
  * <p>
  * Instances are constructed using the builder pattern instance returned by
  * {@link MongoAdapter#newBuilder(MongoClient, String, String)}.

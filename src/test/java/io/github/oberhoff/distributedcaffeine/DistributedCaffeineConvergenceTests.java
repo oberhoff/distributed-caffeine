@@ -26,6 +26,7 @@ import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
 import io.github.oberhoff.distributedcaffeine.common.Key;
 import io.github.oberhoff.distributedcaffeine.common.Value;
+import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -480,7 +481,7 @@ class DistributedCaffeineConvergenceTests {
             }
 
             @Override
-            public void publishCacheEntries(Collection<CacheEntry<K, V>> cacheEntries) {
+            public void publishCacheEntries(@NonNull Collection<CacheEntry<K, V>> cacheEntries) {
                 // retained under the same uniqueness a real store enforces, the discriminator and the hash - one
                 // record per key, so publishing the same key again replaces what was there
                 cacheEntries.forEach(cacheEntry -> broker.retained.put(cacheEntry.getHash(), cacheEntry));
