@@ -55,6 +55,8 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
 
     @SuppressWarnings({"java:S116", "FieldMayBeFinal", "CanBeFinal"}) // not static final for testing
     private Duration MAINTENANCE_INTERVAL = Duration.ofMinutes(1);
+    // How far either side of the interval a maintenance run may be moved
+    private static final double MAINTENANCE_JITTER_FACTOR = 0.2;
     // How long a write is treated as still being on its way to the other cache instances. Shared with
     // InternalCacheManager, which remembers an invalidation for exactly as long: what is kept here of a record
     // written for distribution only says how long a cache entry can still be delivered, and that is how long
@@ -130,6 +132,11 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
                 .withDelay(MAINTENANCE_INTERVAL)
                 .withDelayFnOn(context -> MAINTENANCE_INTERVAL.multipliedBy(min(context.getAttemptCount(), 10)),
                         Throwable.class)
+                // Cache instances started together would otherwise stay in lockstep for as long as they run, each
+                // of them issuing the same commands against the data store at the same moment. A factor rather
+                // than a fixed duration keeps the spread proportional to whatever the interval is, and Failsafe
+                // applies it to the computed delay above as well, so a retry after a failure is spread the same way
+                .withJitter(MAINTENANCE_JITTER_FACTOR)
                 .onRetryScheduled(event -> Optional.ofNullable(event.getLastException())
                         .ifPresent(throwable -> logger.log(Level.WARNING,
                                 format("Maintenance failed for cache at '%s'. Retrying...",
@@ -150,7 +157,23 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
     @SuppressWarnings("SameParameterValue")
     private void processMaintenance(Duration distributionDuration) {
         if (isActivated()) {
-            // TODO check for real activities
+            // Deliberately unconditional, rather than skipped when this cache instance has been idle: every step
+            // below but the first one works on the data store, whose records are written by all cache instances -
+            // including ones that have since shut down and ones that wrote before this cache instance started -
+            // so what happened locally is no evidence about what is there to collect. Leaving each writer to
+            // collect after itself fails in three ways: a time-based step falls due long after the write that
+            // made it due, so the cycle skipped for being idle is exactly the one that should prune; a cache
+            // instance that writes and then exits leaves records nobody is accountable for; and a cache instance
+            // that only reads never has anything to report while the leftovers of an earlier run stay. Counting
+            // what arrives does not close the gap either, because only what the distribution mode considers is
+            // received at all, and nothing is while synchronization is stopped.
+            // There is little to save in any case: a step that is not configured is skipped already, a size-based
+            // one leads with a count and reads nothing further unless it is over, and what is left is a single
+            // indexed command each, matching nothing - and therefore writing nothing any cache instance has to
+            // receive - when there is nothing to do.
+            // Where reporting activities would pay is a pass reading the data store back in full to reconcile
+            // what is held here: that one is expensive, and what it reconciles is this cache instance's own
+            // content, which is precisely what its activities are evidence about
             processCleanUp();
             processCachedEntryPersistenceByTime(distributionDuration);
             processCachedEntryPersistenceBySize(distributionDuration);
