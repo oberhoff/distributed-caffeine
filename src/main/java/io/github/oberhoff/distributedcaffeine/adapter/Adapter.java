@@ -30,7 +30,7 @@ import java.util.Optional;
 public interface Adapter<K, V> extends StateAware, SerializerAware<K, V>, ReceiverAware<K, V> {
 
     /**
-     * Returns the publisher of this adapter
+     * Returns the publisher of this adapter.
      *
      * @return the publisher
      */
@@ -44,14 +44,14 @@ public interface Adapter<K, V> extends StateAware, SerializerAware<K, V>, Receiv
     Optional<Repository<K, V>> getRepository();
 
     /**
-     * Returns the identifier of this adapter
+     * Returns the identifier of this adapter.
      *
      * @return the identifier
      */
     String getIdentifier();
 
     /**
-     * Returns the discriminator of this adapter
+     * Returns the discriminator of this adapter.
      *
      * @return the discriminator
      */
