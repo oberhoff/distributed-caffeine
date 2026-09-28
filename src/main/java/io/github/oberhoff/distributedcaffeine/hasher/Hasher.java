@@ -175,6 +175,20 @@ public final class Hasher implements HashSink {
     }
 
     @Override
+    public HashSink putCharsUTF8(CharSequence c) {
+        hashStream128.putCharsUTF8(c);
+        hasData = true;
+        return this;
+    }
+
+    @Override
+    public HashSink putStringUTF8(String s) {
+        hashStream128.putStringUTF8(s);
+        hasData = true;
+        return this;
+    }
+
+    @Override
     public Hasher putCharArray(char[] x) {
         hashStream128.putCharArray(x);
         hasData = true;
