@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
 
 import com.mongodb.MongoClientException;
+import com.mongodb.MongoCommandException;
 import com.mongodb.MongoTimeoutException;
 import com.mongodb.client.ChangeStreamIterable;
 import com.mongodb.client.MongoChangeStreamCursor;
@@ -64,6 +65,11 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
     private static final Logger LOGGER = System.getLogger(MongoSynchronizer.class.getName());
 
     private static final Duration WATCHER_INTERVAL = Duration.ofSeconds(1);
+    // events already buffered by the cursor are handed over together - bounded so that a backlog cannot hold the
+    // synchronization lock of the cache for arbitrarily long
+    private static final int MAXIMUM_BATCH_SIZE = 100;
+    // "ChangeStreamHistoryLost": the resume position has fallen out of the oplog and never becomes valid again
+    private static final int CHANGE_STREAM_HISTORY_LOST = 286;
     private static final String DOCUMENT_KEY = "documentKey";
     private static final String CLUSTER_TIME = "clusterTime";
     private static final String OPERATION_TYPE = "operationType";
@@ -96,6 +102,12 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
 
     @Override
     public void activate() {
+        // already watching is nothing to do: the future joined below is the one this very activation is running,
+        // and it completes only once watching stops, so joining it here would wait for itself
+        if (isActivated()) {
+            return;
+        }
+
         // wait for completion if required
         Optional.ofNullable(watcherCompletableFuture)
                 .filter(future -> !future.isDone())
@@ -200,7 +212,16 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
             if (isStopped()) {
                 return;
             }
-            watchState.set(WatchState.STARTED);
+            // Watching having started once before means this cursor replaces one that failed, so cache entries may
+            // have been missed: an event whose document was swept in the meantime resolves to no full document and
+            // is dropped by the server-side match on the discriminator, so it never arrives and no replay can make
+            // it good. Whether that actually happened cannot be told from here - the stream that skipped it looks
+            // exactly like one with nothing to deliver - which is why the possibility is what gets reported.
+            // Reported once the new cursor is live, so that changes arriving while the cache instance recovers are
+            // delivered rather than missed in turn, which is the order activation uses for the same reason
+            if (watchState.getAndSet(WatchState.STARTED) == WatchState.STARTED) {
+                receiver.receiveSynchronizationRestart();
+            }
             while (!isStopped()) {
                 ChangeStreamDocument<Document> changeStreamDocument = cursor.tryNext();
                 // additional check necessary because tryNext() seems to be paced (blocked for a while)
@@ -216,28 +237,70 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
                         resumeToken.set(postBatchResumeToken);
                     }
                 } else if (!isStopped()) {
-                    processChangeStreamDocument(changeStreamDocument);
-                    // advance only now that the event has been applied. Resuming happens strictly *after* the
-                    // recorded position, so advancing beforehand would drop an event whose processing failed.
-                    // An event always carries its own position, so no null check is needed here
-                    resumeToken.set(changeStreamDocument.getResumeToken());
+                    // whatever else the cursor already holds is taken along, so that a burst of changes is handed
+                    // over as one batch and costs one synchronization lock of the cache instead of one per event.
+                    // Not a micro-optimization: that lock is fair, so one acquisition per event yields one event
+                    // per round-trip of a writer waiting on it, which measures at the writer's own rate against
+                    // two orders of magnitude more for the same entries handed over in batches. A cache instance
+                    // receiving from more than one busy peer would fall behind for good at the former, and
+                    // falling behind is what makes a swept cache entry undeliverable in the first place.
+                    // available() is what keeps that free of charge: it counts what can be taken without going to
+                    // the server, so nothing here waits for an event that has not arrived yet - polling for one is
+                    // what is paced, and doing that before handing over what is already in hand would delay every
+                    // batch by that pacing
+                    List<ChangeStreamDocument<Document>> changeStreamDocuments = new ArrayList<>();
+                    changeStreamDocuments.add(changeStreamDocument);
+                    while (changeStreamDocuments.size() < MAXIMUM_BATCH_SIZE && cursor.available() > 0
+                            && !isStopped()) {
+                        ChangeStreamDocument<Document> bufferedChangeStreamDocument = cursor.tryNext();
+                        if (isNull(bufferedChangeStreamDocument)) {
+                            break;
+                        }
+                        changeStreamDocuments.add(bufferedChangeStreamDocument);
+                    }
+                    processChangeStreamDocuments(changeStreamDocuments);
+                    // advance only now that the events have been applied, and to the last of them. Resuming happens
+                    // strictly *after* the recorded position, so advancing beforehand would drop events whose
+                    // processing failed - a batch failing part way through is repeated as a whole, exactly as a
+                    // single event was before. An event always carries its own position, so no null check is needed
+                    resumeToken.set(changeStreamDocuments.get(changeStreamDocuments.size() - 1).getResumeToken());
                 }
             }
+        } catch (MongoCommandException e) {
+            // A resume position that has fallen out of the oplog never becomes valid again, so retrying with it
+            // would repeat this failure for as long as the cache instance lives - while isActivated() keeps
+            // reporting that watching is fine, because the retry policy holds the started state through failures.
+            // Giving the position up lets the retry open a fresh cursor, which starts at "now": watching recovers,
+            // the changes made in between do not, which is why this is logged rather than passed over silently
+            if (e.getErrorCode() == CHANGE_STREAM_HISTORY_LOST) {
+                resumeToken.set(null);
+                LOGGER.log(Level.WARNING, format("Resume position lost for cache at '%s'. Watching continues "
+                        + "without it, so changes made in the meantime are not received", identifier));
+            }
+            throw e;
         }
     }
 
-    private void processChangeStreamDocument(ChangeStreamDocument<Document> changeStreamDocument) {
-        OperationType operationType = changeStreamDocument.getOperationType();
-        if (nonNull(changeStreamDocument.getFullDocument()) && nonNull(operationType)
-                && (operationType.equals(INSERT) || operationType.equals(UPDATE))) {
-            // skipped (logged and left out) rather than thrown on, as the contract of a synchronizer asks for: the
-            // resume token is advanced only once an event has been applied, so failing here would make the watcher
-            // retry that very event indefinitely
-            CacheEntry<K, V> cacheEntry = toCacheEntryOrNull(keySerializer, valueSerializer,
-                    changeStreamDocument.getFullDocument(), LOGGER, identifier);
-            Optional.ofNullable(cacheEntry)
-                    .map(List::of)
-                    .ifPresent(cacheEntries -> receiver.receiveCacheEntries(cacheEntries));
+    private void processChangeStreamDocuments(List<ChangeStreamDocument<Document>> changeStreamDocuments) {
+        List<CacheEntry<K, V>> cacheEntries = new ArrayList<>(changeStreamDocuments.size());
+        for (ChangeStreamDocument<Document> changeStreamDocument : changeStreamDocuments) {
+            OperationType operationType = changeStreamDocument.getOperationType();
+            Document fullDocument = changeStreamDocument.getFullDocument();
+            if (nonNull(fullDocument) && nonNull(operationType)
+                    && (operationType.equals(INSERT) || operationType.equals(UPDATE))) {
+                // skipped (logged and left out) rather than thrown on, as the contract of a synchronizer asks for:
+                // the resume token is advanced only once the events have been applied, so failing here would make
+                // the watcher retry that very batch indefinitely
+                CacheEntry<K, V> cacheEntry = toCacheEntryOrNull(keySerializer, valueSerializer,
+                        fullDocument, LOGGER, identifier);
+                if (nonNull(cacheEntry)) {
+                    cacheEntries.add(cacheEntry);
+                }
+            }
+        }
+        // handed over in the order the underlying store produced them, which is the order they were polled in
+        if (!cacheEntries.isEmpty()) {
+            receiver.receiveCacheEntries(cacheEntries);
         }
     }
 

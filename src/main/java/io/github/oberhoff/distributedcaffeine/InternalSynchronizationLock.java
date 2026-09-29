@@ -29,7 +29,13 @@ class InternalSynchronizationLock {
     // replica set, throughput is unchanged (if anything slightly better) while the worst case improves by more
     // than an order of magnitude - barging let a writer that had just released re-acquire ahead of the queue and
     // starve the waiting ones, which cost over a second at 16 concurrent writers against 38 ms fair. It also made
-    // the median look fast by describing only the writers that kept winning
+    // the median look fast by describing only the writers that kept winning.
+    // What fairness costs in return is worth knowing before taking this lock in a loop: handoff alternates, so
+    // whoever acquires it once per item gets exactly one item per round-trip of whoever else is waiting, however
+    // much work is pending. Measured with one writer contending, handing inbound cache entries over one at a time
+    // held delivery to the writer's own rate, while handing the same entries over in batches was faster by two
+    // orders of magnitude. Anything arriving in quantity is therefore to be batched before it gets here, not
+    // one item per acquisition
     InternalSynchronizationLock() {
         lock = new ReentrantLock(true);
     }

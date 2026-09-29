@@ -17,6 +17,7 @@ package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
 
 import com.mongodb.ErrorCategory;
 import com.mongodb.MongoBulkWriteException;
+import com.mongodb.WriteConcern;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoCursor;
@@ -84,7 +85,15 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
     private final MongoCollection<Document> mongoCollection;
 
     MongoRepository(MongoClient mongoClient, String databaseName, String collectionName) {
-        this.mongoCollection = mongoClient.getDatabase(databaseName).getCollection(collectionName);
+        // Majority rather than whatever the client brings, because anything weaker is not a cheaper version of the
+        // same thing here: change streams notify only for majority-committed changes, so a write that is
+        // acknowledged earlier is not distributed any earlier either - it is only acknowledged before it is certain
+        // to be distributable at all. Should it then be rolled back, no other cache instance ever saw it, while the
+        // one that wrote it is already holding it locally, and nothing says so until that key is written again.
+        // Not a precaution against misconfiguration alone: before MongoDB 5.0 the server's own default is w:1, and
+        // a client shared with an application that chose w:1 would hand it over on any version
+        this.mongoCollection = mongoClient.getDatabase(databaseName).getCollection(collectionName)
+                .withWriteConcern(WriteConcern.MAJORITY);
         ensureIndexes();
     }
 

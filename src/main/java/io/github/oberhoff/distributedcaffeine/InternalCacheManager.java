@@ -156,17 +156,24 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     }
 
     void activate() {
-        // Renewing the identifier is what invalidates everything held from before, without touching a single value:
-        // none of it is of this activation any more, so nothing published from here on can rest on it and
-        // synchronizing keeps only what the data store confirms. Which also reaches what no pass over the cache
-        // could - a value already evicted, whose eviction is reported asynchronously and would otherwise be
-        // distributed as if it had taken place after starting again
+        renewActivation();
+        isActivated.set(true);
+    }
+
+    // Renewing the identifier is what invalidates everything held from before, without touching a single value:
+    // none of it is of this activation any more, so nothing published from here on can rest on it and
+    // synchronizing keeps only what the data store confirms. Which also reaches what no pass over the cache
+    // could - a value already evicted, whose eviction is reported asynchronously and would otherwise be
+    // distributed as if it had taken place after starting again.
+    // Separate from activating because recovering from a loss of synchronization needs exactly this and nothing
+    // else: the cache instance is already activated by then, so reporting it activated again would say something
+    // that is not true of it and is not meant by it
+    private void renewActivation() {
         activationId.set(Long.toHexString(ThreadLocalRandom.current().nextLong()));
         // nothing published before this activation is one of its publishes, so none of it may hold an arriving
         // cache entry back any more
         operations.invalidateAll();
         commandOperation.set(0);
-        isActivated.set(true);
     }
 
     void deactivate() {
@@ -540,6 +547,33 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         receiveCacheEntries(cacheEntries.stream(), Arrival.DELIVERED);
     }
 
+    @Override
+    public void receiveSynchronizationRestart() {
+        // What the adapter reports is a fact about itself - receiving restarted - and what that means is this
+        // side's to decide, because only here is it known what a cache entry missed in the meantime would cost.
+        // Reconciling instead of trusting what the resumed stream delivers, because a cache entry missed while
+        // synchronization was interrupted leaves nothing behind that a replay could report: the event carrying it
+        // is simply not delivered. Renewing the identifier marks everything held from before and synchronizing
+        // then keeps only what the data store confirms - the same two steps activating takes, and for the same
+        // reason, rather than a second mechanism beside them.
+        // Both the check and the recovery happen under the lock, so that deactivating in between cannot be
+        // overtaken by what follows it
+        synchronizationLock.runLocked(() -> {
+            if (isActivated()) {
+                long retainedBefore = cache.estimatedSize();
+                renewActivation();
+                synchronizeCacheEntries();
+                // Reported because what it costs is visible to whoever uses this cache and explains nothing about
+                // itself: without persistence of cached entries the data store confirms none of them, so the cache
+                // is left empty and every read misses until it fills again. Logged after the fact so that the
+                // counts are what actually happened rather than what was about to be attempted
+                logger.log(Level.WARNING, format("Synchronization was interrupted for cache at '%s', so cache "
+                                + "entries not confirmed by the underlying store were removed (%d of %d retained)",
+                        identifier, cache.estimatedSize(), retainedBefore));
+            }
+        });
+    }
+
     private void receiveCacheEntries(Stream<CacheEntry<K, V>> cacheEntries, Arrival arrival) {
         if (isActivated()) {
             // Applied one at a time rather than collected and applied afterwards, so that every cache entry is
@@ -599,11 +633,13 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         }
     }
 
-    // while synchronization was stopped the cache kept serving locally, so local writes never reached the data store
-    // and changes made elsewhere never arrived. Receiving below only ever adds what the store holds, which would
-    // leave entries the store no longer backs in place to be served as if they were still valid. Everything present
-    // is marked by then (stopping and activating do that), so what the store still knows clears its mark again and
-    // only what stays marked is removed here - in place, which keeps the cache readable throughout instead of
+    // whenever synchronization was not in effect the cache kept serving locally while changes made elsewhere did
+    // not arrive - either because it was stopped, in which case local writes never reached the data store either,
+    // or because watching failed, in which case they did and only the inbound half was missing. Receiving below
+    // only ever adds what the store holds, which would leave entries the store no longer backs in place to be
+    // served as if they were still valid. Everything present is marked by then (stopping, activating and
+    // recovering from a loss of synchronization all do that), so what the store still knows clears its mark again
+    // and only what stays marked is removed here - in place, which keeps the cache readable throughout instead of
     // replacing it with an empty one that answers every read with a miss
     void synchronizeCacheEntries() {
         if (isActivated()) {

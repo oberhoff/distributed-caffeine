@@ -102,6 +102,19 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
     }
 
     void activate() {
+        // Already running is nothing to do, and must not be treated as something to do: the future joined below
+        // completes only once this worker stops, so activating it a second time would wait for what cannot happen
+        // while the caller holds the synchronization lock. That is reachable whenever a cache instance is only
+        // partially activated - its adapter stopped on its own, for instance, which the adapter's own API allows -
+        // because activating a cache instance is guarded by all of its components being activated, not by each of
+        // them being so.
+        // Starting a component is idempotent, in other words, while what belongs to starting synchronization as a
+        // whole - beginning a new activation and reconciling against the data store afterwards - is the cache
+        // manager's part and stays unconditional
+        if (isActivated.get()) {
+            return;
+        }
+
         // wait for completion if required
         if (!maintenanceCompletableFuture.isDone()) {
             maintenanceCompletableFuture.join();

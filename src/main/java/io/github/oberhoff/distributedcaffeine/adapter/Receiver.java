@@ -21,7 +21,8 @@ import java.util.List;
  * Interface representing a receiver that manages distributed synchronization between cache instances.
  * <p>
  * <b>Note:</b> Inbound cache operations are supposed to be passed on as cache entries by the {@link Adapter} using
- * the receiver.
+ * the receiver. Beside them, it takes what the adapter reports about its own receiving, which is a matter of the
+ * adapter's state rather than of any cache entry.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
@@ -35,6 +36,16 @@ public interface Receiver<K, V> {
      * @param cacheEntries the cache entries to be received
      */
     void receiveCacheEntries(List<CacheEntry<K, V>> cacheEntries);
+
+    /**
+     * Receives the information that inbound synchronization was interrupted and has restarted, so that cache
+     * entries of the underlying store may have been missed in the meantime.
+     * <p>
+     * <b>Note:</b> This is supposed to be called by the {@link Adapter} whenever it resumes receiving after a
+     * failure, but not when it starts receiving for the first time. Whether anything was actually missed cannot be
+     * told apart from nothing having happened, so what is reported is the possibility rather than the fact.
+     */
+    void receiveSynchronizationRestart();
 
     // TODO list of statuses in relation of distribution mode for more efficient receiving
 }

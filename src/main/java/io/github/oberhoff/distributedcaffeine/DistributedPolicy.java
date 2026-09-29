@@ -54,6 +54,12 @@ public interface DistributedPolicy<K, V> {
      * (and a {@link DistributionMode} that includes population is configured but without configuring a cold start
      * explicitly), those retained cache entries from the underlying store are synchronized into this cache instance
      * with priority, so that previously existing cache entries might be overwritten or even removed.
+     * <p>
+     * Without such a configuration nothing is read back, so no cache entry can be confirmed by the underlying store
+     * and all of them are removed instead, leaving this cache instance to continue with an empty cache. The same
+     * applies whenever synchronization is restored after an interruption, which happens on its own without this
+     * method being called, because a cache entry missed in the meantime cannot be told apart from one that never
+     * changed.
      */
     void startSynchronization();
 

@@ -26,7 +26,7 @@ import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
 import io.github.oberhoff.distributedcaffeine.common.Key;
 import io.github.oberhoff.distributedcaffeine.common.Value;
-import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -92,7 +92,7 @@ class DistributedCaffeineConvergenceTests {
         for (int instance = 0; instance < INSTANCES; instance++) {
             AbstractAdapter<Key, Value> adapter = broker.newAdapter("in-memory-" + instance);
             adapters.add(adapter);
-            caches.add(DistributedCaffeine.<Key, Value>newBuilder(adapter)
+            caches.add(DistributedCaffeine.newBuilder(adapter)
                     .withDistributionMode(POPULATION_AND_INVALIDATION)
                     .build());
         }
@@ -136,7 +136,7 @@ class DistributedCaffeineConvergenceTests {
         int maximumSize = 2_000;
         InMemoryBroker<Key, Value> broker = new InMemoryBroker<>();
         AbstractAdapter<Key, Value> adapter = broker.newAdapter("in-memory-restore");
-        DistributedCache<Key, Value> cache = DistributedCaffeine.<Key, Value>newBuilder(adapter)
+        DistributedCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
                 // evictions have to be part of it, because cache residency alongside an eviction policy says
                 // residency is a property of all the cache instances rather than of each one
                 .withDistributionMode(POPULATION_AND_INVALIDATION_AND_EVICTION)
@@ -257,12 +257,12 @@ class DistributedCaffeineConvergenceTests {
             Set<Key> removed = ConcurrentHashMap.newKeySet();
             InMemoryBroker<Key, Value> broker = new InMemoryBroker<>();
             AbstractAdapter<Key, Value> adapter = broker.newAdapter("in-memory-accounting-" + round);
-            DistributedCache<Key, Value> cache = DistributedCaffeine.<Key, Value>newBuilder(adapter)
+            DistributedCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
                     .withDistributionMode(POPULATION_AND_INVALIDATION_AND_EVICTION)
                     .withCaffeine(Caffeine.newBuilder()
                             .maximumSize(maximumSize)
                             .removalListener((Key key, Value value, RemovalCause cause) -> {
-                                if (key != null && cause != RemovalCause.REPLACED) {
+                                if (cause != RemovalCause.REPLACED) {
                                     removed.add(key);
                                 }
                             }))
@@ -286,9 +286,7 @@ class DistributedCaffeineConvergenceTests {
                                         cache.put(key, Value.of(key.getId(), "put"));
                                     }
                                     case 1 -> cache.invalidate(key);
-                                    default -> {
-                                        var unusedValue = cache.getIfPresent(key);
-                                    }
+                                    default -> cache.getIfPresent(key);
                                 }
                             }
                         }))
@@ -321,7 +319,7 @@ class DistributedCaffeineConvergenceTests {
     // a cache instance that reads the data store back when it is activated, which is what persistence of cached
     // entries with cache residency asks for - and evictions have to be distributed alongside it
     private DistributedCache<Key, Value> restorableCache(AbstractAdapter<Key, Value> adapter, int maximumSize) {
-        return DistributedCaffeine.<Key, Value>newBuilder(adapter)
+        return DistributedCaffeine.newBuilder(adapter)
                 .withDistributionMode(POPULATION_AND_INVALIDATION_AND_EVICTION)
                 .withCaffeine(Caffeine.newBuilder()
                         .executor(Runnable::run)
@@ -382,6 +380,9 @@ class DistributedCaffeineConvergenceTests {
      * decides by itself, and which no test can steer, is here a sequence of explicit steps, so an interleaving that
      * would take a stress run to stumble upon can be written down (see {@link #deliver}).
      */
+    // null-marked like the adapter interfaces it implements, so the overrides below line up with them instead of
+    // leaving their nullness unstated
+    @NullMarked
     private static final class InMemoryBroker<K, V> {
 
         private final List<CacheEntry<K, V>> log;
@@ -481,7 +482,7 @@ class DistributedCaffeineConvergenceTests {
             }
 
             @Override
-            public void publishCacheEntries(@NonNull Collection<CacheEntry<K, V>> cacheEntries) {
+            public void publishCacheEntries(Collection<CacheEntry<K, V>> cacheEntries) {
                 // retained under the same uniqueness a real store enforces, the discriminator and the hash - one
                 // record per key, so publishing the same key again replaces what was there
                 cacheEntries.forEach(cacheEntry -> broker.retained.put(cacheEntry.getHash(), cacheEntry));

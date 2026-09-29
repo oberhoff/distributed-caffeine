@@ -25,6 +25,7 @@ import com.github.benmanes.caffeine.cache.RemovalListener;
 import com.mongodb.MongoBulkWriteException;
 import com.mongodb.MongoException;
 import com.mongodb.ServerAddress;
+import com.mongodb.WriteConcern;
 import com.mongodb.bulk.BulkWriteError;
 import com.mongodb.bulk.BulkWriteResult;
 import com.mongodb.client.ChangeStreamIterable;
@@ -40,6 +41,7 @@ import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
+import io.github.oberhoff.distributedcaffeine.adapter.Receiver;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.adapter.Synchronizer;
 import io.github.oberhoff.distributedcaffeine.common.DistributedCaffeineCommonTestInstance;
@@ -135,8 +137,8 @@ final class DistributedCaffeineUnitTests {
             when(publishingAdapter.getIdentifier()).thenReturn("broker.topic");
             when(publishingAdapter.getRepository()).thenReturn(Optional.empty());
             Stream.<Configurer<PersistenceConfigurer>>of(
-                            configurer -> configurer.withCachedEntries(tier ->
-                                    tier.withCacheResidency()),
+                            configurer -> configurer.withCachedEntries(
+                                    CachedEntryPersistenceConfigurer::withCacheResidency),
                             configurer -> configurer.withCachedEntries(tier ->
                                     tier.withMaximumSize(1)),
                             configurer -> configurer.withEvictedEntries(tier ->
@@ -503,6 +505,9 @@ final class DistributedCaffeineUnitTests {
 
         @DisplayName("that every key is either still held or was reported as removed, under the full operation mix")
         @Test
+        // the reads below are driven for what they do to the cache, not for what they return, so discarding their
+        // result is the point rather than an oversight
+        @SuppressWarnings({"CheckReturnValue", "ResultOfMethodCallIgnored"})
         void test_Caffeine_accounts_for_every_key_under_the_full_operation_mix() throws Exception {
             // The control above only writes, and it accounts for every key. This one adds the paths the stress
             // test also drives - loading through a cache loader, refreshing after every write, computing through
@@ -532,7 +537,7 @@ final class DistributedCaffeineUnitTests {
                             .expireAfter(Expiry.creating((Integer key, String value) -> FOREVER.getDuration()))
                             .refreshAfterWrite(Duration.ofNanos(1))
                             .removalListener((Integer key, String value, RemovalCause cause) -> {
-                                if (key != null && cause != RemovalCause.REPLACED) {
+                                if (cause != RemovalCause.REPLACED) {
                                     removed.add(key);
                                 }
                             })
@@ -549,14 +554,9 @@ final class DistributedCaffeineUnitTests {
                                             touched.add(id);
                                             cache.put(id, "put-" + id);
                                         }
-                                        case 1 -> {
-                                            var unusedValue = cache.get(id);
-                                        }
-                                        case 2 -> {
-                                            // a set, so the two ids colliding is not a duplicate element
-                                            var unusedValues = cache.getAll(
-                                                    new HashSet<>(List.of(id, random.nextInt(keys))));
-                                        }
+                                        case 1 -> cache.get(id);
+                                        // a set, so the two ids colliding is not a duplicate element
+                                        case 2 -> cache.getAll(new HashSet<>(List.of(id, random.nextInt(keys))));
                                         case 3 -> cache.invalidate(id);
                                         default -> cache.asMap().remove(id);
                                     }
@@ -611,7 +611,7 @@ final class DistributedCaffeineUnitTests {
                         .expireAfter(Expiry.creating((Integer key, String value) -> FOREVER.getDuration()))
                         .removalListener((Integer key, String value, RemovalCause cause) -> {
                             // a replacement leaves the key in place, so it is not a removal of the key
-                            if (key != null && cause != RemovalCause.REPLACED) {
+                            if (cause != RemovalCause.REPLACED) {
                                 removed.add(key);
                             }
                         })
@@ -958,8 +958,10 @@ final class DistributedCaffeineUnitTests {
         }
 
         private MongoCollection<Document> mongoCollectionOf(MongoClient mongoClient) {
-            // deep stubs return the same collection mock the repository resolves for these names
-            return mongoClient.getDatabase(DATABASE_NAME).getCollection(COLLECTION_NAME);
+            // deep stubs return the same collection mock the repository resolves for these names - the write
+            // concern it pins included, which resolves a collection of its own that the calls below land on
+            return mongoClient.getDatabase(DATABASE_NAME).getCollection(COLLECTION_NAME)
+                    .withWriteConcern(WriteConcern.MAJORITY);
         }
 
         // MongoRepository is package-private in another package, so it is constructed reflectively - but Repository
@@ -1020,19 +1022,27 @@ final class DistributedCaffeineUnitTests {
             MongoException connectionLost = new MongoException("connection lost");
             when(cursor.tryNext()).thenReturn(null).thenThrow(connectionLost);
 
+            Receiver<Key, Value> receiver = mock();
+
             Synchronizer<Key, Value> synchronizer = synchronizerOf(mongoClient);
+            synchronizer.setReceiver(receiver);
             startWatching(synchronizer);
 
             // the first attempt has nothing to resume from, so it watches from wherever the stream currently is
             assertThatThrownBy(() -> processChangeStreams(synchronizer))
                     .isSameAs(connectionLost);
             verify(changeStreamIterable, never()).resumeAfter(any());
+            // and it is a first start rather than a reopen, so nothing can have been missed yet
+            verify(receiver, never()).receiveSynchronizationRestart();
 
             // the retry must not start over at "now", which would skip everything written while watching was down.
             // It resumes strictly after the position the failed attempt saw while idle
             assertThatThrownBy(() -> processChangeStreams(synchronizer))
                     .isSameAs(connectionLost);
             verify(changeStreamIterable, times(1)).resumeAfter(tokenWhileIdle);
+            // resuming is a reopen, and an event whose document was swept while watching was down would not be
+            // delivered by it, so the possibility of having missed one is reported exactly once
+            verify(receiver, times(1)).receiveSynchronizationRestart();
         }
 
         // MongoSynchronizer and its watch loop are package-private in another package, so both are reached

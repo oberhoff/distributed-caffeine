@@ -1113,6 +1113,51 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(cacheManager.isActivated()).isFalse();
         }
 
+        @DisplayName("Test that starting synchronization recovers a partially activated cache instance")
+        @Test
+        void test_DistributedCaffeine_starting_synchronization_recovers_partial_activation() {
+            // The check guarding activation requires all three components, so a cache instance whose adapter was
+            // stopped on its own - which its public API allows - no longer counts as activated and starting
+            // synchronization runs the whole body again, over components that never stopped. Activating the
+            // maintenance worker a second time joins the worker future of the first activation, which completes
+            // only once that worker is deactivated, so it waits for something that cannot happen while it is
+            // holding the synchronization lock - and with that lock held no cache operation of this instance can
+            // proceed either.
+            // Started on a separate thread for exactly that reason: waiting for it here would park the thread
+            // running this test inside that lock, and nothing after it - including tearing the instance down
+            // again - could run.
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+            InternalInstanceRegistry<Key, Value> instanceRegistry = getInstanceRegistry(distributedCache);
+            InternalMaintenanceWorker<Key, Value> maintenanceWorker = instanceRegistry.getMaintenanceWorker();
+
+            assertThat(instanceRegistry.isActivated()).isTrue();
+
+            instanceRegistry.getAdapter().deactivate();
+
+            // the state this is about, asserted rather than assumed: partially activated, so the check guarding
+            // activation lets the body through while the maintenance worker is still running
+            assertThat(instanceRegistry.isActivated()).isFalse();
+            assertThat(maintenanceWorker.isActivated()).isTrue();
+
+            CompletableFuture<Void> startSynchronization = CompletableFuture.runAsync(() ->
+                    distributedCache.distributedPolicy().startSynchronization());
+
+            try {
+                assertThat(startSynchronization).succeedsWithin(WAITING_DURATION);
+                assertThat(instanceRegistry.isActivated()).isTrue();
+            } finally {
+                // whatever the outcome above, the thread must not stay parked in the lock: deactivating cancels
+                // the very future it is joining, which fails that activation and unwinds it - which is also what
+                // its rollback is for, so the instance is left stopped rather than half started
+                maintenanceWorker.deactivate();
+                await("release of the parked activation")
+                        .atMost(WAITING_DURATION)
+                        .untilAsserted(() -> assertThat(startSynchronization).isDone());
+            }
+        }
+
         @DisplayName("Test refresh() with a same-thread executor")
         @Test
         void test_DistributedLoadingCache_refresh_with_same_thread_executor() {
@@ -3943,6 +3988,81 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(retainingDistributedCache.getIfPresent(key)).isEqualTo(value);
         }
 
+        @DisplayName("Test that an invalidation swept while the watcher is down is not lost")
+        @Test
+        void test_Synchronizer_invalidation_swept_while_watcher_is_down_is_not_lost() throws Exception {
+            // An invalidation reaches the other cache instances as an update of the document the population left
+            // behind, and change streams are watched with UPDATE_LOOKUP, so what is delivered is that document as it
+            // stands when the event is polled - not as it stood when the update happened. Maintenance deletes it a
+            // distribution duration after the write, because without persistence it only ever existed to carry the
+            // removal. A cache instance whose watcher was down for longer than that therefore polls an event whose
+            // document is already gone: the lookup finds nothing, the pipeline's match on the discriminator drops
+            // the event on the server, and nothing arrives here at all - not even something recognizable as
+            // missing. The invalidation is then lost for good, because the watcher's own retrying never reconciles
+            // against the data store; only activating the cache instance does.
+            // Being down is engineered rather than waited for: the receiver of the watcher is made to throw, which
+            // is what a failure of the inbound apply step looks like, so watching fails and keeps failing while the
+            // invalidation below is written and swept. Keeping it failing is what pins the resume position before
+            // the invalidation - a watcher let through in between would apply it while the document still exists,
+            // and the test would pass without ever reproducing anything.
+            DistributedCache<Key, Value> distributedCacheA = createCache(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+            DistributedCache<Key, Value> distributedCacheB = createCache(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+            Key key2 = Key.of(2);
+            Value value2 = Value.of(2);
+
+            distributedCacheA.put(key1, value1);
+
+            await("synchronization between cache instances")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(distributedCacheB.getIfPresent(key1)).isEqualTo(value1));
+
+            Adapter<Key, Value> adapter = distributedCacheA.distributedPolicy().getAdapter();
+            Synchronizer<Key, Value> synchronizer = readFieldValue(adapter, AbstractAdapter.class,
+                    "synchronizer", Synchronizer.class);
+            Receiver<Key, Value> receiver = injectSpy(synchronizer, AbstractSynchronizer.class,
+                    "receiver", Receiver.class);
+
+            CountDownLatch watcherFailed = new CountDownLatch(1);
+            doAnswer(invocation -> {
+                watcherFailed.countDown();
+                throw new IllegalStateException("provoked");
+            }).when(receiver).receiveCacheEntries(anyList());
+
+            // something for the watcher to fail on, and the entry whose arrival proves afterwards that it recovered
+            distributedCacheB.put(key2, value2);
+
+            assertThat(watcherFailed.await(WAITING_DURATION.toMillis(), TimeUnit.MILLISECONDS)).isTrue();
+
+            distributedCacheB.invalidate(key1);
+
+            // what maintenance does a distribution duration later, done now: a negative duration puts the deadline
+            // ahead of every write, so nothing is left for the watcher to find once it watches again
+            invokeMethod(getInstanceRegistry(distributedCacheB).getMaintenanceWorker(),
+                    InternalMaintenanceWorker.class, "processNotRetained",
+                    List.of(Duration.class), List.of(Duration.ZERO.minus(Duration.ofMillis(1))));
+
+            assertThatDataStoreIsEmpty();
+
+            doCallRealMethod().when(receiver).receiveCacheEntries(anyList());
+
+            // the population of the other cache instance arrives because an insert carries its cache entry in the
+            // oplog, so it survives the document being swept - asserted first, so that a watcher which never
+            // recovered at all cannot make the assertions below pass
+            await("recovery")
+                    .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure
+                    .untilAsserted(() -> assertThat(distributedCacheA.getIfPresent(key2)).isEqualTo(value2));
+
+            assertThat(distributedCacheA.getIfPresent(key1)).isNull();
+            assertThat(distributedCacheB.getIfPresent(key1)).isNull();
+        }
+
         @DisplayName("Test refresh")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
@@ -5811,11 +5931,15 @@ final class DistributedCaffeineIntegrationTests {
         @ResourceLock(LOGGER_RESOURCE_LOCK)
         void test_Adapter() throws Exception {
             Set<CacheEntry<Key, Value>> receivedCacheEntries = new HashSet<>();
-            @SuppressWarnings("Convert2Lambda")
             Receiver<Key, Value> receiver = spy(new Receiver<Key, Value>() {
                 @Override
                 public void receiveCacheEntries(@NonNull List<CacheEntry<Key, Value>> cacheEntries) {
                     receivedCacheEntries.addAll(cacheEntries);
+                }
+
+                @Override
+                public void receiveSynchronizationRestart() {
+                    // nothing to record: this test drives the adapter directly and never interrupts it
                 }
             });
 
@@ -5871,7 +5995,9 @@ final class DistributedCaffeineIntegrationTests {
             await("receiving")
                     .atMost(WAITING_DURATION)
                     .untilAsserted(() -> {
-                        verify(receiver, times(4))
+                        // the number of calls is not fixed: whatever the watcher has already polled is handed
+                        // over as one batch, so the four cache entries below arrive in between one and four of them
+                        verify(receiver, atLeastOnce())
                                 .receiveCacheEntries(anyList());
                         assertThat(receivedCacheEntries)
                                 .containsExactlyInAnyOrder(

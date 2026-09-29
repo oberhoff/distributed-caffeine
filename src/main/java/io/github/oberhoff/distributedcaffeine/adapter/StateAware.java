@@ -24,11 +24,20 @@ public interface StateAware {
 
     /**
      * Sets the state as activated.
+     * <p>
+     * <b>Note:</b> Activating something that is activated already is supposed to do nothing. A cache instance counts
+     * as activated only while all of its parts are, so a part deactivated on its own leaves it activating all of
+     * them again - and a part that waits for itself to stop instead of returning blocks everything that cache
+     * instance does for as long as it waits.
      */
     void activate();
 
     /**
      * Sets the state as deactivated.
+     * <p>
+     * <b>Note:</b> Deactivating something that is not activated is supposed to do nothing either, for the same
+     * reason in reverse: deactivating a cache instance takes down whatever is still up, whether or not the cache
+     * instance as a whole counts as activated.
      */
     void deactivate();
 

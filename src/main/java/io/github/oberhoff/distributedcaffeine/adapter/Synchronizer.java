@@ -22,6 +22,11 @@ package io.github.oberhoff.distributedcaffeine.adapter;
  * {@link Receiver}. A cache entry that could not be read for whatever reason (e.g. deserialization fails or field
  * values do not meet the conditions of a cache entry) should be skipped and logged instead of breaking the
  * synchronization exceptionally.
+ * <p>
+ * <b>Note:</b> Receiving that was interrupted and has restarted is supposed to be reported using
+ * {@link Receiver#receiveSynchronizationRestart()}, but not when receiving starts for the first time. Whether
+ * anything was missed in the meantime is not for a synchronizer to decide, and not reporting it at all is what
+ * leaves a cache instance serving what it should have been told to remove, with nothing indicating that it does.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
