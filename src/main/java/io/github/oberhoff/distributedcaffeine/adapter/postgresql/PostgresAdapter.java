@@ -1,0 +1,144 @@
+/*
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.oberhoff.distributedcaffeine.adapter.postgresql;
+
+import io.github.oberhoff.distributedcaffeine.adapter.AbstractAdapter;
+import io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware;
+
+import javax.sql.DataSource;
+import java.util.regex.Pattern;
+
+import static io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware.DEFAULT_DISCRIMINATOR;
+import static java.lang.String.format;
+import static java.util.Objects.requireNonNull;
+
+/**
+ * Implementation of an adapter based on PostgreSQL.
+ * <p>
+ * Instances are constructed using the builder pattern instance returned by
+ * {@link PostgresAdapter#newBuilder(DataSource, String, String)}.
+ * <p>
+ * <b>Note:</b> An adapter instance belongs to exactly one cache instance and cannot be shared between them.
+ *
+ * @param <K> the key type of the cache
+ * @param <V> the value type of the cache
+ * @author Andreas Oberhoff
+ * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
+ */
+public final class PostgresAdapter<K, V> extends AbstractAdapter<K, V> {
+
+    private PostgresAdapter(Builder builder) {
+        // through a second constructor so that the synchronizer can be handed the repository it reads through:
+        // what a notification carries is which records changed, not the records themselves
+        this(new PostgresRepository<K, V>(builder.dataSource, builder.schemaName, builder.tableName), builder);
+    }
+
+    private PostgresAdapter(PostgresRepository<K, V> repository, Builder builder) {
+        super(repository,
+                new PostgresSynchronizer<>(builder.dataSource, repository),
+                String.join(":", "postgresql", builder.schemaName, builder.tableName,
+                        builder.discriminator), builder.discriminator);
+    }
+
+    /**
+     * Returns a new builder pattern instance for configuring and constructing an adapter based on PostgreSQL as the
+     * underlying store. The builder pattern instance is finalized with {@link Builder#build()} to construct the
+     * adapter instance.
+     * <p>
+     * Exemplary usage:
+     * <pre>
+     * PostgresAdapter&#60;Key, Value&#62; postgresAdapter = PostgresAdapter.newBuilder(dataSource, schemaName, tableName)
+     *     ...
+     *     .build();
+     * </pre>
+     *
+     * @param dataSource the data source used by the adapter
+     * @param schemaName the schema name used by the adapter
+     * @param tableName  the table name used by the adapter
+     * @return builder pattern instance for configuring and constructing an adapter
+     * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
+     */
+    public static Builder newBuilder(DataSource dataSource, String schemaName, String tableName) {
+        return new Builder(dataSource, schemaName, tableName);
+    }
+
+    /**
+     * Builder pattern class for configuring and constructing an adapter.
+     *
+     * @author Andreas Oberhoff
+     */
+    public static final class Builder {
+
+        // a schema and a table name cannot be parameters of a statement, so they end up in its text - quoted, but
+        // checked here as well, so that anything but a plain name is rejected where it is configured rather than
+        // reaching the store
+        private static final Pattern NAME_PATTERN = Pattern.compile("[A-Za-z_][A-Za-z0-9_$]*");
+
+        private final DataSource dataSource;
+        private final String schemaName;
+        private final String tableName;
+        private String discriminator;
+
+        private Builder(DataSource dataSource, String schemaName, String tableName) {
+            requireNonNull(dataSource, "dataSource cannot be null");
+            requireNonNull(schemaName, "schemaName cannot be null");
+            requireNonNull(tableName, "tableName cannot be null");
+            this.dataSource = dataSource;
+            this.schemaName = checkedName(schemaName, "schemaName");
+            this.tableName = checkedName(tableName, "tableName");
+            // set defaults
+            this.discriminator = DEFAULT_DISCRIMINATOR;
+        }
+
+        /**
+         * Specifies the discriminator used by the adapter to distinguish between cache entries from different caches
+         * that share a table in PostgreSQL.
+         * <p>
+         * <b>Note:</b> {@link DiscriminatorAware#DEFAULT_DISCRIMINATOR} is used as default if this method is skipped.
+         *
+         * @param discriminator the discriminator used by the adapter
+         * @return a builder pattern instance for chaining additional methods
+         */
+        public Builder withDiscriminator(String discriminator) {
+            requireNonNull(discriminator, "discriminator cannot be null");
+            if (discriminator.isBlank()) {
+                throw new IllegalArgumentException("discriminator cannot be blank");
+            }
+            this.discriminator = discriminator;
+            return this;
+        }
+
+        /**
+         * Constructs an adapter instance.
+         * <p>
+         * <b>Note:</b> An adapter instance belongs to exactly one cache instance and cannot be shared between them.
+         *
+         * @param <K> the key type of the cache
+         * @param <V> the value type of the cache
+         * @return the new adapter instance
+         */
+        public <K, V> PostgresAdapter<K, V> build() {
+            return new PostgresAdapter<>(this);
+        }
+
+        private static String checkedName(String name, String what) {
+            if (!NAME_PATTERN.matcher(name).matches()) {
+                throw new IllegalArgumentException(format("%s must be a plain identifier, but was '%s'", what, name));
+            }
+            return name;
+        }
+    }
+}

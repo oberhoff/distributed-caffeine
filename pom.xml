@@ -22,6 +22,8 @@
         <failsafe.version>3.3.2</failsafe.version>
         <junit.version>6.1.3</junit.version>
         <testcontainers.version>2.0.5</testcontainers.version>
+        <postgresql.version>42.7.13</postgresql.version>
+        <checkerqual.version>3.55.1</checkerqual.version>
         <mockito.version>5.24.0</mockito.version>
         <assertj.version>3.27.7</assertj.version>
         <awaitility.version>4.3.0</awaitility.version>
@@ -77,6 +79,11 @@
             <version>${mongodb.version}</version>
         </dependency>
         <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>${postgresql.version}</version>
+        </dependency>
+        <dependency>
             <groupId>org.apache.fory</groupId>
             <artifactId>fory-core</artifactId>
             <version>${fory.version}</version>
@@ -112,6 +119,22 @@
             <artifactId>testcontainers-mongodb</artifactId>
             <version>${testcontainers.version}</version>
             <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-postgresql</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- The PostgreSQL driver's class files reference these annotations, which javac reads when compiling
+             against it, while the driver itself declares them at runtime scope only - so they are absent exactly
+             where they are needed and a warning about it fails the build. Provided, so nothing of it reaches a
+             user of this library, and at the version the driver asks for. -->
+        <dependency>
+            <groupId>org.checkerframework</groupId>
+            <artifactId>checker-qual</artifactId>
+            <version>${checkerqual.version}</version>
+            <scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>org.mockito</groupId>
