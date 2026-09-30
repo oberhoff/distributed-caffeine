@@ -117,6 +117,273 @@ import static org.mockito.Mockito.when;
 final class DistributedCaffeineUnitTests {
 
     @Nested
+    @DisplayName("Test Caffeine")
+    @SuppressWarnings("java:S5838")
+    final class CaffeineUnit extends DistributedCaffeineUnitTestInstance {
+
+        @DisplayName("that every key is either still held or was reported as removed, under the full operation mix")
+        @Test
+        // the reads below are driven for what they do to the cache, not for what they return, so discarding their
+        // result is the point rather than an oversight
+        @SuppressWarnings({"CheckReturnValue", "ResultOfMethodCallIgnored"})
+        void test_Caffeine_accounts_for_every_key_under_the_full_operation_mix() throws Exception {
+            // The control above only writes, and it accounts for every key. This one adds the paths the stress
+            // test also drives - loading through a cache loader, refreshing after every write, computing through
+            // getAll, and explicit invalidation - because a key was seen leaving a cache instance there with no
+            // removal reported for it at all, and only a path that skips the notification can do that. This class
+            // already records one such path in the test below, where a refresh returning the old value is not
+            // reported, so refreshing is the one to cover
+            int maximumSize = 500;
+            int keys = 2_000;
+            int rounds = 30;
+            int operationsPerWorker = 2_000;
+            int workers = 4;
+
+            for (int round = 0; round < rounds; round++) {
+                ThreadPoolExecutor executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(8);
+                ExecutorService workerExecutor = Executors.newFixedThreadPool(workers);
+                Set<Integer> touched = ConcurrentHashMap.newKeySet();
+                Set<Integer> removed = ConcurrentHashMap.newKeySet();
+                try {
+                    CacheLoader<Integer, String> cacheLoader = key -> {
+                        touched.add(key);
+                        return "loaded-" + key;
+                    };
+                    LoadingCache<Integer, String> cache = Caffeine.newBuilder()
+                            .executor(executor)
+                            .maximumSize(maximumSize)
+                            .expireAfter(Expiry.creating((Integer key, String value) -> FOREVER.getDuration()))
+                            .refreshAfterWrite(Duration.ofNanos(1))
+                            .removalListener((Integer key, String value, RemovalCause cause) -> {
+                                if (cause != RemovalCause.REPLACED) {
+                                    removed.add(key);
+                                }
+                            })
+                            .build(cacheLoader);
+
+                    int currentRound = round;
+                    List<Future<?>> running = IntStream.range(0, workers)
+                            .mapToObj(worker -> workerExecutor.submit(() -> {
+                                Random random = new Random(currentRound * 31L + worker);
+                                for (int operation = 0; operation < operationsPerWorker; operation++) {
+                                    int id = random.nextInt(keys);
+                                    switch (random.nextInt(5)) {
+                                        case 0 -> {
+                                            touched.add(id);
+                                            cache.put(id, "put-" + id);
+                                        }
+                                        case 1 -> cache.get(id);
+                                        // a set, so the two ids colliding is not a duplicate element
+                                        case 2 -> cache.getAll(new HashSet<>(List.of(id, random.nextInt(keys))));
+                                        case 3 -> cache.invalidate(id);
+                                        default -> cache.asMap().remove(id);
+                                    }
+                                }
+                            }))
+                            .collect(toList());
+                    for (Future<?> future : running) {
+                        future.get();
+                    }
+
+                    // everything the cache still has to do, so that no notification is merely late
+                    cache.cleanUp();
+                    await("pending cache work")
+                            .atMost(Duration.ofSeconds(10))
+                            .until(() -> executor.getActiveCount() == 0 && executor.getQueue().isEmpty());
+                    cache.cleanUp();
+                    Thread.sleep(200);
+
+                    Set<Integer> held = cache.asMap().keySet();
+                    Set<Integer> unaccountedFor = touched.stream()
+                            .filter(id -> !held.contains(id) && !removed.contains(id))
+                            .collect(toCollection(LinkedHashSet::new));
+                    assertThat(unaccountedFor)
+                            .describedAs("round %d: keys neither held nor reported as removed, out of %d touched",
+                                    round, touched.size())
+                            .isEmpty();
+                } finally {
+                    workerExecutor.shutdownNow();
+                    executor.shutdownNow();
+                }
+            }
+        }
+
+        @DisplayName("that every key put is either still held or was reported as removed")
+        @Test
+        void test_Caffeine_accounts_for_every_key_under_size_pressure() throws Exception {
+            // Distributed Caffeine relies on being told about every removal: an eviction is what it distributes,
+            // so a key that leaves a cache unannounced is one the other cache instances go on serving. A stress
+            // run turned up exactly that shape - a key gone from the cache with no removal reported for it - so
+            // this checks the assumption directly, with no distribution involved at all.
+            // The configuration is the one that run used: a maximum size with more keys than it holds, variable
+            // expiry that never expires, and writes from several threads against a real executor
+            int maximumSize = 1_000;
+            int keys = 4_000;
+            int writers = 4;
+            ExecutorService executor = Executors.newFixedThreadPool(8);
+            Set<Object> removed = ConcurrentHashMap.newKeySet();
+            try {
+                Cache<Integer, String> cache = Caffeine.newBuilder()
+                        .executor(executor)
+                        .maximumSize(maximumSize)
+                        .expireAfter(Expiry.creating((Integer key, String value) -> FOREVER.getDuration()))
+                        .removalListener((Integer key, String value, RemovalCause cause) -> {
+                            // a replacement leaves the key in place, so it is not a removal of the key
+                            if (cause != RemovalCause.REPLACED) {
+                                removed.add(key);
+                            }
+                        })
+                        .build();
+
+                List<Future<?>> written = IntStream.range(0, writers)
+                        .mapToObj(writer -> executor.submit(() -> IntStream.range(0, keys)
+                                .filter(id -> id % writers == writer)
+                                .forEach(id -> cache.put(id, "value-" + id))))
+                        .collect(toList());
+                for (Future<?> future : written) {
+                    future.get();
+                }
+                cache.cleanUp();
+                await("pending removal notifications")
+                        .atMost(Duration.ofSeconds(10))
+                        .until(() -> cache.estimatedSize() <= maximumSize);
+                cache.cleanUp();
+                Thread.sleep(500); // removal notifications are handed to the executor, so they arrive after the fact
+
+                Set<Integer> held = cache.asMap().keySet();
+                Set<Integer> unaccountedFor = IntStream.range(0, keys)
+                        .boxed()
+                        .filter(id -> !held.contains(id) && !removed.contains(id))
+                        .collect(toCollection(LinkedHashSet::new));
+                assertThat(unaccountedFor)
+                        .describedAs("keys neither held nor reported as removed, out of %d put", keys)
+                        .isEmpty();
+            } finally {
+                executor.shutdownNow();
+            }
+        }
+
+        @DisplayName("that removal listener is not invoked if refresh returns old value")
+        @Test
+        void test_Caffeine_removal_listener_is_not_invoked_if_refresh_returns_old_value() {
+            @SuppressWarnings("unchecked")
+            RemovalListener<Key, Value> removalListener = mock(RemovalListener.class);
+
+            CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
+                @Override
+                public Value load(Key key) {
+                    return Value.of(key.getId());
+                }
+
+                @Override
+                public @NonNull CompletableFuture<? extends Value> asyncLoad(@NonNull Key key, @NonNull Executor executor) {
+                    return CompletableFuture.completedFuture(load(key));
+                }
+
+                @Override
+                public @NonNull CompletableFuture<? extends Value> asyncReload(@NonNull Key key, @NonNull Value oldValue, @NonNull Executor executor) {
+                    return CompletableFuture.completedFuture(oldValue);
+                }
+            });
+
+            LoadingCache<Key, Value> loadingCache = Caffeine.newBuilder()
+                    .removalListener(removalListener)
+                    .build(cacheLoader);
+
+            Key key1 = Key.of(1);
+            Set<Key> keys2to3 = Set.of(Key.of(2), Key.of(3));
+
+            loadingCache.refresh(key1);
+            loadingCache.refreshAll(keys2to3);
+
+            await("refresh (initial load)")
+                    .failFast(loadingCache::cleanUp)
+                    .untilAsserted(() -> {
+                        assertThat(loadingCache.estimatedSize()).isEqualTo(3);
+                        verifyNoInteractions(removalListener);
+                        verify(cacheLoader, times(3))
+                                .load(any(Key.class));
+                        verify(cacheLoader, times(3))
+                                .asyncLoad(any(Key.class), any(Executor.class));
+                        verify(cacheLoader, never())
+                                .asyncReload(any(Key.class), any(Value.class), any(Executor.class));
+                    });
+
+            loadingCache.refresh(key1);
+            loadingCache.refreshAll(keys2to3);
+
+            await("refresh (reload)")
+                    .failFast(loadingCache::cleanUp)
+                    .untilAsserted(() -> {
+                        assertThat(loadingCache.estimatedSize()).isEqualTo(3);
+                        verifyNoInteractions(removalListener);
+                        verify(cacheLoader, times(3))
+                                .load(any(Key.class));
+                        verify(cacheLoader, times(3))
+                                .asyncLoad(any(Key.class), any(Executor.class));
+                        verify(cacheLoader, times(3))
+                                .asyncReload(any(Key.class), any(Value.class), any(Executor.class));
+                    });
+
+            loadingCache.invalidateAll();
+
+            await("invalidation")
+                    .failFast(loadingCache::cleanUp)
+                    .untilAsserted(() -> {
+                        assertThat(loadingCache.estimatedSize()).isEqualTo(0);
+                        verify(removalListener, times(3))
+                                .onRemoval(any(Key.class), any(Value.class), any(RemovalCause.class));
+                        verify(cacheLoader, times(3))
+                                .load(any(Key.class));
+                        verify(cacheLoader, times(3))
+                                .asyncLoad(any(Key.class), any(Executor.class));
+                        verify(cacheLoader, times(3))
+                                .asyncReload(any(Key.class), any(Value.class), any(Executor.class));
+                    });
+        }
+
+        @DisplayName("that cache can be build for arbitrary types using same builder")
+        @Test
+        @SuppressWarnings("unchecked")
+        void test_Caffeine_cache_can_be_build_for_arbitrary_types_using_same_builder() throws Exception {
+            AtomicInteger removalCount = new AtomicInteger(0);
+
+            RemovalListener<String, String> stringRemovalListener = (key, value, removalCause) ->
+                    removalCount.incrementAndGet();
+
+            Caffeine<?, ?> caffeine = Caffeine.newBuilder()
+                    .removalListener(stringRemovalListener);
+
+            Cache<String, String> stringCache = (Cache<String, String>) caffeine.build();
+
+            stringCache.put("key", "value");
+            assertThat(stringCache.getIfPresent("key")).isEqualTo("value");
+            stringCache.invalidateAll();
+            stringCache.cleanUp();
+            assertThat(stringCache.estimatedSize()).isEqualTo(0);
+
+            RemovalListener<Integer, Integer> integerRemovalListener = (key, value, removalCause) ->
+                    removalCount.incrementAndGet();
+
+            Field field = Caffeine.class.getDeclaredField("removalListener");
+            field.setAccessible(true);
+            field.set(caffeine, integerRemovalListener);
+
+            Cache<Integer, Integer> integerCache = (Cache<Integer, Integer>) caffeine.build();
+
+            integerCache.put(0, 1);
+            assertThat(integerCache.getIfPresent(0)).isEqualTo(1);
+            integerCache.invalidateAll();
+            integerCache.cleanUp();
+            assertThat(integerCache.estimatedSize()).isEqualTo(0);
+
+            await("removal")
+                    .untilAsserted(() ->
+                            assertThat(removalCount).hasValue(2));
+        }
+    }
+
+    @Nested
     @DisplayName("Test builder and configurers")
     final class BuilderUnit extends DistributedCaffeineUnitTestInstance {
 
@@ -499,273 +766,6 @@ final class DistributedCaffeineUnitTests {
     }
 
     @Nested
-    @DisplayName("Test Caffeine")
-    @SuppressWarnings("java:S5838")
-    final class CaffeineUnit extends DistributedCaffeineUnitTestInstance {
-
-        @DisplayName("that every key is either still held or was reported as removed, under the full operation mix")
-        @Test
-        // the reads below are driven for what they do to the cache, not for what they return, so discarding their
-        // result is the point rather than an oversight
-        @SuppressWarnings({"CheckReturnValue", "ResultOfMethodCallIgnored"})
-        void test_Caffeine_accounts_for_every_key_under_the_full_operation_mix() throws Exception {
-            // The control above only writes, and it accounts for every key. This one adds the paths the stress
-            // test also drives - loading through a cache loader, refreshing after every write, computing through
-            // getAll, and explicit invalidation - because a key was seen leaving a cache instance there with no
-            // removal reported for it at all, and only a path that skips the notification can do that. This class
-            // already records one such path in the test below, where a refresh returning the old value is not
-            // reported, so refreshing is the one to cover
-            int maximumSize = 500;
-            int keys = 2_000;
-            int rounds = 30;
-            int operationsPerWorker = 2_000;
-            int workers = 4;
-
-            for (int round = 0; round < rounds; round++) {
-                ThreadPoolExecutor executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(8);
-                ExecutorService workerExecutor = Executors.newFixedThreadPool(workers);
-                Set<Integer> touched = ConcurrentHashMap.newKeySet();
-                Set<Integer> removed = ConcurrentHashMap.newKeySet();
-                try {
-                    CacheLoader<Integer, String> cacheLoader = key -> {
-                        touched.add(key);
-                        return "loaded-" + key;
-                    };
-                    LoadingCache<Integer, String> cache = Caffeine.newBuilder()
-                            .executor(executor)
-                            .maximumSize(maximumSize)
-                            .expireAfter(Expiry.creating((Integer key, String value) -> FOREVER.getDuration()))
-                            .refreshAfterWrite(Duration.ofNanos(1))
-                            .removalListener((Integer key, String value, RemovalCause cause) -> {
-                                if (cause != RemovalCause.REPLACED) {
-                                    removed.add(key);
-                                }
-                            })
-                            .build(cacheLoader);
-
-                    int currentRound = round;
-                    List<Future<?>> running = IntStream.range(0, workers)
-                            .mapToObj(worker -> workerExecutor.submit(() -> {
-                                Random random = new Random(currentRound * 31L + worker);
-                                for (int operation = 0; operation < operationsPerWorker; operation++) {
-                                    int id = random.nextInt(keys);
-                                    switch (random.nextInt(5)) {
-                                        case 0 -> {
-                                            touched.add(id);
-                                            cache.put(id, "put-" + id);
-                                        }
-                                        case 1 -> cache.get(id);
-                                        // a set, so the two ids colliding is not a duplicate element
-                                        case 2 -> cache.getAll(new HashSet<>(List.of(id, random.nextInt(keys))));
-                                        case 3 -> cache.invalidate(id);
-                                        default -> cache.asMap().remove(id);
-                                    }
-                                }
-                            }))
-                            .collect(toList());
-                    for (Future<?> future : running) {
-                        future.get();
-                    }
-
-                    // everything the cache still has to do, so that no notification is merely late
-                    cache.cleanUp();
-                    await("pending cache work")
-                            .atMost(Duration.ofSeconds(10))
-                            .until(() -> executor.getActiveCount() == 0 && executor.getQueue().isEmpty());
-                    cache.cleanUp();
-                    Thread.sleep(200);
-
-                    Set<Integer> held = cache.asMap().keySet();
-                    Set<Integer> unaccountedFor = touched.stream()
-                            .filter(id -> !held.contains(id) && !removed.contains(id))
-                            .collect(toCollection(LinkedHashSet::new));
-                    assertThat(unaccountedFor)
-                            .describedAs("round %d: keys neither held nor reported as removed, out of %d touched",
-                                    round, touched.size())
-                            .isEmpty();
-                } finally {
-                    workerExecutor.shutdownNow();
-                    executor.shutdownNow();
-                }
-            }
-        }
-
-        @DisplayName("that every key put is either still held or was reported as removed")
-        @Test
-        void test_Caffeine_accounts_for_every_key_under_size_pressure() throws Exception {
-            // Distributed Caffeine relies on being told about every removal: an eviction is what it distributes,
-            // so a key that leaves a cache unannounced is one the other cache instances go on serving. A stress
-            // run turned up exactly that shape - a key gone from the cache with no removal reported for it - so
-            // this checks the assumption directly, with no distribution involved at all.
-            // The configuration is the one that run used: a maximum size with more keys than it holds, variable
-            // expiry that never expires, and writes from several threads against a real executor
-            int maximumSize = 1_000;
-            int keys = 4_000;
-            int writers = 4;
-            ExecutorService executor = Executors.newFixedThreadPool(8);
-            Set<Object> removed = ConcurrentHashMap.newKeySet();
-            try {
-                Cache<Integer, String> cache = Caffeine.newBuilder()
-                        .executor(executor)
-                        .maximumSize(maximumSize)
-                        .expireAfter(Expiry.creating((Integer key, String value) -> FOREVER.getDuration()))
-                        .removalListener((Integer key, String value, RemovalCause cause) -> {
-                            // a replacement leaves the key in place, so it is not a removal of the key
-                            if (cause != RemovalCause.REPLACED) {
-                                removed.add(key);
-                            }
-                        })
-                        .build();
-
-                List<Future<?>> written = IntStream.range(0, writers)
-                        .mapToObj(writer -> executor.submit(() -> IntStream.range(0, keys)
-                                .filter(id -> id % writers == writer)
-                                .forEach(id -> cache.put(id, "value-" + id))))
-                        .collect(toList());
-                for (Future<?> future : written) {
-                    future.get();
-                }
-                cache.cleanUp();
-                await("pending removal notifications")
-                        .atMost(Duration.ofSeconds(10))
-                        .until(() -> cache.estimatedSize() <= maximumSize);
-                cache.cleanUp();
-                Thread.sleep(500); // removal notifications are handed to the executor, so they arrive after the fact
-
-                Set<Integer> held = cache.asMap().keySet();
-                Set<Integer> unaccountedFor = IntStream.range(0, keys)
-                        .boxed()
-                        .filter(id -> !held.contains(id) && !removed.contains(id))
-                        .collect(toCollection(LinkedHashSet::new));
-                assertThat(unaccountedFor)
-                        .describedAs("keys neither held nor reported as removed, out of %d put", keys)
-                        .isEmpty();
-            } finally {
-                executor.shutdownNow();
-            }
-        }
-
-        @DisplayName("that removal listener is not invoked if refresh returns old value")
-        @Test
-        void test_Caffeine_removal_listener_is_not_invoked_if_refresh_returns_old_value() {
-            @SuppressWarnings("unchecked")
-            RemovalListener<Key, Value> removalListener = mock(RemovalListener.class);
-
-            CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
-                @Override
-                public Value load(Key key) {
-                    return Value.of(key.getId());
-                }
-
-                @Override
-                public @NonNull CompletableFuture<? extends Value> asyncLoad(@NonNull Key key, @NonNull Executor executor) {
-                    return CompletableFuture.completedFuture(load(key));
-                }
-
-                @Override
-                public @NonNull CompletableFuture<? extends Value> asyncReload(@NonNull Key key, @NonNull Value oldValue, @NonNull Executor executor) {
-                    return CompletableFuture.completedFuture(oldValue);
-                }
-            });
-
-            LoadingCache<Key, Value> loadingCache = Caffeine.newBuilder()
-                    .removalListener(removalListener)
-                    .build(cacheLoader);
-
-            Key key1 = Key.of(1);
-            Set<Key> keys2to3 = Set.of(Key.of(2), Key.of(3));
-
-            loadingCache.refresh(key1);
-            loadingCache.refreshAll(keys2to3);
-
-            await("refresh (initial load)")
-                    .failFast(loadingCache::cleanUp)
-                    .untilAsserted(() -> {
-                        assertThat(loadingCache.estimatedSize()).isEqualTo(3);
-                        verifyNoInteractions(removalListener);
-                        verify(cacheLoader, times(3))
-                                .load(any(Key.class));
-                        verify(cacheLoader, times(3))
-                                .asyncLoad(any(Key.class), any(Executor.class));
-                        verify(cacheLoader, never())
-                                .asyncReload(any(Key.class), any(Value.class), any(Executor.class));
-                    });
-
-            loadingCache.refresh(key1);
-            loadingCache.refreshAll(keys2to3);
-
-            await("refresh (reload)")
-                    .failFast(loadingCache::cleanUp)
-                    .untilAsserted(() -> {
-                        assertThat(loadingCache.estimatedSize()).isEqualTo(3);
-                        verifyNoInteractions(removalListener);
-                        verify(cacheLoader, times(3))
-                                .load(any(Key.class));
-                        verify(cacheLoader, times(3))
-                                .asyncLoad(any(Key.class), any(Executor.class));
-                        verify(cacheLoader, times(3))
-                                .asyncReload(any(Key.class), any(Value.class), any(Executor.class));
-                    });
-
-            loadingCache.invalidateAll();
-
-            await("invalidation")
-                    .failFast(loadingCache::cleanUp)
-                    .untilAsserted(() -> {
-                        assertThat(loadingCache.estimatedSize()).isEqualTo(0);
-                        verify(removalListener, times(3))
-                                .onRemoval(any(Key.class), any(Value.class), any(RemovalCause.class));
-                        verify(cacheLoader, times(3))
-                                .load(any(Key.class));
-                        verify(cacheLoader, times(3))
-                                .asyncLoad(any(Key.class), any(Executor.class));
-                        verify(cacheLoader, times(3))
-                                .asyncReload(any(Key.class), any(Value.class), any(Executor.class));
-                    });
-        }
-
-        @DisplayName("that cache can be build for arbitrary types using same builder")
-        @Test
-        @SuppressWarnings("unchecked")
-        void test_Caffeine_cache_can_be_build_for_arbitrary_types_using_same_builder() throws Exception {
-            AtomicInteger removalCount = new AtomicInteger(0);
-
-            RemovalListener<String, String> stringRemovalListener = (key, value, removalCause) ->
-                    removalCount.incrementAndGet();
-
-            Caffeine<?, ?> caffeine = Caffeine.newBuilder()
-                    .removalListener(stringRemovalListener);
-
-            Cache<String, String> stringCache = (Cache<String, String>) caffeine.build();
-
-            stringCache.put("key", "value");
-            assertThat(stringCache.getIfPresent("key")).isEqualTo("value");
-            stringCache.invalidateAll();
-            stringCache.cleanUp();
-            assertThat(stringCache.estimatedSize()).isEqualTo(0);
-
-            RemovalListener<Integer, Integer> integerRemovalListener = (key, value, removalCause) ->
-                    removalCount.incrementAndGet();
-
-            Field field = Caffeine.class.getDeclaredField("removalListener");
-            field.setAccessible(true);
-            field.set(caffeine, integerRemovalListener);
-
-            Cache<Integer, Integer> integerCache = (Cache<Integer, Integer>) caffeine.build();
-
-            integerCache.put(0, 1);
-            assertThat(integerCache.getIfPresent(0)).isEqualTo(1);
-            integerCache.invalidateAll();
-            integerCache.cleanUp();
-            assertThat(integerCache.estimatedSize()).isEqualTo(0);
-
-            await("removal")
-                    .untilAsserted(() ->
-                            assertThat(removalCount).hasValue(2));
-        }
-    }
-
-    @Nested
     @DisplayName("Test Hasher")
     final class HasherUnit extends DistributedCaffeineUnitTestInstance {
 
@@ -832,6 +832,120 @@ final class DistributedCaffeineUnitTests {
                     .isExactlyInstanceOf(IllegalStateException.class)
                     .withMessage("Keys of type Double are not hashable out of the box (only String, Long, Integer and UUID are), "
                             .concat("keys have to implement the Hashable interface or a HashProvider has to be specified."));
+        }
+    }
+
+    @Nested
+    @DisplayName("Test CacheEntry and CacheEntryMetadata")
+    final class CacheEntryUnit extends DistributedCaffeineUnitTestInstance {
+
+        // the same instant twice, once with a nanosecond an underlying store cannot be expected to keep
+        private static final Instant TIMESTAMP = Instant.ofEpochMilli(1_700_000_000_000L);
+        private static final Instant TIMESTAMP_WITH_NANOS = TIMESTAMP.plusNanos(1);
+
+        @DisplayName("that field values are checked against the conditions of a cache entry")
+        @Test
+        @SuppressWarnings("java:S5778")
+        void test_CacheEntry_checks_on_field_values() {
+            // the fields no cache entry can do without, whatever its status
+            assertThatThrownBy(() ->
+                    CacheEntry.of(_null(), "op", Key.of(1), Value.of(1), Status.CACHED, TIMESTAMP))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("hash cannot be null");
+            assertThatThrownBy(() ->
+                    CacheEntry.of("h", "op", Key.of(1), Value.of(1), _null(), TIMESTAMP))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("status cannot be null");
+            assertThatThrownBy(() ->
+                    CacheEntry.of("h", "op", Key.of(1), Value.of(1), Status.CACHED, _null()))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("timestamp cannot be null");
+
+            // a key belongs to every cache entry except one carrying a command, and a value to every one except an
+            // invalidated one or one carrying a command - checked for every status, so that a status added later is
+            // covered by whichever of the two rules it falls under
+            Stream.of(Status.values()).forEach(status -> {
+                if (!status.isCommand()) {
+                    assertThatThrownBy(() ->
+                            CacheEntry.of("h", "op", null, Value.of(1), status, TIMESTAMP))
+                            .isInstanceOf(NullPointerException.class)
+                            .hasMessage("key cannot be null");
+                }
+                if (!status.isInvalidated() && !status.isCommand()) {
+                    assertThatThrownBy(() ->
+                            CacheEntry.of("h", "op", Key.of(1), null, status, TIMESTAMP))
+                            .isInstanceOf(NullPointerException.class)
+                            .hasMessage("value cannot be null");
+                }
+            });
+
+            // ... while an absent key or value is what those statuses call for, and an operation is optional throughout
+            Stream.of(Status.values())
+                    .filter(Status::isInvalidated)
+                    .forEach(status -> assertThat(CacheEntry.of("h", "op", Key.of(1), null, status, TIMESTAMP))
+                            .satisfies(cacheEntry -> assertThat(cacheEntry.getValue()).isNull()));
+            assertThat(CacheEntry.of("invalidate_all", "op", null, null, Status.COMMAND, TIMESTAMP))
+                    .satisfies(cacheEntry -> {
+                        assertThat(cacheEntry.getKey()).isNull();
+                        assertThat(cacheEntry.getValue()).isNull();
+                        assertThat(cacheEntry.isCommand()).isTrue();
+                    });
+            assertThat(CacheEntry.of("h", null, Key.of(1), Value.of(1), Status.CACHED, TIMESTAMP).getOperation())
+                    .isNull();
+        }
+
+        @DisplayName("that cache entries are compared at the timestamp resolution of an underlying store")
+        @Test
+        void test_CacheEntry_equals_at_store_resolution() {
+            assertThat(CacheEntry.of("h", "op", Key.of(1), Value.of(1), Status.CACHED, TIMESTAMP))
+                    .isEqualTo(CacheEntry.of("h", "op", Key.of(1), Value.of(1), Status.CACHED, TIMESTAMP_WITH_NANOS))
+                    .hasSameHashCodeAs(CacheEntry.of("h", "op", Key.of(1), Value.of(1), Status.CACHED,
+                            TIMESTAMP_WITH_NANOS));
+        }
+
+        @DisplayName("that field values are checked against the conditions of cache entry metadata")
+        @Test
+        @SuppressWarnings("java:S5778")
+        void test_CacheEntryMetadata_checks_on_field_values() {
+            // metadata has no key and value, so all of its fields but the operation are required
+            assertThatThrownBy(() -> CacheEntryMetadata.of(_null(), "op", Status.CACHED, TIMESTAMP))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("hash cannot be null");
+            assertThatThrownBy(() -> CacheEntryMetadata.of("h", "op", _null(), TIMESTAMP))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("status cannot be null");
+            assertThatThrownBy(() -> CacheEntryMetadata.of("h", "op", Status.CACHED, _null()))
+                    .isInstanceOf(NullPointerException.class)
+                    .hasMessage("timestamp cannot be null");
+            assertThat(CacheEntryMetadata.of("h", null, Status.CACHED, TIMESTAMP).getOperation())
+                    .isNull();
+        }
+
+        @DisplayName("that cache entry metadata implements equals(), hashCode() and toString()")
+        @Test
+        @SuppressWarnings("EqualsIncompatibleType") // comparing unrelated types is the point of the equals() contract test
+        void test_CacheEntryMetadata_equals_hashCode_toString() {
+            CacheEntryMetadata metadata = CacheEntryMetadata.of("h1", "op1", Status.CACHED, TIMESTAMP);
+            CacheEntryMetadata equalMetadata = CacheEntryMetadata.of("h1", "op1", Status.CACHED, TIMESTAMP);
+            CacheEntryMetadata otherMetadata = CacheEntryMetadata.of("h2", "op2", Status.CACHED, TIMESTAMP);
+
+            // noinspection ConstantValue
+            assertThat(metadata.equals(null)).isFalse();
+            // noinspection EqualsBetweenInconvertibleTypes
+            assertThat(metadata.equals("other class")).isFalse();
+            // noinspection EqualsWithItself
+            assertThat(metadata.equals(metadata)).isTrue();
+            assertThat(metadata).isEqualTo(equalMetadata)
+                    .hasSameHashCodeAs(equalMetadata)
+                    .isNotEqualTo(otherMetadata);
+            assertThat(metadata.hashCode()).isNotEqualTo(otherMetadata.hashCode());
+            assertThat(metadata.toString()).isNotEqualTo(otherMetadata.toString());
+            // compared at the timestamp resolution of an underlying store, just like a cache entry
+            assertThat(metadata)
+                    .isEqualTo(CacheEntryMetadata.of("h1", "op1", Status.CACHED, TIMESTAMP_WITH_NANOS));
+            // the field names of an underlying store are what it names its values by
+            assertThat(metadata.toString())
+                    .startsWith("CacheEntryMetadata{hash=h1, operation=op1, status=cached, timestamp=");
         }
     }
 
@@ -1076,120 +1190,6 @@ final class DistributedCaffeineUnitTests {
 
         private void processChangeStreams(Synchronizer<Key, Value> synchronizer) {
             invokeMethod(synchronizer, synchronizer.getClass(), "processChangeStreams", List.of(), List.of());
-        }
-    }
-
-    @Nested
-    @DisplayName("Test CacheEntry and CacheEntryMetadata")
-    final class CacheEntryUnit extends DistributedCaffeineUnitTestInstance {
-
-        // the same instant twice, once with a nanosecond an underlying store cannot be expected to keep
-        private static final Instant TIMESTAMP = Instant.ofEpochMilli(1_700_000_000_000L);
-        private static final Instant TIMESTAMP_WITH_NANOS = TIMESTAMP.plusNanos(1);
-
-        @DisplayName("that field values are checked against the conditions of a cache entry")
-        @Test
-        @SuppressWarnings("java:S5778")
-        void test_CacheEntry_checks_on_field_values() {
-            // the fields no cache entry can do without, whatever its status
-            assertThatThrownBy(() ->
-                    CacheEntry.of(_null(), "op", Key.of(1), Value.of(1), Status.CACHED, TIMESTAMP))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("hash cannot be null");
-            assertThatThrownBy(() ->
-                    CacheEntry.of("h", "op", Key.of(1), Value.of(1), _null(), TIMESTAMP))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("status cannot be null");
-            assertThatThrownBy(() ->
-                    CacheEntry.of("h", "op", Key.of(1), Value.of(1), Status.CACHED, _null()))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("timestamp cannot be null");
-
-            // a key belongs to every cache entry except one carrying a command, and a value to every one except an
-            // invalidated one or one carrying a command - checked for every status, so that a status added later is
-            // covered by whichever of the two rules it falls under
-            Stream.of(Status.values()).forEach(status -> {
-                if (!status.isCommand()) {
-                    assertThatThrownBy(() ->
-                            CacheEntry.of("h", "op", null, Value.of(1), status, TIMESTAMP))
-                            .isInstanceOf(NullPointerException.class)
-                            .hasMessage("key cannot be null");
-                }
-                if (!status.isInvalidated() && !status.isCommand()) {
-                    assertThatThrownBy(() ->
-                            CacheEntry.of("h", "op", Key.of(1), null, status, TIMESTAMP))
-                            .isInstanceOf(NullPointerException.class)
-                            .hasMessage("value cannot be null");
-                }
-            });
-
-            // ... while an absent key or value is what those statuses call for, and an operation is optional throughout
-            Stream.of(Status.values())
-                    .filter(Status::isInvalidated)
-                    .forEach(status -> assertThat(CacheEntry.of("h", "op", Key.of(1), null, status, TIMESTAMP))
-                            .satisfies(cacheEntry -> assertThat(cacheEntry.getValue()).isNull()));
-            assertThat(CacheEntry.of("invalidate_all", "op", null, null, Status.COMMAND, TIMESTAMP))
-                    .satisfies(cacheEntry -> {
-                        assertThat(cacheEntry.getKey()).isNull();
-                        assertThat(cacheEntry.getValue()).isNull();
-                        assertThat(cacheEntry.isCommand()).isTrue();
-                    });
-            assertThat(CacheEntry.of("h", null, Key.of(1), Value.of(1), Status.CACHED, TIMESTAMP).getOperation())
-                    .isNull();
-        }
-
-        @DisplayName("that cache entries are compared at the timestamp resolution of an underlying store")
-        @Test
-        void test_CacheEntry_equals_at_store_resolution() {
-            assertThat(CacheEntry.of("h", "op", Key.of(1), Value.of(1), Status.CACHED, TIMESTAMP))
-                    .isEqualTo(CacheEntry.of("h", "op", Key.of(1), Value.of(1), Status.CACHED, TIMESTAMP_WITH_NANOS))
-                    .hasSameHashCodeAs(CacheEntry.of("h", "op", Key.of(1), Value.of(1), Status.CACHED,
-                            TIMESTAMP_WITH_NANOS));
-        }
-
-        @DisplayName("that field values are checked against the conditions of cache entry metadata")
-        @Test
-        @SuppressWarnings("java:S5778")
-        void test_CacheEntryMetadata_checks_on_field_values() {
-            // metadata has no key and value, so all of its fields but the operation are required
-            assertThatThrownBy(() -> CacheEntryMetadata.of(_null(), "op", Status.CACHED, TIMESTAMP))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("hash cannot be null");
-            assertThatThrownBy(() -> CacheEntryMetadata.of("h", "op", _null(), TIMESTAMP))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("status cannot be null");
-            assertThatThrownBy(() -> CacheEntryMetadata.of("h", "op", Status.CACHED, _null()))
-                    .isInstanceOf(NullPointerException.class)
-                    .hasMessage("timestamp cannot be null");
-            assertThat(CacheEntryMetadata.of("h", null, Status.CACHED, TIMESTAMP).getOperation())
-                    .isNull();
-        }
-
-        @DisplayName("that cache entry metadata implements equals(), hashCode() and toString()")
-        @Test
-        @SuppressWarnings("EqualsIncompatibleType") // comparing unrelated types is the point of the equals() contract test
-        void test_CacheEntryMetadata_equals_hashCode_toString() {
-            CacheEntryMetadata metadata = CacheEntryMetadata.of("h1", "op1", Status.CACHED, TIMESTAMP);
-            CacheEntryMetadata equalMetadata = CacheEntryMetadata.of("h1", "op1", Status.CACHED, TIMESTAMP);
-            CacheEntryMetadata otherMetadata = CacheEntryMetadata.of("h2", "op2", Status.CACHED, TIMESTAMP);
-
-            // noinspection ConstantValue
-            assertThat(metadata.equals(null)).isFalse();
-            // noinspection EqualsBetweenInconvertibleTypes
-            assertThat(metadata.equals("other class")).isFalse();
-            // noinspection EqualsWithItself
-            assertThat(metadata.equals(metadata)).isTrue();
-            assertThat(metadata).isEqualTo(equalMetadata)
-                    .hasSameHashCodeAs(equalMetadata)
-                    .isNotEqualTo(otherMetadata);
-            assertThat(metadata.hashCode()).isNotEqualTo(otherMetadata.hashCode());
-            assertThat(metadata.toString()).isNotEqualTo(otherMetadata.toString());
-            // compared at the timestamp resolution of an underlying store, just like a cache entry
-            assertThat(metadata)
-                    .isEqualTo(CacheEntryMetadata.of("h1", "op1", Status.CACHED, TIMESTAMP_WITH_NANOS));
-            // the field names of an underlying store are what it names its values by
-            assertThat(metadata.toString())
-                    .startsWith("CacheEntryMetadata{hash=h1, operation=op1, status=cached, timestamp=");
         }
     }
 

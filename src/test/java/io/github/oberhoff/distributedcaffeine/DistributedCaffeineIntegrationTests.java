@@ -4843,6 +4843,442 @@ final class DistributedCaffeineIntegrationTests {
                     .satisfies(value -> assertThat(value.getName()).isEqualTo("loaded but not from store"));
         }
 
+        @DisplayName("Test persistence of evicted entries by time")
+        @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
+        @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
+        void test_DistributionMode_evicted_entry_persistence_by_time(CacheFactory<Key, Value> cacheFactory) throws Exception {
+            @SuppressWarnings("unchecked")
+            RemovalListener<Key, Value> evictionListener = mock(RemovalListener.class);
+
+            CacheBuilder<Key, Value> cacheBuilder =
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
+                                    .evictionListener(evictionListener)
+                                    // variable expiration policy provides more control over evictions
+                                    .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration())))
+                            .withPersistence(configurer -> configurer
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withMaximumTime(FOREVER.getDuration())
+                                            // just to test the distinction in logic
+                                            .withMaximumSize(Integer.MAX_VALUE)
+                                            .withLoadingStrategies(CACHE_LOADER)));
+
+            @SuppressWarnings("Convert2Lambda")
+            CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
+                @Override
+                @SuppressWarnings("RedundantThrows")
+                public Value load(@NonNull Key key) throws Exception {
+                    throw new UnsupportedOperationException();
+                }
+            });
+
+            DistributedLoadingCache<Key, Value> distributedLoadingCacheA = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
+                    cacheBuilder,
+                    dc -> dc.build(cacheLoader));
+            DistributedLoadingCache<Key, Value> distributedLoadingCacheB = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
+                    cacheBuilder,
+                    dc -> dc.build(cacheLoader));
+
+            DistributionMode distributionMode = getInstanceRegistry(distributedLoadingCacheA).getDistributionMode();
+            DistributedPolicy<Key, Value> distributedPolicy = distributedLoadingCacheA.distributedPolicy();
+            VarExpiration<Key, Value> varExpirationA = distributedLoadingCacheA.policy().expireVariably().orElseThrow();
+            VarExpiration<Key, Value> varExpirationB = distributedLoadingCacheB.policy().expireVariably().orElseThrow();
+
+            Key key1 = Key.of(1);
+            Key key2 = Key.of(2);
+            Key key3 = Key.of(3);
+            Key key4 = Key.of(4);
+
+            doAnswer(invocation -> Value.of(invocation.<Key>getArgument(0).getId(), "loaded"))
+                    .when(cacheLoader).load(any(Key.class));
+
+            Value loadedValue1 = distributedLoadingCacheA.get(key1);
+
+            verify(cacheLoader, times(1)).load(any(Key.class));
+            verifyNoInteractions(evictionListener);
+
+            await("synchronization between cache instances")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> {
+                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
+                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
+                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
+                            assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
+                            assertThat(distributedLoadingCacheA.asMap())
+                                    .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
+                            assertThatDataStoreHasCounts(
+                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)));
+                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
+                                distributionMode.equals(INVALIDATION)) {
+                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
+                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
+                            assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNull();
+                            assertThatDataStoreHasCounts(
+                                    Count.empty());
+                        }
+                    });
+
+            Value loadedValue2 = distributedLoadingCacheB.get(key2);
+            // explicit eviction
+            varExpirationA.setExpiresAfter(key1, Duration.ZERO);
+            varExpirationB.setExpiresAfter(key1, Duration.ZERO);
+
+            verify(cacheLoader, times(2)).load(any(Key.class));
+
+            await("eviction")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> {
+                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
+                            verify(evictionListener, times(2))
+                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
+                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
+                                || distributionMode.equals(INVALIDATION)) {
+                            verify(evictionListener, times(1))
+                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
+                        }
+                    });
+
+            await("synchronization between cache instances")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> {
+                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
+                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
+                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
+                            assertThat(distributedLoadingCacheA.getIfPresent(key2)).isEqualTo(loadedValue2);
+                            assertThat(distributedLoadingCacheA.asMap())
+                                    .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
+                            assertThatDataStoreHasCounts(
+                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(1)));
+                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
+                                distributionMode.equals(INVALIDATION)) {
+                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(0);
+                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
+                            assertThat(distributedLoadingCacheB.getIfPresent(key2)).isEqualTo(loadedValue2);
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNull();
+                            assertThatDataStoreHasCounts(
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(1)));
+                        }
+                    });
+
+            // use getAll()
+            distributedLoadingCacheA.getAll(Set.of(key1));
+            // explicit eviction
+            varExpirationA.setExpiresAfter(key2, Duration.ZERO);
+            varExpirationB.setExpiresAfter(key2, Duration.ZERO);
+
+            verifyNoMoreInteractions(cacheLoader);
+
+            await("eviction")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> {
+                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
+                            verify(evictionListener, times(4))
+                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
+                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
+                                || distributionMode.equals(INVALIDATION)) {
+                            verify(evictionListener, times(1))
+                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
+                        }
+                    });
+
+            await("synchronization between cache instances")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> {
+                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
+                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
+                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
+                            assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
+                            assertThat(distributedLoadingCacheA.asMap())
+                                    .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
+                            assertThatDataStoreHasCounts(
+                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(1)));
+                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
+                                distributionMode.equals(INVALIDATION)) {
+                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
+                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
+                            assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
+                            assertThatDataStoreHasCounts(
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(2)));
+                        }
+                    });
+
+            Value loadedValue3 = distributedLoadingCacheB.get(key3);
+            // explicit eviction
+            varExpirationA.setExpiresAfter(key1, Duration.ZERO);
+            varExpirationB.setExpiresAfter(key1, Duration.ZERO);
+
+            verify(cacheLoader, times(3)).load(any(Key.class));
+
+            await("eviction")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> {
+                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
+                            verify(evictionListener, times(6))
+                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
+                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
+                                || distributionMode.equals(INVALIDATION)) {
+                            verify(evictionListener, times(3))
+                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
+                        }
+                    });
+
+            await("synchronization between cache instances")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> {
+                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
+                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
+                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
+                            assertThat(distributedLoadingCacheB.getIfPresent(key3)).isEqualTo(loadedValue3);
+                            assertThat(distributedLoadingCacheA.asMap())
+                                    .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
+                            assertThat(distributedPolicy.getFromStore(key3, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
+                            assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
+                            assertThatDataStoreHasCounts(
+                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(2)));
+                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
+                                distributionMode.equals(INVALIDATION)) {
+                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(0);
+                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
+                            assertThat(distributedLoadingCacheB.getIfPresent(key3)).isEqualTo(loadedValue3);
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
+                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, true)).isNull();
+                            assertThatDataStoreHasCounts(
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(2)));
+                        }
+                    });
+
+            distributedLoadingCacheA.get(key1);
+            // explicit eviction
+            varExpirationA.setExpiresAfter(key3, Duration.ZERO);
+            varExpirationB.setExpiresAfter(key3, Duration.ZERO);
+
+            verifyNoMoreInteractions(cacheLoader);
+
+            await("eviction")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> {
+                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
+                            verify(evictionListener, times(8))
+                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
+                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
+                                || distributionMode.equals(INVALIDATION)) {
+                            verify(evictionListener, times(4))
+                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
+                        }
+                    });
+
+            await("synchronization between cache instances")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> {
+                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
+                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
+                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
+                            assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
+                            assertThat(distributedLoadingCacheA.asMap())
+                                    .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
+                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
+                            assertThatDataStoreHasCounts(
+                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(2)));
+                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
+                                distributionMode.equals(INVALIDATION)) {
+                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
+                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
+                            assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
+                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
+                            assertThatDataStoreHasCounts(
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(3)));
+                        }
+                    });
+
+            Value loadedValue4 = distributedLoadingCacheA.get(key4);
+            // explicit eviction
+            varExpirationA.setExpiresAfter(key3, Duration.ZERO);
+            varExpirationB.setExpiresAfter(key3, Duration.ZERO);
+
+            verify(cacheLoader, times(4)).load(any(Key.class));
+
+            await("eviction")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> {
+                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
+                            verify(evictionListener, times(8))
+                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
+                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
+                                || distributionMode.equals(INVALIDATION)) {
+                            verify(evictionListener, times(4))
+                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
+                        }
+                    });
+
+            await("synchronization between cache instances")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> {
+                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
+                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(2);
+                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(2);
+                            assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
+                            assertThat(distributedLoadingCacheA.getIfPresent(key4)).isEqualTo(loadedValue4);
+                            assertThat(distributedLoadingCacheA.asMap())
+                                    .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
+                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
+                            assertThat(distributedPolicy.getFromStore(key4, false)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue4));
+                            assertThat(distributedPolicy.getFromStore(key4, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue4));
+                            assertThatDataStoreHasCounts(
+                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(2)),
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(2)));
+                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
+                                distributionMode.equals(INVALIDATION)) {
+                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(2);
+                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
+                            assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
+                            assertThat(distributedLoadingCacheA.getIfPresent(key4)).isEqualTo(loadedValue4);
+                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
+                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
+                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
+                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
+                            assertThat(distributedPolicy.getFromStore(key4, false)).isNull();
+                            assertThat(distributedPolicy.getFromStore(key4, true)).isNull();
+                            assertThatDataStoreHasCounts(
+                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(3)));
+                        }
+                    });
+
+            processMaintenance();
+
+            if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
+                    || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
+                assertThatDataStoreHasCounts(
+                        Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(2)),
+                        Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(2)));
+            } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
+                    || distributionMode.equals(INVALIDATION)) {
+                assertThatDataStoreHasCounts(
+                        Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(3)));
+            }
+
+            // test cache without loading strategy
+            DistributedLoadingCache<Key, Value> distributedLoadingCacheWithoutLoadingStrategy = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
+                    dc -> dc.withPersistence(configurer -> configurer
+                            .withEvictedEntries(DistributedCaffeine.EvictedEntryPersistenceConfigurer::withLoadingStrategies)),
+                    dc -> dc.build(cacheLoader));
+
+            doAnswer(invocation -> Value.of(invocation.<Key>getArgument(0).getId(), "loaded but not from store"))
+                    .when(cacheLoader).load(any(Key.class));
+
+            Value loadedFromStoreValue = distributedPolicy.getFromStore(key2, true).getValue();
+            Value notFoundValue = distributedLoadingCacheWithoutLoadingStrategy.getIfPresent(key2);
+            Value loadedButNotFromStoreValue = distributedLoadingCacheWithoutLoadingStrategy.get(key2);
+
+            verify(cacheLoader, times(5)).load(any(Key.class));
+
+            assertThat(loadedFromStoreValue).isEqualTo(loadedValue2);
+            assertThat(notFoundValue).isNull();
+            assertThat(loadedButNotFromStoreValue).isNotNull()
+                    .satisfies(value -> assertThat(value.getName()).isEqualTo("loaded but not from store"));
+        }
+
         @DisplayName("Test invalidation of a cache entry only the underlying store still holds")
         @Test
         void test_EvictedEntryPersistence_invalidation_of_passivated_cache_entry() {
@@ -5282,441 +5718,7 @@ final class DistributedCaffeineIntegrationTests {
                     });
         }
 
-        @DisplayName("Test persistence of evicted entries by time")
-        @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
-        @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
-        void test_DistributionMode_evicted_entry_persistence_by_time(CacheFactory<Key, Value> cacheFactory) throws Exception {
-            @SuppressWarnings("unchecked")
-            RemovalListener<Key, Value> evictionListener = mock(RemovalListener.class);
 
-            CacheBuilder<Key, Value> cacheBuilder =
-                    dc -> dc.withCaffeine(Caffeine.newBuilder()
-                                    .evictionListener(evictionListener)
-                                    // variable expiration policy provides more control over evictions
-                                    .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration())))
-                            .withPersistence(configurer -> configurer
-                                    .withEvictedEntries(evictedEntries -> evictedEntries
-                                            .withMaximumTime(FOREVER.getDuration())
-                                            // just to test the distinction in logic
-                                            .withMaximumSize(Integer.MAX_VALUE)
-                                            .withLoadingStrategies(CACHE_LOADER)));
-
-            @SuppressWarnings("Convert2Lambda")
-            CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
-                @Override
-                @SuppressWarnings("RedundantThrows")
-                public Value load(@NonNull Key key) throws Exception {
-                    throw new UnsupportedOperationException();
-                }
-            });
-
-            DistributedLoadingCache<Key, Value> distributedLoadingCacheA = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
-                    cacheBuilder,
-                    dc -> dc.build(cacheLoader));
-            DistributedLoadingCache<Key, Value> distributedLoadingCacheB = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
-                    cacheBuilder,
-                    dc -> dc.build(cacheLoader));
-
-            DistributionMode distributionMode = getInstanceRegistry(distributedLoadingCacheA).getDistributionMode();
-            DistributedPolicy<Key, Value> distributedPolicy = distributedLoadingCacheA.distributedPolicy();
-            VarExpiration<Key, Value> varExpirationA = distributedLoadingCacheA.policy().expireVariably().orElseThrow();
-            VarExpiration<Key, Value> varExpirationB = distributedLoadingCacheB.policy().expireVariably().orElseThrow();
-
-            Key key1 = Key.of(1);
-            Key key2 = Key.of(2);
-            Key key3 = Key.of(3);
-            Key key4 = Key.of(4);
-
-            doAnswer(invocation -> Value.of(invocation.<Key>getArgument(0).getId(), "loaded"))
-                    .when(cacheLoader).load(any(Key.class));
-
-            Value loadedValue1 = distributedLoadingCacheA.get(key1);
-
-            verify(cacheLoader, times(1)).load(any(Key.class));
-            verifyNoInteractions(evictionListener);
-
-            await("synchronization between cache instances")
-                    .atMost(WAITING_DURATION)
-                    .failFast("process clean up", this::cleanUp)
-                    .untilAsserted(() -> {
-                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
-                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
-                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
-                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
-                            assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
-                            assertThat(distributedLoadingCacheA.asMap())
-                                    .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
-                            assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)));
-                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
-                                distributionMode.equals(INVALIDATION)) {
-                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
-                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
-                            assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
-                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key1, true)).isNull();
-                            assertThatDataStoreHasCounts(
-                                    Count.empty());
-                        }
-                    });
-
-            Value loadedValue2 = distributedLoadingCacheB.get(key2);
-            // explicit eviction
-            varExpirationA.setExpiresAfter(key1, Duration.ZERO);
-            varExpirationB.setExpiresAfter(key1, Duration.ZERO);
-
-            verify(cacheLoader, times(2)).load(any(Key.class));
-
-            await("eviction")
-                    .atMost(WAITING_DURATION)
-                    .failFast("process clean up", this::cleanUp)
-                    .untilAsserted(() -> {
-                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
-                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
-                            verify(evictionListener, times(2))
-                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
-                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
-                                || distributionMode.equals(INVALIDATION)) {
-                            verify(evictionListener, times(1))
-                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
-                        }
-                    });
-
-            await("synchronization between cache instances")
-                    .atMost(WAITING_DURATION)
-                    .failFast("process clean up", this::cleanUp)
-                    .untilAsserted(() -> {
-                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
-                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
-                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
-                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
-                            assertThat(distributedLoadingCacheA.getIfPresent(key2)).isEqualTo(loadedValue2);
-                            assertThat(distributedLoadingCacheA.asMap())
-                                    .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromStore(key2, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
-                            assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
-                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(1)));
-                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
-                                distributionMode.equals(INVALIDATION)) {
-                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(0);
-                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
-                            assertThat(distributedLoadingCacheB.getIfPresent(key2)).isEqualTo(loadedValue2);
-                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key2, true)).isNull();
-                            assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(1)));
-                        }
-                    });
-
-            // use getAll()
-            distributedLoadingCacheA.getAll(Set.of(key1));
-            // explicit eviction
-            varExpirationA.setExpiresAfter(key2, Duration.ZERO);
-            varExpirationB.setExpiresAfter(key2, Duration.ZERO);
-
-            verifyNoMoreInteractions(cacheLoader);
-
-            await("eviction")
-                    .atMost(WAITING_DURATION)
-                    .failFast("process clean up", this::cleanUp)
-                    .untilAsserted(() -> {
-                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
-                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
-                            verify(evictionListener, times(4))
-                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
-                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
-                                || distributionMode.equals(INVALIDATION)) {
-                            verify(evictionListener, times(1))
-                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
-                        }
-                    });
-
-            await("synchronization between cache instances")
-                    .atMost(WAITING_DURATION)
-                    .failFast("process clean up", this::cleanUp)
-                    .untilAsserted(() -> {
-                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
-                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
-                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
-                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
-                            assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
-                            assertThat(distributedLoadingCacheA.asMap())
-                                    .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
-                            assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
-                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(1)));
-                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
-                                distributionMode.equals(INVALIDATION)) {
-                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
-                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
-                            assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
-                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
-                            assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(2)));
-                        }
-                    });
-
-            Value loadedValue3 = distributedLoadingCacheB.get(key3);
-            // explicit eviction
-            varExpirationA.setExpiresAfter(key1, Duration.ZERO);
-            varExpirationB.setExpiresAfter(key1, Duration.ZERO);
-
-            verify(cacheLoader, times(3)).load(any(Key.class));
-
-            await("eviction")
-                    .atMost(WAITING_DURATION)
-                    .failFast("process clean up", this::cleanUp)
-                    .untilAsserted(() -> {
-                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
-                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
-                            verify(evictionListener, times(6))
-                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
-                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
-                                || distributionMode.equals(INVALIDATION)) {
-                            verify(evictionListener, times(3))
-                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
-                        }
-                    });
-
-            await("synchronization between cache instances")
-                    .atMost(WAITING_DURATION)
-                    .failFast("process clean up", this::cleanUp)
-                    .untilAsserted(() -> {
-                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
-                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
-                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
-                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
-                            assertThat(distributedLoadingCacheB.getIfPresent(key3)).isEqualTo(loadedValue3);
-                            assertThat(distributedLoadingCacheA.asMap())
-                                    .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromStore(key3, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
-                            assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
-                            assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
-                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(2)));
-                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
-                                distributionMode.equals(INVALIDATION)) {
-                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(0);
-                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
-                            assertThat(distributedLoadingCacheB.getIfPresent(key3)).isEqualTo(loadedValue3);
-                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key3, true)).isNull();
-                            assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(2)));
-                        }
-                    });
-
-            distributedLoadingCacheA.get(key1);
-            // explicit eviction
-            varExpirationA.setExpiresAfter(key3, Duration.ZERO);
-            varExpirationB.setExpiresAfter(key3, Duration.ZERO);
-
-            verifyNoMoreInteractions(cacheLoader);
-
-            await("eviction")
-                    .atMost(WAITING_DURATION)
-                    .failFast("process clean up", this::cleanUp)
-                    .untilAsserted(() -> {
-                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
-                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
-                            verify(evictionListener, times(8))
-                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
-                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
-                                || distributionMode.equals(INVALIDATION)) {
-                            verify(evictionListener, times(4))
-                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
-                        }
-                    });
-
-            await("synchronization between cache instances")
-                    .atMost(WAITING_DURATION)
-                    .failFast("process clean up", this::cleanUp)
-                    .untilAsserted(() -> {
-                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
-                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
-                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
-                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(1);
-                            assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
-                            assertThat(distributedLoadingCacheA.asMap())
-                                    .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
-                            assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(1)),
-                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(2)));
-                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
-                                distributionMode.equals(INVALIDATION)) {
-                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(1);
-                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
-                            assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
-                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
-                            assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(3)));
-                        }
-                    });
-
-            Value loadedValue4 = distributedLoadingCacheA.get(key4);
-            // explicit eviction
-            varExpirationA.setExpiresAfter(key3, Duration.ZERO);
-            varExpirationB.setExpiresAfter(key3, Duration.ZERO);
-
-            verify(cacheLoader, times(4)).load(any(Key.class));
-
-            await("eviction")
-                    .atMost(WAITING_DURATION)
-                    .failFast("process clean up", this::cleanUp)
-                    .untilAsserted(() -> {
-                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
-                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
-                            verify(evictionListener, times(8))
-                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
-                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
-                                || distributionMode.equals(INVALIDATION)) {
-                            verify(evictionListener, times(4))
-                                    .onRemoval(any(Key.class), any(Value.class), eq(RemovalCause.EXPIRED));
-                        }
-                    });
-
-            await("synchronization between cache instances")
-                    .atMost(WAITING_DURATION)
-                    .failFast("process clean up", this::cleanUp)
-                    .untilAsserted(() -> {
-                        if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
-                                || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
-                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(2);
-                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(2);
-                            assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
-                            assertThat(distributedLoadingCacheA.getIfPresent(key4)).isEqualTo(loadedValue4);
-                            assertThat(distributedLoadingCacheA.asMap())
-                                    .containsExactlyInAnyOrderEntriesOf(distributedLoadingCacheB.asMap());
-                            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
-                            assertThat(distributedPolicy.getFromStore(key4, false)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue4));
-                            assertThat(distributedPolicy.getFromStore(key4, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue4));
-                            assertThatDataStoreHasCounts(
-                                    Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(2)),
-                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(2)));
-                        } else if (distributionMode.equals(INVALIDATION_AND_EVICTION) ||
-                                distributionMode.equals(INVALIDATION)) {
-                            assertThat(distributedLoadingCacheA.estimatedSize()).isEqualTo(2);
-                            assertThat(distributedLoadingCacheB.estimatedSize()).isEqualTo(0);
-                            assertThat(distributedLoadingCacheA.getIfPresent(key1)).isEqualTo(loadedValue1);
-                            assertThat(distributedLoadingCacheA.getIfPresent(key4)).isEqualTo(loadedValue4);
-                            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue1));
-                            assertThat(distributedPolicy.getFromStore(key2, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key2, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue2));
-                            assertThat(distributedPolicy.getFromStore(key3, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key3, true)).isNotNull()
-                                    .satisfies(entry -> assertThat(entry.getValue()).isEqualTo(loadedValue3));
-                            assertThat(distributedPolicy.getFromStore(key4, false)).isNull();
-                            assertThat(distributedPolicy.getFromStore(key4, true)).isNull();
-                            assertThatDataStoreHasCounts(
-                                    Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(3)));
-                        }
-                    });
-
-            processMaintenance();
-
-            if (distributionMode.equals(POPULATION_AND_INVALIDATION_AND_EVICTION)
-                    || distributionMode.equals(POPULATION_AND_INVALIDATION)) {
-                assertThatDataStoreHasCounts(
-                        Count.of(CACHED_LOADED, assertion -> assertion.isEqualTo(2)),
-                        Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(2)));
-            } else if (distributionMode.equals(INVALIDATION_AND_EVICTION)
-                    || distributionMode.equals(INVALIDATION)) {
-                assertThatDataStoreHasCounts(
-                        Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(3)));
-            }
-
-            // test cache without loading strategy
-            DistributedLoadingCache<Key, Value> distributedLoadingCacheWithoutLoadingStrategy = (DistributedLoadingCache<Key, Value>) cacheFactory.create(
-                    dc -> dc.withPersistence(configurer -> configurer
-                            .withEvictedEntries(DistributedCaffeine.EvictedEntryPersistenceConfigurer::withLoadingStrategies)),
-                    dc -> dc.build(cacheLoader));
-
-            doAnswer(invocation -> Value.of(invocation.<Key>getArgument(0).getId(), "loaded but not from store"))
-                    .when(cacheLoader).load(any(Key.class));
-
-            Value loadedFromStoreValue = distributedPolicy.getFromStore(key2, true).getValue();
-            Value notFoundValue = distributedLoadingCacheWithoutLoadingStrategy.getIfPresent(key2);
-            Value loadedButNotFromStoreValue = distributedLoadingCacheWithoutLoadingStrategy.get(key2);
-
-            verify(cacheLoader, times(5)).load(any(Key.class));
-
-            assertThat(loadedFromStoreValue).isEqualTo(loadedValue2);
-            assertThat(notFoundValue).isNull();
-            assertThat(loadedButNotFromStoreValue).isNotNull()
-                    .satisfies(value -> assertThat(value.getName()).isEqualTo("loaded but not from store"));
-        }
 
         @DisplayName("Test synchronization")
         @Test
@@ -5926,9 +5928,128 @@ final class DistributedCaffeineIntegrationTests {
             assertThatDataStoreIsEmpty();
         }
 
-        @DisplayName("Test Adapter")
+        @DisplayName("Test MaintenanceWorker")
         @Test
         @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_MaintenanceWorker_fails_and_retries() {
+            int maximumSize = 1;
+            int retainedMaximumSize = 2;
+
+            CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
+                    .getCaptureLogger(DistributedCaffeine.class);
+
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
+                                    .maximumSize(maximumSize))
+                            .withPersistence(configurer -> configurer
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withMaximumSize(retainedMaximumSize))),
+                    DistributedCaffeine::build);
+
+            // inject a spy into the maintenance worker (to provoke a failure later) and shorten the (otherwise
+            // minute-long) maintenance interval so the scheduled maintenance runs frequently enough to be observed
+            // within the test's waiting duration; (re)activate to apply it - from here the maintenance worker runs
+            // continuously in the background (as it does in production, only faster)
+            InternalMaintenanceWorker<Key, Value> maintenanceWorker = getInstanceRegistry(distributedCache)
+                    .getMaintenanceWorker();
+            InternalCacheManager<Key, Value> cacheManager = injectSpy(maintenanceWorker, InternalMaintenanceWorker.class,
+                    "cacheManager", InternalCacheManager.class);
+            writeFieldValue(maintenanceWorker, InternalMaintenanceWorker.class,
+                    "MAINTENANCE_INTERVAL", Duration.ofMillis(100));
+            maintenanceWorker.deactivate();
+            maintenanceWorker.activate();
+
+            Key key1 = Key.of(1);
+            Key key2 = Key.of(2);
+            Key key3 = Key.of(3);
+            Key key4 = Key.of(4);
+            Key key5 = Key.of(5);
+            Value value = Value.of(0);
+
+            distributedCache.put(key1, value);
+
+            await("caching")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize))));
+
+            // create retained-by-size entries up to (but not exceeding) the retained maximum size;
+            // the background maintenance runs continuously but has nothing to prune yet
+            distributedCache.put(key2, value); // implicit eviction
+
+            await("eviction")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)),
+                            Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(1))));
+
+            distributedCache.put(key3, value); // implicit eviction
+
+            await("eviction")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)),
+                            Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(retainedMaximumSize))));
+
+            loggerDistributedCaffeine.startCapturing();
+
+            // provoke failure
+            doThrow(new IllegalStateException()).when(cacheManager).cleanup();
+
+            // the maintenance worker kicks in in the background, fails, and reschedules itself with a retry warning
+            await("failure")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        List<LoggingEvent> loggingEvents = loggerDistributedCaffeine.getLoggingEvents();
+                        assertThat(loggingEvents).isNotEmpty();
+                        assertThat(loggingEvents).allMatch(loggingEvent ->
+                                loggingEvent.getLevel().equals(Level.WARN)
+                                        && loggingEvent.getMessage().startsWith("Maintenance failed")
+                                        && loggingEvent.getMessage().endsWith("Retrying..."));
+                    });
+
+            loggerDistributedCaffeine.stopCapturing();
+
+            // create more retained-by-size entries than the retained maximum size allows;
+            // the background maintenance keeps failing, so the overflow is left unpruned
+            distributedCache.put(key4, value); // implicit eviction
+
+            await("eviction")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)),
+                            Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(retainedMaximumSize + 1))));
+
+            distributedCache.put(key5, value); // implicit eviction
+
+            await("eviction")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)),
+                            Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(retainedMaximumSize + 2))));
+
+            // fix failure
+            doCallRealMethod().when(cacheManager).cleanup();
+
+            // with the failure fixed, the background maintenance recovers on its own (no explicit trigger) and prunes
+            // retained-by-size entries down to the retained maximum size; this distribution mode distributes
+            // evictions, so residency is a property of every cache instance alike and the pruned overflow is
+            // invalidated (and only later removed as distribution-only, so it still lingers within the waiting duration)
+            await("recovery")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)),
+                            Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(retainedMaximumSize)),
+                            Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2))));
+        }
+
+        @DisplayName("Test Adapter")
+        @Test
         void test_Adapter() throws Exception {
             Set<CacheEntry<Key, Value>> receivedCacheEntries = new HashSet<>();
             Receiver<Key, Value> receiver = spy(new Receiver<Key, Value>() {
@@ -6110,84 +6231,6 @@ final class DistributedCaffeineIntegrationTests {
                         .containsExactly("h1", "h2");
             }
 
-            // reading a document that is no cache entry is reported before it is skipped, so the warnings expected
-            // for the two documents seeded below are captured (and asserted) instead of ending up - with their stack
-            // traces - in the test output
-            CaptureLogger loggerMongoRepository = CaptureLoggerFactory
-                    .getCaptureLogger("io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoRepository");
-            loggerMongoRepository.startCapturing();
-
-            // a document carrying a key and a value that cannot be deserialized is what tells the two streams apart:
-            // it is no cache entry (skipped, logged and left out), while its metadata is returned - which it could only
-            // be if reading metadata does not touch the payload at all
-            mongoClient.getDatabase(DATABASE_NAME).getCollection(getCollectionName())
-                    .insertOne(new Document()
-                            .append(CacheEntry.Field.HASH.toString(), "broken")
-                            .append(CacheEntry.Field.OPERATION.toString(), "op4")
-                            .append(CacheEntry.Field.KEY.toString(), "not a serialized key")
-                            .append(CacheEntry.Field.VALUE.toString(), "not a serialized value")
-                            .append(CacheEntry.Field.STATUS.toString(), CACHED.toString())
-                            .append(CacheEntry.Field.TIMESTAMP.toString(), timestamp1)
-                            .append(DiscriminatorAware.DISCRIMINATOR_FIELD, DEFAULT_DISCRIMINATOR));
-            try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries(Set.of("broken"), null, false)) {
-                assertThat(stream.toList()).isEmpty();
-            }
-            try (Stream<CacheEntryMetadata> stream =
-                         repository.streamCacheEntryMetadata(Set.of("broken"), null, false)) {
-                assertThat(stream.toList())
-                        .singleElement()
-                        .isEqualTo(CacheEntryMetadata.of("broken", "op4", CACHED, timestamp1));
-            }
-            repository.deleteCacheEntries(Set.of("broken"), null, null);
-
-            // a document not carrying what even metadata cannot do without (no status here) is no cache entry and no
-            // metadata of one either, so both streams skip it
-            mongoClient.getDatabase(DATABASE_NAME).getCollection(getCollectionName())
-                    .insertOne(new Document()
-                            .append(CacheEntry.Field.HASH.toString(), "incomplete")
-                            .append(CacheEntry.Field.TIMESTAMP.toString(), timestamp1)
-                            .append(DiscriminatorAware.DISCRIMINATOR_FIELD, DEFAULT_DISCRIMINATOR));
-            try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries(Set.of("incomplete"), null, false)) {
-                assertThat(stream.toList()).isEmpty();
-            }
-            try (Stream<CacheEntryMetadata> stream =
-                         repository.streamCacheEntryMetadata(Set.of("incomplete"), null, false)) {
-                assertThat(stream.toList()).isEmpty();
-            }
-            repository.deleteCacheEntries(Set.of("incomplete"), null, null);
-
-            // every skipped document is reported, the incomplete one twice because both streams skip it
-            assertThat(loggerMongoRepository.getLoggingEvents()).hasSize(3)
-                    .allSatisfy(loggingEvent -> assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN))
-                    .satisfiesOnlyOnce(loggingEvent -> {
-                        assertThat(loggingEvent.getMessage())
-                                .startsWith("Reading of cache entry failed")
-                                .contains("hash=broken");
-                        assertThat(loggingEvent.getThrowable())
-                                .isExactlyInstanceOf(IllegalStateException.class)
-                                .hasMessage("No Serializer found for deserializing value of type String");
-                    })
-                    .satisfiesOnlyOnce(loggingEvent -> {
-                        assertThat(loggingEvent.getMessage())
-                                .startsWith("Reading of cache entry failed")
-                                .contains("hash=incomplete");
-                        assertThat(loggingEvent.getThrowable())
-                                .isExactlyInstanceOf(NullPointerException.class)
-                                .hasMessage("status cannot be null");
-                    })
-                    .satisfiesOnlyOnce(loggingEvent -> {
-                        assertThat(loggingEvent.getMessage())
-                                .startsWith("Reading of cache entry metadata failed")
-                                .contains("hash=incomplete");
-                        assertThat(loggingEvent.getThrowable())
-                                .isExactlyInstanceOf(NullPointerException.class)
-                                .hasMessage("status cannot be null");
-                    });
-
-            loggerMongoRepository.stopCapturing();
-
             // updateStatusOfCacheEntries updates the status, clears the operation and refreshes the timestamp
             repository.updateStatusOfCacheEntries(Set.of("h1"), Set.of(CACHED), null, INVALIDATED);
 
@@ -6238,48 +6281,20 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(repository.countCacheEntries(null)).isEqualTo(0);
         }
 
-        @DisplayName("Test Adapter with a collection shared across caches")
+        @DisplayName("Test Adapter with a dataset shared across caches")
         @Test
-        void test_Adapter_with_shared_collection() throws Exception {
-            String collectionName = getCollectionName();
-
-            // four caches on one and the same collection: two of them share the discriminator 'a' (so they are
+        void test_Adapter_with_shared_dataset() throws Exception {
+            // four caches on one and the same dataset: two of them share the discriminator 'a' (so they are
             // expected to synchronize with each other), one uses 'b' and one chooses none, which puts it in the
             // default scope
             DistributedCache<Key, Value> cacheA1 = createCache(
-                    MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName)
-                            .withDiscriminator("a").build(),
-                    CacheBuilder.identity(), DistributedCaffeine::build);
+                    "a", CacheBuilder.identity(), DistributedCaffeine::build);
             DistributedCache<Key, Value> cacheA2 = createCache(
-                    MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName)
-                            .withDiscriminator("a").build(),
-                    CacheBuilder.identity(), DistributedCaffeine::build);
+                    "a", CacheBuilder.identity(), DistributedCaffeine::build);
             DistributedCache<Key, Value> cacheB = createCache(
-                    MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName)
-                            .withDiscriminator("b").build(),
-                    CacheBuilder.identity(), DistributedCaffeine::build);
+                    "b", CacheBuilder.identity(), DistributedCaffeine::build);
             DistributedCache<Key, Value> cacheInDefaultScope = createCache(
-                    MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName).build(),
                     CacheBuilder.identity(), DistributedCaffeine::build);
-
-            // a discriminator gone missing is reported instead of silently placing the cache in a scope of its own,
-            // where it would neither synchronize with the caches it was meant to nor say so
-            assertThatThrownBy(() ->
-                    MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName).withDiscriminator(null))
-                    .isExactlyInstanceOf(NullPointerException.class)
-                    .hasMessage("discriminator cannot be null");
-            Stream.of("", " ", "\t\n").forEach(blank ->
-                    assertThatThrownBy(() ->
-                            MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName)
-                                    .withDiscriminator(blank))
-                            .isExactlyInstanceOf(IllegalArgumentException.class)
-                            .hasMessage("discriminator cannot be blank"));
-
-            // every cache has a discriminator, so the identifier always carries one
-            assertThat(cacheA1.distributedPolicy().getAdapter().getIdentifier())
-                    .isEqualTo(String.join(":", "mongodb", DATABASE_NAME, collectionName, "a"));
-            assertThat(cacheInDefaultScope.distributedPolicy().getAdapter().getIdentifier())
-                    .isEqualTo(String.join(":", "mongodb", DATABASE_NAME, collectionName, DEFAULT_DISCRIMINATOR));
 
             // the same key is populated in every scope, each with a value of its own
             Key key = Key.of(1);
@@ -6298,11 +6313,7 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(cacheB.getIfPresent(key)).isEqualTo(Value.of(2));
             assertThat(cacheInDefaultScope.getIfPresent(key)).isEqualTo(Value.of(3));
 
-            // uniqueness in the store is (discriminator + hash), so the same key coexists once per scope
-            assertThat(mongoClient.getDatabase(DATABASE_NAME).getCollection(collectionName).countDocuments())
-                    .isEqualTo(3);
-
-            // and every repository addresses its own scope only
+            // every repository addresses its own scope only
             assertThat(repositoryOf(cacheA1).countCacheEntries(null)).isEqualTo(1);
             assertThat(repositoryOf(cacheB).countCacheEntries(null)).isEqualTo(1);
             assertThat(repositoryOf(cacheInDefaultScope).countCacheEntries(null)).isEqualTo(1);
@@ -6314,9 +6325,146 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(repositoryOf(cacheInDefaultScope).countCacheEntries(null)).isEqualTo(1);
         }
 
-        @DisplayName("Test Repository queries are served by an index")
+        @DisplayName("Test that MongoDB documents which are no cache entries are skipped and reported")
         @Test
-        void test_Repository_queries_avoid_collection_scans() throws Exception {
+        @EnabledIf("isMongo")
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_MongoDB_adapter_skips_documents_that_are_no_cache_entries() throws Exception {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+            Adapter<Key, Value> adapter = distributedCache.distributedPolicy().getAdapter();
+            Repository<Key, Value> repository = adapter.getRepository().orElseThrow();
+
+            // operating directly on the repository, which works independently of the synchronizer being activated,
+            // so that nothing the change stream delivers is counted among the warnings asserted below
+            adapter.deactivate();
+
+            // millisecond precision, which is what the store keeps, so the metadata read back compares equal
+            Instant timestamp = Instant.now().truncatedTo(MILLIS);
+
+            // reading a document that is no cache entry is reported before it is skipped, so the warnings expected
+            // for the two documents seeded below are captured (and asserted) instead of ending up - with their stack
+            // traces - in the test output
+            CaptureLogger loggerMongoRepository = CaptureLoggerFactory
+                    .getCaptureLogger("io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoRepository");
+            loggerMongoRepository.startCapturing();
+
+            // a document carrying a key and a value that cannot be deserialized is what tells the two streams apart:
+            // it is no cache entry (skipped, logged and left out), while its metadata is returned - which it could only
+            // be if reading metadata does not touch the payload at all
+            mongoClient.getDatabase(DATABASE_NAME).getCollection(getCollectionName())
+                    .insertOne(new Document()
+                            .append(CacheEntry.Field.HASH.toString(), "broken")
+                            .append(CacheEntry.Field.OPERATION.toString(), "op4")
+                            .append(CacheEntry.Field.KEY.toString(), "not a serialized key")
+                            .append(CacheEntry.Field.VALUE.toString(), "not a serialized value")
+                            .append(CacheEntry.Field.STATUS.toString(), CACHED.toString())
+                            .append(CacheEntry.Field.TIMESTAMP.toString(), timestamp)
+                            .append(DiscriminatorAware.DISCRIMINATOR_FIELD, DEFAULT_DISCRIMINATOR));
+            try (Stream<CacheEntry<Key, Value>> stream =
+                         repository.streamCacheEntries(Set.of("broken"), null, false)) {
+                assertThat(stream.toList()).isEmpty();
+            }
+            try (Stream<CacheEntryMetadata> stream =
+                         repository.streamCacheEntryMetadata(Set.of("broken"), null, false)) {
+                assertThat(stream.toList())
+                        .singleElement()
+                        .isEqualTo(CacheEntryMetadata.of("broken", "op4", CACHED, timestamp));
+            }
+            repository.deleteCacheEntries(Set.of("broken"), null, null);
+
+            // a document not carrying what even metadata cannot do without (no status here) is no cache entry and no
+            // metadata of one either, so both streams skip it
+            mongoClient.getDatabase(DATABASE_NAME).getCollection(getCollectionName())
+                    .insertOne(new Document()
+                            .append(CacheEntry.Field.HASH.toString(), "incomplete")
+                            .append(CacheEntry.Field.TIMESTAMP.toString(), timestamp)
+                            .append(DiscriminatorAware.DISCRIMINATOR_FIELD, DEFAULT_DISCRIMINATOR));
+            try (Stream<CacheEntry<Key, Value>> stream =
+                         repository.streamCacheEntries(Set.of("incomplete"), null, false)) {
+                assertThat(stream.toList()).isEmpty();
+            }
+            try (Stream<CacheEntryMetadata> stream =
+                         repository.streamCacheEntryMetadata(Set.of("incomplete"), null, false)) {
+                assertThat(stream.toList()).isEmpty();
+            }
+            repository.deleteCacheEntries(Set.of("incomplete"), null, null);
+
+            // every skipped document is reported, the incomplete one twice because both streams skip it
+            assertThat(loggerMongoRepository.getLoggingEvents()).hasSize(3)
+                    .allSatisfy(loggingEvent -> assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN))
+                    .satisfiesOnlyOnce(loggingEvent -> {
+                        assertThat(loggingEvent.getMessage())
+                                .startsWith("Reading of cache entry failed")
+                                .contains("hash=broken");
+                        assertThat(loggingEvent.getThrowable())
+                                .isExactlyInstanceOf(IllegalStateException.class)
+                                .hasMessage("No Serializer found for deserializing value of type String");
+                    })
+                    .satisfiesOnlyOnce(loggingEvent -> {
+                        assertThat(loggingEvent.getMessage())
+                                .startsWith("Reading of cache entry failed")
+                                .contains("hash=incomplete");
+                        assertThat(loggingEvent.getThrowable())
+                                .isExactlyInstanceOf(NullPointerException.class)
+                                .hasMessage("status cannot be null");
+                    })
+                    .satisfiesOnlyOnce(loggingEvent -> {
+                        assertThat(loggingEvent.getMessage())
+                                .startsWith("Reading of cache entry metadata failed")
+                                .contains("hash=incomplete");
+                        assertThat(loggingEvent.getThrowable())
+                                .isExactlyInstanceOf(NullPointerException.class)
+                                .hasMessage("status cannot be null");
+                    });
+
+            loggerMongoRepository.stopCapturing();
+        }
+
+        @DisplayName("Test that a MongoDB adapter names and separates its scope by discriminator")
+        @Test
+        @EnabledIf("isMongo")
+        void test_MongoDB_adapter_scopes_by_discriminator() {
+            String collectionName = getCollectionName();
+
+            // a discriminator gone missing is reported instead of silently placing the cache in a scope of its own,
+            // where it would neither synchronize with the caches it was meant to nor say so
+            assertThatThrownBy(() ->
+                    MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName).withDiscriminator(null))
+                    .isExactlyInstanceOf(NullPointerException.class)
+                    .hasMessage("discriminator cannot be null");
+            Stream.of("", " ", "\t\n").forEach(blank ->
+                    assertThatThrownBy(() ->
+                            MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName)
+                                    .withDiscriminator(blank))
+                            .isExactlyInstanceOf(IllegalArgumentException.class)
+                            .hasMessage("discriminator cannot be blank"));
+
+            DistributedCache<Key, Value> cacheA = createCache(
+                    "a", CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheInDefaultScope = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            // every cache has a discriminator, so the identifier always carries one
+            assertThat(cacheA.distributedPolicy().getAdapter().getIdentifier())
+                    .isEqualTo(String.join(":", "mongodb", DATABASE_NAME, collectionName, "a"));
+            assertThat(cacheInDefaultScope.distributedPolicy().getAdapter().getIdentifier())
+                    .isEqualTo(String.join(":", "mongodb", DATABASE_NAME, collectionName, DEFAULT_DISCRIMINATOR));
+
+            // uniqueness in the store is (discriminator + hash), so the same key coexists once per scope
+            Key key = Key.of(1);
+            cacheA.put(key, Value.of(1));
+            cacheInDefaultScope.put(key, Value.of(2));
+
+            assertThat(mongoClient.getDatabase(DATABASE_NAME).getCollection(collectionName).countDocuments())
+                    .isEqualTo(2);
+        }
+
+        @DisplayName("Test that MongoDB repository queries are served by an index")
+        @Test
+        @EnabledIf("isMongo")
+        void test_MongoDB_repository_queries_avoid_collection_scans() throws Exception {
             String collectionName = getCollectionName();
             // both scopes populated, so that the discriminator actually discriminates instead of matching every
             // document - and one of them in the default scope, which an index has to serve like any other
@@ -6383,131 +6531,11 @@ final class DistributedCaffeineIntegrationTests {
                     .doesNotContain("COLLSCAN");
         }
 
-        @DisplayName("Test MaintenanceWorker")
-        @Test
-        @ResourceLock(LOGGER_RESOURCE_LOCK)
-        void test_MaintenanceWorker_fails_and_retries() {
-            int maximumSize = 1;
-            int retainedMaximumSize = 2;
-
-            CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
-                    .getCaptureLogger(DistributedCaffeine.class);
-
-            DistributedCache<Key, Value> distributedCache = createCache(
-                    dc -> dc.withCaffeine(Caffeine.newBuilder()
-                                    .maximumSize(maximumSize))
-                            .withPersistence(configurer -> configurer
-                                    .withEvictedEntries(evictedEntries -> evictedEntries
-                                            .withMaximumSize(retainedMaximumSize))),
-                    DistributedCaffeine::build);
-
-            // inject a spy into the maintenance worker (to provoke a failure later) and shorten the (otherwise
-            // minute-long) maintenance interval so the scheduled maintenance runs frequently enough to be observed
-            // within the test's waiting duration; (re)activate to apply it - from here the maintenance worker runs
-            // continuously in the background (as it does in production, only faster)
-            InternalMaintenanceWorker<Key, Value> maintenanceWorker = getInstanceRegistry(distributedCache)
-                    .getMaintenanceWorker();
-            InternalCacheManager<Key, Value> cacheManager = injectSpy(maintenanceWorker, InternalMaintenanceWorker.class,
-                    "cacheManager", InternalCacheManager.class);
-            writeFieldValue(maintenanceWorker, InternalMaintenanceWorker.class,
-                    "MAINTENANCE_INTERVAL", Duration.ofMillis(100));
-            maintenanceWorker.deactivate();
-            maintenanceWorker.activate();
-
-            Key key1 = Key.of(1);
-            Key key2 = Key.of(2);
-            Key key3 = Key.of(3);
-            Key key4 = Key.of(4);
-            Key key5 = Key.of(5);
-            Value value = Value.of(0);
-
-            distributedCache.put(key1, value);
-
-            await("caching")
-                    .atMost(WAITING_DURATION)
-                    .failFast("process clean up", this::cleanUp)
-                    .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize))));
-
-            // create retained-by-size entries up to (but not exceeding) the retained maximum size;
-            // the background maintenance runs continuously but has nothing to prune yet
-            distributedCache.put(key2, value); // implicit eviction
-
-            await("eviction")
-                    .atMost(WAITING_DURATION)
-                    .failFast("process clean up", this::cleanUp)
-                    .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)),
-                            Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(1))));
-
-            distributedCache.put(key3, value); // implicit eviction
-
-            await("eviction")
-                    .atMost(WAITING_DURATION)
-                    .failFast("process clean up", this::cleanUp)
-                    .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)),
-                            Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(retainedMaximumSize))));
-
-            loggerDistributedCaffeine.startCapturing();
-
-            // provoke failure
-            doThrow(new IllegalStateException()).when(cacheManager).cleanup();
-
-            // the maintenance worker kicks in in the background, fails, and reschedules itself with a retry warning
-            await("failure")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> {
-                        List<LoggingEvent> loggingEvents = loggerDistributedCaffeine.getLoggingEvents();
-                        assertThat(loggingEvents).isNotEmpty();
-                        assertThat(loggingEvents).allMatch(loggingEvent ->
-                                loggingEvent.getLevel().equals(Level.WARN)
-                                        && loggingEvent.getMessage().startsWith("Maintenance failed")
-                                        && loggingEvent.getMessage().endsWith("Retrying..."));
-                    });
-
-            loggerDistributedCaffeine.stopCapturing();
-
-            // create more retained-by-size entries than the retained maximum size allows;
-            // the background maintenance keeps failing, so the overflow is left unpruned
-            distributedCache.put(key4, value); // implicit eviction
-
-            await("eviction")
-                    .atMost(WAITING_DURATION)
-                    .failFast("process clean up", this::cleanUp)
-                    .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)),
-                            Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(retainedMaximumSize + 1))));
-
-            distributedCache.put(key5, value); // implicit eviction
-
-            await("eviction")
-                    .atMost(WAITING_DURATION)
-                    .failFast("process clean up", this::cleanUp)
-                    .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)),
-                            Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(retainedMaximumSize + 2))));
-
-            // fix failure
-            doCallRealMethod().when(cacheManager).cleanup();
-
-            // with the failure fixed, the background maintenance recovers on its own (no explicit trigger) and prunes
-            // retained-by-size entries down to the retained maximum size; this distribution mode distributes
-            // evictions, so residency is a property of every cache instance alike and the pruned overflow is
-            // invalidated (and only later removed as distribution-only, so it still lingers within the waiting duration)
-            await("recovery")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)),
-                            Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(retainedMaximumSize)),
-                            Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2))));
-        }
-
         @DisplayName("Test MongoSynchronizer")
         @Test
         @EnabledIf("isMongo")
         @ResourceLock(LOGGER_RESOURCE_LOCK)
-        void test_MongoSynchronizer_fails_and_retries() throws Exception {
+        void test_MongoDB_synchronizer_fails_and_retries() throws Exception {
             // early (fail-fast) failure: watching change streams requires majority read concern, so building a cache
             // whose collection uses a local read concern fails immediately (without retrying)
             try (MongoClient failFastMongoClient = MongoClients.create(MongoClientSettings.builder()
@@ -7302,6 +7330,18 @@ final class DistributedCaffeineIntegrationTests {
         <K, V> DistributedCache<K, V> createCache(CacheBuilder<K, V> cacheBuilder, CacheConstructor<K, V> cacheConstructor) {
             MongoAdapter<K, V> mongoAdapter = MongoAdapter
                     .newBuilder(mongoClient, DATABASE_NAME, getCollectionName())
+                    .build();
+            return createCache(mongoAdapter, cacheBuilder, cacheConstructor);
+        }
+
+        // every cache of a test shares its collection, so this is what puts two of them in the same scope or in
+        // different ones - the store-specific half of that, so a test about the scoping itself does not have to name
+        // the store
+        <K, V> DistributedCache<K, V> createCache(String discriminator, CacheBuilder<K, V> cacheBuilder,
+                                                  CacheConstructor<K, V> cacheConstructor) {
+            MongoAdapter<K, V> mongoAdapter = MongoAdapter
+                    .newBuilder(mongoClient, DATABASE_NAME, getCollectionName())
+                    .withDiscriminator(discriminator)
                     .build();
             return createCache(mongoAdapter, cacheBuilder, cacheConstructor);
         }
