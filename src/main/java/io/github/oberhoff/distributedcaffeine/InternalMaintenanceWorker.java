@@ -35,6 +35,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
@@ -67,6 +68,11 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
             .collect(toUnmodifiableSet());
 
     private final AtomicBoolean isActivated;
+    // How many maintenance cycles have failed in a row, which is what the delay after a failure is measured in.
+    // Deliberately not the attempt count the policy keeps: this policy retries on a result as well, so a healthy
+    // cycle is an attempt too and counting those would have the first failure after ten quiet minutes wait ten of
+    // them - backing off hardest exactly when something first goes wrong
+    private final AtomicInteger failureStreak;
     private CompletableFuture<Void> maintenanceCompletableFuture;
 
     @SuppressWarnings("NotNullFieldNotInitialized")
@@ -86,6 +92,7 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
     @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalMaintenanceWorker() {
         this.isActivated = new AtomicBoolean(false);
+        this.failureStreak = new AtomicInteger();
         maintenanceCompletableFuture = CompletableFuture.completedFuture(null);
         // see also initialize()
     }
@@ -143,8 +150,7 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
                 .handleResultIf(result -> isActivated())
                 .withMaxAttempts(-1)
                 .withDelay(MAINTENANCE_INTERVAL)
-                .withDelayFnOn(context -> MAINTENANCE_INTERVAL.multipliedBy(min(context.getAttemptCount(), 10)),
-                        Throwable.class)
+                .withDelayFnOn(context -> retryDelay(), Throwable.class)
                 // Cache instances started together would otherwise stay in lockstep for as long as they run, each
                 // of them issuing the same commands against the data store at the same moment. A factor rather
                 // than a fixed duration keeps the spread proportional to whatever the interval is, and Failsafe
@@ -162,9 +168,27 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
         // loop keeps running - and reports isDone() == true, which would let activate() skip its join() below)
         CompletableFuture<Void> failsafeCompletableFuture = Failsafe.with(retryPolicy)
                 .with(executorService)
-                .runAsync(() -> processMaintenance(DISTRIBUTION_DURATION));
+                .runAsync(() -> runMaintenanceCycle(DISTRIBUTION_DURATION));
         failsafeCompletableFuture.whenComplete((result, throwable) -> executorService.shutdown());
         maintenanceCompletableFuture = failsafeCompletableFuture;
+    }
+
+    // One cycle, and the bookkeeping the delay after it is measured in. Counted here rather than through a
+    // callback of the policy, so that what it counts does not depend on the order the policy fires its handlers in
+    void runMaintenanceCycle(Duration distributionDuration) {
+        try {
+            processMaintenance(distributionDuration);
+        } catch (RuntimeException e) {
+            failureStreak.incrementAndGet();
+            throw e;
+        }
+        failureStreak.set(0);
+    }
+
+    // What the policy waits after a failure: one interval for the first, growing with the failures that follow it
+    // and levelling off, so that a store that stays down is not asked about every minute forever
+    Duration retryDelay() {
+        return MAINTENANCE_INTERVAL.multipliedBy(min(failureStreak.get(), 10));
     }
 
     @SuppressWarnings("SameParameterValue")

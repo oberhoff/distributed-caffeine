@@ -34,7 +34,7 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
-@SuppressWarnings({"RedundantThrows", "java:S112"})
+@SuppressWarnings("java:S112")
 public interface Repository<K, V> extends Publisher<K, V> {
 
     /**

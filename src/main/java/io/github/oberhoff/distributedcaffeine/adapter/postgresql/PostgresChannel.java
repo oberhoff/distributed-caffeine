@@ -15,10 +15,6 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter.postgresql;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.List;
 
 import static java.lang.String.format;
@@ -43,16 +39,10 @@ final class PostgresChannel {
     }
 
     static String channelOf(String identifier) {
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256")
-                    .digest(identifier.getBytes(StandardCharsets.UTF_8));
-            // 16 bytes of it, so the channel stays well inside any identifier length while collisions remain
-            // something nobody will see - and a collision costs a read that matches nothing anyway, because the
-            // read carries the discriminator
-            return PREFIX + HexFormat.of().formatHex(digest, 0, 16);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 is not available", e);
-        }
+        // 16 bytes of it, so the channel stays well inside any identifier length while collisions remain
+        // something nobody will see - and a collision costs a read that matches nothing anyway, because the
+        // read carries the discriminator
+        return PREFIX + PostgresIdentifier.digestOf(identifier, 16);
     }
 
     // A publish larger than one payload becomes several notifications rather than one that is rejected: the server

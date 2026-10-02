@@ -34,9 +34,9 @@ import java.util.stream.Stream;
 import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
 import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
-import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireRepository;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.im;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.nullable;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireRepository;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_RETAINED_GROUP;
@@ -159,7 +159,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
         // through the application's cache loader alone - reading the store would bring back what synchronizing is
         // about to settle - and reaches neither publishing method. What comes back is of no activation either, so
         // nothing is distributed for it and synchronizing removes it unless the store turns out to back it
-        if (!cacheManager.hasCurrentActivationId(oldValue)) {
+        if (cacheManager.isOutsideCurrentActivation(oldValue)) {
             return getFailable(() -> cacheLoader.asyncReload(k(key), v(oldValue), executor))
                     .thenApply(InternalValue::ivn);
         }

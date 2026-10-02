@@ -15,8 +15,8 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
@@ -24,8 +24,8 @@ import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPe
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.Publisher;
-import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.adapter.Receiver;
+import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.System.Logger;
@@ -35,7 +35,6 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -180,12 +179,13 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         isActivated.set(false);
     }
 
-    // whether this value is content of the current activation, meaning this cache instance wrote or received it
-    // while taking part in synchronization. Only such a value may have a change to it distributed, and only such a
-    // value survives synchronizing
-    boolean hasCurrentActivationId(InternalValue<V> value) {
+    // whether this value is content of anything but the current activation, meaning this cache instance neither
+    // wrote nor received it while taking part in synchronization. Only content of the current activation may have
+    // a change to it distributed, and only such content survives synchronizing - which is what every caller here
+    // asks about, so the question is put the way they ask it rather than inverted at each of them
+    boolean isOutsideCurrentActivation(InternalValue<V> value) {
         String currentActivationId = activationId.get();
-        return nonNull(currentActivationId) && currentActivationId.equals(value.getActivationId());
+        return isNull(currentActivationId) || !currentActivationId.equals(value.getActivationId());
     }
 
     boolean isActivated() {
@@ -311,9 +311,9 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     }
 
     @SuppressWarnings("java:S3776")
-    // special handling (activated, eviction support, async, not managed, cache change).
-    // Every condition for distributing an eviction is here rather than partly at the listener reporting it, so
-    // that what reaches the underlying store and what does not can be read in one place
+        // special handling (activated, eviction support, async, not managed, cache change).
+        // Every condition for distributing an eviction is here rather than partly at the listener reporting it, so
+        // that what reaches the underlying store and what does not can be read in one place
     void evictDistributed(@Nullable InternalKey<K> key, @Nullable InternalValue<V> value,
                           RemovalCause removalCause) {
         // a reference that was collected is reported without the key or the value it had, so there is nothing to
@@ -324,7 +324,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         // An eviction is reported asynchronously, so it can arrive once this cache instance counts as activated
         // again although it took place while it did not - which the value says, because it carries the activation
         // it became content of, and only that activation's content is this cache instance's to distribute
-        if (!isActivated() || !hasCurrentActivationId(value)) {
+        if (!isActivated() || isOutsideCurrentActivation(value)) {
             return;
         }
         // the two causes an eviction is distributed for; the collected one is already out above, and every other
@@ -566,10 +566,14 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                 // Reported because what it costs is visible to whoever uses this cache and explains nothing about
                 // itself: without persistence of cached entries the data store confirms none of them, so the cache
                 // is left empty and every read misses until it fills again. Logged after the fact so that the
-                // counts are what actually happened rather than what was about to be attempted
-                logger.log(Level.WARNING, format("Synchronization was interrupted for cache at '%s', so cache "
-                                + "entries not confirmed by the underlying store were removed (%d of %d retained)",
-                        identifier, cache.estimatedSize(), retainedBefore));
+                // counts are what actually happened rather than what was about to be attempted.
+                // Counted as before and after rather than as a share of what was held, because reconciling both
+                // drops and restores: what the data store backs but this cache instance missed comes back with it,
+                // so it can hold more afterwards than it did before
+                logger.log(Level.WARNING, format("Synchronization was interrupted for cache at '%s', so the cache "
+                                + "was reconciled against the underlying store, dropping what it does not confirm "
+                                + "and restoring what it backs (%d before, %d after)",
+                        identifier, retainedBefore, cache.estimatedSize()));
             }
         });
     }
@@ -661,7 +665,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
             // without population being considered nothing clears the marks, so everything present is dropped - the
             // same outcome as before, where a restart always continued with an empty cache
             cache.asMap().values()
-                    .removeIf(value -> !hasCurrentActivationId(value));
+                    .removeIf(this::isOutsideCurrentActivation);
         }
     }
 

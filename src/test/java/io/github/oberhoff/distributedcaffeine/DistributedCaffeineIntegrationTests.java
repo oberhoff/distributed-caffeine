@@ -24,6 +24,7 @@ import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.Policy.VarExpiration;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
+import com.github.benmanes.caffeine.cache.Weigher;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import com.github.benmanes.caffeine.cache.stats.StatsCounter;
 import com.mongodb.ConnectionString;
@@ -36,7 +37,11 @@ import com.mongodb.ReadConcernLevel;
 import com.mongodb.client.FindIterable;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.Sorts;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
 import io.github.oberhoff.distributedcaffeine.adapter.AbstractAdapter;
 import io.github.oberhoff.distributedcaffeine.adapter.AbstractSynchronizer;
@@ -45,10 +50,11 @@ import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
 import io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware;
-import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.adapter.Receiver;
+import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.adapter.Synchronizer;
 import io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoAdapter;
+import io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresAdapter;
 import io.github.oberhoff.distributedcaffeine.common.DistributedCaffeineCommonTestInstance;
 import io.github.oberhoff.distributedcaffeine.common.Key;
 import io.github.oberhoff.distributedcaffeine.common.Value;
@@ -73,38 +79,51 @@ import org.junit.jupiter.api.Named;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
-import org.junit.jupiter.api.condition.EnabledIf;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.postgresql.PGConnection;
+import org.postgresql.PGNotification;
 import org.slf4j.event.Level;
 import org.slf4j.event.LoggingEvent;
 import org.testcontainers.images.PullPolicy;
 import org.testcontainers.mongodb.MongoDBContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
 import tools.jackson.core.type.TypeReference;
 
+import javax.sql.DataSource;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Inherited;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TimeZone;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentMap;
@@ -118,6 +137,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
@@ -133,12 +153,14 @@ import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.entry;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
+import static io.github.oberhoff.distributedcaffeine.InternalMaintenanceWorker.DISTRIBUTION_DURATION;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_LOADED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_REFRESHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_REFRESHED_AFTER_WRITE;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.COMMAND;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.DISTRIBUTION_ONLY_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_RETAINED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_SIZE;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_SIZE_RETAINED;
@@ -148,14 +170,17 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.I
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED_AFTER_WRITE;
-import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.DISTRIBUTION_ONLY_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.STALE;
 import static io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware.DEFAULT_DISCRIMINATOR;
 import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.lang.System.getProperty;
 import static java.time.temporal.ChronoUnit.FOREVER;
+import static java.time.temporal.ChronoUnit.MICROS;
 import static java.time.temporal.ChronoUnit.MILLIS;
+import static java.util.Objects.isNull;
+import static java.util.Objects.requireNonNull;
+import static java.util.Objects.requireNonNullElse;
 import static java.util.stream.Collectors.toMap;
 import static java.util.stream.Collectors.toSet;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -186,6 +211,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
 
 @DisplayName("Distributed Caffeine Integration Test Suite")
 final class DistributedCaffeineIntegrationTests {
@@ -194,73 +220,226 @@ final class DistributedCaffeineIntegrationTests {
     @DisplayName("MongoDB 4.2.0")
     @DockerImage("mongo:4.2.0") // oldest version supported by the latest driver
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_4_2_0 extends DistributedCaffeineIntegration {
+    final class Mongo_4_2_0 extends MongoIntegration {
     }
 
     @Nested
     @DisplayName("MongoDB 4.latest")
     @DockerImage("mongo:4")
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_4_latest extends DistributedCaffeineIntegration {
+    final class Mongo_4_latest extends MongoIntegration {
     }
 
     @Nested
     @DisplayName("MongoDB 5.0.0")
     @DockerImage("mongo:5.0.0")
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_5_0_0 extends DistributedCaffeineIntegration {
+    final class Mongo_5_0_0 extends MongoIntegration {
     }
 
     @Nested
     @DisplayName("MongoDB 5.latest")
     @DockerImage("mongo:5")
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_5_latest extends DistributedCaffeineIntegration {
+    final class Mongo_5_latest extends MongoIntegration {
     }
 
     @Nested
     @DisplayName("MongoDB 6.0.1")
     @DockerImage("mongo:6.0.1") // mongo:6.0.0 is not available
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_6_0_1 extends DistributedCaffeineIntegration {
+    final class Mongo_6_0_1 extends MongoIntegration {
     }
 
     @Nested
     @DisplayName("MongoDB 6.latest")
     @DockerImage("mongo:6")
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_6_latest extends DistributedCaffeineIntegration {
+    final class Mongo_6_latest extends MongoIntegration {
     }
 
     @Nested
     @DisplayName("MongoDB 7.0.0")
     @DockerImage("mongo:7.0.0")
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_7_0_0 extends DistributedCaffeineIntegration {
+    final class Mongo_7_0_0 extends MongoIntegration {
     }
 
     @Nested
     @DisplayName("MongoDB 7.latest")
     @DockerImage("mongo:7")
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_7_latest extends DistributedCaffeineIntegration {
+    final class Mongo_7_latest extends MongoIntegration {
     }
 
     @Nested
     @DisplayName("MongoDB 8.0.0")
     @DockerImage("mongo:8.0.0")
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_8_0_0 extends DistributedCaffeineIntegration {
+    final class Mongo_8_0_0 extends MongoIntegration {
     }
 
     @Nested
     @DisplayName("MongoDB 8.latest")
     @DockerImage("mongo:8")
-    final class Mongo_8_latest extends DistributedCaffeineIntegration {
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_8_latest extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 9.0.2")
+    @DockerImage("mongo:9.0.2") // mongo:9.0.0 is not available
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_9_0_2 extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 9.latest")
+    @DockerImage("mongo:9")
+    final class Mongo_9_latest extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 9.5.25")
+    @DockerImage("postgres:9.5.25") // oldest version offering all features needed
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_9_5_25 extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 9.latest")
+    @DockerImage("postgres:9")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_9_latest extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 10.0")
+    @DockerImage("postgres:10.0")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_10_0 extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 10.latest")
+    @DockerImage("postgres:10")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_10_latest extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 11.0")
+    @DockerImage("postgres:11.0")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_11_0 extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 11.latest")
+    @DockerImage("postgres:11")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_11_latest extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 12.0")
+    @DockerImage("postgres:12.0")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_12_0 extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 12.latest")
+    @DockerImage("postgres:12")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_12_latest extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 13.0")
+    @DockerImage("postgres:13.0")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_13_0 extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 13.latest")
+    @DockerImage("postgres:13")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_13_latest extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 14.0")
+    @DockerImage("postgres:14.0")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_14_0 extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 14.latest")
+    @DockerImage("postgres:14")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_14_latest extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 15.0")
+    @DockerImage("postgres:15.0")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_15_0 extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 15.latest")
+    @DockerImage("postgres:15")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_15_latest extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 16.0")
+    @DockerImage("postgres:16.0")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_16_0 extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 16.latest")
+    @DockerImage("postgres:16")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_16_latest extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 17.0")
+    @DockerImage("postgres:17.0")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_17_0 extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 17.latest")
+    @DockerImage("postgres:17")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_17_latest extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 18.0")
+    @DockerImage("postgres:18.0")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_18_0 extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 18.latest")
+    @DockerImage("postgres:18")
+    final class Postgres_18_latest extends PostgresIntegration {
     }
 
     @SuppressWarnings({"java:S5838", "java:S5778", "java:S5961", "ResultOfMethodCallIgnored", "DataFlowIssue"})
-    abstract static class DistributedCaffeineIntegration extends DistributedCaffeineIntegrationTestInstance {
+    abstract static class CommonIntegration extends DistributedCaffeineIntegrationTestInstance {
 
         @DisplayName("Test put() and getIfPresent()")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
@@ -1911,10 +2090,10 @@ final class DistributedCaffeineIntegrationTests {
             assertThatDataStoreIsEmpty();
         }
 
-        @DisplayName("Test replace()")
+        @DisplayName("Test replace() and replaceAll()")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentSerializers")
-        void test_ConcurrentMap_replace(CacheFactory<Key, Value> cacheFactory) {
+        void test_ConcurrentMap_replace_replaceAll(CacheFactory<Key, Value> cacheFactory) {
             DistributedCache<Key, Value> distributedCache = cacheFactory.create(
                     CacheBuilder.identity(),
                     DistributedCaffeine::build);
@@ -1932,6 +2111,10 @@ final class DistributedCaffeineIntegrationTests {
             Value value1 = Value.of(1);
             Key key2 = Key.of(2);
             Value value2 = Value.of(2);
+            // replaceAll derives each new value from the one in place, so what it leaves behind still witnesses
+            // what replace() put there
+            Value replacedAllValue1 = Value.of(1, "replaced all");
+            Value replacedAllValue2 = Value.of(2, "replaced all");
 
             EqualResult<Key, Value> replacedValue1x1 = new EqualResult<>();
             EqualResult<Key, Value> replacedValue1x2 = new EqualResult<>();
@@ -1945,6 +2128,7 @@ final class DistributedCaffeineIntegrationTests {
                 assertThatNullPointerException().isThrownBy(() -> map.replace(_null(), Value.of(0), Value.of(0)));
                 assertThatNullPointerException().isThrownBy(() -> map.replace(Key.of(0), _null(), Value.of(0)));
                 assertThatNullPointerException().isThrownBy(() -> map.replace(Key.of(0), Value.of(0), _null()));
+                assertThatNullPointerException().isThrownBy(() -> map.replaceAll(_null()));
 
                 replacedValue1x1.setValue(map.replace(key1, value1));
                 replacedBool2x1.setObject(map.replace(key2, toBeReplacedValue, value2));
@@ -1953,6 +2137,12 @@ final class DistributedCaffeineIntegrationTests {
                 replacedValue1x2.setValue(map.replace(key1, value1));
                 replacedBool2x2.setObject(map.replace(key2, toBeReplacedValue, value2));
                 replacedBool2x3.setObject(map.replace(key2, toBeReplacedValue, value2));
+
+                // the one mutator of the map view that is NOT overridden: it comes from ConcurrentMap's default,
+                // which iterates the entry set and calls replace() for each entry - so it takes the
+                // synchronization lock once per entry and distributes each replacement on its own, unlike
+                // removeAll and retainAll beside it, which take the lock once and invalidate as a set
+                map.replaceAll((key, value) -> Value.of(value.getId(), "replaced all"));
             });
 
             await("synchronization between cache instances")
@@ -1960,12 +2150,12 @@ final class DistributedCaffeineIntegrationTests {
                     .untilAsserted(() -> {
                         allMaps.forEach(map -> {
                             assertThat(map).hasSize(2);
-                            assertThat(map.get(key1)).isEqualTo(value1)
+                            assertThat(map.get(key1)).isEqualTo(replacedAllValue1)
                                     .isNotEqualTo(replacedValue1x1.getValue())
                                     .isNotEqualTo(replacedValue1x2.getValue());
                             assertThat(replacedValue1x1.getValue()).isNull();
                             assertThat(replacedBool2x1.<Boolean>getObject()).isFalse();
-                            assertThat(map.get(key2)).isEqualTo(value2);
+                            assertThat(map.get(key2)).isEqualTo(replacedAllValue2);
                             assertThat(replacedValue1x2.getValue()).isEqualTo(toBeReplacedValue);
                             assertThat(replacedBool2x2.<Boolean>getObject()).isTrue();
                             assertThat(replacedBool2x3.<Boolean>getObject()).isFalse();
@@ -2719,7 +2909,8 @@ final class DistributedCaffeineIntegrationTests {
 
         @DisplayName("Test distributedPolicy()")
         @Test
-        @SuppressWarnings("EqualsIncompatibleType") // comparing unrelated types is the point of the equals() contract test
+        @SuppressWarnings("EqualsIncompatibleType")
+            // comparing unrelated types is the point of the equals() contract test
         void test_DistributedPolicy() {
             DistributedCache<Key, Value> distributedCache = createCache(
                     dc -> dc.withCaffeine(Caffeine.newBuilder()
@@ -3988,81 +4179,6 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(retainingDistributedCache.getIfPresent(key)).isEqualTo(value);
         }
 
-        @DisplayName("Test that an invalidation swept while the watcher is down is not lost")
-        @Test
-        void test_Synchronizer_invalidation_swept_while_watcher_is_down_is_not_lost() throws Exception {
-            // An invalidation reaches the other cache instances as an update of the document the population left
-            // behind, and change streams are watched with UPDATE_LOOKUP, so what is delivered is that document as it
-            // stands when the event is polled - not as it stood when the update happened. Maintenance deletes it a
-            // distribution duration after the write, because without persistence it only ever existed to carry the
-            // removal. A cache instance whose watcher was down for longer than that therefore polls an event whose
-            // document is already gone: the lookup finds nothing, the pipeline's match on the discriminator drops
-            // the event on the server, and nothing arrives here at all - not even something recognizable as
-            // missing. The invalidation is then lost for good, because the watcher's own retrying never reconciles
-            // against the data store; only activating the cache instance does.
-            // Being down is engineered rather than waited for: the receiver of the watcher is made to throw, which
-            // is what a failure of the inbound apply step looks like, so watching fails and keeps failing while the
-            // invalidation below is written and swept. Keeping it failing is what pins the resume position before
-            // the invalidation - a watcher let through in between would apply it while the document still exists,
-            // and the test would pass without ever reproducing anything.
-            DistributedCache<Key, Value> distributedCacheA = createCache(
-                    CacheBuilder.identity(),
-                    DistributedCaffeine::build);
-            DistributedCache<Key, Value> distributedCacheB = createCache(
-                    CacheBuilder.identity(),
-                    DistributedCaffeine::build);
-
-            Key key1 = Key.of(1);
-            Value value1 = Value.of(1);
-            Key key2 = Key.of(2);
-            Value value2 = Value.of(2);
-
-            distributedCacheA.put(key1, value1);
-
-            await("synchronization between cache instances")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThat(distributedCacheB.getIfPresent(key1)).isEqualTo(value1));
-
-            Adapter<Key, Value> adapter = distributedCacheA.distributedPolicy().getAdapter();
-            Synchronizer<Key, Value> synchronizer = readFieldValue(adapter, AbstractAdapter.class,
-                    "synchronizer", Synchronizer.class);
-            Receiver<Key, Value> receiver = injectSpy(synchronizer, AbstractSynchronizer.class,
-                    "receiver", Receiver.class);
-
-            CountDownLatch watcherFailed = new CountDownLatch(1);
-            doAnswer(invocation -> {
-                watcherFailed.countDown();
-                throw new IllegalStateException("provoked");
-            }).when(receiver).receiveCacheEntries(anyList());
-
-            // something for the watcher to fail on, and the entry whose arrival proves afterwards that it recovered
-            distributedCacheB.put(key2, value2);
-
-            assertThat(watcherFailed.await(WAITING_DURATION.toMillis(), TimeUnit.MILLISECONDS)).isTrue();
-
-            distributedCacheB.invalidate(key1);
-
-            // what maintenance does a distribution duration later, done now: a negative duration puts the deadline
-            // ahead of every write, so nothing is left for the watcher to find once it watches again
-            invokeMethod(getInstanceRegistry(distributedCacheB).getMaintenanceWorker(),
-                    InternalMaintenanceWorker.class, "processNotRetained",
-                    List.of(Duration.class), List.of(Duration.ZERO.minus(Duration.ofMillis(1))));
-
-            assertThatDataStoreIsEmpty();
-
-            doCallRealMethod().when(receiver).receiveCacheEntries(anyList());
-
-            // the population of the other cache instance arrives because an insert carries its cache entry in the
-            // oplog, so it survives the document being swept - asserted first, so that a watcher which never
-            // recovered at all cannot make the assertions below pass
-            await("recovery")
-                    .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure
-                    .untilAsserted(() -> assertThat(distributedCacheA.getIfPresent(key2)).isEqualTo(value2));
-
-            assertThat(distributedCacheA.getIfPresent(key1)).isNull();
-            assertThat(distributedCacheB.getIfPresent(key1)).isNull();
-        }
-
         @DisplayName("Test refresh")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
@@ -4421,7 +4537,7 @@ final class DistributedCaffeineIntegrationTests {
         @DisplayName("Test persistence of evicted entries by size")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
-        void test_DistributionMode_evicted_entry_persistence_by_size(CacheFactory<Key, Value> cacheFactory) throws Exception {
+        void test_EvictedEntryPersistence_by_size(CacheFactory<Key, Value> cacheFactory) throws Exception {
             int maximumSize = 1;
             int retainedMaximumSize = 2;
 
@@ -4843,10 +4959,101 @@ final class DistributedCaffeineIntegrationTests {
                     .satisfies(value -> assertThat(value.getName()).isEqualTo("loaded but not from store"));
         }
 
+        @DisplayName("Test that retained evicted entries are not reloaded without a loading strategy")
+        @Test
+            // No loading strategy is the default - loadingStrategies starts out empty - so a retained evicted entry
+            // stays in the store and is reached only through getFromStore or getAllFromStore. Asking the cache for it
+            // loads it afresh instead, which the value says: what the loader returns is stamped
+        void test_EvictedEntryPersistence_without_a_loading_strategy_does_not_read_the_store() throws Exception {
+            @SuppressWarnings("Convert2Lambda")
+            CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<Key, Value>() {
+                @Override
+                public Value load(@NonNull Key key) {
+                    return Value.of(key.getId(), "loaded");
+                }
+            });
+
+            DistributedLoadingCache<Key, Value> distributedLoadingCache =
+                    (DistributedLoadingCache<Key, Value>) this.<Key, Value>createCache(
+                            dc -> dc.withCaffeine(Caffeine.newBuilder().maximumSize(1))
+                                    .withPersistence(configurer -> configurer
+                                            .withEvictedEntries(evictedEntries -> evictedEntries
+                                                    .withMaximumSize(10))),
+                            dc -> dc.build(cacheLoader));
+            Key key = Key.of(1);
+
+            // evicted by taking the room away rather than by writing until something gives, so which entry goes
+            // is not Caffeine's admission decision to make
+            distributedLoadingCache.put(key, Value.of(1, "written"));
+            distributedLoadingCache.policy().eviction().orElseThrow().setMaximum(0);
+            distributedLoadingCache.cleanUp();
+
+            await("the eviction being retained in the store")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(distributedLoadingCache.distributedPolicy()
+                            .getFromStore(key, true))
+                            .isNotNull()
+                            .extracting(CacheEntry::getStatus)
+                            .isEqualTo(EVICTED_SIZE_RETAINED));
+
+            assertThat(distributedLoadingCache.get(key))
+                    .as("loaded afresh rather than taken from the store")
+                    .isEqualTo(Value.of(1, "loaded"));
+            verify(cacheLoader, times(1)).load(key);
+        }
+
+        @DisplayName("Test that the cache loader strategy reads the store first and loads only what it misses")
+        @Test
+            // The documented order, stated here rather than left to a loader invocation count that does not move:
+            // the cache loader is invoked only for what the store could not supply
+        void test_EvictedEntryPersistence_with_the_cache_loader_strategy_reads_the_store_first() throws Exception {
+            @SuppressWarnings("Convert2Lambda")
+            CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<Key, Value>() {
+                @Override
+                public Value load(@NonNull Key key) {
+                    return Value.of(key.getId(), "loaded");
+                }
+            });
+
+            DistributedLoadingCache<Key, Value> distributedLoadingCache =
+                    (DistributedLoadingCache<Key, Value>) this.<Key, Value>createCache(
+                            dc -> dc.withCaffeine(Caffeine.newBuilder().maximumSize(1))
+                                    .withPersistence(configurer -> configurer
+                                            .withEvictedEntries(evictedEntries -> evictedEntries
+                                                    .withMaximumSize(10)
+                                                    .withLoadingStrategies(CACHE_LOADER))),
+                            dc -> dc.build(cacheLoader));
+            Key key = Key.of(1);
+
+            // evicted by taking the room away rather than by writing until something gives, so which entry goes
+            // is not Caffeine's admission decision to make
+            distributedLoadingCache.put(key, Value.of(1, "written"));
+            distributedLoadingCache.policy().eviction().orElseThrow().setMaximum(0);
+            distributedLoadingCache.cleanUp();
+
+            await("the eviction being retained in the store")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(distributedLoadingCache.distributedPolicy()
+                            .getFromStore(key, true))
+                            .isNotNull()
+                            .extracting(CacheEntry::getStatus)
+                            .isEqualTo(EVICTED_SIZE_RETAINED));
+
+            assertThat(distributedLoadingCache.get(key))
+                    .as("the value that was written, so it came back from the store")
+                    .isEqualTo(Value.of(1, "written"));
+            verifyNoInteractions(cacheLoader);
+
+            // and the fallback: a key the store never held is what the loader is actually for
+            Key unknown = Key.of(99);
+            assertThat(distributedLoadingCache.get(unknown)).isEqualTo(Value.of(99, "loaded"));
+            verify(cacheLoader, times(1)).load(unknown);
+        }
+
         @DisplayName("Test persistence of evicted entries by time")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
-        void test_DistributionMode_evicted_entry_persistence_by_time(CacheFactory<Key, Value> cacheFactory) throws Exception {
+        void test_EvictedEntryPersistence_by_time(CacheFactory<Key, Value> cacheFactory) throws Exception {
             @SuppressWarnings("unchecked")
             RemovalListener<Key, Value> evictionListener = mock(RemovalListener.class);
 
@@ -5350,6 +5557,48 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(distributedPolicy.getFromStore(key1, true)).isNull());
         }
 
+        @DisplayName("Test that a cache bounded by weight has its evictions retained and pruned by record count")
+        @Test
+        void test_EvictedEntryPersistence_of_a_weight_bounded_cache_is_pruned_by_count() {
+            // Two bounds in different units, deliberately. Caffeine bounds the cache by total weight, which
+            // measures the live object on this heap; the store tier bounds what is kept by number of records,
+            // because a serialized record's cost is unrelated to that weight and the pruning reads metadata only,
+            // never the key and value it would have to deserialize to weigh them
+            int retainedMaximumSize = 2;
+            CacheBuilder<Key, Value> cacheBuilder = dc -> dc
+                    .withCaffeine(Caffeine.newBuilder()
+                            .maximumWeight(50)
+                            .weigher((Weigher<Key, Value>) (key, value) -> key.getId()))
+                    .withPersistence(configurer -> configurer
+                            .withEvictedEntries(evictedEntries -> evictedEntries
+                                    .withMaximumSize(retainedMaximumSize)));
+
+            DistributedCache<Key, Value> distributedCache = createCache(cacheBuilder, DistributedCaffeine::build);
+            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
+
+            // each key weighs its own id, so no two of them fit under a maximum weight of 50, while four entries
+            // would never breach a maximum SIZE of 50 - only the weigher can be what evicts here
+            List<Key> keys = List.of(Key.of(30), Key.of(31), Key.of(32), Key.of(33));
+            keys.forEach(key -> distributedCache.put(key, Value.of(key.getId())));
+            distributedCache.cleanUp();
+
+            // An eviction the weigher caused is retained exactly as one a maximum size would have caused. Which
+            // entries Caffeine chooses to evict is its own admission decision and is not the same every time -
+            // what is under test is the bound the store applies afterwards, not that choice
+            await("more evictions reaching the store than it is allowed to keep")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(distributedPolicy.getAllFromStore(keys, true))
+                            .filteredOn(cacheEntry -> cacheEntry.getStatus() == EVICTED_SIZE_RETAINED)
+                            .hasSizeGreaterThan(retainedMaximumSize));
+
+            processMaintenance();
+
+            // pruned to a count of records rather than to a weight, whatever those records weigh
+            assertThat(distributedPolicy.getAllFromStore(keys, true))
+                    .filteredOn(cacheEntry -> cacheEntry.getStatus() == EVICTED_SIZE_RETAINED)
+                    .hasSize(retainedMaximumSize);
+        }
+
         @DisplayName("Test that cached entries are not retained without a synchronization strategy")
         @Test
         void test_CachedEntryPersistence_cache_entries_are_not_retained() {
@@ -5719,14 +5968,13 @@ final class DistributedCaffeineIntegrationTests {
         }
 
 
-
         @DisplayName("Test synchronization")
         @Test
         void test_DistributedCaffeine_synchronization() {
             // the second cache instance below is created after the first write, so synchronizing from the data
             // store is the only way it can arrive at that cache entry
             CacheBuilder<Key, Value> cacheBuilder = dc -> dc.withPersistence(configurer -> configurer
-                            .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency));
+                    .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency));
             DistributedCache<Key, Value> distributedCache = createCache(
                     cacheBuilder,
                     DistributedCaffeine::build);
@@ -5928,6 +6176,61 @@ final class DistributedCaffeineIntegrationTests {
             assertThatDataStoreIsEmpty();
         }
 
+        @DisplayName("Test that maintenance backs off by the failures in a row, not by how long it has been running")
+        @Test
+        void test_MaintenanceWorker_backs_off_by_consecutive_failures() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            // Driven by hand, with the scheduled interval pushed out of the way so the background loop cannot run a
+            // cycle in the middle of one asserted here. What is under test is the bookkeeping the delay is measured
+            // in, so nothing about it has to be waited for
+            InternalMaintenanceWorker<Key, Value> maintenanceWorker = getInstanceRegistry(distributedCache)
+                    .getMaintenanceWorker();
+            InternalCacheManager<Key, Value> cacheManager = injectSpy(maintenanceWorker,
+                    InternalMaintenanceWorker.class, "cacheManager", InternalCacheManager.class);
+            Duration interval = Duration.ofHours(1);
+            writeFieldValue(maintenanceWorker, InternalMaintenanceWorker.class, "MAINTENANCE_INTERVAL", interval);
+            maintenanceWorker.deactivate();
+            maintenanceWorker.activate();
+
+            // a long healthy run, well past the point where the policy's own attempt count reaches its ceiling
+            for (int cycle = 0; cycle < 12; cycle++) {
+                maintenanceWorker.runMaintenanceCycle(DISTRIBUTION_DURATION);
+            }
+
+            // and the first failure after it waits as a first failure, not as the twelfth attempt - which is the
+            // whole point: a cache instance that has been up for a while must not back off hardest the moment
+            // something first goes wrong
+            doThrow(new IllegalStateException("provoked")).when(cacheManager).cleanup();
+            assertThatThrownBy(() -> maintenanceWorker.runMaintenanceCycle(DISTRIBUTION_DURATION))
+                    .isInstanceOf(IllegalStateException.class);
+            assertThat(maintenanceWorker.retryDelay()).isEqualTo(interval);
+
+            // failures in a row do stretch it, so a store that stays down is not asked about every interval
+            assertThatThrownBy(() -> maintenanceWorker.runMaintenanceCycle(DISTRIBUTION_DURATION))
+                    .isInstanceOf(IllegalStateException.class);
+            assertThat(maintenanceWorker.retryDelay()).isEqualTo(interval.multipliedBy(2));
+
+            // and it levels off rather than growing without end
+            for (int failure = 0; failure < 20; failure++) {
+                assertThatThrownBy(() -> maintenanceWorker.runMaintenanceCycle(DISTRIBUTION_DURATION))
+                        .isInstanceOf(IllegalStateException.class);
+            }
+            assertThat(maintenanceWorker.retryDelay()).isEqualTo(interval.multipliedBy(10));
+
+            // a cycle that goes through starts the count again, so recovering is not held against the next failure
+            doCallRealMethod().when(cacheManager).cleanup();
+            maintenanceWorker.runMaintenanceCycle(DISTRIBUTION_DURATION);
+
+            doThrow(new IllegalStateException("provoked")).when(cacheManager).cleanup();
+            assertThatThrownBy(() -> maintenanceWorker.runMaintenanceCycle(DISTRIBUTION_DURATION))
+                    .isInstanceOf(IllegalStateException.class);
+            assertThat(maintenanceWorker.retryDelay()).isEqualTo(interval);
+
+            doCallRealMethod().when(cacheManager).cleanup();
+        }
+
         @DisplayName("Test MaintenanceWorker")
         @Test
         @ResourceLock(LOGGER_RESOURCE_LOCK)
@@ -6105,6 +6408,16 @@ final class DistributedCaffeineIntegrationTests {
                     insertCacheEntry2.getStatus(),
                     Instant.now());
 
+            // awaited before updating them, because what a cache entry says when it arrives is what the store
+            // holds at that moment: where the events carry their own payload both versions arrive either way,
+            // while a store whose notification only names the record is read when the notification is taken, so
+            // publishing twice in a row would leave the first version unobservable. Both distribute every publish,
+            // which is what this asserts
+            await("receiving of the published cache entries")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(receivedCacheEntries)
+                            .contains(insertCacheEntry1, insertCacheEntry2));
+
             repository.publishCacheEntries(Set.of(updateCacheEntry1, updateCacheEntry2));
 
             List<io.github.oberhoff.distributedcaffeine.adapter.CacheEntry<Key, Value>> foundCacheEntries = new ArrayList<>();
@@ -6145,8 +6458,10 @@ final class DistributedCaffeineIntegrationTests {
             // so the assertions below are not disturbed by change stream events)
 
             // timestamps in the past (and spaced apart) so that a status update - which refreshes the timestamp to the
-            // real 'now' - reliably produces a newer timestamp than these seeded ones
-            Instant now = Instant.now();
+            // real 'now' - reliably produces a newer timestamp than these seeded ones. At millisecond precision,
+            // which is the coarsest any store here keeps, so that what comes back compares equal to what went in
+            // rather than to what one store happened to round it to
+            Instant now = Instant.now().truncatedTo(MILLIS);
             Instant timestamp1 = now.minusSeconds(30);
             Instant timestamp2 = now.minusSeconds(20);
             Instant timestamp3 = now.minusSeconds(10);
@@ -6325,407 +6640,175 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(repositoryOf(cacheInDefaultScope).countCacheEntries(null)).isEqualTo(1);
         }
 
-        @DisplayName("Test that MongoDB documents which are no cache entries are skipped and reported")
+        @DisplayName("Test that cache entries are published, read back, filtered and ordered")
         @Test
-        @EnabledIf("isMongo")
-        @ResourceLock(LOGGER_RESOURCE_LOCK)
-        void test_MongoDB_adapter_skips_documents_that_are_no_cache_entries() throws Exception {
-            DistributedCache<Key, Value> distributedCache = createCache(
-                    CacheBuilder.identity(),
-                    DistributedCaffeine::build);
-            Adapter<Key, Value> adapter = distributedCache.distributedPolicy().getAdapter();
-            Repository<Key, Value> repository = adapter.getRepository().orElseThrow();
+        void test_Repository_publishes_and_reads_cache_entries() throws Exception {
+            Repository<Key, Value> repository = repositoryFor(null);
 
-            // operating directly on the repository, which works independently of the synchronizer being activated,
-            // so that nothing the change stream delivers is counted among the warnings asserted below
-            adapter.deactivate();
+            // timestamps in the past and spaced apart, so that a status update - which refreshes the timestamp to the
+            // real 'now' - reliably produces a newer one. Truncated to the coarsest resolution any store keeps, so
+            // that the round-trip compares equal rather than nearly so wherever this runs
+            Instant now = Instant.now().truncatedTo(MILLIS);
+            Instant timestamp1 = now.minusSeconds(30);
+            Instant timestamp2 = now.minusSeconds(20);
+            Instant timestamp3 = now.minusSeconds(10);
 
-            // millisecond precision, which is what the store keeps, so the metadata read back compares equal
-            Instant timestamp = Instant.now().truncatedTo(MILLIS);
+            CacheEntry<Key, Value> cachedEntry1 = CacheEntry.of("h1", "op1", Key.of(1), Value.of(1), CACHED, timestamp1);
+            CacheEntry<Key, Value> cachedEntry2 = CacheEntry.of("h2", "op2", Key.of(2), Value.of(2), CACHED, timestamp2);
+            CacheEntry<Key, Value> invalidatedEntry3 =
+                    CacheEntry.of("h3", "op3", Key.of(3), null, INVALIDATED, timestamp3);
 
-            // reading a document that is no cache entry is reported before it is skipped, so the warnings expected
-            // for the two documents seeded below are captured (and asserted) instead of ending up - with their stack
-            // traces - in the test output
-            CaptureLogger loggerMongoRepository = CaptureLoggerFactory
-                    .getCaptureLogger("io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoRepository");
-            loggerMongoRepository.startCapturing();
+            repository.publishCacheEntries(List.of(cachedEntry1, cachedEntry2, invalidatedEntry3));
 
-            // a document carrying a key and a value that cannot be deserialized is what tells the two streams apart:
-            // it is no cache entry (skipped, logged and left out), while its metadata is returned - which it could only
-            // be if reading metadata does not touch the payload at all
-            mongoClient.getDatabase(DATABASE_NAME).getCollection(getCollectionName())
-                    .insertOne(new Document()
-                            .append(CacheEntry.Field.HASH.toString(), "broken")
-                            .append(CacheEntry.Field.OPERATION.toString(), "op4")
-                            .append(CacheEntry.Field.KEY.toString(), "not a serialized key")
-                            .append(CacheEntry.Field.VALUE.toString(), "not a serialized value")
-                            .append(CacheEntry.Field.STATUS.toString(), CACHED.toString())
-                            .append(CacheEntry.Field.TIMESTAMP.toString(), timestamp)
-                            .append(DiscriminatorAware.DISCRIMINATOR_FIELD, DEFAULT_DISCRIMINATOR));
-            try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries(Set.of("broken"), null, false)) {
-                assertThat(stream.toList()).isEmpty();
+            assertThat(repository.countCacheEntries(null)).isEqualTo(3);
+            assertThat(repository.countCacheEntries(Set.of(CACHED))).isEqualTo(2);
+
+            // unfiltered, then by hashes, by statuses, by both, and ordered
+            try (Stream<CacheEntry<Key, Value>> stream = repository.streamCacheEntries(null, null, false)) {
+                assertThat(stream.toList())
+                        .containsExactlyInAnyOrder(cachedEntry1, cachedEntry2, invalidatedEntry3);
             }
-            try (Stream<CacheEntryMetadata> stream =
-                         repository.streamCacheEntryMetadata(Set.of("broken"), null, false)) {
+            try (Stream<CacheEntry<Key, Value>> stream = repository.streamCacheEntries(Set.of("h1", "h2"), null, false)) {
+                assertThat(stream.toList()).containsExactlyInAnyOrder(cachedEntry1, cachedEntry2);
+            }
+            try (Stream<CacheEntry<Key, Value>> stream =
+                         repository.streamCacheEntries(Set.of("h1", "h2", "h3"), Set.of(INVALIDATED), false)) {
+                assertThat(stream.toList()).containsExactly(invalidatedEntry3);
+            }
+            try (Stream<CacheEntry<Key, Value>> stream = repository.streamCacheEntries(null, null, true)) {
+                assertThat(stream.toList()).containsExactly(cachedEntry1, cachedEntry2, invalidatedEntry3);
+            }
+
+            // an invalidated cache entry carries no value, which has to survive the round-trip as null rather than as
+            // something that fails to deserialize
+            try (Stream<CacheEntry<Key, Value>> stream = repository.streamCacheEntries(Set.of("h3"), null, false)) {
                 assertThat(stream.toList())
                         .singleElement()
-                        .isEqualTo(CacheEntryMetadata.of("broken", "op4", CACHED, timestamp));
+                        .satisfies(cacheEntry -> {
+                            assertThat(cacheEntry.getKey()).isEqualTo(Key.of(3));
+                            assertThat(cacheEntry.getValue()).isNull();
+                        });
             }
-            repository.deleteCacheEntries(Set.of("broken"), null, null);
 
-            // a document not carrying what even metadata cannot do without (no status here) is no cache entry and no
-            // metadata of one either, so both streams skip it
-            mongoClient.getDatabase(DATABASE_NAME).getCollection(getCollectionName())
-                    .insertOne(new Document()
-                            .append(CacheEntry.Field.HASH.toString(), "incomplete")
-                            .append(CacheEntry.Field.TIMESTAMP.toString(), timestamp)
-                            .append(DiscriminatorAware.DISCRIMINATOR_FIELD, DEFAULT_DISCRIMINATOR));
-            try (Stream<CacheEntry<Key, Value>> stream =
-                         repository.streamCacheEntries(Set.of("incomplete"), null, false)) {
-                assertThat(stream.toList()).isEmpty();
+            // publishing the same hash again replaces what was there, which is the uniqueness every store has to
+            // enforce for a hash within a scope, by a primary key or by a unique index
+            repository.publishCacheEntries(List.of(
+                    CacheEntry.of("h1", "op9", Key.of(1), Value.of(9), CACHED, timestamp1)));
+            assertThat(repository.countCacheEntries(null)).isEqualTo(3);
+            try (Stream<CacheEntry<Key, Value>> stream = repository.streamCacheEntries(Set.of("h1"), null, false)) {
+                assertThat(stream.toList())
+                        .singleElement()
+                        .satisfies(cacheEntry -> assertThat(cacheEntry.getValue()).isEqualTo(Value.of(9)));
             }
-            try (Stream<CacheEntryMetadata> stream =
-                         repository.streamCacheEntryMetadata(Set.of("incomplete"), null, false)) {
-                assertThat(stream.toList()).isEmpty();
-            }
-            repository.deleteCacheEntries(Set.of("incomplete"), null, null);
-
-            // every skipped document is reported, the incomplete one twice because both streams skip it
-            assertThat(loggerMongoRepository.getLoggingEvents()).hasSize(3)
-                    .allSatisfy(loggingEvent -> assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN))
-                    .satisfiesOnlyOnce(loggingEvent -> {
-                        assertThat(loggingEvent.getMessage())
-                                .startsWith("Reading of cache entry failed")
-                                .contains("hash=broken");
-                        assertThat(loggingEvent.getThrowable())
-                                .isExactlyInstanceOf(IllegalStateException.class)
-                                .hasMessage("No Serializer found for deserializing value of type String");
-                    })
-                    .satisfiesOnlyOnce(loggingEvent -> {
-                        assertThat(loggingEvent.getMessage())
-                                .startsWith("Reading of cache entry failed")
-                                .contains("hash=incomplete");
-                        assertThat(loggingEvent.getThrowable())
-                                .isExactlyInstanceOf(NullPointerException.class)
-                                .hasMessage("status cannot be null");
-                    })
-                    .satisfiesOnlyOnce(loggingEvent -> {
-                        assertThat(loggingEvent.getMessage())
-                                .startsWith("Reading of cache entry metadata failed")
-                                .contains("hash=incomplete");
-                        assertThat(loggingEvent.getThrowable())
-                                .isExactlyInstanceOf(NullPointerException.class)
-                                .hasMessage("status cannot be null");
-                    });
-
-            loggerMongoRepository.stopCapturing();
         }
 
-        @DisplayName("Test that a MongoDB adapter names and separates its scope by discriminator")
+        @DisplayName("Test that metadata is read without touching key and value")
         @Test
-        @EnabledIf("isMongo")
-        void test_MongoDB_adapter_scopes_by_discriminator() {
-            String collectionName = getCollectionName();
+        void test_Repository_reads_metadata_only() throws Exception {
+            Repository<Key, Value> repository = repositoryFor(null);
 
-            // a discriminator gone missing is reported instead of silently placing the cache in a scope of its own,
-            // where it would neither synchronize with the caches it was meant to nor say so
-            assertThatThrownBy(() ->
-                    MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName).withDiscriminator(null))
-                    .isExactlyInstanceOf(NullPointerException.class)
-                    .hasMessage("discriminator cannot be null");
-            Stream.of("", " ", "\t\n").forEach(blank ->
-                    assertThatThrownBy(() ->
-                            MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName)
-                                    .withDiscriminator(blank))
-                            .isExactlyInstanceOf(IllegalArgumentException.class)
-                            .hasMessage("discriminator cannot be blank"));
+            Instant timestamp = Instant.now().truncatedTo(MILLIS).minusSeconds(30);
+            CacheEntry<Key, Value> cachedEntry = CacheEntry.of("h1", "op1", Key.of(1), Value.of(1), CACHED, timestamp);
+            repository.publishCacheEntries(List.of(cachedEntry));
 
-            DistributedCache<Key, Value> cacheA = createCache(
-                    "a", CacheBuilder.identity(), DistributedCaffeine::build);
-            DistributedCache<Key, Value> cacheInDefaultScope = createCache(
-                    CacheBuilder.identity(), DistributedCaffeine::build);
-
-            // every cache has a discriminator, so the identifier always carries one
-            assertThat(cacheA.distributedPolicy().getAdapter().getIdentifier())
-                    .isEqualTo(String.join(":", "mongodb", DATABASE_NAME, collectionName, "a"));
-            assertThat(cacheInDefaultScope.distributedPolicy().getAdapter().getIdentifier())
-                    .isEqualTo(String.join(":", "mongodb", DATABASE_NAME, collectionName, DEFAULT_DISCRIMINATOR));
-
-            // uniqueness in the store is (discriminator + hash), so the same key coexists once per scope
-            Key key = Key.of(1);
-            cacheA.put(key, Value.of(1));
-            cacheInDefaultScope.put(key, Value.of(2));
-
-            assertThat(mongoClient.getDatabase(DATABASE_NAME).getCollection(collectionName).countDocuments())
-                    .isEqualTo(2);
+            try (Stream<CacheEntryMetadata> stream = repository.streamCacheEntryMetadata(Set.of("h1"), null, false)) {
+                assertThat(stream.toList())
+                        .singleElement()
+                        // the metadata of a cache entry is unrelated to the cache entry it belongs to, so the two are
+                        // never equal
+                        .isNotEqualTo(cachedEntry)
+                        .isEqualTo(CacheEntryMetadata.of("h1", "op1", CACHED, timestamp));
+            }
         }
 
-        @DisplayName("Test that MongoDB repository queries are served by an index")
+        @DisplayName("Test that a status update sets the status, clears the operation and refreshes the timestamp")
         @Test
-        @EnabledIf("isMongo")
-        void test_MongoDB_repository_queries_avoid_collection_scans() throws Exception {
-            String collectionName = getCollectionName();
-            // both scopes populated, so that the discriminator actually discriminates instead of matching every
-            // document - and one of them in the default scope, which an index has to serve like any other
-            DistributedCache<Key, Value> cacheWithDiscriminator = createCache(
-                    MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName)
-                            .withDiscriminator("d1").build(),
-                    CacheBuilder.identity(), DistributedCaffeine::build);
-            DistributedCache<Key, Value> cacheInDefaultScope = createCache(
-                    MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName).build(),
-                    CacheBuilder.identity(), DistributedCaffeine::build);
+        void test_Repository_updates_status() throws Exception {
+            Repository<Key, Value> repository = repositoryFor(null);
 
-            // enough documents, spread over statuses and timestamps, that the planner has something to choose
-            // between rather than trivially scanning a handful. Plan selection is cost-based, so it could in
-            // principle turn over at a size no test wants to seed - probed separately up to 50k documents and
-            // across scopes holding 1% to 100% of the collection, where it does not
-            Status[] statuses = Status.values();
-            for (Repository<Key, Value> repository : List.of(
-                    repositoryOf(cacheWithDiscriminator), repositoryOf(cacheInDefaultScope))) {
-                repository.publishCacheEntries(IntStream.range(0, 500)
-                        .mapToObj(i -> CacheEntry.of("h" + i, "op" + i, Key.of(i), Value.of(i),
-                                statuses[i % statuses.length], Instant.now().minusSeconds(i)))
-                        .collect(toSet()));
+            Instant now = Instant.now().truncatedTo(MILLIS);
+            Instant timestamp1 = now.minusSeconds(30);
+            Instant timestamp3 = now.minusSeconds(10);
+            repository.publishCacheEntries(List.of(
+                    CacheEntry.of("h1", "op1", Key.of(1), Value.of(1), CACHED, timestamp1),
+                    CacheEntry.of("h3", "op3", Key.of(3), Value.of(3), CACHED, timestamp3)));
+
+            repository.updateStatusOfCacheEntries(Set.of("h1"), Set.of(CACHED), null, INVALIDATED);
+
+            try (Stream<CacheEntry<Key, Value>> stream = repository.streamCacheEntries(Set.of("h1"), null, false)) {
+                assertThat(stream.toList())
+                        .singleElement()
+                        .satisfies(cacheEntry -> {
+                            assertThat(cacheEntry.getStatus()).isEqualTo(INVALIDATED);
+                            assertThat(cacheEntry.getOperation()).isNull();
+                            assertThat(cacheEntry.getKey()).isEqualTo(Key.of(1));
+                            assertThat(cacheEntry.getValue()).isEqualTo(Value.of(1));
+                            assertThat(cacheEntry.getTimestamp()).isAfter(timestamp3);
+                        });
             }
 
-            Instant deadline = Instant.now().minusSeconds(100);
-            Set<String> hashes = Set.of("h1", "h2");
-
-            for (Repository<Key, Value> repository : List.of(
-                    repositoryOf(cacheWithDiscriminator), repositoryOf(cacheInDefaultScope))) {
-                // every filter combination the repository can produce, including those no internal caller currently
-                // issues but the SPI permits (a discriminator on its own used to scan the collection)
-                assertThatQueryIsIndexed(repository, collectionName, null, null, null, false);
-                assertThatQueryIsIndexed(repository, collectionName, null, null, deadline, false);
-                assertThatQueryIsIndexed(repository, collectionName, hashes, null, null, false);
-                assertThatQueryIsIndexed(repository, collectionName, hashes, CACHED_GROUP, null, false);
-                assertThatQueryIsIndexed(repository, collectionName, null, CACHED_GROUP, null, false);
-                assertThatQueryIsIndexed(repository, collectionName, null, CACHED_GROUP, deadline, false);
-                // ordered by timestamp, as synchronizing cache entries on activation does
-                assertThatQueryIsIndexed(repository, collectionName, null, CACHED_GROUP, null, true);
-            }
+            // filtered by olderThan, so the entry just refreshed is not caught by it while the older one is
+            repository.updateStatusOfCacheEntries(null, null, now, EVICTED_SIZE);
+            assertThat(repository.countCacheEntries(Set.of(EVICTED_SIZE))).isEqualTo(1);
+            assertThat(repository.countCacheEntries(Set.of(INVALIDATED))).isEqualTo(1);
         }
 
-        // asserts against the winning plan only - rejected plans name stages that are never executed. The filter is
-        // taken from the repository itself rather than rebuilt here, so that this cannot drift from what is queried
-        private void assertThatQueryIsIndexed(Repository<Key, Value> repository, String collectionName,
-                                              Set<String> hashes, Set<Status> statuses, Instant olderThan,
-                                              boolean orderByTimestampAsc) throws Exception {
-            Bson filter = invokeMethod(repository,
-                    Class.forName("io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoRepository"),
-                    "getFilter", List.of(Set.class, Set.class, Instant.class),
-                    Arrays.asList(hashes, statuses, olderThan));
-            FindIterable<Document> findIterable = mongoClient.getDatabase(DATABASE_NAME)
-                    .getCollection(collectionName)
-                    .find(filter);
-            if (orderByTimestampAsc) {
-                findIterable = findIterable.sort(Sorts.ascending(CacheEntry.Field.TIMESTAMP.toString()));
-            }
-            String winningPlan = findIterable.explain(ExplainVerbosity.QUERY_PLANNER)
-                    .get("queryPlanner", Document.class)
-                    .get("winningPlan", Document.class)
-                    .toJson();
-            assertThat(winningPlan)
-                    .describedAs("%nWinning plan for filter %s", filter)
-                    .doesNotContain("COLLSCAN");
-        }
-
-        @DisplayName("Test MongoSynchronizer")
+        @DisplayName("Test that deleting is filtered by hashes, statuses and age")
         @Test
-        @EnabledIf("isMongo")
-        @ResourceLock(LOGGER_RESOURCE_LOCK)
-        void test_MongoDB_synchronizer_fails_and_retries() throws Exception {
-            // early (fail-fast) failure: watching change streams requires majority read concern, so building a cache
-            // whose collection uses a local read concern fails immediately (without retrying)
-            try (MongoClient failFastMongoClient = MongoClients.create(MongoClientSettings.builder()
-                    .applyConnectionString(new ConnectionString(mongoContainer.getReplicaSetUrl()))
-                    .readConcern(ReadConcern.LOCAL)
-                    .build())) {
-                MongoAdapter<Key, Value> localReadConcernAdapter = MongoAdapter
-                        .newBuilder(failFastMongoClient, DATABASE_NAME, getCollectionName())
-                        .build();
-                assertThatThrownBy(() -> DistributedCaffeine.newBuilder(localReadConcernAdapter).build())
-                        .isExactlyInstanceOf(MongoClientException.class)
-                        .hasMessageStartingWith("Watching change streams failed")
-                        .hasMessageNotContaining("Retrying")
-                        .cause()
-                        .isExactlyInstanceOf(MongoCommandException.class)
-                        .hasMessageContainingAll(ReadConcernLevel.LOCAL.getValue(), ReadConcernLevel.MAJORITY.getValue());
+        void test_Repository_deletes_cache_entries() throws Exception {
+            Repository<Key, Value> repository = repositoryFor(null);
+
+            Instant now = Instant.now().truncatedTo(MILLIS);
+            repository.publishCacheEntries(List.of(
+                    CacheEntry.of("h1", "op1", Key.of(1), Value.of(1), CACHED, now.minusSeconds(30)),
+                    CacheEntry.of("h2", "op2", Key.of(2), Value.of(2), INVALIDATED, now.minusSeconds(20)),
+                    CacheEntry.of("h3", "op3", Key.of(3), Value.of(3), CACHED, now)));
+
+            repository.deleteCacheEntries(Set.of("h1"), null, null);
+            assertThat(repository.countCacheEntries(null)).isEqualTo(2);
+
+            repository.deleteCacheEntries(null, Set.of(INVALIDATED), null);
+            assertThat(repository.countCacheEntries(null)).isEqualTo(1);
+
+            repository.deleteCacheEntries(null, null, now.minusSeconds(5));
+            assertThat(repository.countCacheEntries(null)).isEqualTo(1);
+
+            repository.deleteCacheEntries(null, null, null);
+            assertThat(repository.countCacheEntries(null)).isEqualTo(0);
+        }
+
+        @DisplayName("Test that every repository addresses its own discriminator only")
+        @Test
+        void test_Repository_scopes_by_discriminator() throws Exception {
+            Repository<Key, Value> repositoryA = repositoryFor("a");
+            Repository<Key, Value> repositoryB = repositoryFor("b");
+
+            Instant timestamp = Instant.now().truncatedTo(MILLIS);
+            // the same hash in both scopes, which is allowed precisely because what is unique carries the
+            // discriminator alongside the hash
+            repositoryA.publishCacheEntries(List.of(
+                    CacheEntry.of("h1", "op1", Key.of(1), Value.of(1), CACHED, timestamp)));
+            repositoryB.publishCacheEntries(List.of(
+                    CacheEntry.of("h1", "op1", Key.of(1), Value.of(2), CACHED, timestamp)));
+
+            assertThat(repositoryA.countCacheEntries(null)).isEqualTo(1);
+            assertThat(repositoryB.countCacheEntries(null)).isEqualTo(1);
+            try (Stream<CacheEntry<Key, Value>> stream = repositoryA.streamCacheEntries(null, null, false)) {
+                assertThat(stream.toList())
+                        .singleElement()
+                        .satisfies(cacheEntry -> assertThat(cacheEntry.getValue()).isEqualTo(Value.of(1)));
             }
 
-            // both the "watching failed" and the "deserializing failed" warnings are logged under the MongoSynchronizer
-            // class (which is package-private, so it is captured by its fully-qualified name)
-            CaptureLogger loggerMongoSynchronizer = CaptureLoggerFactory
-                    .getCaptureLogger("io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoSynchronizer");
-
-            DistributedCache<Key, Value> distributedCache = createCache(
-                    CacheBuilder.identity(),
-                    DistributedCaffeine::build);
-            DistributedCache<Key, Value> syncedDistributedCache = createCache(
-                    CacheBuilder.identity(),
-                    DistributedCaffeine::build);
-
-            // reach the synced instance's change stream watcher to provoke inbound-processing failures in the background;
-            // the watcher applies inbound changes via its receiver and deserializes them with its value serializer
-            Adapter<Key, Value> syncedAdapter = getInstanceRegistry(syncedDistributedCache).getAdapter();
-            Synchronizer<Key, Value> syncedSynchronizer = readFieldValue(syncedAdapter, AbstractAdapter.class,
-                    "synchronizer", Synchronizer.class);
-            Receiver<Key, Value> syncedReceiver = injectSpy(syncedSynchronizer, AbstractSynchronizer.class,
-                    "receiver", Receiver.class);
-            Serializer<Value, ?> syncedValueSerializer = injectSpy(syncedSynchronizer, AbstractSynchronizer.class,
-                    "valueSerializer", Serializer.class);
-
-            Key key1 = Key.of(1);
-            Value value1 = Value.of(1);
-            Key key2 = Key.of(2);
-            Value value2 = Value.of(2);
-            Key key3 = Key.of(3);
-            Value value3 = Value.of(3);
-            Key key4 = Key.of(4);
-            Value value4 = Value.of(4);
-
-            // a position to resume watching from must exist before any event has arrived, otherwise a cursor failing
-            // in an idle period would resume at "now" and silently skip whatever is written while watching is down.
-            // The server reports one for every polled batch, so it appears without anything having happened
-            AtomicReference<?> resumeToken = readFieldValue(syncedSynchronizer,
-                    syncedSynchronizer.getClass(), "resumeToken", AtomicReference.class);
-
-            await("resume position while idle")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThat(resumeToken.get()).isNotNull());
-
-            Object resumeTokenWhileIdle = resumeToken.get();
-
-            // baseline: the change stream watcher synchronizes changes from the other instance in the background
-            distributedCache.put(key1, value1);
-
-            await("synchronization")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThat(syncedDistributedCache.getIfPresent(key1)).isEqualTo(value1));
-
-            // and it advances as events are applied, so a failure resumes after the last one instead of repeating it
-            assertThat(resumeToken.get()).isNotEqualTo(resumeTokenWhileIdle);
-
-            // watching change streams fails and retries
-            loggerMongoSynchronizer.startCapturing();
-
-            // provoke failure in the inbound apply step of the synced instance's watcher
-            doThrow(new IllegalStateException()).when(syncedReceiver).receiveCacheEntries(any());
-
-            distributedCache.put(key2, value2);
-
-            await("failure")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> {
-                        List<LoggingEvent> loggingEvents = loggerMongoSynchronizer.getLoggingEvents();
-                        assertThat(loggingEvents).isNotEmpty();
-                        assertThat(loggingEvents).allMatch(loggingEvent ->
-                                loggingEvent.getLevel().equals(Level.WARN)
-                                        && loggingEvent.getMessage().startsWith("Watching change streams failed")
-                                        && loggingEvent.getMessage().endsWith("Retrying..."));
-                    });
-
-            loggerMongoSynchronizer.stopCapturing();
-
-            // while watching fails, the synced instance does not receive the update
-            assertThat(syncedDistributedCache.getIfPresent(key2)).isNull();
-
-            // fix failure: the watcher recovers on its own and applies the missed update
-            doCallRealMethod().when(syncedReceiver).receiveCacheEntries(any());
-
-            await("recovery")
-                    .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure
-                    .untilAsserted(() -> assertThat(syncedDistributedCache.getIfPresent(key2)).isEqualTo(value2));
-
-            // reading an inbound cache entry fails and is skipped (without failing the watcher)
-            loggerMongoSynchronizer.startCapturing();
-
-            // provoke failure when deserializing inbound cache entries
-            doThrow(new IllegalStateException()).when(syncedValueSerializer).deserialize(any());
-
-            distributedCache.put(key3, value3);
-
-            await("failure")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> {
-                        List<LoggingEvent> loggingEvents = loggerMongoSynchronizer.getLoggingEvents();
-                        assertThat(loggingEvents).isNotEmpty();
-                        assertThat(loggingEvents).allMatch(loggingEvent ->
-                                loggingEvent.getLevel().equals(Level.WARN)
-                                        && loggingEvent.getMessage().startsWith("Reading of cache entry failed")
-                                        && loggingEvent.getMessage().endsWith("Skipping..."));
-                    });
-
-            loggerMongoSynchronizer.stopCapturing();
-
-            // the entry that failed to deserialize is skipped and not applied (the watcher keeps running)
-            assertThat(syncedDistributedCache.getIfPresent(key3)).isNull();
-
-            // fix failure: subsequent inbound cache entries are synchronized again
-            doCallRealMethod().when(syncedValueSerializer).deserialize(any());
-
-            distributedCache.put(key4, value4);
-
-            await("recovery")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThat(syncedDistributedCache.getIfPresent(key4)).isEqualTo(value4));
-
-            // a failed activation must not poison later activations: the throwable recorded while activating is
-            // cleared by deactivate() only, which InternalInstanceRegistry.deactivate() skips while the cache does
-            // not count as activated - precisely the state a failed activation leaves behind. Simulate that state by
-            // planting a throwable while deactivated (the synchronizer is package-private in another package, so its
-            // class is reached via getClass()) and assert that activating still succeeds and resumes synchronizing.
-            Key key5 = Key.of(5);
-            Value value5 = Value.of(5);
-
-            syncedDistributedCache.distributedPolicy().stopSynchronization();
-
-            AtomicReference<Throwable> failFastThrowable = readFieldValue(syncedSynchronizer,
-                    syncedSynchronizer.getClass(), "failFastThrowable", AtomicReference.class);
-            failFastThrowable.set(new IllegalStateException("stale activation failure"));
-
-            assertThatNoException().isThrownBy(() ->
-                    syncedDistributedCache.distributedPolicy().startSynchronization());
-
-            distributedCache.put(key5, value5);
-
-            await("recovery after a failed activation")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThat(syncedDistributedCache.getIfPresent(key5)).isEqualTo(value5));
-
-            // a retry attempt scheduled before deactivation must not start watching again. The retry policy decides
-            // whether to abort at failure time only, so an attempt already queued behind a delay still runs after
-            // deactivate() - simulated here by invoking the watcher directly while deactivated. It has to return
-            // without watching: otherwise it would report itself activated (leaving the adapter activated while the
-            // rest of the cache is deactivated) and enter a loop that never ends, so the next activation would join
-            // a future that can never complete
-            Key key6 = Key.of(6);
-            Value value6 = Value.of(6);
-
-            syncedDistributedCache.distributedPolicy().stopSynchronization();
-
-            CompletableFuture<Void> staleWatchAttempt = CompletableFuture.runAsync(() ->
-                    invokeMethod(syncedSynchronizer, syncedSynchronizer.getClass(),
-                            "processChangeStreams", List.of(), List.of()));
-
-            assertThat(staleWatchAttempt).succeedsWithin(WAITING_DURATION);
-            assertThat(syncedSynchronizer.isActivated()).isFalse();
-
-            // and activating afterwards still works, without joining a never-completing watcher
-            assertThatNoException().isThrownBy(() ->
-                    syncedDistributedCache.distributedPolicy().startSynchronization());
-
-            distributedCache.put(key6, value6);
-
-            await("recovery after a stale watch attempt")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThat(syncedDistributedCache.getIfPresent(key6)).isEqualTo(value6));
+            // and deleting within one scope leaves the other untouched
+            repositoryB.deleteCacheEntries(null, null, null);
+            assertThat(repositoryB.countCacheEntries(null)).isEqualTo(0);
+            assertThat(repositoryA.countCacheEntries(null)).isEqualTo(1);
         }
 
         @DisplayName("Stress test synchronization from data store")
         @Test
-        @SuppressWarnings("FutureReturnValueIgnored") // background load, awaited through loopCondition/loopCounter
+        @SuppressWarnings("FutureReturnValueIgnored")
+            // background load, awaited through loopCondition/loopCounter
         void stress_test_DistributedCaffeine_synchronization_from_data_store() throws Exception {
             int maximumSize = runsOnGitHub(10_000, 100_000);
             int retainedMaximumSize = maximumSize / 100;
@@ -6879,7 +6962,8 @@ final class DistributedCaffeineIntegrationTests {
         @DisplayName("Stress test thread safety")
         @ParameterizedTest(name = "with {0}-executor")
         @ValueSource(strings = {"same thread", "single thread", "common pool", "cached thread pool", "work stealing thread pool"})
-        @SuppressWarnings("FutureReturnValueIgnored") // delayed executor shutdown, deliberately not awaited
+        @SuppressWarnings("FutureReturnValueIgnored")
+            // delayed executor shutdown, deliberately not awaited
         void stress_test_DistributedCaffeine_thread_safety(String valueSource) throws Exception {
             int maximumSize = 100;
             int retainedMaximumSize = maximumSize / 10;
@@ -7194,20 +7278,1567 @@ final class DistributedCaffeineIntegrationTests {
         }
     }
 
+    @SuppressWarnings({"java:S5838", "java:S5778", "java:S5961"})
+    abstract static class MongoIntegration extends CommonIntegration {
+
+        static final String DATABASE_NAME = "distributedCaffeineDatabase";
+
+        MongoDBContainer mongoContainer;
+        MongoClient mongoClient;
+
+        @DisplayName("Test that the adapter names and separates its scope by discriminator")
+        @Test
+        void test_Adapter_scopes_by_discriminator() {
+            String collectionName = getDatasetName();
+
+            DistributedCache<Key, Value> cacheA = createCache(
+                    "a", CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheInDefaultScope = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            // every cache has a discriminator, so the identifier always carries one
+            assertThat(cacheA.distributedPolicy().getAdapter().getIdentifier())
+                    .isEqualTo(String.join(":", "mongodb", DATABASE_NAME, collectionName, "a"));
+            assertThat(cacheInDefaultScope.distributedPolicy().getAdapter().getIdentifier())
+                    .isEqualTo(String.join(":", "mongodb", DATABASE_NAME, collectionName, DEFAULT_DISCRIMINATOR));
+
+            // uniqueness in the store is (discriminator + hash), so the same key coexists once per scope
+            Key key = Key.of(1);
+            cacheA.put(key, Value.of(1));
+            cacheInDefaultScope.put(key, Value.of(2));
+
+            assertThat(mongoClient.getDatabase(DATABASE_NAME).getCollection(collectionName).countDocuments())
+                    .isEqualTo(2);
+        }
+
+        @DisplayName("Test that documents which are no cache entries are reported and skipped")
+        @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Repository_skips_documents_that_are_no_cache_entries() throws Exception {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+            Adapter<Key, Value> adapter = distributedCache.distributedPolicy().getAdapter();
+            Repository<Key, Value> repository = adapter.getRepository().orElseThrow();
+
+            // operating directly on the repository, which works independently of the synchronizer being activated,
+            // so that nothing the change stream delivers is counted among the warnings asserted below
+            adapter.deactivate();
+
+            // millisecond precision, which is what the store keeps, so the metadata read back compares equal
+            Instant timestamp = Instant.now().truncatedTo(MILLIS);
+
+            // reading a document that is no cache entry is reported before it is skipped, so the warnings expected
+            // for the two documents seeded below are captured (and asserted) instead of ending up - with their stack
+            // traces - in the test output
+            CaptureLogger loggerMongoRepository = CaptureLoggerFactory
+                    .getCaptureLogger("io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoRepository");
+            loggerMongoRepository.startCapturing();
+
+            // a document carrying a key and a value that cannot be deserialized is what tells the two streams apart:
+            // it is no cache entry (skipped, logged and left out), while its metadata is returned - which it could only
+            // be if reading metadata does not touch the payload at all
+            mongoClient.getDatabase(DATABASE_NAME).getCollection(getDatasetName())
+                    .insertOne(new Document()
+                            .append(CacheEntry.Field.HASH.toString(), "broken")
+                            .append(CacheEntry.Field.OPERATION.toString(), "op4")
+                            .append(CacheEntry.Field.KEY.toString(), "not a serialized key")
+                            .append(CacheEntry.Field.VALUE.toString(), "not a serialized value")
+                            .append(CacheEntry.Field.STATUS.toString(), CACHED.toString())
+                            .append(CacheEntry.Field.TIMESTAMP.toString(), timestamp)
+                            .append(DiscriminatorAware.DISCRIMINATOR_FIELD, DEFAULT_DISCRIMINATOR));
+            try (Stream<CacheEntry<Key, Value>> stream =
+                         repository.streamCacheEntries(Set.of("broken"), null, false)) {
+                assertThat(stream.toList()).isEmpty();
+            }
+            try (Stream<CacheEntryMetadata> stream =
+                         repository.streamCacheEntryMetadata(Set.of("broken"), null, false)) {
+                assertThat(stream.toList())
+                        .singleElement()
+                        .isEqualTo(CacheEntryMetadata.of("broken", "op4", CACHED, timestamp));
+            }
+            repository.deleteCacheEntries(Set.of("broken"), null, null);
+
+            // a document not carrying what even metadata cannot do without (no status here) is no cache entry and no
+            // metadata of one either, so both streams skip it
+            mongoClient.getDatabase(DATABASE_NAME).getCollection(getDatasetName())
+                    .insertOne(new Document()
+                            .append(CacheEntry.Field.HASH.toString(), "incomplete")
+                            .append(CacheEntry.Field.TIMESTAMP.toString(), timestamp)
+                            .append(DiscriminatorAware.DISCRIMINATOR_FIELD, DEFAULT_DISCRIMINATOR));
+            try (Stream<CacheEntry<Key, Value>> stream =
+                         repository.streamCacheEntries(Set.of("incomplete"), null, false)) {
+                assertThat(stream.toList()).isEmpty();
+            }
+            try (Stream<CacheEntryMetadata> stream =
+                         repository.streamCacheEntryMetadata(Set.of("incomplete"), null, false)) {
+                assertThat(stream.toList()).isEmpty();
+            }
+            repository.deleteCacheEntries(Set.of("incomplete"), null, null);
+
+            // every skipped document is reported, the incomplete one twice because both streams skip it
+            assertThat(loggerMongoRepository.getLoggingEvents()).hasSize(3)
+                    .allSatisfy(loggingEvent -> assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN))
+                    .satisfiesOnlyOnce(loggingEvent -> {
+                        assertThat(loggingEvent.getMessage())
+                                .startsWith("Reading of cache entry failed")
+                                .contains("hash=broken");
+                        assertThat(loggingEvent.getThrowable())
+                                .isExactlyInstanceOf(IllegalStateException.class)
+                                .hasMessage("No Serializer found for deserializing value of type String");
+                    })
+                    .satisfiesOnlyOnce(loggingEvent -> {
+                        assertThat(loggingEvent.getMessage())
+                                .startsWith("Reading of cache entry failed")
+                                .contains("hash=incomplete");
+                        assertThat(loggingEvent.getThrowable())
+                                .isExactlyInstanceOf(NullPointerException.class)
+                                .hasMessage("status cannot be null");
+                    })
+                    .satisfiesOnlyOnce(loggingEvent -> {
+                        assertThat(loggingEvent.getMessage())
+                                .startsWith("Reading of cache entry metadata failed")
+                                .contains("hash=incomplete");
+                        assertThat(loggingEvent.getThrowable())
+                                .isExactlyInstanceOf(NullPointerException.class)
+                                .hasMessage("status cannot be null");
+                    });
+
+            loggerMongoRepository.stopCapturing();
+        }
+
+        @DisplayName("Test that every query the repository issues is served by an index")
+        @Test
+        void test_Repository_queries_avoid_collection_scans() throws Exception {
+            String collectionName = getDatasetName();
+            // both scopes populated, so that the discriminator actually discriminates instead of matching every
+            // document - and one of them in the default scope, which an index has to serve like any other
+            DistributedCache<Key, Value> cacheWithDiscriminator = createCache(
+                    MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName)
+                            .withDiscriminator("d1").build(),
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheInDefaultScope = createCache(
+                    MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, collectionName).build(),
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            // enough documents, spread over statuses and timestamps, that the planner has something to choose
+            // between rather than trivially scanning a handful. Plan selection is cost-based, so it could in
+            // principle turn over at a size no test wants to seed - probed separately up to 50k documents and
+            // across scopes holding 1% to 100% of the collection, where it does not
+            Status[] statuses = Status.values();
+            for (Repository<Key, Value> repository : List.of(
+                    repositoryOf(cacheWithDiscriminator), repositoryOf(cacheInDefaultScope))) {
+                repository.publishCacheEntries(IntStream.range(0, 500)
+                        .mapToObj(i -> CacheEntry.of("h" + i, "op" + i, Key.of(i), Value.of(i),
+                                statuses[i % statuses.length], Instant.now().minusSeconds(i)))
+                        .collect(toSet()));
+            }
+
+            Instant deadline = Instant.now().minusSeconds(100);
+            Set<String> hashes = Set.of("h1", "h2");
+
+            for (Repository<Key, Value> repository : List.of(
+                    repositoryOf(cacheWithDiscriminator), repositoryOf(cacheInDefaultScope))) {
+                // every filter combination the repository can produce, including those no internal caller currently
+                // issues but the SPI permits (a discriminator on its own used to scan the collection)
+                assertThatQueryIsIndexed(repository, collectionName, null, null, null, false);
+                assertThatQueryIsIndexed(repository, collectionName, null, null, deadline, false);
+                assertThatQueryIsIndexed(repository, collectionName, hashes, null, null, false);
+                assertThatQueryIsIndexed(repository, collectionName, hashes, CACHED_GROUP, null, false);
+                assertThatQueryIsIndexed(repository, collectionName, null, CACHED_GROUP, null, false);
+                assertThatQueryIsIndexed(repository, collectionName, null, CACHED_GROUP, deadline, false);
+                // ordered by timestamp, as synchronizing cache entries on activation does
+                assertThatQueryIsIndexed(repository, collectionName, null, CACHED_GROUP, null, true);
+            }
+        }
+
+        @DisplayName("Test that a binary JSON value is stored as a document rather than as a string")
+        @Test
+        void test_Repository_stores_binary_json_as_a_document() throws Exception {
+            // What storeAsBinaryJson is for: the value is handed to the store in the store's own representation,
+            // so somebody looking at the records reads them and can query inside them. Stored as a string it
+            // round-trips just as well and nothing in the cache behaves differently - only the records stop being
+            // legible, which no other test would notice
+            Value value = Value.of(1);
+            publishWith(new JacksonSerializer<>(Value.class, true), "asDocument", value);
+            publishWith(new JacksonSerializer<>(Value.class, false), "asString", value);
+
+            MongoCollection<Document> collection = mongoClient.getDatabase(DATABASE_NAME)
+                    .getCollection(getDatasetName());
+
+            assertThat(requireNonNull(collection.find(Filters.eq(DiscriminatorAware.DISCRIMINATOR_FIELD,
+                    "asDocument")).first()).get(CacheEntry.Field.VALUE.toString()))
+                    .isInstanceOf(Document.class);
+            assertThat(requireNonNull(collection.find(Filters.eq(DiscriminatorAware.DISCRIMINATOR_FIELD,
+                    "asString")).first()).get(CacheEntry.Field.VALUE.toString()))
+                    .isInstanceOf(String.class);
+
+            // and what was stored as a document can be queried inside, which is the whole of the difference
+            assertThat(collection.find(Filters.eq(
+                    CacheEntry.Field.VALUE.toString().concat(".name"), "value")).into(new ArrayList<>()))
+                    .singleElement()
+                    .satisfies(document -> assertThat(document.getString(DiscriminatorAware.DISCRIMINATOR_FIELD))
+                            .isEqualTo("asDocument"));
+        }
+
+        @DisplayName("Test failure handling while watching change streams")
+        @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_fails_and_retries() throws Exception {
+            // early (fail-fast) failure: watching change streams requires majority read concern, so building a cache
+            // whose collection uses a local read concern fails immediately (without retrying)
+            try (MongoClient failFastMongoClient = MongoClients.create(MongoClientSettings.builder()
+                    .applyConnectionString(new ConnectionString(mongoContainer.getReplicaSetUrl()))
+                    .readConcern(ReadConcern.LOCAL)
+                    .build())) {
+                MongoAdapter<Key, Value> localReadConcernAdapter = MongoAdapter
+                        .newBuilder(failFastMongoClient, DATABASE_NAME, getDatasetName())
+                        .build();
+                assertThatThrownBy(() -> DistributedCaffeine.newBuilder(localReadConcernAdapter).build())
+                        .isExactlyInstanceOf(MongoClientException.class)
+                        .hasMessageStartingWith("Watching change streams failed")
+                        .hasMessageNotContaining("Retrying")
+                        .cause()
+                        .isExactlyInstanceOf(MongoCommandException.class)
+                        .hasMessageContainingAll(ReadConcernLevel.LOCAL.getValue(), ReadConcernLevel.MAJORITY.getValue());
+            }
+
+            // both the "watching failed" and the "deserializing failed" warnings are logged under the MongoSynchronizer
+            // class (which is package-private, so it is captured by its fully-qualified name)
+            CaptureLogger loggerMongoSynchronizer = CaptureLoggerFactory
+                    .getCaptureLogger("io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoSynchronizer");
+
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+            DistributedCache<Key, Value> syncedDistributedCache = createCache(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+
+            // reach the synced instance's change stream watcher to provoke inbound-processing failures in the background;
+            // the watcher applies inbound changes via its receiver and deserializes them with its value serializer
+            Adapter<Key, Value> syncedAdapter = getInstanceRegistry(syncedDistributedCache).getAdapter();
+            Synchronizer<Key, Value> syncedSynchronizer = readFieldValue(syncedAdapter, AbstractAdapter.class,
+                    "synchronizer", Synchronizer.class);
+            Receiver<Key, Value> syncedReceiver = injectSpy(syncedSynchronizer, AbstractSynchronizer.class,
+                    "receiver", Receiver.class);
+            Serializer<Value, ?> syncedValueSerializer = injectSpy(syncedSynchronizer, AbstractSynchronizer.class,
+                    "valueSerializer", Serializer.class);
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+            Key key2 = Key.of(2);
+            Value value2 = Value.of(2);
+            Key key3 = Key.of(3);
+            Value value3 = Value.of(3);
+            Key key4 = Key.of(4);
+            Value value4 = Value.of(4);
+
+            // a position to resume watching from must exist before any event has arrived, otherwise a cursor failing
+            // in an idle period would resume at "now" and silently skip whatever is written while watching is down.
+            // The server reports one for every polled batch, so it appears without anything having happened
+            AtomicReference<?> resumeToken = readFieldValue(syncedSynchronizer,
+                    syncedSynchronizer.getClass(), "resumeToken", AtomicReference.class);
+
+            await("resume position while idle")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(resumeToken.get()).isNotNull());
+
+            Object resumeTokenWhileIdle = resumeToken.get();
+
+            // baseline: the change stream watcher synchronizes changes from the other instance in the background
+            distributedCache.put(key1, value1);
+
+            await("synchronization")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(syncedDistributedCache.getIfPresent(key1)).isEqualTo(value1));
+
+            // and it advances as events are applied, so a failure resumes after the last one instead of repeating it
+            assertThat(resumeToken.get()).isNotEqualTo(resumeTokenWhileIdle);
+
+            // watching change streams fails and retries
+            loggerMongoSynchronizer.startCapturing();
+
+            // restarting reconciles the cache against the data store, and reports that it did - captured for
+            // the same reason and asserted below, because that reconcile is what the recovery under test consists of
+            CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
+                    .getCaptureLogger(DistributedCaffeine.class);
+            loggerDistributedCaffeine.startCapturing();
+
+            // provoke failure in the inbound apply step of the synced instance's watcher
+            doThrow(new IllegalStateException()).when(syncedReceiver).receiveCacheEntries(any());
+
+            distributedCache.put(key2, value2);
+
+            await("failure")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        List<LoggingEvent> loggingEvents = loggerMongoSynchronizer.getLoggingEvents();
+                        assertThat(loggingEvents).isNotEmpty();
+                        assertThat(loggingEvents).allMatch(loggingEvent ->
+                                loggingEvent.getLevel().equals(Level.WARN)
+                                        && loggingEvent.getMessage().startsWith("Watching change streams failed")
+                                        && loggingEvent.getMessage().endsWith("Retrying..."));
+                    });
+
+            loggerMongoSynchronizer.stopCapturing();
+
+            // while watching fails, the synced instance does not receive the update
+            assertThat(syncedDistributedCache.getIfPresent(key2)).isNull();
+
+            // fix failure: the watcher recovers on its own and applies the missed update
+            doCallRealMethod().when(syncedReceiver).receiveCacheEntries(any());
+
+            await("recovery")
+                    .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure
+                    .untilAsserted(() -> assertThat(syncedDistributedCache.getIfPresent(key2)).isEqualTo(value2));
+
+            // and the watcher did not just resume where it left off: restarting reconciled the cache against
+            // the data store, which is what makes an entry missed while watching was down good again
+            assertThat(loggerDistributedCaffeine.getLoggingEvents())
+                    .anySatisfy(loggingEvent -> {
+                        assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                        assertThat(loggingEvent.getMessage())
+                                .startsWith("Synchronization was interrupted for cache at");
+                    });
+            loggerDistributedCaffeine.stopCapturing();
+
+            // reading an inbound cache entry fails and is skipped (without failing the watcher)
+            loggerMongoSynchronizer.startCapturing();
+
+            // provoke failure when deserializing inbound cache entries
+            doThrow(new IllegalStateException()).when(syncedValueSerializer).deserialize(any());
+
+            distributedCache.put(key3, value3);
+
+            await("failure")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        List<LoggingEvent> loggingEvents = loggerMongoSynchronizer.getLoggingEvents();
+                        assertThat(loggingEvents).isNotEmpty();
+                        assertThat(loggingEvents).allMatch(loggingEvent ->
+                                loggingEvent.getLevel().equals(Level.WARN)
+                                        && loggingEvent.getMessage().startsWith("Reading of cache entry failed")
+                                        && loggingEvent.getMessage().endsWith("Skipping..."));
+                    });
+
+            loggerMongoSynchronizer.stopCapturing();
+
+            // the entry that failed to deserialize is skipped and not applied (the watcher keeps running)
+            assertThat(syncedDistributedCache.getIfPresent(key3)).isNull();
+
+            // fix failure: subsequent inbound cache entries are synchronized again
+            doCallRealMethod().when(syncedValueSerializer).deserialize(any());
+
+            distributedCache.put(key4, value4);
+
+            await("recovery")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(syncedDistributedCache.getIfPresent(key4)).isEqualTo(value4));
+
+            // a failed activation must not poison later activations: the throwable recorded while activating is
+            // cleared by deactivate() only, which InternalInstanceRegistry.deactivate() skips while the cache does
+            // not count as activated - precisely the state a failed activation leaves behind. Simulate that state by
+            // planting a throwable while deactivated (the synchronizer is package-private in another package, so its
+            // class is reached via getClass()) and assert that activating still succeeds and resumes synchronizing.
+            Key key5 = Key.of(5);
+            Value value5 = Value.of(5);
+
+            syncedDistributedCache.distributedPolicy().stopSynchronization();
+
+            AtomicReference<Throwable> failFastThrowable = readFieldValue(syncedSynchronizer,
+                    syncedSynchronizer.getClass(), "failFastThrowable", AtomicReference.class);
+            failFastThrowable.set(new IllegalStateException("stale activation failure"));
+
+            assertThatNoException().isThrownBy(() ->
+                    syncedDistributedCache.distributedPolicy().startSynchronization());
+
+            distributedCache.put(key5, value5);
+
+            await("recovery after a failed activation")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(syncedDistributedCache.getIfPresent(key5)).isEqualTo(value5));
+
+            // a retry attempt scheduled before deactivation must not start watching again. The retry policy decides
+            // whether to abort at failure time only, so an attempt already queued behind a delay still runs after
+            // deactivate() - simulated here by invoking the watcher directly while deactivated. It has to return
+            // without watching: otherwise it would report itself activated (leaving the adapter activated while the
+            // rest of the cache is deactivated) and enter a loop that never ends, so the next activation would join
+            // a future that can never complete
+            Key key6 = Key.of(6);
+            Value value6 = Value.of(6);
+
+            syncedDistributedCache.distributedPolicy().stopSynchronization();
+
+            CompletableFuture<Void> staleWatchAttempt = CompletableFuture.runAsync(() ->
+                    invokeMethod(syncedSynchronizer, syncedSynchronizer.getClass(),
+                            "processChangeStreams", List.of(), List.of()));
+
+            assertThat(staleWatchAttempt).succeedsWithin(WAITING_DURATION);
+            assertThat(syncedSynchronizer.isActivated()).isFalse();
+
+            // and activating afterwards still works, without joining a never-completing watcher
+            assertThatNoException().isThrownBy(() ->
+                    syncedDistributedCache.distributedPolicy().startSynchronization());
+
+            distributedCache.put(key6, value6);
+
+            await("recovery after a stale watch attempt")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(syncedDistributedCache.getIfPresent(key6)).isEqualTo(value6));
+        }
+
+        @DisplayName("Test that an invalidation swept while the watcher is down is not lost")
+        @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_invalidation_swept_while_watcher_is_down_is_not_lost() throws Exception {
+            // An invalidation reaches the other cache instances as an update of the document the population left
+            // behind, and change streams are watched with UPDATE_LOOKUP, so what is delivered is that document as it
+            // stands when the event is polled - not as it stood when the update happened. Maintenance deletes it a
+            // distribution duration after the write, because without persistence it only ever existed to carry the
+            // removal. A cache instance whose watcher was down for longer than that therefore polls an event whose
+            // document is already gone: the lookup finds nothing, the pipeline's match on the discriminator drops
+            // the event on the server, and nothing arrives here at all - not even something recognizable as
+            // missing. The invalidation is then lost for good, because the watcher's own retrying never reconciles
+            // against the data store; only activating the cache instance does.
+            // Being down is engineered rather than waited for: the receiver of the watcher is made to throw, which
+            // is what a failure of the inbound apply step looks like, so watching fails and keeps failing while the
+            // invalidation below is written and swept. Keeping it failing is what pins the resume position before
+            // the invalidation - a watcher let through in between would apply it while the document still exists,
+            // and the test would pass without ever reproducing anything.
+            DistributedCache<Key, Value> distributedCacheA = createCache(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+            DistributedCache<Key, Value> distributedCacheB = createCache(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+            Key key2 = Key.of(2);
+            Value value2 = Value.of(2);
+
+            distributedCacheA.put(key1, value1);
+
+            await("synchronization between cache instances")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(distributedCacheB.getIfPresent(key1)).isEqualTo(value1));
+
+            Adapter<Key, Value> adapter = distributedCacheA.distributedPolicy().getAdapter();
+            Synchronizer<Key, Value> synchronizer = readFieldValue(adapter, AbstractAdapter.class,
+                    "synchronizer", Synchronizer.class);
+            Receiver<Key, Value> receiver = injectSpy(synchronizer, AbstractSynchronizer.class,
+                    "receiver", Receiver.class);
+
+            // the watcher reports every failed attempt, so the provoked ones below are captured and asserted
+            // instead of ending up, with their stack traces, in the test output
+            CaptureLogger loggerMongoSynchronizer = CaptureLoggerFactory
+                    .getCaptureLogger("io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoSynchronizer");
+            loggerMongoSynchronizer.startCapturing();
+
+            // restarting reconciles the cache against the data store, and reports that it did - captured for
+            // the same reason and asserted below, because that reconcile is what the recovery under test consists of
+            CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
+                    .getCaptureLogger(DistributedCaffeine.class);
+            loggerDistributedCaffeine.startCapturing();
+
+            CountDownLatch watcherFailed = new CountDownLatch(1);
+            doAnswer(invocation -> {
+                watcherFailed.countDown();
+                throw new IllegalStateException("provoked");
+            }).when(receiver).receiveCacheEntries(anyList());
+
+            // something for the watcher to fail on, and the entry whose arrival proves afterwards that it recovered
+            distributedCacheB.put(key2, value2);
+
+            assertThat(watcherFailed.await(WAITING_DURATION.toMillis(), TimeUnit.MILLISECONDS)).isTrue();
+
+            distributedCacheB.invalidate(key1);
+
+            // what maintenance does a distribution duration later, done now: a negative duration puts the deadline
+            // ahead of every write, so nothing is left for the watcher to find once it watches again
+            invokeMethod(getInstanceRegistry(distributedCacheB).getMaintenanceWorker(),
+                    InternalMaintenanceWorker.class, "processNotRetained",
+                    List.of(Duration.class), List.of(Duration.ZERO.minus(Duration.ofMillis(1))));
+
+            assertThatDataStoreIsEmpty();
+
+            doCallRealMethod().when(receiver).receiveCacheEntries(anyList());
+
+            // the population of the other cache instance arrives because an insert carries its cache entry in the
+            // oplog, so it survives the document being swept - asserted first, so that a watcher which never
+            // recovered at all cannot make the assertions below pass
+            await("recovery")
+                    .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure
+                    .untilAsserted(() -> assertThat(distributedCacheA.getIfPresent(key2)).isEqualTo(value2));
+
+            assertThat(distributedCacheA.getIfPresent(key1)).isNull();
+            assertThat(distributedCacheB.getIfPresent(key1)).isNull();
+
+            // the watcher really did fail and say so, which is what the recovery above is a recovery from
+            assertThat(loggerMongoSynchronizer.getLoggingEvents())
+                    .anySatisfy(loggingEvent -> {
+                        assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                        assertThat(loggingEvent.getMessage()).startsWith("Watching change streams failed");
+                        assertThat(loggingEvent.getThrowable()).hasMessage("provoked");
+                    });
+            loggerMongoSynchronizer.stopCapturing();
+
+            // and the invalidation above survived because restarting reconciled the cache against the data
+            // store - the only step that can drop a cache entry whose removal was never delivered
+            assertThat(loggerDistributedCaffeine.getLoggingEvents())
+                    .anySatisfy(loggingEvent -> {
+                        assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                        assertThat(loggingEvent.getMessage())
+                                .startsWith("Synchronization was interrupted for cache at");
+                    });
+            loggerDistributedCaffeine.stopCapturing();
+        }
+
+        private void publishWith(Serializer<Value, ?> valueSerializer, String discriminator, Value value)
+                throws Exception {
+            MongoAdapter<Key, Value> adapter = MongoAdapter
+                    .newBuilder(mongoClient, DATABASE_NAME, getDatasetName())
+                    .withDiscriminator(discriminator)
+                    .build();
+            adapter.setKeySerializer(new JavaObjectSerializer<>());
+            adapter.setValueSerializer(valueSerializer);
+            adapter.getRepository().orElseThrow().publishCacheEntries(List.of(
+                    CacheEntry.of("h1", "op1", Key.of(1), value, CACHED, Instant.now().truncatedTo(MILLIS))));
+        }
+
+        // asserts against the winning plan only - rejected plans name stages that are never executed. The filter is
+        // taken from the repository itself rather than rebuilt here, so that this cannot drift from what is queried
+        private void assertThatQueryIsIndexed(Repository<Key, Value> repository, String collectionName,
+                                              Set<String> hashes, Set<Status> statuses, Instant olderThan,
+                                              boolean orderByTimestampAsc) throws Exception {
+            Bson filter = invokeMethod(repository,
+                    Class.forName("io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoRepository"),
+                    "getFilter", List.of(Set.class, Set.class, Instant.class),
+                    Arrays.asList(hashes, statuses, olderThan));
+            FindIterable<Document> findIterable = mongoClient.getDatabase(DATABASE_NAME)
+                    .getCollection(collectionName)
+                    .find(filter);
+            if (orderByTimestampAsc) {
+                findIterable = findIterable.sort(Sorts.ascending(CacheEntry.Field.TIMESTAMP.toString()));
+            }
+            String winningPlan = findIterable.explain(ExplainVerbosity.QUERY_PLANNER)
+                    .get("queryPlanner", Document.class)
+                    .get("winningPlan", Document.class)
+                    .toJson();
+            assertThat(winningPlan)
+                    .describedAs("%nWinning plan for filter %s", filter)
+                    .doesNotContain("COLLSCAN");
+        }
+
+        @Override
+        void startStore(DockerImageName dockerImageName, String displayName) {
+            this.mongoContainer = new MongoDBContainer(dockerImageName)
+                    .withReplicaSet()
+                    .withCreateContainerCmdModifier(cmd -> cmd.withName(displayName))
+                    .withImagePullPolicy(PullPolicy.alwaysPull());
+            this.mongoContainer.start();
+            this.mongoClient = MongoClients.create(MongoClientSettings.builder()
+                    .applyConnectionString(new ConnectionString(mongoContainer.getReplicaSetUrl()))
+                    .applyToSocketSettings(socketSettings -> socketSettings
+                            .connectTimeout(30, TimeUnit.SECONDS)
+                            .readTimeout(30, TimeUnit.SECONDS))
+                    .build());
+        }
+
+        @Override
+        void stopStore() {
+            this.mongoClient.close();
+            this.mongoContainer.stop();
+        }
+
+        @Override
+        <K, V> Adapter<K, V> createAdapter() {
+            return MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, getDatasetName()).build();
+        }
+
+        @Override
+        <K, V> Adapter<K, V> createAdapter(String discriminator) {
+            return MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, getDatasetName())
+                    .withDiscriminator(discriminator)
+                    .build();
+        }
+    }
+
+    @SuppressWarnings({"java:S5838", "java:S5778", "SqlNoDataSourceInspection", "SqlSourceToSinkFlow"})
+    abstract static class PostgresIntegration extends CommonIntegration {
+
+        // whichever index serves it, for a predicate so broad that preferring one of them would be the wrong plan
+        private static final Set<String> ANY_INDEX = Set.of("Index");
+
+        // what the adapter sends a notification with, spelled as it spells it
+        private static final String NOTIFY_STATEMENT = "SELECT pg_notify(?, ?)";
+
+        static final String SCHEMA_NAME = "public";
+
+        PostgreSQLContainer postgresContainer;
+        DataSource dataSource;
+
+        @DisplayName("Test that the adapter names and separates its scope by discriminator")
+        @Test
+        void test_Adapter_scopes_by_discriminator() throws Exception {
+            String tableName = getDatasetName();
+
+            DistributedCache<Key, Value> cacheA = createCache(
+                    "a", CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheInDefaultScope = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            // every cache has a discriminator, so the identifier always carries one - and the identifier is what
+            // the notification channel is derived from and what every log line names the cache by
+            assertThat(cacheA.distributedPolicy().getAdapter().getIdentifier())
+                    .isEqualTo(String.join(":", "postgresql", SCHEMA_NAME, tableName, "a"));
+            assertThat(cacheInDefaultScope.distributedPolicy().getAdapter().getIdentifier())
+                    .isEqualTo(String.join(":", "postgresql", SCHEMA_NAME, tableName, DEFAULT_DISCRIMINATOR));
+
+            // uniqueness in the store is (discriminator, hash), which is exactly the primary key, so the same
+            // key coexists once per scope
+            Key key = Key.of(1);
+            cacheA.put(key, Value.of(1));
+            cacheInDefaultScope.put(key, Value.of(2));
+
+            try (Connection connection = dataSource.getConnection();
+                 PreparedStatement statement = connection.prepareStatement(format(
+                         "SELECT count(*) FROM \"%s\".\"%s\"", SCHEMA_NAME, tableName));
+                 ResultSet resultSet = statement.executeQuery()) {
+                assertThat(resultSet.next()).isTrue();
+                assertThat(resultSet.getLong(1)).isEqualTo(2);
+            }
+        }
+
+        @DisplayName("Test that a timestamp is one and the same instant whatever time zone writes or reads it")
+        @Test
+        void test_Repository_keeps_timestamps_absolute() throws Exception {
+            Repository<Key, Value> repository = repositoryFor(null);
+
+            // microseconds, which is the resolution the column keeps, and a value carrying more than that
+            Instant exact = Instant.parse("2026-07-01T12:34:56.123456Z");
+            Instant finerThanTheColumn = Instant.parse("2026-07-01T12:34:56.123456789Z");
+
+            TimeZone originalTimeZone = TimeZone.getDefault();
+            try {
+                // written from a machine well ahead of UTC...
+                TimeZone.setDefault(TimeZone.getTimeZone("Asia/Tokyo"));
+                repository.publishCacheEntries(List.of(
+                        CacheEntry.of("h1", "op1", Key.of(1), Value.of(1), CACHED, exact),
+                        CacheEntry.of("h2", "op2", Key.of(2), Value.of(2), CACHED, finerThanTheColumn)));
+
+                // ...and read back on one well behind it, which changes nothing: the column is timestamptz, so what
+                // it holds is a point in time and not a reading of a clock, and neither machine's zone is part of it
+                TimeZone.setDefault(TimeZone.getTimeZone("America/Los_Angeles"));
+                try (Stream<CacheEntry<Key, Value>> stream = repository.streamCacheEntries(Set.of("h1"), null, false)) {
+                    assertThat(stream.toList())
+                            .singleElement()
+                            .satisfies(cacheEntry -> assertThat(cacheEntry.getTimestamp()).isEqualTo(exact));
+                }
+
+                // and what the store holds is that instant in UTC, rather than either machine's reading of it
+                try (Connection connection = dataSource.getConnection();
+                     PreparedStatement statement = connection.prepareStatement(format(
+                             "SELECT \"%s\" AT TIME ZONE 'UTC' FROM \"%s\".\"%s\" WHERE hash = 'h1'",
+                             CacheEntry.Field.TIMESTAMP, SCHEMA_NAME, getDatasetName()))) {
+                    try (ResultSet resultSet = statement.executeQuery()) {
+                        assertThat(resultSet.next()).isTrue();
+                        assertThat(resultSet.getString(1)).isEqualTo("2026-07-01 12:34:56.123456");
+                    }
+                }
+
+                // Anything finer than the column is rounded to what it can hold, rather than truncated - which is
+                // worth knowing but costs nothing: MongoDB keeps its dates to the millisecond, a thousand times
+                // coarser, and what the engine does with a timestamp is order and age it
+                try (Stream<CacheEntry<Key, Value>> stream = repository.streamCacheEntries(Set.of("h2"), null, false)) {
+                    assertThat(stream.toList())
+                            .singleElement()
+                            .satisfies(cacheEntry -> assertThat(cacheEntry.getTimestamp())
+                                    .isEqualTo(Instant.parse("2026-07-01T12:34:56.123457Z")));
+                }
+            } finally {
+                TimeZone.setDefault(originalTimeZone);
+            }
+        }
+
+        @DisplayName("Test that records which are no cache entries are reported and skipped, while their metadata still reads")
+        @Test
+        void test_Repository_skips_records_that_are_no_cache_entries() throws Exception {
+            Repository<Key, Value> repository = repositoryFor(null);
+            Instant timestamp = Instant.now().truncatedTo(MICROS).minusSeconds(30);
+
+            // reading a record that is no cache entry is reported before it is skipped, so the warning is
+            // captured and asserted instead of ending up, with its stack trace, in the test output
+            CaptureLogger loggerPostgresRepository = CaptureLoggerFactory.getCaptureLogger(
+                    "io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresRepository");
+            loggerPostgresRepository.startCapturing();
+
+            // a record whose key and value cannot be deserialized is no cache entry - skipped, logged and left
+            // out - while its metadata is returned, which it could only be if reading metadata never touches the
+            // payload. Unlike MongoDB there is no counterpart for a record missing what metadata needs: the
+            // columns the metadata is read from are NOT NULL, so the schema refuses such a row outright
+            try (Connection connection = dataSource.getConnection();
+                 PreparedStatement statement = connection.prepareStatement(format(
+                         "INSERT INTO \"%s\".\"%s\" (discriminator, hash, operation, key_binary, value_text, "
+                                 + "status, timestamp) VALUES (?, 'broken', 'op4', ?, 'not a serialized value', "
+                                 + "?, ?)",
+                         SCHEMA_NAME, getDatasetName()))) {
+                statement.setString(1, DEFAULT_DISCRIMINATOR);
+                statement.setBytes(2, "not a serialized key".getBytes(StandardCharsets.UTF_8));
+                statement.setString(3, CACHED.toString());
+                statement.setObject(4, timestamp.atOffset(ZoneOffset.UTC));
+                statement.executeUpdate();
+            }
+
+            try (Stream<CacheEntry<Key, Value>> stream =
+                         repository.streamCacheEntries(Set.of("broken"), null, false)) {
+                assertThat(stream.toList()).isEmpty();
+            }
+            try (Stream<CacheEntryMetadata> stream =
+                         repository.streamCacheEntryMetadata(Set.of("broken"), null, false)) {
+                assertThat(stream.toList())
+                        .singleElement()
+                        .isEqualTo(CacheEntryMetadata.of("broken", "op4", CACHED, timestamp));
+            }
+
+            assertThat(loggerPostgresRepository.getLoggingEvents())
+                    .singleElement()
+                    .satisfies(loggingEvent -> {
+                        assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                        assertThat(loggingEvent.getMessage()).startsWith("Reading of cache entry failed");
+                        assertThat(loggingEvent.getThrowable()).isNotNull();
+                    });
+            loggerPostgresRepository.stopCapturing();
+        }
+
+        @DisplayName("Test that every query the repository issues is served by the index meant for it")
+        @Test
+        void test_Repository_queries_avoid_sequential_scans() throws Exception {
+            // both scopes populated, so that the discriminator actually discriminates instead of matching every
+            // row - and one of them the default scope, which an index has to serve like any other
+            Repository<Key, Value> repositoryWithDiscriminator = repositoryFor("d1");
+            Repository<Key, Value> repositoryInDefaultScope = repositoryFor(null);
+
+            // enough rows, spread over timestamps and with a rare status among them, that every predicate below is
+            // selective enough for an index to be the better plan rather than merely a permitted one: on a handful
+            // of rows, or for a filter matching most of them, PostgreSQL reads the table and is right to
+            Instant timestamp = Instant.now().truncatedTo(MICROS);
+            for (Repository<Key, Value> repository : List.of(repositoryWithDiscriminator, repositoryInDefaultScope)) {
+                List<CacheEntry<Key, Value>> cacheEntries = new ArrayList<>();
+                for (int index = 0; index < 2_000; index++) {
+                    cacheEntries.add(CacheEntry.of("h" + index, "op", Key.of(index), Value.of(index),
+                            index % 400 == 0 ? EVICTED_SIZE_RETAINED : CACHED, timestamp.minusSeconds(index)));
+                }
+                repository.publishCacheEntries(cacheEntries);
+            }
+
+            Set<String> hashes = Set.of("h1", "h2");
+            Set<Status> statuses = Set.of(EVICTED_SIZE_RETAINED);
+            Instant deadline = timestamp.minusSeconds(1_990);
+
+            try (Connection connection = dataSource.getConnection()) {
+                // the planner needs statistics before it can prefer anything
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute(format("ANALYZE \"%s\".\"%s\"", SCHEMA_NAME, getDatasetName()));
+                }
+
+                // Which index is meant for which query is read off the table rather than spelled out here, so that
+                // renaming one cannot quietly turn the assertions below into assertions about nothing. Naming the
+                // index is what gives them teeth: every predicate leads with the discriminator, and so does the
+                // primary key, so "some index was used" is satisfied by the wrong index just as well as by the right
+                Map<String, String> indexes = readIndexes(connection);
+                assertThat(indexes).hasSize(2);
+                String byHash = indexNameOf(indexes, false);
+                String byStatusAndTimestamp = indexNameOf(indexes, true);
+
+                // a query narrowed from both sides can be answered from either end, and which end is cheaper is
+                // the planner's judgement rather than a property of the table
+                Set<String> eitherIndex = Set.of(byHash, byStatusAndTimestamp);
+
+                for (Repository<Key, Value> repository : List.of(repositoryWithDiscriminator,
+                        repositoryInDefaultScope)) {
+                    // asking by hash is the primary key's own question
+                    assertThatQueryIsIndexed(connection, repository, hashes, null, null, false, Set.of(byHash));
+                    assertThatQueryIsIndexed(connection, repository, hashes, statuses, null, false, eitherIndex);
+                    assertThatQueryIsIndexed(connection, repository, hashes, null, deadline, false, eitherIndex);
+                    assertThatQueryIsIndexed(connection, repository, hashes, statuses, deadline, false,
+                            eitherIndex);
+
+                    // and asking by status or by age is what the second index is there for, the two together being
+                    // what maintenance sweeps with - which the primary key cannot answer at all
+                    assertThatQueryIsIndexed(connection, repository, null, statuses, null, false,
+                            Set.of(byStatusAndTimestamp));
+                    assertThatQueryIsIndexed(connection, repository, null, null, deadline, false,
+                            Set.of(byStatusAndTimestamp));
+                    assertThatQueryIsIndexed(connection, repository, null, statuses, deadline, false,
+                            Set.of(byStatusAndTimestamp));
+
+                    // ordered by timestamp, as synchronizing cache entries on activation reads - which is the one
+                    // shape that never carries an age to filter by
+                    assertThatQueryIsIndexed(connection, repository, hashes, null, null, true, Set.of(byHash));
+                    assertThatQueryIsIndexed(connection, repository, hashes, statuses, null, true, eitherIndex);
+                    assertThatQueryIsIndexed(connection, repository, null, statuses, null, true,
+                            Set.of(byStatusAndTimestamp));
+                }
+
+                // What remains is the discriminator on its own, which counting a scope and reading it whole ask -
+                // and there a sequential scan is not a missing index but the right plan, because the filter matches
+                // most of the table. All that can be asserted of those is that an index path exists at all, which
+                // is what pricing sequential scans out of the way asks. Set for the transaction rather than for the
+                // session, because the connection goes back into a pool afterwards and would otherwise carry the
+                // setting over to whoever gets it next
+                connection.setAutoCommit(false);
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute("SET LOCAL enable_seqscan = off");
+                    for (Repository<Key, Value> repository : List.of(repositoryWithDiscriminator,
+                            repositoryInDefaultScope)) {
+                        assertThatQueryIsIndexed(connection, repository, null, null, null, false, ANY_INDEX);
+                        assertThatQueryIsIndexed(connection, repository, null, null, null, true, ANY_INDEX);
+                    }
+                } finally {
+                    // nothing was written, and the setting goes with the transaction that carried it
+                    connection.rollback();
+                    connection.setAutoCommit(true);
+                }
+            }
+        }
+
+        @DisplayName("Test that a role which may only read and write can use a table it was not allowed to create")
+        @Test
+        void test_Repository_uses_a_table_it_may_not_create() throws Exception {
+            // created by somebody who may, which is what a migration is
+            repositoryFor(null);
+
+            String role = "r" + Integer.toHexString(getDatasetName().hashCode());
+            try (Connection connection = dataSource.getConnection();
+                 Statement statement = connection.createStatement()) {
+                statement.execute(format("CREATE ROLE %s LOGIN PASSWORD 'secret'", role));
+                statement.execute(format("GRANT USAGE ON SCHEMA \"%s\" TO %s", SCHEMA_NAME, role));
+                // reading and writing only - no CREATE on the schema and no ownership of the table, which is how
+                // an application role is commonly granted
+                statement.execute(format("GRANT SELECT, INSERT, UPDATE, DELETE ON \"%s\".\"%s\" TO %s",
+                        SCHEMA_NAME, getDatasetName(), role));
+            }
+
+            HikariConfig hikariConfig = new HikariConfig();
+            hikariConfig.setJdbcUrl(postgresContainer.getJdbcUrl());
+            hikariConfig.setUsername(role);
+            hikariConfig.setPassword("secret");
+            hikariConfig.setMaximumPoolSize(2);
+            try (HikariDataSource restricted = new HikariDataSource(hikariConfig)) {
+                PostgresAdapter<Key, Value> adapter = PostgresAdapter
+                        .newBuilder(restricted, SCHEMA_NAME, getDatasetName())
+                        .build();
+                adapter.setKeySerializer(new JavaObjectSerializer<>());
+                adapter.setValueSerializer(new JacksonSerializer<>(Value.class, false));
+                Repository<Key, Value> repository = adapter.getRepository().orElseThrow();
+
+                // constructing it is what used to fail, because CREATE TABLE IF NOT EXISTS is refused on the
+                // privilege before PostgreSQL ever looks at whether the table is there
+                repository.publishCacheEntries(List.of(CacheEntry.of("h1", "op1", Key.of(1), Value.of(1), CACHED,
+                        Instant.now().truncatedTo(MICROS))));
+                assertThat(repository.countCacheEntries(null)).isEqualTo(1);
+            }
+        }
+
+        @DisplayName("Test that a table shaped for another version is reported at construction, not at the first write")
+        @Test
+        void test_Repository_rejects_a_table_of_another_shape() throws Exception {
+            // the shape this library had before the JSON column was renamed, which CREATE TABLE IF NOT EXISTS
+            // would leave exactly as it is
+            try (Connection connection = dataSource.getConnection();
+                 Statement statement = connection.createStatement()) {
+                statement.execute(format("CREATE TABLE \"%s\".\"%s\" (discriminator text NOT NULL, "
+                                + "hash text NOT NULL, operation text, key_binary bytea, key_text text, "
+                                + "key_json jsonb, value_binary bytea, value_text text, value_json jsonb, "
+                                + "status text NOT NULL, timestamp timestamptz NOT NULL)",
+                        SCHEMA_NAME, getDatasetName()));
+            }
+
+            assertThatThrownBy(() -> repositoryFor(null))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("is not shaped as this version expects")
+                    .hasMessageContaining("key_jsonb expected as jsonb but missing")
+                    .hasMessageContaining("value_jsonb expected as jsonb but missing");
+        }
+
+        @DisplayName("Test that each serializer stores into a column of its own, so that records stay legible")
+        @Test
+        void test_Repository_uses_a_column_per_serializer() throws Exception {
+            // the same value written three ways, by three caches sharing the table under discriminators of their own
+            publish("binary", new JavaObjectSerializer<>());
+            publish("text", new JacksonSerializer<>(Value.class, false));
+            publish("jsonb", new JacksonSerializer<>(Value.class, true));
+
+            assertThat(columnsOf("binary")).containsExactly("value_binary");
+            assertThat(columnsOf("text")).containsExactly("value_text");
+            assertThat(columnsOf("jsonb")).containsExactly("value_jsonb");
+
+            // and what a JSON serializer wrote is the store's own representation, so it can be read and queried as
+            // such rather than decoded first - which is the whole point of not putting everything into one column
+            try (Connection connection = dataSource.getConnection();
+                 PreparedStatement statement = connection.prepareStatement(format(
+                         "SELECT value_jsonb ->> 'name' FROM \"%s\".\"%s\" WHERE discriminator = 'jsonb'",
+                         SCHEMA_NAME, getDatasetName()))) {
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    assertThat(resultSet.next()).isTrue();
+                    assertThat(resultSet.getString(1)).isEqualTo("value");
+                }
+            }
+        }
+
+        @DisplayName("Test that tables whose index names would collide once truncated each keep an index of their own")
+        @Test
+        void test_Repository_keeps_index_names_apart() throws Exception {
+            // A pair chosen so that appending the index suffix and truncating at the identifier length the server
+            // allows yields one and the same name for both, which it does because the suffix opens with "_status" and
+            // the longer table is named after the shorter one plus exactly that. Both are distinct tables, and both
+            // are short enough that nothing truncates the table names themselves
+            String shorter = "t".repeat(55);
+            String longer = shorter + "_status";
+
+            PostgresAdapter<Key, Value> shorterAdapter = PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, shorter)
+                    .build();
+            PostgresAdapter<Key, Value> longerAdapter = PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, longer)
+                    .build();
+
+            assertThat(shorterAdapter.getRepository()).isPresent();
+            assertThat(longerAdapter.getRepository()).isPresent();
+            // one index from the primary key and one from the adapter, for each of the two tables - where a shared
+            // name would have left the second table with the primary key alone, and silently, because creating an
+            // index that is already there is not an error
+            assertThat(indexCountOf(shorter)).isEqualTo(2);
+            assertThat(indexCountOf(longer)).isEqualTo(2);
+        }
+
+        @DisplayName("Test that a write the server rolled back for reasons other than its own is simply made again")
+        @Test
+        void test_Repository_retries_a_rolled_back_write() throws Exception {
+            // "40P01" is what a deadlock reaches a client as, which is what concurrent maintenance runs into: the
+            // server rolls one of the two transactions back, and nothing of it was committed
+            AtomicInteger connections = new AtomicInteger();
+            AtomicBoolean rollbackNext = new AtomicBoolean();
+            DataSource rollingBack = rollingBackOnce(rollbackNext, "40P01", connections);
+            Repository<Key, Value> repository = repositoryUsing(rollingBack);
+
+            int before = connections.get();
+            rollbackNext.set(true);
+            repository.publishCacheEntries(List.of(
+                    CacheEntry.of("h1", "op1", Key.of(1), Value.of(1), CACHED, Instant.now().truncatedTo(MICROS))));
+
+            // one attempt that was rolled back and one that went through, and the caller saw no failure at all
+            assertThat(connections.get() - before).isEqualTo(2);
+            try (Stream<CacheEntry<Key, Value>> cacheEntries = repository.streamCacheEntries(null, null, false)) {
+                assertThat(cacheEntries).hasSize(1);
+            }
+        }
+
+        @DisplayName("Test that a write that failed for its own reasons is reported rather than made again")
+        @Test
+        void test_Repository_does_not_retry_a_plain_failure() throws Exception {
+            // "42P01" is a table that is not there, which asking again cannot mend
+            AtomicInteger connections = new AtomicInteger();
+            AtomicBoolean failNext = new AtomicBoolean();
+            DataSource failing = rollingBackOnce(failNext, "42P01", connections);
+            Repository<Key, Value> repository = repositoryUsing(failing);
+
+            int before = connections.get();
+            failNext.set(true);
+            assertThatThrownBy(() -> repository.publishCacheEntries(List.of(
+                    CacheEntry.of("h1", "op1", Key.of(1), Value.of(1), CACHED, Instant.now().truncatedTo(MICROS)))))
+                    .isInstanceOf(SQLException.class)
+                    .hasMessageContaining("provoked");
+
+            assertThat(connections.get() - before).isEqualTo(1);
+        }
+
+        @DisplayName("Test that a write whose announcement failed leaves neither a record nor a notification")
+        @Test
+        void test_Repository_rolls_back_a_write_it_could_not_announce() throws Exception {
+            // A notification carries only what its writer announces, so a record kept while its announcement was
+            // lost is one no other cache instance ever learns of - which is why the write and the notification of
+            // it share a transaction. Failing inside that transaction is what shows it: before the notification
+            // was sent, and after it was sent but before the commit that would make it deliverable
+            Repository<Key, Value> reading = repositoryFor(null);
+            AtomicBoolean refuseNext = new AtomicBoolean();
+            PostgresAdapter<Key, Value> adapter = adapterUsing(refusing(refuseNext,
+                    (method, arguments) -> "prepareStatement".equals(method)
+                            && NOTIFY_STATEMENT.equals(arguments[0])));
+            Repository<Key, Value> repository = adapter.getRepository().orElseThrow();
+            String channel = invokeMethod(null,
+                    Class.forName("io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresChannel"),
+                    "channelOf", List.of(String.class), List.of(adapter.getIdentifier()));
+
+            try (Connection listener = dataSource.getConnection()) {
+                // for the same reason the adapter does: a pooled connection may arrive still subscribed
+                execute(listener, "UNLISTEN *");
+                execute(listener, "LISTEN " + channel);
+                try {
+                    // the announcement cannot be sent at all
+                    refuseNext.set(true);
+                    assertThatThrownBy(() -> repository.publishCacheEntries(List.of(CacheEntry.of("h1", "op1",
+                            Key.of(1), Value.of(1), CACHED, Instant.now().truncatedTo(MICROS)))))
+                            .isInstanceOf(SQLException.class)
+                            .hasMessageContaining("provoked");
+
+                    assertThat(reading.countCacheEntries(null)).isEqualTo(0);
+                    assertThat(notificationsOf(listener, 1)).isEmpty();
+
+                    // and the same once it has been sent, which is the half a rollback has to reach into: the
+                    // server holds a notification until the transaction that issued it commits, so rolling back
+                    // takes it with the record rather than leaving it to be delivered on its own
+                    PostgresAdapter<Key, Value> uncommitting = adapterUsing(refusing(refuseNext,
+                            (method, arguments) -> "commit".equals(method)));
+                    refuseNext.set(true);
+                    assertThatThrownBy(() -> uncommitting.getRepository().orElseThrow()
+                            .publishCacheEntries(List.of(CacheEntry.of("h2", "op2", Key.of(2), Value.of(2),
+                                    CACHED, Instant.now().truncatedTo(MICROS)))))
+                            .isInstanceOf(SQLException.class)
+                            .hasMessageContaining("provoked");
+
+                    assertThat(reading.countCacheEntries(null)).isEqualTo(0);
+                    assertThat(notificationsOf(listener, 1)).isEmpty();
+
+                    // and with nothing refused both arrive, which is what makes the assertions above say that
+                    // nothing was delivered rather than that nothing was listening
+                    repository.publishCacheEntries(List.of(CacheEntry.of("h3", "op3", Key.of(3), Value.of(3),
+                            CACHED, Instant.now().truncatedTo(MICROS))));
+
+                    assertThat(reading.countCacheEntries(null)).isEqualTo(1);
+                    assertThat(notificationsOf(listener, 1))
+                            .singleElement()
+                            .satisfies(payload -> assertThat(payload).contains("h3"));
+                } finally {
+                    // the connection goes back to the pool, and a pooled connection still listening would hand
+                    // another test notifications it never asked for
+                    execute(listener, "UNLISTEN " + channel);
+                }
+            }
+        }
+
+        @DisplayName("Test that a population reaches another cache instance on the same table")
+        @Test
+        void test_Synchronizer_distributes_a_population() {
+            DistributedCache<Key, Value> cacheA = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheB = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            Key key = Key.of(1);
+            Value value = Value.of(1);
+
+            cacheA.put(key, value);
+
+            await("synchronization between cache instances")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(cacheB.getIfPresent(key)).isEqualTo(value));
+        }
+
+        @DisplayName("Test that an invalidation reaches another cache instance")
+        @Test
+        void test_Synchronizer_distributes_an_invalidation() {
+            DistributedCache<Key, Value> cacheA = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheB = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            Key key = Key.of(1);
+            Value value = Value.of(1);
+
+            cacheA.put(key, value);
+
+            await("synchronization of the population")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(cacheB.getIfPresent(key)).isEqualTo(value));
+
+            cacheA.invalidate(key);
+
+            await("synchronization of the invalidation")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(cacheB.getIfPresent(key)).isNull());
+        }
+
+        @DisplayName("Test that a batch of cache entries arrives as a batch")
+        @Test
+        void test_Synchronizer_distributes_a_batch() {
+            DistributedCache<Key, Value> cacheA = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheB = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            List<Key> keys = IntStream.rangeClosed(1, 200)
+                    .mapToObj(Key::of)
+                    .toList();
+            keys.forEach(key -> cacheA.put(key, Value.of(key.getId())));
+
+            await("synchronization of every cache entry")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(cacheB.estimatedSize()).isEqualTo(keys.size()));
+            assertThat(cacheB.getIfPresent(Key.of(200))).isEqualTo(Value.of(200));
+        }
+
+        @DisplayName("Test that a status transition made in the store reaches another cache instance")
+        @Test
+        void test_Synchronizer_distributes_a_status_transition() throws Exception {
+            DistributedCache<Key, Value> cacheA = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheB = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            Key key = Key.of(1);
+            Value value = Value.of(1);
+
+            cacheA.put(key, value);
+
+            await("synchronization of the population")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(cacheB.getIfPresent(key)).isEqualTo(value));
+
+            // what maintenance does when it prunes: the status is transitioned in place rather than the record
+            // deleted, and unlike a delete that has to reach every cache instance - which on a store that
+            // distributes only what a writer announces means the transition has to announce itself
+            cacheA.distributedPolicy().getAdapter().getRepository().orElseThrow()
+                    .updateStatusOfCacheEntries(null, Set.of(CACHED), null, INVALIDATED);
+
+            await("synchronization of the status transition")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(cacheB.getIfPresent(key)).isNull());
+        }
+
+        @DisplayName("Test that cache instances of different discriminators do not hear each other")
+        @Test
+        void test_Synchronizer_separates_discriminators() {
+            DistributedCache<Key, Value> cacheA = createCache("a",
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheB = createCache("b",
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheA2 = createCache("a",
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            Key key = Key.of(1);
+
+            cacheA.put(key, Value.of(1));
+
+            await("synchronization within the shared discriminator")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(cacheA2.getIfPresent(key)).isEqualTo(Value.of(1)));
+
+            // the other scope had its chance on the same table while that one arrived
+            assertThat(cacheB.getIfPresent(key)).isNull();
+        }
+
+        @DisplayName("Test that what a lost notification would have carried is recovered when listening restarts")
+        @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_recovers_what_was_published_while_not_listening() {
+            // Persisting cached entries is what makes the recovery warm: reconciling keeps what the store confirms,
+            // and without a store that retains them there is nothing to confirm against
+            DistributedCache<Key, Value> cacheA = createCache(CacheBuilder.identity(),
+                    dc -> dc.withPersistence(configurer -> configurer
+                                    .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency))
+                            .build());
+            DistributedCache<Key, Value> cacheB = createCache(CacheBuilder.identity(),
+                    dc -> dc.withPersistence(configurer -> configurer
+                                    .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency))
+                            .build());
+
+            Key key1 = Key.of(1);
+            Key key2 = Key.of(2);
+
+            cacheA.put(key1, Value.of(1));
+
+            await("synchronization between cache instances")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(cacheB.getIfPresent(key1)).isEqualTo(Value.of(1)));
+
+            // Failing the apply is what takes the listener down: it fails, closes its connection and listens again -
+            // and a notification issued while nothing was listening is gone, because nothing keeps it for anyone.
+            // Handing over cache entries keeps failing throughout, so the only way the value below can arrive is the
+            // reconcile that restarting performs, which is exactly what is under test here
+            // the listener reports every failed attempt, so the provoked ones below are captured and asserted
+            // instead of ending up, with their stack traces, in the test output
+            CaptureLogger loggerPostgresSynchronizer = CaptureLoggerFactory.getCaptureLogger(
+                    "io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresSynchronizer");
+            loggerPostgresSynchronizer.startCapturing();
+
+            // restarting reconciles the cache against the data store, and reports that it did - captured for
+            // the same reason and asserted below, because that reconcile is what the recovery under test consists of
+            CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
+                    .getCaptureLogger(DistributedCaffeine.class);
+            loggerDistributedCaffeine.startCapturing();
+
+            InternalCacheManager<Key, Value> cacheManager = getInstanceRegistry(cacheB).getCacheManager();
+            AtomicBoolean failing = new AtomicBoolean(true);
+            cacheB.distributedPolicy().getAdapter().setReceiver(new Receiver<>() {
+
+                @Override
+                public void receiveCacheEntries(@NonNull List<CacheEntry<Key, Value>> cacheEntries) {
+                    if (failing.get()) {
+                        throw new IllegalStateException("provoked");
+                    }
+                    cacheManager.receiveCacheEntries(cacheEntries);
+                }
+
+                @Override
+                public void receiveSynchronizationRestart() {
+                    cacheManager.receiveSynchronizationRestart();
+                }
+            });
+
+            cacheA.put(key2, Value.of(2));
+
+            await("recovery of what was published while not listening")
+                    .atMost(EXTENDED_WAITING_DURATION) // the retry delay grows with every failure
+                    .untilAsserted(() -> assertThat(cacheB.getIfPresent(key2)).isEqualTo(Value.of(2)));
+
+            // the listener really did fail and say so, which is what the recovery above is a recovery from
+            assertThat(loggerPostgresSynchronizer.getLoggingEvents())
+                    .anySatisfy(loggingEvent -> {
+                        assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                        assertThat(loggingEvent.getMessage()).startsWith("Listening for notifications failed");
+                        assertThat(loggingEvent.getThrowable()).hasMessage("provoked");
+                    });
+            loggerPostgresSynchronizer.stopCapturing();
+
+            // and what brought the value back is the reconcile that restarting performs, which says so itself
+            assertThat(loggerDistributedCaffeine.getLoggingEvents())
+                    .anySatisfy(loggingEvent -> {
+                        assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                        assertThat(loggingEvent.getMessage())
+                                .startsWith("Synchronization was interrupted for cache at");
+                    });
+            loggerDistributedCaffeine.stopCapturing();
+
+            failing.set(false);
+        }
+
+        @DisplayName("Test that what the adapter puts into one notification is a payload the server accepts")
+        @Test
+        void test_Synchronizer_payloads_stay_within_what_the_server_accepts() throws Exception {
+            // Enough hashes of the length the hasher produces to need more than one notification, chunked by the
+            // adapter itself rather than by a number repeated here: what is under test is that its chunking fits
+            // through the server, not that two constants agree with each other. Nothing else would catch the
+            // chunk size being raised, because the batches the other tests send stay well inside one payload
+            List<String> hashes = IntStream.range(0, 2000)
+                    .mapToObj(index -> format("%032x", index))
+                    .toList();
+            List<String> payloads = invokeMethod(null,
+                    Class.forName("io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresChannel"),
+                    "payloadsOf", List.of(List.class), List.of(hashes));
+            assertThat(payloads).hasSizeGreaterThan(1);
+
+            String channel = "distributed_caffeine_payload_bound";
+            try (Connection listener = dataSource.getConnection();
+                 Connection writer = dataSource.getConnection()) {
+                // for the same reason the adapter does: a pooled connection may arrive still subscribed
+                execute(listener, "UNLISTEN *");
+                execute(listener, "LISTEN " + channel);
+                // unsubscribing stops what comes next, not what this session was already handed
+                PGConnection pgListener = listener.unwrap(PGConnection.class);
+                PGNotification[] stale;
+                do {
+                    stale = pgListener.getNotifications(1);
+                } while (stale != null && stale.length > 0);
+                try {
+                    for (String payload : payloads) {
+                        notifyPayload(writer, channel, payload);
+                    }
+                    assertThat(notificationsOf(listener, payloads.size()))
+                            .containsExactlyElementsOf(payloads);
+
+                    // and the limit that the chunk size leaves room beneath is where it is documented to be,
+                    // which is what makes that room a margin rather than a guess. The server refuses an over-long
+                    // payload at the call, so this is what the adapter would run into if it ever stopped chunking
+                    assertThatThrownBy(() -> notifyPayload(writer, channel, "x".repeat(8000)))
+                            .isInstanceOf(SQLException.class);
+                } finally {
+                    // the connection goes back to the pool, and a pooled connection still listening would hand
+                    // another test notifications it never asked for
+                    execute(listener, "UNLISTEN " + channel);
+                }
+            }
+        }
+
+        // asserts against the access path only - what a plan costs is the planner's business, not this table's.
+        // Both the predicate and the binding behind it are taken from the repository rather than rebuilt here, so
+        // that this cannot drift from what is actually queried. Naming more than one index accepts whichever of
+        // them the planner picked, for a predicate that genuinely has more than one right answer
+        private void assertThatQueryIsIndexed(Connection connection, Repository<Key, Value> repository,
+                                              Set<String> hashes, Set<Status> statuses, Instant olderThan,
+                                              boolean orderByTimestampAsc, Set<String> servedBy)
+                throws Exception {
+            Class<?> repositoryClass = Class
+                    .forName("io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresRepository");
+            String sql;
+            if (orderByTimestampAsc) {
+                // what reads the store back carries the order and never an age, so it is built as a whole
+                sql = invokeMethod(repository, repositoryClass, "select",
+                        List.of(String.class, Set.class, Set.class, boolean.class),
+                        Arrays.asList("1", hashes, statuses, true));
+            } else {
+                String where = invokeMethod(repository, repositoryClass, "where",
+                        List.of(Set.class, Set.class, Instant.class),
+                        Arrays.asList(hashes, statuses, olderThan));
+                sql = format("SELECT 1 FROM \"%s\".\"%s\" %s", SCHEMA_NAME, getDatasetName(), where);
+            }
+
+            StringBuilder plan = new StringBuilder();
+            try (PreparedStatement statement = connection.prepareStatement("EXPLAIN " + sql)) {
+                invokeMethod(repository, repositoryClass, "bind",
+                        List.of(Connection.class, PreparedStatement.class, int.class, Set.class, Set.class,
+                                Instant.class),
+                        Arrays.asList(connection, statement, 1, hashes, statuses,
+                                orderByTimestampAsc ? null : olderThan));
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    while (resultSet.next()) {
+                        plan.append(resultSet.getString(1)).append('\n');
+                    }
+                }
+            }
+
+            String plans = plan.toString();
+            assertThat(plans)
+                    .describedAs("%nPlan for %s", sql)
+                    .doesNotContain("Seq Scan");
+            assertThat(servedBy)
+                    .describedAs("%nPlan for %s%n%s", sql, plans)
+                    .anyMatch(plans::contains);
+        }
+
+        // read off the table rather than rebuilt from the naming convention the adapter follows, which is exactly
+        // where the two could drift apart
+        private Map<String, String> readIndexes(Connection connection) throws SQLException {
+            Map<String, String> indexes = new LinkedHashMap<>();
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = ? AND tablename = ?")) {
+                statement.setString(1, SCHEMA_NAME);
+                statement.setString(2, getDatasetName());
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    while (resultSet.next()) {
+                        indexes.put(resultSet.getString(1), resultSet.getString(2));
+                    }
+                }
+            }
+            return indexes;
+        }
+
+        // the one covering the status is the one maintenance sweeps through, the other one is the primary key.
+        // Read from the column list of the definition rather than from the whole of it, because the index name
+        // sits in there too - and with the quotes taken off, because PostgreSQL prints them only where a name
+        // needs them, which "timestamp" does and "status" does not
+        private String indexNameOf(Map<String, String> indexes, boolean coveringStatus) {
+            return indexes.entrySet().stream()
+                    .filter(index -> {
+                        String definition = index.getValue().replace("\"", "");
+                        String columns = definition.substring(definition.lastIndexOf('(') + 1);
+                        return columns.contains(CacheEntry.Field.STATUS.toString()) == coveringStatus;
+                    })
+                    .map(Map.Entry::getKey)
+                    .findFirst()
+                    .orElseThrow();
+        }
+
+        private void execute(Connection connection, String sql) throws SQLException {
+            try (Statement statement = connection.createStatement()) {
+                statement.execute(sql);
+            }
+        }
+
+        // through pg_notify rather than the NOTIFY statement, so that channel and payload are parameters instead
+        // of literals a caller would have to quote itself - which is what the adapter does as well
+        private void notifyPayload(Connection connection, String channel, String payload) throws SQLException {
+            try (PreparedStatement statement = connection.prepareStatement("SELECT pg_notify(?, ?)")) {
+                statement.setString(1, channel);
+                statement.setString(2, payload);
+                statement.execute();
+            }
+        }
+
+        private List<String> notificationsOf(Connection connection, int expected) throws SQLException {
+            List<String> payloads = new ArrayList<>();
+            Instant deadline = Instant.now().plus(WAITING_DURATION);
+            while (payloads.size() < expected && Instant.now().isBefore(deadline)) {
+                PGNotification[] notifications = connection.unwrap(PGConnection.class).getNotifications(100);
+                if (notifications != null) {
+                    Stream.of(notifications).map(PGNotification::getParameter).forEach(payloads::add);
+                }
+            }
+            return payloads;
+        }
+
+        private long indexCountOf(String table) throws Exception {
+            try (Connection connection = dataSource.getConnection();
+                 PreparedStatement statement = connection.prepareStatement(
+                         "SELECT count(*) FROM pg_indexes WHERE schemaname = ? AND tablename = ?")) {
+                statement.setString(1, SCHEMA_NAME);
+                statement.setString(2, table);
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    assertThat(resultSet.next()).isTrue();
+                    return resultSet.getLong(1);
+                }
+            }
+        }
+
+        private void publish(String discriminator, Serializer<Value, ?> valueSerializer) throws Exception {
+            PostgresAdapter<Key, Value> adapter = PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, getDatasetName())
+                    .withDiscriminator(discriminator)
+                    .build();
+            adapter.setKeySerializer(new JavaObjectSerializer<>());
+            adapter.setValueSerializer(valueSerializer);
+            adapter.getRepository().orElseThrow().publishCacheEntries(List.of(
+                    CacheEntry.of("h1", "op1", Key.of(1), Value.of(1), CACHED, Instant.now().truncatedTo(MICROS))));
+        }
+
+        // which of the three value columns the record actually filled
+        private List<String> columnsOf(String discriminator) throws Exception {
+            List<String> columns = new java.util.ArrayList<>();
+            try (Connection connection = dataSource.getConnection();
+                 PreparedStatement statement = connection.prepareStatement(format(
+                         "SELECT value_binary, value_text, value_jsonb FROM \"%s\".\"%s\" WHERE discriminator = ?",
+                         SCHEMA_NAME, getDatasetName()))) {
+                statement.setString(1, discriminator);
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    assertThat(resultSet.next()).isTrue();
+                    for (String column : List.of("value_binary", "value_text", "value_jsonb")) {
+                        if (resultSet.getObject(column) != null) {
+                            columns.add(column);
+                        }
+                    }
+                }
+            }
+            return columns;
+        }
+
+        // Hands out the real connections, except that the next one asked for once the flag is set fails the way the
+        // server fails a statement - which is the only way to put a caller in front of a given SQL state on purpose,
+        // since what provokes a real deadlock is two transactions meeting at a moment neither of them decides
+        private DataSource rollingBackOnce(AtomicBoolean failNext, String sqlState, AtomicInteger connections)
+                throws SQLException {
+            DataSource failing = mock(DataSource.class);
+            when(failing.getConnection()).thenAnswer(invocation -> {
+                connections.incrementAndGet();
+                if (failNext.compareAndSet(true, false)) {
+                    throw new SQLException("provoked", sqlState);
+                }
+                return dataSource.getConnection();
+            });
+            return failing;
+        }
+
+        private Repository<Key, Value> repositoryUsing(DataSource source) {
+            return adapterUsing(source).getRepository().orElseThrow();
+        }
+
+        private PostgresAdapter<Key, Value> adapterUsing(DataSource source) {
+            PostgresAdapter<Key, Value> adapter = PostgresAdapter.newBuilder(source, SCHEMA_NAME, getDatasetName()).build();
+            adapter.setKeySerializer(new JavaObjectSerializer<>());
+            adapter.setValueSerializer(new JacksonSerializer<>(Value.class, false));
+            return adapter;
+        }
+
+        // A data source whose connections refuse one call, so that a failure can be placed INSIDE the transaction
+        // rather than before it - which is where refusing the connection itself cannot reach. Everything else
+        // passes through to a real connection, so the write really does happen before the refusal and really is
+        // rolled back by it
+        private DataSource refusing(AtomicBoolean refuseNext, BiPredicate<String, Object[]> refused)
+                throws SQLException {
+            DataSource refusing = mock(DataSource.class);
+            when(refusing.getConnection()).thenAnswer(dataSourceInvocation -> {
+                Connection connection = dataSource.getConnection();
+                return Proxy.newProxyInstance(getClass().getClassLoader(),
+                        new Class<?>[]{Connection.class}, (proxy, method, arguments) -> {
+                            if (refused.test(method.getName(), requireNonNullElse(arguments, new Object[0]))
+                                    && refuseNext.compareAndSet(true, false)) {
+                                throw new SQLException("provoked", "42601");
+                            }
+                            try {
+                                return method.invoke(connection, arguments);
+                            } catch (InvocationTargetException e) {
+                                // the caller is owed what the connection threw, not the news that it was reached
+                                // by reflection
+                                throw e.getCause();
+                            }
+                        });
+            });
+            return refusing;
+        }
+
+        @Override
+        void startStore(DockerImageName dockerImageName, String displayName) {
+            this.postgresContainer = new PostgreSQLContainer(dockerImageName)
+                    .withCreateContainerCmdModifier(cmd -> cmd.withName(displayName));
+            this.postgresContainer.start();
+            HikariConfig hikariConfig = new HikariConfig();
+            hikariConfig.setJdbcUrl(postgresContainer.getJdbcUrl());
+            hikariConfig.setUsername(postgresContainer.getUsername());
+            hikariConfig.setPassword(postgresContainer.getPassword());
+            // every cache instance holds one of these for as long as it listens, so the pool has to carry the
+            // caches of a test as well as the connections their operations borrow
+            hikariConfig.setMaximumPoolSize(30);
+            this.dataSource = new HikariDataSource(hikariConfig);
+        }
+
+        @Override
+        void stopStore() {
+            ((HikariDataSource) this.dataSource).close();
+            this.postgresContainer.stop();
+        }
+
+        @Override
+        <K, V> Adapter<K, V> createAdapter() {
+            return PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, getDatasetName()).build();
+        }
+
+        @Override
+        <K, V> Adapter<K, V> createAdapter(String discriminator) {
+            return PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, getDatasetName())
+                    .withDiscriminator(discriminator)
+                    .build();
+        }
+
+        // a table name is an identifier and cannot be as long as a test method name, so the name is bounded -
+        // the counter alone already makes it unique, which is what the truncation relies on
+        @Override
+        String getDatasetName() {
+            String name = super.getDatasetName();
+            return name.length() <= 60 ? name : name.substring(name.length() - 60);
+        }
+    }
+
     abstract static class DistributedCaffeineIntegrationTestInstance extends DistributedCaffeineCommonTestInstance {
 
         static final String RUNS_ON_GITHUB = "runsOnGitHub";
-        static final String DATABASE_NAME = "distributedCaffeineDatabase";
         static final String LOGGER_RESOURCE_LOCK = "logger";
         static final Duration WAITING_DURATION = Duration.ofSeconds(3);
         static final Duration EXTENDED_WAITING_DURATION = Duration.ofMinutes(3);
         static final Duration EXTENDED_POLL_INTERVAL = Duration.ofSeconds(1);
 
         SecureRandom secureRandom;
-        MongoDBContainer mongoContainer;
-        MongoClient mongoClient;
 
-        boolean isMongo;
+        // What a store brings: a container of its own, whatever a cache instance needs to reach it, and the
+        // adapter built on that. Everything else a test does goes through the SPI and reads the same either way,
+        // which is what makes one suite answer for both
+        abstract void startStore(DockerImageName dockerImageName, String displayName);
+
+        abstract void stopStore();
+
+        abstract <K, V> Adapter<K, V> createAdapter();
+
+        abstract <K, V> Adapter<K, V> createAdapter(String discriminator);
+
+        // through the adapter rather than the repository directly, because wiring the serializers and the
+        // discriminator is what an adapter does - and a repository is package-private in its adapter's package.
+        // A byte array serializer for the key and a string one for the value, so that both encodings a store has
+        // to carry are exercised at once
+        Repository<Key, Value> repositoryFor(String discriminator) {
+            Adapter<Key, Value> adapter = isNull(discriminator)
+                    ? createAdapter()
+                    : createAdapter(discriminator);
+            adapter.setKeySerializer(new JavaObjectSerializer<>());
+            adapter.setValueSerializer(new JacksonSerializer<>(Value.class, false));
+            return adapter.getRepository().orElseThrow();
+        }
 
         @BeforeAll
         void beforeAll() {
@@ -7223,25 +8854,12 @@ final class DistributedCaffeineIntegrationTests {
                     .map(String::toLowerCase)
                     .orElseThrow();
 
-            this.mongoContainer = new MongoDBContainer(dockerImageName)
-                    .withReplicaSet()
-                    .withCreateContainerCmdModifier(cmd -> cmd.withName(displayName))
-                    .withImagePullPolicy(PullPolicy.alwaysPull());
-            this.mongoContainer.start();
-            this.mongoClient = MongoClients.create(MongoClientSettings.builder()
-                    .applyConnectionString(new ConnectionString(mongoContainer.getReplicaSetUrl()))
-                    .applyToSocketSettings(socketSettings -> socketSettings
-                            .connectTimeout(30, TimeUnit.SECONDS)
-                            .readTimeout(30, TimeUnit.SECONDS))
-                    .build());
-
-            isMongo = dockerImageName.asCanonicalNameString().toLowerCase(Locale.ROOT).contains("mongo");
+            startStore(dockerImageName, displayName);
         }
 
         @AfterAll
         void afterAll() {
-            this.mongoClient.close();
-            this.mongoContainer.stop();
+            stopStore();
         }
 
         Stream<Arguments> provideCacheFactoriesWithDifferentSerializers() {
@@ -7309,8 +8927,8 @@ final class DistributedCaffeineIntegrationTests {
                                 // include evictions, which half of these deliberately do not
                                 return distributionMode.isPopulationConsidered()
                                         ? builder.withPersistence(configurer -> configurer
-                                                .withCachedEntries(cachedEntries -> cachedEntries
-                                                        .withMaximumTime(Duration.ofDays(1))))
+                                        .withCachedEntries(cachedEntries -> cachedEntries
+                                                .withMaximumTime(Duration.ofDays(1))))
                                         : builder;
                             }));
         }
@@ -7328,10 +8946,7 @@ final class DistributedCaffeineIntegrationTests {
         }
 
         <K, V> DistributedCache<K, V> createCache(CacheBuilder<K, V> cacheBuilder, CacheConstructor<K, V> cacheConstructor) {
-            MongoAdapter<K, V> mongoAdapter = MongoAdapter
-                    .newBuilder(mongoClient, DATABASE_NAME, getCollectionName())
-                    .build();
-            return createCache(mongoAdapter, cacheBuilder, cacheConstructor);
+            return createCache(createAdapter(), cacheBuilder, cacheConstructor);
         }
 
         // every cache of a test shares its collection, so this is what puts two of them in the same scope or in
@@ -7339,14 +8954,12 @@ final class DistributedCaffeineIntegrationTests {
         // the store
         <K, V> DistributedCache<K, V> createCache(String discriminator, CacheBuilder<K, V> cacheBuilder,
                                                   CacheConstructor<K, V> cacheConstructor) {
-            MongoAdapter<K, V> mongoAdapter = MongoAdapter
-                    .newBuilder(mongoClient, DATABASE_NAME, getCollectionName())
-                    .withDiscriminator(discriminator)
-                    .build();
-            return createCache(mongoAdapter, cacheBuilder, cacheConstructor);
+            return createCache(createAdapter(discriminator), cacheBuilder, cacheConstructor);
         }
 
-        String getCollectionName() {
+        // what the store calls a dataset of its own - a collection in MongoDB, a table in PostgreSQL - named
+        // after the test that owns it, so that tests cannot see each other's records
+        String getDatasetName() {
             return format("%s_%05d", testInfo.getTestMethod().orElseThrow().getName(), testCounter.get());
         }
 
@@ -7371,7 +8984,8 @@ final class DistributedCaffeineIntegrationTests {
             assertThatDataStoreHasCounts(new Count[0]);
         }
 
-        @SuppressWarnings("ReturnValueIgnored") // the assertion runs inside apply(), its result is of no interest
+        @SuppressWarnings("ReturnValueIgnored")
+            // the assertion runs inside apply(), its result is of no interest
         void assertThatDataStoreHasCounts(Count... counts) {
             Repository<?, ?> repository = getInstanceRegistry(distributedCacheInstances.stream()
                     .findFirst()
@@ -7390,7 +9004,8 @@ final class DistributedCaffeineIntegrationTests {
                                     .describedAs("%nCount for %s", count.status().name())));
         }
 
-        @SuppressWarnings("ReturnValueIgnored") // the assertion runs inside apply(), its result is of no interest
+        @SuppressWarnings("ReturnValueIgnored")
+            // the assertion runs inside apply(), its result is of no interest
         void assertThatDataStoreHasCounts(CountGrouped... countsGrouped) {
             Repository<?, ?> repository = getInstanceRegistry(distributedCacheInstances.stream()
                     .findFirst()
@@ -7489,10 +9104,6 @@ final class DistributedCaffeineIntegrationTests {
                 });
             }
             return operations;
-        }
-
-        boolean isMongo() {
-            return isMongo;
         }
 
         int nextInt(int bound) {

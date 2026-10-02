@@ -21,12 +21,13 @@ package io.github.oberhoff.distributedcaffeine.serializer;
  * @param <T> the type of the object to serialize
  * @author Andreas Oberhoff
  */
-@SuppressWarnings("RedundantThrows")
 public interface StringSerializer<T> extends Serializer<T, String> {
 
+    @SuppressWarnings("RedundantThrows")
     @Override
     String serialize(T object) throws Exception;
 
+    @SuppressWarnings("RedundantThrows")
     @Override
     T deserialize(String value) throws Exception;
 }

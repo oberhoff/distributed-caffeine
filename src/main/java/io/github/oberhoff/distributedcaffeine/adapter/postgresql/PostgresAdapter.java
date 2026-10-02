@@ -32,6 +32,13 @@ import static java.util.Objects.requireNonNull;
  * {@link PostgresAdapter#newBuilder(DataSource, String, String)}.
  * <p>
  * <b>Note:</b> An adapter instance belongs to exactly one cache instance and cannot be shared between them.
+ * <p>
+ * <b>Note:</b> The data source is expected to pool its connections. Every operation on the underlying store takes
+ * a connection and returns it, which is what a data source is there to absorb, so an unpooled one opens a
+ * connection of its own for each of them and exhausts the ports of the machine under load. Beside those, one
+ * connection is held for as long as a cache instance listens for notifications: a notification reaches the
+ * sessions listening when it is issued and nobody else, so that connection cannot be returned between polls. The
+ * pool therefore has to carry one connection per cache instance on top of what their operations borrow.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
@@ -43,7 +50,7 @@ public final class PostgresAdapter<K, V> extends AbstractAdapter<K, V> {
     private PostgresAdapter(Builder builder) {
         // through a second constructor so that the synchronizer can be handed the repository it reads through:
         // what a notification carries is which records changed, not the records themselves
-        this(new PostgresRepository<K, V>(builder.dataSource, builder.schemaName, builder.tableName), builder);
+        this(new PostgresRepository<>(builder.dataSource, builder.schemaName, builder.tableName), builder);
     }
 
     private PostgresAdapter(PostgresRepository<K, V> repository, Builder builder) {

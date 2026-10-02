@@ -15,13 +15,20 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import com.dynatrace.hash4j.hashing.ByteAccess;
+import com.dynatrace.hash4j.hashing.HashFunnel;
+import com.dynatrace.hash4j.hashing.HashStream128;
+import com.dynatrace.hash4j.hashing.Hashing;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.CacheLoader;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
 import com.github.benmanes.caffeine.cache.LoadingCache;
+import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
+import com.github.benmanes.caffeine.cache.Scheduler;
+import com.github.benmanes.caffeine.cache.Weigher;
 import com.mongodb.MongoBulkWriteException;
 import com.mongodb.MongoException;
 import com.mongodb.ServerAddress;
@@ -37,19 +44,27 @@ import com.mongodb.client.MongoCursor;
 import com.mongodb.client.model.BulkWriteOptions;
 import com.mongodb.client.model.UpdateOneModel;
 import com.mongodb.client.model.changestream.ChangeStreamDocument;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Configurer;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.PersistenceConfigurer;
 import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
 import io.github.oberhoff.distributedcaffeine.adapter.Receiver;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
+import io.github.oberhoff.distributedcaffeine.adapter.SerializerAware;
 import io.github.oberhoff.distributedcaffeine.adapter.Synchronizer;
+import io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoAdapter;
+import io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresAdapter;
 import io.github.oberhoff.distributedcaffeine.common.DistributedCaffeineCommonTestInstance;
 import io.github.oberhoff.distributedcaffeine.common.Key;
 import io.github.oberhoff.distributedcaffeine.common.Value;
 import io.github.oberhoff.distributedcaffeine.hasher.Hasher;
 import io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer;
+import io.github.oberhoff.distributedcaffeine.serializer.JavaObjectSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
+import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.bson.BsonDocument;
 import org.bson.BsonString;
 import org.bson.Document;
@@ -58,56 +73,84 @@ import org.jspecify.annotations.NonNull;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
+import org.postgresql.PGConnection;
+import org.postgresql.PGNotification;
 
+import javax.sql.DataSource;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.Collection;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalDouble;
+import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+import java.util.function.ToLongFunction;
 import java.util.function.UnaryOperator;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Configurer;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.PersistenceConfigurer;
-
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer.LoadingStrategy.CACHE_LOADER;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_SIZE;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_TIME;
 import static io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware.DEFAULT_DISCRIMINATOR;
+import static java.time.temporal.ChronoUnit.FOREVER;
+import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.TimeUnit.SECONDS;
+import static java.util.stream.Collectors.toCollection;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static java.time.temporal.ChronoUnit.FOREVER;
-import static java.util.stream.Collectors.toCollection;
-import static java.util.stream.Collectors.toList;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anySet;
+import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -125,7 +168,10 @@ final class DistributedCaffeineUnitTests {
         @Test
         // the reads below are driven for what they do to the cache, not for what they return, so discarding their
         // result is the point rather than an oversight
-        @SuppressWarnings({"CheckReturnValue", "ResultOfMethodCallIgnored"})
+        // java:S2925 - the removal notifications are handed to an executor that has already reported itself
+        // idle, so there is no condition left to wait on and what separates "not yet delivered" from "never
+        // delivered" is time alone
+        @SuppressWarnings({"CheckReturnValue", "ResultOfMethodCallIgnored", "java:S2925"})
         void test_Caffeine_accounts_for_every_key_under_the_full_operation_mix() throws Exception {
             // The control above only writes, and it accounts for every key. This one adds the paths the stress
             // test also drives - loading through a cache loader, refreshing after every write, computing through
@@ -162,7 +208,7 @@ final class DistributedCaffeineUnitTests {
                             .build(cacheLoader);
 
                     int currentRound = round;
-                    List<Future<?>> running = IntStream.range(0, workers)
+                    List<? extends Future<?>> running = IntStream.range(0, workers)
                             .mapToObj(worker -> workerExecutor.submit(() -> {
                                 Random random = new Random(currentRound * 31L + worker);
                                 for (int operation = 0; operation < operationsPerWorker; operation++) {
@@ -180,7 +226,7 @@ final class DistributedCaffeineUnitTests {
                                     }
                                 }
                             }))
-                            .collect(toList());
+                            .toList();
                     for (Future<?> future : running) {
                         future.get();
                     }
@@ -210,6 +256,9 @@ final class DistributedCaffeineUnitTests {
 
         @DisplayName("that every key put is either still held or was reported as removed")
         @Test
+        // java:S2925 - as above: the executor goes idle before the notifications it was handed arrive, so there is
+        // nothing left to poll for and the wait has to be a plain one
+        @SuppressWarnings("java:S2925")
         void test_Caffeine_accounts_for_every_key_under_size_pressure() throws Exception {
             // Distributed Caffeine relies on being told about every removal: an eviction is what it distributes,
             // so a key that leaves a cache unannounced is one the other cache instances go on serving. A stress
@@ -235,11 +284,11 @@ final class DistributedCaffeineUnitTests {
                         })
                         .build();
 
-                List<Future<?>> written = IntStream.range(0, writers)
+                List<? extends Future<?>> written = IntStream.range(0, writers)
                         .mapToObj(writer -> executor.submit(() -> IntStream.range(0, keys)
                                 .filter(id -> id % writers == writer)
                                 .forEach(id -> cache.put(id, "value-" + id))))
-                        .collect(toList());
+                        .toList();
                 for (Future<?> future : written) {
                     future.get();
                 }
@@ -380,6 +429,405 @@ final class DistributedCaffeineUnitTests {
             await("removal")
                     .untilAsserted(() ->
                             assertThat(removalCount).hasValue(2));
+        }
+    }
+
+    @Nested
+    @DisplayName("Test Policy")
+    final class PolicyUnit extends DistributedCaffeineUnitTestInstance {
+
+        private static final Key RESIDENT = Key.of(1);
+        private static final Key ABSENT = Key.of(99);
+
+        // Every method below is a delegation that unwraps what it hands back, and the two ways it can be wrong
+        // both compile: a key passed on without being wrapped finds nothing, and a map handed back without being
+        // unwrapped carries the library's own key and value types into application code
+        @DisplayName("that eviction, both fixed expirations and fixed refresh delegate and unwrap")
+        @Test
+        void test_Policy_delegations_pass_keys_through_and_hand_back_application_types() throws Exception {
+            DistributedCache<Key, Value> cache = createCache(mockAdapter(),
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
+                            .maximumSize(10)
+                            .expireAfterWrite(Duration.ofMinutes(5))
+                            .expireAfterAccess(Duration.ofMinutes(7))
+                            .refreshAfterWrite(Duration.ofMinutes(1))),
+                    dc -> dc.build(key -> Value.of(key.getId())));
+            cache.put(RESIDENT, Value.of(1));
+            cache.put(Key.of(2), Value.of(2));
+
+            Policy<Key, Value> policy = cache.policy();
+
+            Policy.Eviction<Key, Value> eviction = policy.eviction().orElseThrow();
+            assertThat(eviction.isWeighted()).isFalse();
+            assertThat(eviction.weightOf(RESIDENT)).isEmpty();
+            assertThat(eviction.weightedSize()).isEmpty();
+            assertThat(eviction.getMaximum()).isEqualTo(10);
+            eviction.setMaximum(20);
+            assertThat(eviction.getMaximum()).as("the setter reaches the cache rather than being a no-op")
+                    .isEqualTo(20);
+            assertThat(eviction.coldest(10)).containsEntry(RESIDENT, Value.of(1));
+            assertThat(eviction.hottest(10)).containsEntry(RESIDENT, Value.of(1));
+
+            Policy.FixedExpiration<Key, Value> afterWrite = policy.expireAfterWrite().orElseThrow();
+            assertThat(afterWrite.getExpiresAfter(TimeUnit.MINUTES)).isEqualTo(5);
+            afterWrite.setExpiresAfter(9, TimeUnit.MINUTES);
+            assertThat(afterWrite.getExpiresAfter(TimeUnit.MINUTES)).isEqualTo(9);
+            // present for a key the cache holds and empty for one it does not, which is what a key handed on
+            // unwrapped would get wrong in the same direction for both
+            assertThat(afterWrite.ageOf(RESIDENT, TimeUnit.NANOSECONDS)).isPresent();
+            assertThat(afterWrite.ageOf(ABSENT, TimeUnit.NANOSECONDS)).isEmpty();
+            assertThat(afterWrite.oldest(10)).containsEntry(RESIDENT, Value.of(1));
+            assertThat(afterWrite.youngest(10)).containsEntry(RESIDENT, Value.of(1));
+
+            // the same factory serves both, so this proves the accessor reaches it at all
+            assertThat(policy.expireAfterAccess().orElseThrow().getExpiresAfter(TimeUnit.MINUTES)).isEqualTo(7);
+
+            Policy.FixedRefresh<Key, Value> refresh = policy.refreshAfterWrite().orElseThrow();
+            assertThat(refresh.getRefreshesAfter(TimeUnit.MINUTES)).isEqualTo(1);
+            refresh.setRefreshesAfter(3, TimeUnit.MINUTES);
+            assertThat(refresh.getRefreshesAfter(TimeUnit.MINUTES)).isEqualTo(3);
+            assertThat(refresh.ageOf(RESIDENT, TimeUnit.NANOSECONDS)).isPresent();
+            assertThat(refresh.ageOf(ABSENT, TimeUnit.NANOSECONDS)).isEmpty();
+        }
+
+        @DisplayName("that a quietly fetched entry delegates what it is asked and refuses to be written through")
+        @Test
+        @SuppressWarnings("java:S5778")
+        void test_Policy_cache_entry_delegates_and_refuses_to_be_set() throws Exception {
+            DistributedCache<Key, Value> cache = createCache(mockAdapter(),
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
+                            .expireAfterWrite(Duration.ofMinutes(5))
+                            .refreshAfterWrite(Duration.ofMinutes(1))),
+                    dc -> dc.build(key -> Value.of(key.getId())));
+            cache.put(RESIDENT, Value.of(1));
+
+            Policy.CacheEntry<Key, Value> cacheEntry =
+                    requireNonNull(cache.policy().getEntryIfPresentQuietly(RESIDENT));
+
+            assertThat(cacheEntry.getKey()).isEqualTo(RESIDENT);
+            assertThat(cacheEntry.getValue()).isEqualTo(Value.of(1));
+            // the three moments the entry carries, all of them the underlying entry's rather than invented here
+            assertThat(cacheEntry.expiresAt()).isGreaterThan(cacheEntry.snapshotAt());
+            assertThat(cacheEntry.refreshableAt()).isGreaterThan(cacheEntry.snapshotAt());
+            assertThat(cacheEntry.expiresAt()).isGreaterThan(cacheEntry.refreshableAt());
+
+            // a view of what the cache holds, not a way into it - writing through it would bypass everything
+            // that makes a write distributable
+            assertThatThrownBy(() -> cacheEntry.setValue(Value.of(2)))
+                    .isInstanceOf(UnsupportedOperationException.class);
+        }
+
+        @DisplayName("that what the cache was not configured for is absent rather than empty-handed")
+        @Test
+        void test_Policy_absent_configurations_are_reported_as_absent() throws Exception {
+            DistributedCache<Key, Value> cache = createCache(mockAdapter(),
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            Policy<Key, Value> policy = cache.policy();
+
+            assertThat(policy.eviction()).isEmpty();
+            assertThat(policy.expireAfterWrite()).isEmpty();
+            assertThat(policy.expireAfterAccess()).isEmpty();
+            assertThat(policy.refreshAfterWrite()).isEmpty();
+            assertThat(policy.expireVariably()).isEmpty();
+        }
+
+        @SuppressWarnings("unchecked")
+        private Adapter<Key, Value> mockAdapter() throws Exception {
+            Adapter<Key, Value> adapter = mock(Adapter.class);
+            Repository<Key, Value> repository = mock(Repository.class);
+            when(adapter.getIdentifier()).thenReturn("policy.test");
+            when(adapter.getPublisher()).thenReturn(repository);
+            when(adapter.getRepository()).thenReturn(Optional.of(repository));
+            when(repository.streamCacheEntries(any(), any(), anyBoolean()))
+                    .thenAnswer(invocation -> Stream.empty());
+            return adapter;
+        }
+    }
+
+    @Nested
+    @DisplayName("Test SerializerAware")
+    final class SerializerAwareUnit extends DistributedCaffeineUnitTestInstance {
+
+        @DisplayName("that nothing is serialized or deserialized for a null, either way")
+        @Test
+        void test_SerializerAware_passes_null_through() throws Exception {
+            assertThat(SerializerAware.serialize(null, new JavaObjectSerializer<Key>())).isNull();
+            // held as an Object rather than asserted on where it is produced, because what comes back is declared
+            // nullable while the assertion it is passed to is not, which is the whole point of the call
+            Object deserialized = SerializerAware.deserialize(null, new JavaObjectSerializer<Key>());
+            assertThat(deserialized).isNull();
+        }
+
+        // The dispatch asks what KIND of serializer it was given, so a serializer implementing the base interface
+        // alone matches none of the three and is reported rather than silently producing nothing
+        @DisplayName("that a serializer of no known kind is reported instead of being guessed at")
+        @Test
+        @SuppressWarnings("java:S5778")
+        void test_SerializerAware_rejects_a_serializer_of_no_known_kind() {
+            Serializer<Key, String> ofNoKnownKind = new Serializer<>() {
+
+                @Override
+                public @NonNull String serialize(@NonNull Key object) {
+                    return "serialized";
+                }
+
+                @Override
+                public @NonNull Key deserialize(@NonNull String value) {
+                    return Key.of(1);
+                }
+            };
+
+            assertThatThrownBy(() -> SerializerAware.serialize(Key.of(1), ofNoKnownKind))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("No Serializer found for serializing object of type Key");
+            assertThatThrownBy(() -> SerializerAware.deserialize("serialized", ofNoKnownKind))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("No Serializer found for deserializing value of type String");
+        }
+
+        // Deserializing asks about the VALUE as well, because what the store hands back has to match the kind of
+        // serializer configured for it - a column or field holding the other representation is reported, not cast
+        @DisplayName("that a value of the wrong representation for its serializer is reported")
+        @Test
+        @SuppressWarnings("java:S5778")
+        void test_SerializerAware_rejects_a_value_the_serializer_cannot_take() {
+            assertThatThrownBy(() -> SerializerAware.deserialize("a string, not bytes",
+                    new JavaObjectSerializer<Key>()))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("No Serializer found for deserializing value of type String");
+            assertThatThrownBy(() -> SerializerAware.deserialize("not bytes".getBytes(StandardCharsets.UTF_8),
+                    new JacksonSerializer<>(Value.class, false)))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("No Serializer found for deserializing value of type byte[]");
+        }
+    }
+
+    @Nested
+    @DisplayName("Test Weigher")
+    final class WeigherUnit extends DistributedCaffeineUnitTestInstance {
+
+        // A weigher is not handed to Caffeine through its builder: the library reaches into the private field by
+        // reflection and replaces the application's weigher with a wrapper, because Caffeine weighs InternalKey
+        // and InternalValue rather than the application's own types. Take the replacement away and the
+        // application's weigher is handed those wrappers and fails with a ClassCastException on the first write -
+        // loud for whoever configured a weigher, and silent here, because nothing exercised the path at all
+        @DisplayName("that a configured weigher is the one in effect and is asked with the application's own types")
+        @Test
+        void test_Weigher_is_injected_and_reports_through_the_policy() throws Exception {
+            List<String> weighed = new CopyOnWriteArrayList<>();
+            Weigher<Key, Value> weigher = (key, value) -> {
+                weighed.add(key.getId() + "=" + value.getId());
+                return key.getId();
+            };
+
+            DistributedCache<Key, Value> cache = createCache(mockAdapter(),
+                    dc -> dc.withCaffeine(Caffeine.newBuilder().maximumWeight(100).weigher(weigher)),
+                    DistributedCaffeine::build);
+            cache.put(Key.of(10), Value.of(10));
+            cache.put(Key.of(20), Value.of(20));
+
+            assertThat(weighed).as("the configured weigher, not Caffeine's default of one per entry")
+                    .contains("10=10", "20=20");
+
+            Policy.Eviction<Key, Value> eviction = cache.policy().eviction().orElseThrow();
+            assertThat(eviction.isWeighted()).isTrue();
+            // what the weigher returned for that key, which is what proves it is this weigher in effect
+            assertThat(eviction.weightOf(Key.of(10))).hasValue(10);
+            assertThat(eviction.weightedSize()).hasValue(30);
+            // in weight units rather than entries, unlike the same method on a cache bounded by size
+            assertThat(eviction.getMaximum()).isEqualTo(100);
+
+            assertThat(requireNonNull(cache.policy().getEntryIfPresentQuietly(Key.of(10))).weight()).isEqualTo(10);
+        }
+
+        // Weight and count are different quantities, but they leave the cache by the same door: Caffeine reports
+        // RemovalCause.SIZE for both, so the engine cannot tell them apart and does not need to. This pins that
+        // an eviction the weigher caused is recorded exactly as one a maximum size would have caused - which is
+        // also why a store-side bound stays a count of records: weight measures the live object on this heap and
+        // says nothing about the serialized record
+        @DisplayName("that an eviction caused by weight is recorded as a size eviction, like a count one")
+        @Test
+        void test_Weigher_eviction_is_reported_as_a_size_eviction() throws Exception {
+            Adapter<Key, Value> adapter = mockAdapter();
+            DistributedCache<Key, Value> cache = createCache(adapter,
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
+                            .maximumWeight(100)
+                            .weigher((Weigher<Key, Value>) (key, value) -> key.getId())),
+                    DistributedCaffeine::build);
+
+            // 60 and 70 cannot both be held under a maximum weight of 100, while two entries never exceed a
+            // maximum size of 100 - so only the weigher can be what evicts here
+            cache.put(Key.of(60), Value.of(60));
+            cache.put(Key.of(70), Value.of(70));
+            cache.cleanUp();
+
+            // reported asynchronously, so it is awaited rather than read straight afterwards
+            ArgumentCaptor<Collection<CacheEntry<Key, Value>>> captor = ArgumentCaptor.captor();
+            verify(adapter.getPublisher(), timeout(5_000).atLeastOnce()).publishCacheEntries(captor.capture());
+
+            assertThat(captor.getAllValues().stream().flatMap(Collection::stream))
+                    .anySatisfy(cacheEntry -> assertThat(cacheEntry.getStatus()).isEqualTo(EVICTED_SIZE));
+        }
+
+        @SuppressWarnings("unchecked")
+        private Adapter<Key, Value> mockAdapter() throws Exception {
+            Adapter<Key, Value> adapter = mock(Adapter.class);
+            Repository<Key, Value> repository = mock(Repository.class);
+            when(adapter.getIdentifier()).thenReturn("weigher.test");
+            when(adapter.getPublisher()).thenReturn(repository);
+            when(adapter.getRepository()).thenReturn(Optional.of(repository));
+            when(repository.streamCacheEntries(any(), any(), anyBoolean()))
+                    .thenAnswer(invocation -> Stream.empty());
+            return adapter;
+        }
+    }
+
+    @Nested
+    @DisplayName("Test Scheduler")
+    final class SchedulerUnit extends DistributedCaffeineUnitTestInstance {
+
+        private static final Duration EXPIRY = Duration.ofMillis(200);
+        // comfortably under the maintenance interval of one minute, so the library's own cleanUp cannot be what
+        // drives the expiry below - only a scheduler can
+        private static final Duration WAITING_DURATION = Duration.ofSeconds(10);
+
+        @DisplayName("that a scheduler of the application's own is wrapped rather than replaced")
+        @Test
+        @SuppressWarnings("unchecked")
+        void test_Scheduler_configured_by_the_application_is_the_one_used() throws Exception {
+            AtomicInteger scheduled = new AtomicInteger();
+            Scheduler application = (executor, command, delay, unit) -> {
+                scheduled.incrementAndGet();
+                return Scheduler.systemScheduler().schedule(executor, command, delay, unit);
+            };
+
+            DistributedCache<Key, Value> cache = createCache(mockAdapter(mock(Repository.class)),
+                    dc -> dc.withCaffeine(Caffeine.newBuilder().expireAfterWrite(EXPIRY).scheduler(application)),
+                    DistributedCaffeine::build);
+            cache.put(Key.of(1), Value.of(1));
+
+            // the library puts a wrapper of its own into the field, and this is what says the wrapper delegates
+            // to the scheduler that was configured instead of standing in for it
+            await("the application's scheduler being asked to schedule")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(scheduled).hasPositiveValue());
+        }
+
+        // Deliberate and undocumented: a scheduler is what makes the eviction listener reliable, so the library
+        // overrides an application that switched scheduling off rather than honouring it. Nothing else pins that
+        // decision, and were it to go the entry below would sit in the cache unnoticed until something touched it
+        @DisplayName("that a scheduler the application disabled is overridden, so expiry is still reported")
+        @Test
+        void test_Scheduler_disabled_by_the_application_is_overridden() throws Exception {
+            List<CacheEntry<Key, Value>> published = new CopyOnWriteArrayList<>();
+            @SuppressWarnings("unchecked")
+            Repository<Key, Value> repository = mock(Repository.class);
+            Adapter<Key, Value> adapter = mockAdapter(repository);
+            doAnswer(invocation -> {
+                published.addAll(invocation.getArgument(0));
+                return null;
+            }).when(repository).publishCacheEntries(any());
+
+            DistributedCache<Key, Value> cache = createCache(adapter,
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
+                            .expireAfterWrite(EXPIRY)
+                            .scheduler(Scheduler.disabledScheduler())),
+                    DistributedCaffeine::build);
+            cache.put(Key.of(1), Value.of(1));
+
+            // nothing reads the cache from here on, so no access can be what notices the expiry either
+            await("the expiry being reported without the cache being touched")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(published)
+                            .anySatisfy(cacheEntry -> assertThat(cacheEntry.getStatus()).isEqualTo(EVICTED_TIME)));
+        }
+
+        // the repository is handed in rather than made here, so that a test can stub it without Mockito seeing
+        // a stubbed call (adapter.getPublisher()) inside a stubbing of its own
+        private Adapter<Key, Value> mockAdapter(Repository<Key, Value> repository) throws Exception {
+            @SuppressWarnings("unchecked")
+            Adapter<Key, Value> adapter = mock(Adapter.class);
+            when(adapter.getIdentifier()).thenReturn("scheduler.test");
+            when(adapter.getPublisher()).thenReturn(repository);
+            when(adapter.getRepository()).thenReturn(Optional.of(repository));
+            when(repository.streamCacheEntries(any(), any(), anyBoolean()))
+                    .thenAnswer(invocation -> Stream.empty());
+            return adapter;
+        }
+    }
+
+    @Nested
+    @DisplayName("Test Expiry")
+    final class ExpiryUnit extends DistributedCaffeineUnitTestInstance {
+
+        // Three durations far enough apart to tell which callback produced the one in force
+        private static final long AFTER_CREATE_SECONDS = 600;
+        private static final long AFTER_UPDATE_SECONDS = 1_200;
+        private static final long AFTER_READ_SECONDS = 1_800;
+
+        // Every other test configures expiry with Expiry.creating(...), whose update and read callbacks hand back
+        // the duration already in force. Against that, the wrapper's own expireAfterUpdate and expireAfterRead are
+        // executed but unobservable: returning currentDuration instead of delegating, or swapping the two, gives
+        // the same answer either way. An Expiry whose three callbacks differ is what makes them observable
+        @DisplayName("that all three expiry callbacks are delegated with the application's own types")
+        @Test
+        void test_Expiry_delegates_create_update_and_read_separately() throws Exception {
+            List<String> calls = new CopyOnWriteArrayList<>();
+            Expiry<Key, Value> expiry = new Expiry<>() {
+
+                @Override
+                public long expireAfterCreate(Key key, Value value, long currentTime) {
+                    calls.add("create:" + key.getId() + "=" + value.getId());
+                    return SECONDS.toNanos(AFTER_CREATE_SECONDS);
+                }
+
+                @Override
+                public long expireAfterUpdate(Key key, Value value, long currentTime, long currentDuration) {
+                    calls.add("update:" + key.getId() + "=" + value.getId());
+                    return SECONDS.toNanos(AFTER_UPDATE_SECONDS);
+                }
+
+                @Override
+                public long expireAfterRead(Key key, Value value, long currentTime, long currentDuration) {
+                    calls.add("read:" + key.getId() + "=" + value.getId());
+                    return SECONDS.toNanos(AFTER_READ_SECONDS);
+                }
+            };
+
+            DistributedCache<Key, Value> cache = createCache(mockAdapter(),
+                    dc -> dc.withCaffeine(Caffeine.newBuilder().expireAfter(expiry)),
+                    DistributedCaffeine::build);
+            Key key = Key.of(1);
+
+            cache.put(key, Value.of(1));
+            assertThat(expiresAfter(cache, key)).isBetween(AFTER_CREATE_SECONDS - 5, AFTER_CREATE_SECONDS);
+
+            cache.put(key, Value.of(2));
+            assertThat(expiresAfter(cache, key)).isBetween(AFTER_UPDATE_SECONDS - 5, AFTER_UPDATE_SECONDS);
+
+            assertThat(cache.getIfPresent(key)).isEqualTo(Value.of(2));
+            assertThat(expiresAfter(cache, key)).isBetween(AFTER_READ_SECONDS - 5, AFTER_READ_SECONDS);
+
+            // each callback saw the application's own key and value, and the value it saw on update is the new
+            // one rather than the one it replaced
+            assertThat(calls).containsExactly("create:1=1", "update:1=2", "read:1=2");
+        }
+
+        private long expiresAfter(DistributedCache<Key, Value> cache, Key key) {
+            return cache.policy().expireVariably().orElseThrow().getExpiresAfter(key, SECONDS).orElseThrow();
+        }
+
+        @SuppressWarnings("unchecked")
+        private Adapter<Key, Value> mockAdapter() throws Exception {
+            Adapter<Key, Value> adapter = mock(Adapter.class);
+            Repository<Key, Value> repository = mock(Repository.class);
+            when(adapter.getIdentifier()).thenReturn("expiry.test");
+            when(adapter.getPublisher()).thenReturn(repository);
+            when(adapter.getRepository()).thenReturn(Optional.of(repository));
+            when(repository.streamCacheEntries(any(), any(), anyBoolean()))
+                    .thenAnswer(invocation -> Stream.empty());
+            return adapter;
         }
     }
 
@@ -769,6 +1217,118 @@ final class DistributedCaffeineUnitTests {
     @DisplayName("Test Hasher")
     final class HasherUnit extends DistributedCaffeineUnitTestInstance {
 
+        // Each case names a put method and performs the SAME call twice: once on the Hasher, once on the stream
+        // it is supposed to delegate to. The duplication is the test - a put wired to the wrong underlying method
+        // still compiles, still returns a hash, and produces one no other cache instance computes for that key
+        record Delegation(String name, UnaryOperator<Hasher> onHasher, Consumer<HashStream128> onStream) {
+
+            @Override
+            public @NonNull String toString() {
+                return name;
+            }
+        }
+
+        private static Delegation put(String name, UnaryOperator<Hasher> onHasher,
+                                      Consumer<HashStream128> onStream) {
+            return new Delegation(name, onHasher, onStream);
+        }
+
+        // ranged variants take an offset and a length that both matter, so that one quietly delegating to the
+        // whole-array method is caught rather than agreeing by accident
+        static Stream<Delegation> provideDelegations() {
+            byte[] bytes = {1, 2, 3, 4, 5};
+            boolean[] booleans = {true, false, true, true, false};
+            short[] shorts = {11, 22, 33, 44, 55};
+            char[] chars = {'a', 'b', 'c', 'd', 'e'};
+            int[] ints = {101, 202, 303, 404, 505};
+            long[] longs = {1_001L, 2_002L, 3_003L, 4_004L, 5_005L};
+            float[] floats = {1.5f, 2.5f, 3.5f, 4.5f, 5.5f};
+            double[] doubles = {1.25, 2.25, 3.25, 4.25, 5.25};
+            UUID uuid = UUID.fromString("1b4e28ba-2fa1-11d2-883f-0016d3cca427");
+            HashFunnel<String> funnel = (value, sink) -> sink.putString(value);
+            List<String> elements = List.of("alpha", "beta");
+            ToLongFunction<String> elementHash = value -> (long) value.hashCode();
+
+            return Stream.of(
+                    put("putByte", h -> h.putByte((byte) 7), s -> s.putByte((byte) 7)),
+                    put("putBytes", h -> h.putBytes(bytes), s -> s.putBytes(bytes)),
+                    put("putBytes(off,len)", h -> h.putBytes(bytes, 1, 3), s -> s.putBytes(bytes, 1, 3)),
+                    put("putBytes(access)", h -> h.putBytes(bytes, 1L, 3L, ByteAccess.forByteArray()),
+                            s -> s.putBytes(bytes, 1L, 3L, ByteAccess.forByteArray())),
+                    put("putByteArray", h -> h.putByteArray(bytes), s -> s.putByteArray(bytes)),
+                    put("putBoolean", h -> h.putBoolean(true), s -> s.putBoolean(true)),
+                    put("putBooleans", h -> h.putBooleans(booleans), s -> s.putBooleans(booleans)),
+                    put("putBooleans(off,len)", h -> h.putBooleans(booleans, 1, 3),
+                            s -> s.putBooleans(booleans, 1, 3)),
+                    put("putBooleanArray", h -> h.putBooleanArray(booleans), s -> s.putBooleanArray(booleans)),
+                    put("putShort", h -> h.putShort((short) 1234), s -> s.putShort((short) 1234)),
+                    put("putShorts", h -> h.putShorts(shorts), s -> s.putShorts(shorts)),
+                    put("putShorts(off,len)", h -> h.putShorts(shorts, 1, 3), s -> s.putShorts(shorts, 1, 3)),
+                    put("putShortArray", h -> h.putShortArray(shorts), s -> s.putShortArray(shorts)),
+                    put("putChar", h -> h.putChar('x'), s -> s.putChar('x')),
+                    put("putChars", h -> h.putChars(chars), s -> s.putChars(chars)),
+                    put("putChars(off,len)", h -> h.putChars(chars, 1, 3), s -> s.putChars(chars, 1, 3)),
+                    put("putChars(CharSequence)", h -> h.putChars("sequence"),
+                            s -> s.putChars("sequence")),
+                    put("putCharArray", h -> h.putCharArray(chars), s -> s.putCharArray(chars)),
+                    put("putString", h -> h.putString("string"), s -> s.putString("string")),
+                    put("putInt", h -> h.putInt(42), s -> s.putInt(42)),
+                    put("putInts", h -> h.putInts(ints), s -> s.putInts(ints)),
+                    put("putInts(off,len)", h -> h.putInts(ints, 1, 3), s -> s.putInts(ints, 1, 3)),
+                    put("putIntArray", h -> h.putIntArray(ints), s -> s.putIntArray(ints)),
+                    put("putLong", h -> h.putLong(42L), s -> s.putLong(42L)),
+                    put("putLongs", h -> h.putLongs(longs), s -> s.putLongs(longs)),
+                    put("putLongs(off,len)", h -> h.putLongs(longs, 1, 3), s -> s.putLongs(longs, 1, 3)),
+                    put("putLongArray", h -> h.putLongArray(longs), s -> s.putLongArray(longs)),
+                    put("putFloat", h -> h.putFloat(1.5f), s -> s.putFloat(1.5f)),
+                    put("putFloats", h -> h.putFloats(floats), s -> s.putFloats(floats)),
+                    put("putFloats(off,len)", h -> h.putFloats(floats, 1, 3), s -> s.putFloats(floats, 1, 3)),
+                    put("putFloatArray", h -> h.putFloatArray(floats), s -> s.putFloatArray(floats)),
+                    put("putDouble", h -> h.putDouble(1.25), s -> s.putDouble(1.25)),
+                    put("putDoubles", h -> h.putDoubles(doubles), s -> s.putDoubles(doubles)),
+                    put("putDoubles(off,len)", h -> h.putDoubles(doubles, 1, 3), s -> s.putDoubles(doubles, 1, 3)),
+                    put("putDoubleArray", h -> h.putDoubleArray(doubles), s -> s.putDoubleArray(doubles)),
+                    put("putUUID", h -> h.putUUID(uuid), s -> s.putUUID(uuid)),
+                    put("put(funnel)", h -> h.put("alpha", funnel), s -> s.put("alpha", funnel)),
+                    put("putNullable", h -> h.putNullable("alpha", funnel), s -> s.putNullable("alpha", funnel)),
+                    put("putNullable(null)", h -> h.putNullable(null, funnel), s -> s.putNullable(null, funnel)),
+                    put("putOrderedIterable", h -> h.putOrderedIterable(elements, funnel),
+                            s -> s.putOrderedIterable(elements, funnel)),
+                    put("putUnorderedIterable(toLong)", h -> h.putUnorderedIterable(elements, elementHash),
+                            s -> s.putUnorderedIterable(elements, elementHash)),
+                    put("putUnorderedIterable(stream)",
+                            h -> h.putUnorderedIterable(elements, funnel, Hashing.xxh3_64().hashStream()),
+                            s -> s.putUnorderedIterable(elements, funnel, Hashing.xxh3_64().hashStream())),
+                    put("putUnorderedIterable(hasher)",
+                            h -> h.putUnorderedIterable(elements, funnel, Hashing.xxh3_64()),
+                            s -> s.putUnorderedIterable(elements, funnel, Hashing.xxh3_64())),
+                    put("putOptional", h -> h.putOptional(Optional.of("alpha"), funnel),
+                            s -> s.putOptional(Optional.of("alpha"), funnel)),
+                    put("putOptionalInt", h -> h.putOptionalInt(OptionalInt.of(5)),
+                            s -> s.putOptionalInt(OptionalInt.of(5))),
+                    put("putOptionalLong", h -> h.putOptionalLong(OptionalLong.of(5L)),
+                            s -> s.putOptionalLong(OptionalLong.of(5L))),
+                    put("putOptionalDouble", h -> h.putOptionalDouble(OptionalDouble.of(5.0)),
+                            s -> s.putOptionalDouble(OptionalDouble.of(5.0))));
+        }
+
+        @DisplayName("that every put method delegates to the matching one, records that it carried data and chains")
+        @ParameterizedTest(name = "{0}")
+        @MethodSource("provideDelegations")
+        void test_Hasher_put_methods_delegate(Delegation delegation) {
+            Hasher hasher = new Hasher();
+
+            // chaining: a put answers with the hasher it was called on, not a new one
+            assertThat(delegation.onHasher().apply(hasher)).isSameAs(hasher);
+
+            HashStream128 expected = Hashing.xxh3_128().hashStream().reset();
+            delegation.onStream().accept(expected);
+
+            // getHash() throws unless the put recorded that something was put, so this covers that flag as well
+            assertThat(hasher.getHash())
+                    .isEqualTo(HexFormat.of().formatHex(expected.get().toByteArray()));
+        }
+
         @DisplayName("that empty hash stream throws exception")
         @Test
         void test_Hasher_empty_hash_stream_throws_exception() {
@@ -923,7 +1483,8 @@ final class DistributedCaffeineUnitTests {
 
         @DisplayName("that cache entry metadata implements equals(), hashCode() and toString()")
         @Test
-        @SuppressWarnings("EqualsIncompatibleType") // comparing unrelated types is the point of the equals() contract test
+        @SuppressWarnings("EqualsIncompatibleType")
+            // comparing unrelated types is the point of the equals() contract test
         void test_CacheEntryMetadata_equals_hashCode_toString() {
             CacheEntryMetadata metadata = CacheEntryMetadata.of("h1", "op1", Status.CACHED, TIMESTAMP);
             CacheEntryMetadata equalMetadata = CacheEntryMetadata.of("h1", "op1", Status.CACHED, TIMESTAMP);
@@ -946,6 +1507,32 @@ final class DistributedCaffeineUnitTests {
             // the field names of an underlying store are what it names its values by
             assertThat(metadata.toString())
                     .startsWith("CacheEntryMetadata{hash=h1, operation=op1, status=cached, timestamp=");
+        }
+    }
+
+    @Nested
+    @DisplayName("Test MongoAdapter")
+    final class MongoAdapterUnit extends DistributedCaffeineUnitTestInstance {
+
+        @DisplayName("that a discriminator is checked where it is configured")
+        @Test
+        @SuppressWarnings({"resource", "java:S5778"})
+            // a mock holds nothing that could be closed
+        void test_MongoAdapter_checks_the_discriminator() {
+            // nothing here reaches a server: what a builder rejects, it rejects before it is built
+            MongoClient mongoClient = mock(MongoClient.class, RETURNS_DEEP_STUBS);
+
+            // a discriminator gone missing is reported instead of silently placing the cache in a scope of its
+            // own, where it would neither synchronize with the caches it was meant to nor say so
+            assertThatThrownBy(() -> MongoAdapter.newBuilder(mongoClient, "database", "collection")
+                    .withDiscriminator(_null()))
+                    .isExactlyInstanceOf(NullPointerException.class)
+                    .hasMessage("discriminator cannot be null");
+            Stream.of("", " ", "\t\n").forEach(blank ->
+                    assertThatThrownBy(() -> MongoAdapter.newBuilder(mongoClient, "database", "collection")
+                            .withDiscriminator(blank))
+                            .isExactlyInstanceOf(IllegalArgumentException.class)
+                            .hasMessage("discriminator cannot be blank"));
         }
     }
 
@@ -1013,6 +1600,7 @@ final class DistributedCaffeineUnitTests {
 
         @DisplayName("that bulk upserts do not swallow errors other than duplicate key errors")
         @Test
+        @SuppressWarnings("java:S5778")
         void test_MongoRepository_bulk_upsert_propagates_other_errors() throws Exception {
             MongoClient mongoClient = mock(MongoClient.class, RETURNS_DEEP_STUBS);
             MongoCollection<Document> mongoCollection = mongoCollectionOf(mongoClient);
@@ -1190,6 +1778,444 @@ final class DistributedCaffeineUnitTests {
 
         private void processChangeStreams(Synchronizer<Key, Value> synchronizer) {
             invokeMethod(synchronizer, synchronizer.getClass(), "processChangeStreams", List.of(), List.of());
+        }
+    }
+
+    @Nested
+    @DisplayName("Test PostgresAdapter")
+    final class PostgresAdapterUnit extends DistributedCaffeineUnitTestInstance {
+
+        @DisplayName("that a schema and a table name are refused unless they are plain identifiers")
+        @Test
+        void test_PostgresAdapter_checks_names() {
+            DataSource dataSource = mock(DataSource.class);
+
+            // A name cannot be a parameter of a statement, so it ends up in the text of one. It is quoted there,
+            // but it is checked here as well, so that what reaches the store is a name and nothing else - which is
+            // why a name carrying a quote of its own matters as much as one carrying a space
+            Stream.of("", "has space", "has-dash", "1leading", "a\"quote", "t\"; DROP TABLE x --", "a.b")
+                    .forEach(name -> {
+                        assertThatThrownBy(() -> PostgresAdapter.newBuilder(dataSource, name, "table"))
+                                .isExactlyInstanceOf(IllegalArgumentException.class)
+                                .hasMessageContaining("schemaName must be a plain identifier");
+                        assertThatThrownBy(() -> PostgresAdapter.newBuilder(dataSource, "schema", name))
+                                .isExactlyInstanceOf(IllegalArgumentException.class)
+                                .hasMessageContaining("tableName must be a plain identifier");
+                    });
+
+            // and what counts as plain is not narrower than what PostgreSQL itself accepts unquoted
+            Stream.of("public", "_leading", "with_underscore", "With$Dollar", "a1")
+                    .forEach(name -> assertThatCode(() -> PostgresAdapter.newBuilder(dataSource, name, name))
+                            .doesNotThrowAnyException());
+        }
+
+        @DisplayName("that missing arguments and a blank discriminator are reported where they are configured")
+        @Test
+        @SuppressWarnings("java:S5778")
+        void test_PostgresAdapter_checks_arguments() {
+            DataSource dataSource = mock(DataSource.class);
+
+            assertThatThrownBy(() -> PostgresAdapter.newBuilder(_null(), "schema", "table"))
+                    .isExactlyInstanceOf(NullPointerException.class)
+                    .hasMessage("dataSource cannot be null");
+            assertThatThrownBy(() -> PostgresAdapter.newBuilder(dataSource, _null(), "table"))
+                    .isExactlyInstanceOf(NullPointerException.class)
+                    .hasMessage("schemaName cannot be null");
+            assertThatThrownBy(() -> PostgresAdapter.newBuilder(dataSource, "schema", _null()))
+                    .isExactlyInstanceOf(NullPointerException.class)
+                    .hasMessage("tableName cannot be null");
+
+            assertThatThrownBy(() -> PostgresAdapter.newBuilder(dataSource, "schema", "table")
+                    .withDiscriminator(_null()))
+                    .isExactlyInstanceOf(NullPointerException.class)
+                    .hasMessage("discriminator cannot be null");
+            Stream.of("", " ", "\t\n").forEach(blank ->
+                    assertThatThrownBy(() -> PostgresAdapter.newBuilder(dataSource, "schema", "table")
+                            .withDiscriminator(blank))
+                            .isExactlyInstanceOf(IllegalArgumentException.class)
+                            .hasMessage("discriminator cannot be blank"));
+        }
+    }
+
+    @Nested
+    @DisplayName("Test PostgresChannel")
+    final class PostgresChannelUnit extends DistributedCaffeineUnitTestInstance {
+
+        // package-private in another package, so it is reached reflectively (via the inherited invokeMethod
+        // helper) - which is what keeps a test of what are pure functions out of the integration suite and away
+        // from a running PostgreSQL instance
+        private static final Class<?> CHANNEL =
+                classOf("io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresChannel");
+
+        // NAMEDATALEN - 1, what the server allows an identifier to be
+        private static final int MAXIMUM_IDENTIFIER_LENGTH = 63;
+        // what the adapter keeps a notification payload under, itself below the 8000 bytes the server refuses at
+        private static final int MAXIMUM_PAYLOAD_LENGTH = 7900;
+
+        @DisplayName("that a channel is derived from the scope, fits an identifier whatever the scope is, and "
+                + "separates one scope from another")
+        @Test
+        void test_PostgresChannel_derives_a_bounded_channel() {
+            String identifier = "postgresql:public:cache:discriminator";
+            String longIdentifier = "postgresql:public:" + "t".repeat(500) + ":discriminator";
+
+            assertThat(channelOf(identifier))
+                    // the same scope always reaches the same channel, which is what makes a listener and a writer
+                    // of that scope meet at all
+                    .isEqualTo(channelOf(identifier))
+                    .startsWith("distributed_caffeine_")
+                    .hasSizeLessThanOrEqualTo(MAXIMUM_IDENTIFIER_LENGTH);
+
+            // a scope of any length still fits, which is the whole reason the channel is a digest and not the name
+            assertThat(channelOf(longIdentifier)).hasSizeLessThanOrEqualTo(MAXIMUM_IDENTIFIER_LENGTH);
+            // and no cache instance is ever woken by writes of a scope other than its own
+            assertThat(channelOf(identifier)).isNotEqualTo(channelOf(longIdentifier));
+        }
+
+        @DisplayName("that a publish too large for one notification becomes several that put back together")
+        @Test
+        void test_PostgresChannel_splits_and_rejoins_payloads() {
+            assertThat(payloadsOf(List.of())).isEmpty();
+
+            List<String> few = List.of("h1", "h2", "h3");
+            assertThat(payloadsOf(few)).singleElement().isEqualTo("h1,h2,h3");
+            assertThat(hashesOf("h1,h2,h3")).isEqualTo(few);
+
+            // hashes the length the hasher really produces, and enough of them to need more than one notification
+            List<String> many = IntStream.range(0, 1000)
+                    .mapToObj(index -> String.format("%032x", index))
+                    .toList();
+            List<String> payloads = payloadsOf(many);
+
+            assertThat(payloads)
+                    .hasSizeGreaterThan(1)
+                    // every part has to hold before anything is sent, because the server refuses an over-long
+                    // payload at the call rather than truncating it
+                    .allSatisfy(payload -> assertThat(payload).hasSizeLessThanOrEqualTo(MAXIMUM_PAYLOAD_LENGTH));
+            // nothing is lost and nothing is repeated across the parts, which is what the reader reads back
+            assertThat(payloads.stream()
+                    .flatMap(payload -> hashesOf(payload).stream())
+                    .toList())
+                    .containsExactlyElementsOf(many);
+        }
+
+        @DisplayName("that a hash carrying the separator is refused rather than silently split in two")
+        @Test
+        @SuppressWarnings("java:S5778")
+        void test_PostgresChannel_refuses_a_hash_containing_the_separator() {
+            assertThatThrownBy(() -> payloadsOf(List.of("h1,h2")))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+
+        private String channelOf(String identifier) {
+            return invokeMethod(null, CHANNEL, "channelOf", List.of(String.class), List.of(identifier));
+        }
+
+        private List<String> payloadsOf(List<String> hashes) {
+            return invokeMethod(null, CHANNEL, "payloadsOf", List.of(List.class), List.of(hashes));
+        }
+
+        private List<String> hashesOf(String payload) {
+            return invokeMethod(null, CHANNEL, "hashesOf", List.of(String.class), List.of(payload));
+        }
+    }
+
+    @Nested
+    @DisplayName("Test PostgresIdentifier")
+    final class PostgresIdentifierUnit extends DistributedCaffeineUnitTestInstance {
+
+        private static final Class<?> IDENTIFIER =
+                classOf("io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresIdentifier");
+
+        // NAMEDATALEN - 1, what the server allows an identifier to be
+        private static final int MAXIMUM_IDENTIFIER_LENGTH = 63;
+
+        @DisplayName("that a name too long to be an identifier is shortened without two of them becoming one")
+        @Test
+        void test_PostgresIdentifier_keeps_long_names_apart() {
+            // what fits is left alone, so a name stays legible wherever it can be
+            assertThat(limited("cache_status_timestamp_idx")).isEqualTo("cache_status_timestamp_idx");
+            String exactly = "t".repeat(MAXIMUM_IDENTIFIER_LENGTH);
+            assertThat(limited(exactly)).isEqualTo(exactly);
+
+            // The pair that the index names of two tables would otherwise truncate into one another, which is what
+            // this exists to prevent: the suffix opens with "_status", so a table named after another one plus
+            // exactly that runs into it
+            String suffix = "_status_timestamp_idx";
+            String shorter = "t".repeat(55) + suffix;
+            String longer = "t".repeat(55) + "_status" + suffix;
+            assertThat(shorter.substring(0, MAXIMUM_IDENTIFIER_LENGTH))
+                    .as("what the server would truncate these two to, were they left as they are")
+                    .isEqualTo(longer.substring(0, MAXIMUM_IDENTIFIER_LENGTH));
+
+            assertThat(limited(shorter)).hasSize(MAXIMUM_IDENTIFIER_LENGTH);
+            assertThat(limited(longer)).hasSize(MAXIMUM_IDENTIFIER_LENGTH);
+            assertThat(limited(shorter)).isNotEqualTo(limited(longer));
+        }
+
+        private String limited(String identifier) {
+            return invokeMethod(null, IDENTIFIER, "limited", List.of(String.class), List.of(identifier));
+        }
+    }
+
+    @Nested
+    @DisplayName("Test PostgresRepository")
+    final class PostgresRepositoryUnit extends DistributedCaffeineUnitTestInstance {
+
+        // package-private in another package, and so is the enum naming the columns, so both are reached by name
+        private static final Class<?> REPOSITORY =
+                classOf("io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresRepository");
+        private static final Class<?> STORAGE =
+                classOf("io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresRepository$Storage");
+
+        @DisplayName("that a serializer decides which column its field is written to")
+        @Test
+        void test_PostgresRepository_stores_a_field_by_what_serializes_it() {
+            // bytes are opaque wherever they are kept, so they go to the column that keeps bytes
+            assertThat(columnFor(CacheEntry.Field.KEY, new JavaObjectSerializer<>())).isEqualTo("key_binary");
+            // a string serializer stores a string, which is what keeps a record legible to whoever looks at it
+            assertThat(columnFor(CacheEntry.Field.VALUE, stringSerializer())).isEqualTo("value_text");
+            // and a JSON serializer stores JSON - as text, or as the store's own JSON when it asks for binary,
+            // which is the same distinction the MongoDB adapter makes between a string and a BSON document
+            assertThat(columnFor(CacheEntry.Field.VALUE, new JacksonSerializer<>(Value.class, false))).isEqualTo("value_text");
+            assertThat(columnFor(CacheEntry.Field.VALUE, new JacksonSerializer<>(Value.class, true))).isEqualTo("value_jsonb");
+            assertThat(columnFor(CacheEntry.Field.KEY, new JacksonSerializer<>(Key.class, true))).isEqualTo("key_jsonb");
+        }
+
+        @DisplayName("that a timestamp the column could not represent is clamped rather than refused")
+        @Test
+        void test_PostgresRepository_clamps_a_timestamp_below_what_a_column_holds() {
+            // "older than everything" reaches the repository as a point in time, and this is the one maintenance
+            // expresses it with - a year no timestamp column can hold
+            OffsetDateTime clamped = toOffsetDateTime(Instant.ofEpochMilli(Long.MIN_VALUE));
+            assertThat(clamped.getOffset()).isEqualTo(ZoneOffset.UTC);
+            assertThat(clamped.getYear()).isEqualTo(1);
+            // the floor is below every timestamp a cache entry can carry, so what such a filter selects is unchanged
+            assertThat(clamped.toInstant()).isBefore(Instant.EPOCH.minusSeconds(62_000_000_000L));
+
+            // and an ordinary instant passes through untouched, at UTC whatever the machine running this is set to
+            Instant instant = Instant.parse("2026-10-02T11:22:33.123456Z");
+            OffsetDateTime passedThrough = toOffsetDateTime(instant);
+            assertThat(passedThrough.getOffset()).isEqualTo(ZoneOffset.UTC);
+            assertThat(passedThrough.toInstant()).isEqualTo(instant);
+        }
+
+        @DisplayName("that only a write the server rolled back is worth making again, however deeply it is reported")
+        @Test
+        void test_PostgresRepository_recognizes_a_rolled_back_write() {
+            // class 40 is transaction rollback: a serialization failure and a deadlock both say the same thing to
+            // a caller that can simply ask again
+            assertThat(isTransactionRollback(new SQLException("serialization failure", "40001"))).isTrue();
+            assertThat(isTransactionRollback(new SQLException("deadlock detected", "40P01"))).isTrue();
+
+            // and nothing else is: a table that is not there, a syntax error, or no state at all
+            assertThat(isTransactionRollback(new SQLException("no such table", "42P01"))).isFalse();
+            assertThat(isTransactionRollback(new SQLException("nothing to go on"))).isFalse();
+
+            // A batch reports what went wrong through the chain rather than through the exception it is reached
+            // by, so the one that matters can sit behind an exception saying nothing in particular - which is why
+            // the whole chain is walked and not just its head
+            SQLException batchFailed = new SQLException("batch entry failed", "00000");
+            batchFailed.setNextException(new SQLException("deadlock detected", "40P01"));
+            assertThat(isTransactionRollback(batchFailed)).isTrue();
+
+            // and a chain carrying nothing of class 40 stays a plain failure
+            SQLException plainChain = new SQLException("batch entry failed", "00000");
+            plainChain.setNextException(new SQLException("no such table", "42P01"));
+            assertThat(isTransactionRollback(plainChain)).isFalse();
+        }
+
+        // the interface rather than an implementation of it, because what decides the column is which interface a
+        // serializer answers to and not what it does with the object
+        private StringSerializer<Value> stringSerializer() {
+            return new StringSerializer<>() {
+
+                @Override
+                public @NonNull String serialize(@NonNull Value object) {
+                    return object.toString();
+                }
+
+                @Override
+                public @NonNull Value deserialize(@NonNull String string) {
+                    throw new UnsupportedOperationException();
+                }
+            };
+        }
+
+        private String columnFor(CacheEntry.Field field, Serializer<?, ?> serializer) {
+            Object storage = invokeMethod(null, REPOSITORY, "storageOf",
+                    List.of(Serializer.class), List.of(serializer));
+            return invokeMethod(null, REPOSITORY, "columnName",
+                    List.of(CacheEntry.Field.class, STORAGE), List.of(field, storage));
+        }
+
+        private OffsetDateTime toOffsetDateTime(Instant instant) {
+            return invokeMethod(null, REPOSITORY, "toOffsetDateTime", List.of(Instant.class), List.of(instant));
+        }
+
+        private boolean isTransactionRollback(SQLException exception) {
+            return invokeMethod(null, REPOSITORY, "isTransactionRollback",
+                    List.of(SQLException.class), List.of(exception));
+        }
+    }
+
+    @Nested
+    @DisplayName("Test PostgresSynchronizer")
+    @SuppressWarnings("SqlNoDataSourceInspection")
+    final class PostgresSynchronizerUnit extends DistributedCaffeineUnitTestInstance {
+
+        private static final String IDENTIFIER = "postgresql:public:table:default";
+        private static final String SYNCHRONIZER_CLASS_NAME =
+                "io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresSynchronizer";
+
+        @DisplayName("that a connection taken over is unsubscribed and drained before it is listened on")
+        @Test
+        void test_PostgresSynchronizer_takes_over_a_connection_without_inheriting_it() throws Exception {
+            Connection connection = mock();
+            Statement statement = mock();
+            PGConnection pgConnection = mock();
+            when(connection.createStatement()).thenReturn(statement);
+            when(connection.unwrap(PGConnection.class)).thenReturn(pgConnection);
+            when(connection.isValid(anyInt())).thenReturn(true);
+
+            // what a previous tenant of this pooled connection was handed before it was given up, followed by the
+            // poll that ends the watch - so whatever is drained cannot be mistaken for something that arrived here
+            PGNotification stale = mock();
+            when(stale.getParameter()).thenReturn("h1");
+            SQLException watchEnded = new SQLException("provoked");
+            when(pgConnection.getNotifications(anyInt()))
+                    .thenReturn(new PGNotification[]{stale})
+                    .thenReturn(null)
+                    .thenThrow(watchEnded);
+
+            Receiver<Key, Value> receiver = mock();
+            Synchronizer<Key, Value> synchronizer = synchronizerOf(connection);
+            synchronizer.setReceiver(receiver);
+            startListening(synchronizer);
+
+            assertThatThrownBy(() -> processNotifications(synchronizer)).isSameAs(watchEnded);
+
+            // dropped first, because a connection that was not given the chance to unsubscribe hands its
+            // subscriptions on with it - and they name records of a scope this one does not hold
+            InOrder inOrder = inOrder(statement);
+            inOrder.verify(statement).execute("UNLISTEN *");
+            inOrder.verify(statement).execute(startsWith("LISTEN "));
+
+            // and what the session had already been handed is thrown away rather than applied: unsubscribing stops
+            // what comes next, while whatever reached it before is queued and arrives on the first poll regardless
+            verify(receiver, never()).receiveCacheEntries(anyList());
+        }
+
+        @DisplayName("that a first start reports nothing while listening again reports what it may have missed")
+        @Test
+        void test_PostgresSynchronizer_reports_only_a_restart() throws Exception {
+            Connection connection = mock();
+            PGConnection pgConnection = mock();
+            Statement statement = mock();
+            when(connection.createStatement()).thenReturn(statement);
+            when(connection.unwrap(PGConnection.class)).thenReturn(pgConnection);
+            when(connection.isValid(anyInt())).thenReturn(true);
+            // Draining what the session was handed before and polling for what comes next are the same call, so
+            // they are told apart by how long each is willing to wait: the drain does not wait at all, while the
+            // poll does. Nothing is ever drained here, and the poll is what ends the watch
+            SQLException watchEnded = new SQLException("provoked");
+            when(pgConnection.getNotifications(anyInt())).thenAnswer(invocation -> {
+                if (invocation.<Integer>getArgument(0) <= 1) {
+                    return null;
+                }
+                throw watchEnded;
+            });
+
+            Receiver<Key, Value> receiver = mock();
+            Synchronizer<Key, Value> synchronizer = synchronizerOf(connection);
+            synchronizer.setReceiver(receiver);
+            startListening(synchronizer);
+
+            // a first start has missed nothing, because activating reconciles anyway
+            assertThatThrownBy(() -> processNotifications(synchronizer)).isSameAs(watchEnded);
+            verify(receiver, never()).receiveSynchronizationRestart();
+
+            // and listening again means nothing was listening in between, where a notification reaches the sessions
+            // listening at the time and is kept for nobody - so the possibility of having missed one is reported
+            assertThatThrownBy(() -> processNotifications(synchronizer)).isSameAs(watchEnded);
+            verify(receiver, times(1)).receiveSynchronizationRestart();
+        }
+
+        @DisplayName("that a connection which can no longer carry a statement is not unsubscribed from")
+        @Test
+        void test_PostgresSynchronizer_does_not_unsubscribe_a_broken_connection() throws Exception {
+            Connection connection = mock();
+            Statement statement = mock();
+            PGConnection pgConnection = mock();
+            when(connection.createStatement()).thenReturn(statement);
+            when(connection.unwrap(PGConnection.class)).thenReturn(pgConnection);
+            SQLException watchEnded = new SQLException("connection lost");
+            when(pgConnection.getNotifications(anyInt())).thenReturn(null).thenThrow(watchEnded);
+            // a broken connection does not report itself as closed, so it is asked rather than assumed - and the
+            // pool discards it instead of handing it on, so there is nothing left to unsubscribe from
+            when(connection.isValid(anyInt())).thenReturn(false);
+
+            Synchronizer<Key, Value> synchronizer = synchronizerOf(connection);
+            synchronizer.setReceiver(mock());
+            startListening(synchronizer);
+
+            assertThatThrownBy(() -> processNotifications(synchronizer)).isSameAs(watchEnded);
+
+            verify(statement, never()).execute(startsWith("UNLISTEN distributed_caffeine"));
+            verify(connection).close();
+        }
+
+        // PostgresSynchronizer and its watch loop are package-private in another package, so both are reached
+        // reflectively
+        @SuppressWarnings("unchecked")
+        private Synchronizer<Key, Value> synchronizerOf(Connection connection) throws Exception {
+            DataSource dataSource = mock();
+            when(dataSource.getConnection()).thenReturn(connection);
+            Class<?> repositoryClass =
+                    classOf("io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresRepository");
+            Object repository = mock(repositoryClass);
+            // The read-back has to find something. A mock hands back an empty stream of its own accord, and an
+            // empty read-back is never handed on - so an assertion that nothing reached the receiver would hold
+            // whatever the synchronizer did with the notification, which is no assertion at all
+            when(((Repository<Key, Value>) repository).streamCacheEntries(anySet(), any(), anyBoolean()))
+                    .thenAnswer(invocation -> Stream.of(CacheEntry.of("h1", "op1", Key.of(1), Value.of(1),
+                            CACHED, Instant.now())));
+            Constructor<?> constructor = Class.forName(SYNCHRONIZER_CLASS_NAME)
+                    .getDeclaredConstructor(DataSource.class, repositoryClass);
+            constructor.setAccessible(true);
+            Synchronizer<Key, Value> synchronizer = (Synchronizer<Key, Value>)
+                    constructor.newInstance(dataSource, repository);
+            // wiring an adapter would normally do, which constructing the synchronizer directly skips - and the
+            // identifier matters here, because the channel is derived from it
+            synchronizer.setIdentifier(IDENTIFIER);
+            synchronizer.setDiscriminator(DEFAULT_DISCRIMINATOR);
+            return synchronizer;
+        }
+
+        // a freshly constructed synchronizer counts as stopped and would return without listening, so it is moved
+        // into the state a pending activation leaves behind (without starting the machinery around it)
+        // the state is held in an AtomicReference of a package-private enum, which cannot be named here
+        private void startListening(Synchronizer<Key, Value> synchronizer) {
+            AtomicReference<Object> watchState =
+                    readFieldValue(synchronizer, synchronizer.getClass(), "watchState", AtomicReference.class);
+            watchState.set(Stream.of(watchState.get().getClass().getEnumConstants())
+                    .filter(state -> state.toString().equals("STARTING"))
+                    .findFirst()
+                    .orElseThrow(NoSuchFieldError::new));
+        }
+
+        private void processNotifications(Synchronizer<Key, Value> synchronizer) {
+            invokeMethod(synchronizer, synchronizer.getClass(), "processNotifications", List.of(), List.of());
+        }
+    }
+
+    // the adapter classes under test are package-private in their own package, so the tests above reach them
+    // by name rather than by reference
+    private static Class<?> classOf(String name) {
+        try {
+            return Class.forName(name);
+        } catch (ClassNotFoundException e) {
+            throw new IllegalStateException(e);
         }
     }
 

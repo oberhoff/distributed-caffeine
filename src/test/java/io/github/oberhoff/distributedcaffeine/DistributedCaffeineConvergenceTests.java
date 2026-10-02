@@ -57,7 +57,6 @@ import static java.lang.String.format;
 import static java.util.Comparator.comparing;
 import static java.util.Objects.isNull;
 import static java.util.stream.Collectors.toCollection;
-import static java.util.stream.Collectors.toList;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -75,14 +74,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  * cannot say what it should have removed.
  */
 @DisplayName("Distributed Caffeine Convergence Test Suite")
-class DistributedCaffeineConvergenceTests {
+final class DistributedCaffeineConvergenceTests {
 
     private static final int INSTANCES = 3;
     private static final int KEYS = 8;
     private static final int STEPS = 300;
 
     @DisplayName("Test that cache instances converge on the published order under random interleavings")
-    @ParameterizedTest(name = "seed {0}")
+    @ParameterizedTest(name = "with seed {0}")
     @ValueSource(longs = {1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L, 12L, 13L, 14L, 15L, 16L})
     void test_convergence_under_random_interleavings(long seed) {
         Random random = new Random(seed);
@@ -240,6 +239,10 @@ class DistributedCaffeineConvergenceTests {
 
     @DisplayName("Test that no key leaves a cache instance without a removal being reported for it")
     @Test
+    // java:S2925 - the removal notifications are handed to an executor, and nothing reports when the last of them
+    // has arrived, so there is no condition left to poll and only time separates "not yet delivered" from "never
+    // delivered"
+    @SuppressWarnings("java:S2925")
     void test_no_key_leaves_a_cache_instance_unreported() throws Exception {
         // Plain Caffeine accounts for every key under this workload (see the unit tests), so if a key can leave a
         // Distributed Caffeine instance with nothing reported for it, the difference is in what this library does
@@ -275,7 +278,7 @@ class DistributedCaffeineConvergenceTests {
                         broker.deliverAll();
                     }
                 });
-                List<Future<?>> running = IntStream.range(0, workers)
+                List<? extends Future<?>> running = IntStream.range(0, workers)
                         .mapToObj(worker -> workerExecutor.submit(() -> {
                             Random random = new Random(currentRound * 131L + worker);
                             for (int operation = 0; operation < operationsPerWorker; operation++) {
@@ -290,7 +293,7 @@ class DistributedCaffeineConvergenceTests {
                                 }
                             }
                         }))
-                        .collect(toList());
+                        .toList();
                 for (Future<?> future : running) {
                     future.get();
                 }

@@ -44,9 +44,12 @@ import java.util.stream.Stream;
 
 import static java.lang.Math.min;
 import static java.lang.String.format;
-import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 
+// The statements here name a channel, and a channel cannot be a parameter of one. What is concatenated into
+// them is derived from the identifier rather than taken from anywhere a caller reaches - a fixed prefix and a
+// digest - so there is nothing in it for a caller to have put there
+@SuppressWarnings({"java:S2077", "SqlNoDataSourceInspection", "SqlSourceToSinkFlow"})
 final class PostgresSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
 
     private static final Logger LOGGER = System.getLogger(PostgresSynchronizer.class.getName());
@@ -63,12 +66,13 @@ final class PostgresSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
     private final AtomicReference<WatchState> watchState;
 
     private @Nullable CompletableFuture<Void> watcherCompletableFuture;
-    private @Nullable CompletableFuture<Void> listening;
+    private @Nullable CompletableFuture<@Nullable Void> listening;
 
     PostgresSynchronizer(DataSource dataSource, PostgresRepository<K, V> repository) {
         this.dataSource = dataSource;
         this.repository = repository;
         this.watchState = new AtomicReference<>(WatchState.STOPPED);
+        // TODO connection sharing
     }
 
     @Override
@@ -80,7 +84,7 @@ final class PostgresSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
 
         // Completed once listening has begun, and completed exceptionally when starting it turns out to be
         // impossible - which is what activating waits on, rather than polling its own state until it changes
-        CompletableFuture<Void> started = new CompletableFuture<>();
+        CompletableFuture<@Nullable Void> started = new CompletableFuture<>();
         listening = started;
 
         watchState.set(WatchState.STARTING);
@@ -91,6 +95,12 @@ final class PostgresSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
             started.get(ACTIVATION_TIMEOUT.toSeconds(), TimeUnit.SECONDS);
         } catch (Exception e) {
             watchState.set(WatchState.STOPPED);
+            // An interruption is addressed to the thread rather than to this call, and waiting for the listener to
+            // come up clears the flag on its way out. Set again before the failure is reported, so that whoever
+            // asked this thread to stop is still heard by whatever it does next
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
             Throwable cause = e instanceof java.util.concurrent.ExecutionException ? e.getCause() : e;
             throw new IllegalStateException(
                     format("Listening for notifications failed for cache at '%s'", identifier), cause);
@@ -113,7 +123,7 @@ final class PostgresSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
         return watchState.get() == WatchState.STOPPED;
     }
 
-    private void scheduleNotificationWatcher(CompletableFuture<Void> started) {
+    private void scheduleNotificationWatcher(CompletableFuture<@Nullable Void> started) {
         RetryPolicy<Void> retryPolicy = RetryPolicy.<Void>builder()
                 // abort unless listening had already begun: a failure while starting up is final and must fail
                 // fast, whereas a failure after that is treated as transient and retried
@@ -149,31 +159,67 @@ final class PostgresSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
         // listening when it is issued and nobody else, so this one cannot be borrowed and returned between polls
         try (Connection connection = dataSource.getConnection()) {
             try (Statement statement = connection.createStatement()) {
+                // Dropping whatever this session was subscribed to before taking it over: a connection comes from
+                // a pool, and a listener that was not given the chance to unsubscribe - one whose thread was
+                // interrupted, or whose connection broke - hands its subscriptions on with it. Inherited, they
+                // deliver notifications of another scope, whose hashes name records this one does not hold
+                statement.execute("UNLISTEN *");
                 statement.execute("LISTEN " + channel);
             }
-            if (isStopped()) {
-                return;
-            }
-            // Listening having begun once before means this connection replaces one that failed, and whatever was
-            // published while nothing was listening is gone: a notification is delivered to the sessions listening
-            // at the time and is not kept for anyone else, so there is nothing to catch up on from here. Reported
-            // once listening is live again, so that what arrives while the cache instance recovers is delivered
-            // rather than missed in turn
-            boolean relistened = watchState.getAndSet(WatchState.STARTED) == WatchState.STARTED;
-            Optional.ofNullable(listening).ifPresent(future -> future.complete(null));
-            if (relistened) {
-                receiver.receiveSynchronizationRestart();
-            }
-            PGConnection pgConnection = connection.unwrap(PGConnection.class);
-            while (!isStopped()) {
-                // blocks until something arrives or the timeout is over, without a query of its own, which is what
-                // makes a held connection enough to be woken by
-                PGNotification[] notifications = pgConnection.getNotifications((int) POLL_TIMEOUT.toMillis());
-                if (nonNull(notifications) && notifications.length > 0 && !isStopped()) {
-                    receiveCacheEntriesOf(notifications);
+            // and dropping what it had already been handed: unsubscribing stops what comes next, while whatever
+            // reached this session before it is queued and would be delivered on the first poll regardless
+            drainNotifications(connection);
+            try {
+                if (isStopped()) {
+                    return;
+                }
+                // Listening having begun once before means this connection replaces one that failed, and whatever
+                // was published while nothing was listening is gone: a notification is delivered to the sessions
+                // listening at the time and is not kept for anyone else, so there is nothing to catch up on from
+                // here. Reported once listening is live again, so that what arrives while the cache instance
+                // recovers is delivered rather than missed in turn
+                boolean relistened = watchState.getAndSet(WatchState.STARTED) == WatchState.STARTED;
+                Optional.ofNullable(listening).ifPresent(future -> future.complete(null));
+                if (relistened) {
+                    receiver.receiveSynchronizationRestart();
+                }
+                PGConnection pgConnection = connection.unwrap(PGConnection.class);
+                while (!isStopped()) {
+                    // blocks until something arrives or the timeout is over, without a query of its own, which is
+                    // what makes a held connection enough to be woken by
+                    PGNotification[] notifications = pgConnection.getNotifications((int) POLL_TIMEOUT.toMillis());
+                    if (nonNull(notifications) && notifications.length > 0 && !isStopped()) {
+                        receiveCacheEntriesOf(notifications);
+                    }
+                }
+            } finally {
+                // Closing a pooled connection hands it back rather than closing it, and LISTEN is session state
+                // that outlives the hand-back: left subscribed, the connection delivers notifications to whoever
+                // borrows it next, and the server keeps queueing for a session nobody reads. Best effort, because
+                // a watcher that failed may hold a connection that can no longer carry a statement at all
+                try {
+                    // A connection that is already gone took its session with it, and the subscription with it -
+                    // and the pool discards it rather than handing it on, so there is nothing left to unsubscribe
+                    // from. Asked rather than assumed, because a broken one does not report itself as closed
+                    if (connection.isValid(1)) {
+                        try (Statement statement = connection.createStatement()) {
+                            statement.execute("UNLISTEN " + channel);
+                        }
+                    }
+                } catch (SQLException e) {
+                    LOGGER.log(Level.DEBUG, format("Unsubscribing from notifications failed for cache at '%s'",
+                            identifier), e);
                 }
             }
         }
+    }
+
+    private static void drainNotifications(Connection connection) throws SQLException {
+        PGConnection pgConnection = connection.unwrap(PGConnection.class);
+        PGNotification[] stale;
+        do {
+            stale = pgConnection.getNotifications(1);
+        } while (nonNull(stale) && stale.length > 0);
     }
 
     // What arrives names records rather than carrying them, so the payload is where a read starts and not what is

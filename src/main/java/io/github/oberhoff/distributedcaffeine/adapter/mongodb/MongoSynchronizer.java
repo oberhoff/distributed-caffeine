@@ -192,6 +192,7 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
                 .whenComplete((result, throwable) -> executorService.shutdown());
     }
 
+    @SuppressWarnings("java:S3776")
     private void processChangeStreams() {
         // this attempt may have been scheduled before deactivation, in which case watching must not be (re)started
         // the retry policy only evaluates its abort condition at failure time, not when a delayed attempt resumes

@@ -24,7 +24,7 @@ import java.util.Collection;
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
-@SuppressWarnings({"RedundantThrows", "java:S112"})
+@SuppressWarnings("java:S112")
 public interface Publisher<K, V> extends IdentifierAware, DiscriminatorAware, SerializerAware<K, V> {
 
     /**

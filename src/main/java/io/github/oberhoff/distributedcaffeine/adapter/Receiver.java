@@ -46,6 +46,4 @@ public interface Receiver<K, V> {
      * told apart from nothing having happened, so what is reported is the possibility rather than the fact.
      */
     void receiveSynchronizationRestart();
-
-    // TODO list of statuses in relation of distribution mode for more efficient receiving
 }
