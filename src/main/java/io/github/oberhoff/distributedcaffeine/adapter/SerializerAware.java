@@ -30,7 +30,15 @@ import static java.util.Objects.isNull;
  * @param <V> the value type of the cache
  * @author Andreas Oberhoff
  */
+@SuppressWarnings("java:S1452")
 public interface SerializerAware<K, V> {
+
+    /**
+     * Returns the key serializer of this object.
+     *
+     * @return the key serializer of this object
+     */
+    Serializer<K, ?> getKeySerializer();
 
     /**
      * Sets the key serializer for this object.
@@ -38,6 +46,13 @@ public interface SerializerAware<K, V> {
      * @param keySerializer the key serializer to be set
      */
     void setKeySerializer(Serializer<K, ?> keySerializer);
+
+    /**
+     * Returns the value serializer of this object.
+     *
+     * @return the value serializer of this object
+     */
+    Serializer<V, ?> getValueSerializer();
 
     /**
      * Sets the value serializer for this object.

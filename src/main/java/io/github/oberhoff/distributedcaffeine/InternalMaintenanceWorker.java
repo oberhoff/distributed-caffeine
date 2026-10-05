@@ -35,7 +35,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
@@ -46,7 +45,6 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.D
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_RETAINED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.STALE;
-import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.util.Objects.nonNull;
 import static java.util.stream.Collectors.toUnmodifiableSet;
@@ -68,11 +66,6 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
             .collect(toUnmodifiableSet());
 
     private final AtomicBoolean isActivated;
-    // How many maintenance cycles have failed in a row, which is what the delay after a failure is measured in.
-    // Deliberately not the attempt count the policy keeps: this policy retries on a result as well, so a healthy
-    // cycle is an attempt too and counting those would have the first failure after ten quiet minutes wait ten of
-    // them - backing off hardest exactly when something first goes wrong
-    private final AtomicInteger failureStreak;
     private CompletableFuture<Void> maintenanceCompletableFuture;
 
     @SuppressWarnings("NotNullFieldNotInitialized")
@@ -80,6 +73,8 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
     @SuppressWarnings("NotNullFieldNotInitialized")
     private String identifier;
     private @Nullable Repository<K, V> repository;
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    private InternalStoreGuard storeGuard;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalCacheManager<K, V> cacheManager;
     @SuppressWarnings("NotNullFieldNotInitialized")
@@ -92,7 +87,6 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
     @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalMaintenanceWorker() {
         this.isActivated = new AtomicBoolean(false);
-        this.failureStreak = new AtomicInteger();
         maintenanceCompletableFuture = CompletableFuture.completedFuture(null);
         // see also initialize()
     }
@@ -102,6 +96,7 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
         this.logger = instanceRegistry.getLogger();
         this.identifier = instanceRegistry.getAdapter().getIdentifier();
         this.repository = instanceRegistry.getAdapter().getRepository().orElse(null);
+        this.storeGuard = instanceRegistry.getStoreGuard();
         this.cacheManager = instanceRegistry.getCacheManager();
         this.cachedEntryPersistenceConfigurer = instanceRegistry.getCachedEntryPersistenceConfigurer();
         this.evictedEntryPersistenceConfigurer = instanceRegistry.getEvictedEntryPersistenceConfigurer();
@@ -149,8 +144,14 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
         RetryPolicy<Void> retryPolicy = RetryPolicy.<Void>builder()
                 .handleResultIf(result -> isActivated())
                 .withMaxAttempts(-1)
+                // The same delay whether the cycle worked or failed, and deliberately no backoff on top of
+                // it: a minute between attempts is not pressure on a store that is struggling, and what a growing
+                // delay would buy - fewer attempts against something that is down - is already what the interval
+                // gives. What it would cost is real: a cycle delayed by minutes is a cache whose evicted entries
+                // go unpruned for that long after the store is back, and this cycle is also the cheapest evidence
+                // that it is back. A cycle against a store that is gone takes its own driver timeouts anyway, so
+                // the interval stretches by itself exactly when it would have been stretched on purpose
                 .withDelay(MAINTENANCE_INTERVAL)
-                .withDelayFnOn(context -> retryDelay(), Throwable.class)
                 // Cache instances started together would otherwise stay in lockstep for as long as they run, each
                 // of them issuing the same commands against the data store at the same moment. A factor rather
                 // than a fixed duration keeps the spread proportional to whatever the interval is, and Failsafe
@@ -168,27 +169,9 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
         // loop keeps running - and reports isDone() == true, which would let activate() skip its join() below)
         CompletableFuture<Void> failsafeCompletableFuture = Failsafe.with(retryPolicy)
                 .with(executorService)
-                .runAsync(() -> runMaintenanceCycle(DISTRIBUTION_DURATION));
+                .runAsync(() -> processMaintenance(DISTRIBUTION_DURATION));
         failsafeCompletableFuture.whenComplete((result, throwable) -> executorService.shutdown());
         maintenanceCompletableFuture = failsafeCompletableFuture;
-    }
-
-    // One cycle, and the bookkeeping the delay after it is measured in. Counted here rather than through a
-    // callback of the policy, so that what it counts does not depend on the order the policy fires its handlers in
-    void runMaintenanceCycle(Duration distributionDuration) {
-        try {
-            processMaintenance(distributionDuration);
-        } catch (RuntimeException e) {
-            failureStreak.incrementAndGet();
-            throw e;
-        }
-        failureStreak.set(0);
-    }
-
-    // What the policy waits after a failure: one interval for the first, growing with the failures that follow it
-    // and levelling off, so that a store that stays down is not asked about every minute forever
-    Duration retryDelay() {
-        return MAINTENANCE_INTERVAL.multipliedBy(min(failureStreak.get(), 10));
     }
 
     @SuppressWarnings("SameParameterValue")
@@ -218,6 +201,12 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
             processEvictedEntryPersistenceBySize();
             // intentionally at last position
             processNotRetained(distributionDuration);
+            // A cycle that got this far spoke to the data store and was answered, which is what the publishing
+            // side is otherwise left to find out by spending a write on it. Only where there is a store to speak
+            // to: without a repository the steps above are local, so a cycle completing says nothing about it
+            if (nonNull(repository)) {
+                storeGuard.reportReachable();
+            }
         }
     }
 

@@ -33,6 +33,13 @@ public interface DiscriminatorAware {
     String DEFAULT_DISCRIMINATOR = "default";
 
     /**
+     * Returns the discriminator of this object.
+     *
+     * @return the discriminator of this object
+     */
+    String getDiscriminator();
+
+    /**
      * Sets the discriminator for this object.
      *
      * @param discriminator the discriminator to be set

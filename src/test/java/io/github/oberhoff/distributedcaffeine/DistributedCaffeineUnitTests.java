@@ -112,6 +112,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -1785,28 +1786,31 @@ final class DistributedCaffeineUnitTests {
     @DisplayName("Test PostgresAdapter")
     final class PostgresAdapterUnit extends DistributedCaffeineUnitTestInstance {
 
-        @DisplayName("that a schema and a table name are refused unless they are plain identifiers")
+        @DisplayName("that a schema and a table name are taken as they are, and only an empty one is refused")
         @Test
         void test_PostgresAdapter_checks_names() {
             DataSource dataSource = mock(DataSource.class);
 
-            // A name cannot be a parameter of a statement, so it ends up in the text of one. It is quoted there,
-            // but it is checked here as well, so that what reaches the store is a name and nothing else - which is
-            // why a name carrying a quote of its own matters as much as one carrying a space
-            Stream.of("", "has space", "has-dash", "1leading", "a\"quote", "t\"; DROP TABLE x --", "a.b")
-                    .forEach(name -> {
-                        assertThatThrownBy(() -> PostgresAdapter.newBuilder(dataSource, name, "table"))
-                                .isExactlyInstanceOf(IllegalArgumentException.class)
-                                .hasMessageContaining("schemaName must be a plain identifier");
-                        assertThatThrownBy(() -> PostgresAdapter.newBuilder(dataSource, "schema", name))
-                                .isExactlyInstanceOf(IllegalArgumentException.class)
-                                .hasMessageContaining("tableName must be a plain identifier");
-                    });
-
-            // and what counts as plain is not narrower than what PostgreSQL itself accepts unquoted
-            Stream.of("public", "_leading", "with_underscore", "With$Dollar", "a1")
+            // A name reaches a statement as text, because it cannot be a parameter of one - and it is quoted
+            // there, which is what lets it be a name PostgreSQL would otherwise need explaining: a table some
+            // migration tool called this, a schema with a space in it, one that is not ASCII at all. Refusing
+            // them here would have bought nothing and shut out every such schema
+            Stream.of("public", "_leading", "with_underscore", "With$Dollar", "a1", "cache-entries", "has space",
+                            "1leading", "a.b", "Gro\u00dfschreibung", "\u30ad\u30e3\u30c3\u30b7\u30e5")
                     .forEach(name -> assertThatCode(() -> PostgresAdapter.newBuilder(dataSource, name, name))
                             .doesNotThrowAnyException());
+
+            // including one carrying a quote of its own, which the quoting doubles rather than lets out
+            assertThatCode(() -> PostgresAdapter.newBuilder(dataSource, "a\"quote", "t\"; DROP TABLE x --"))
+                    .doesNotThrowAnyException();
+
+            // and the one name there is nothing to address by
+            assertThatThrownBy(() -> PostgresAdapter.newBuilder(dataSource, "", "table"))
+                    .isExactlyInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("schemaName cannot be empty");
+            assertThatThrownBy(() -> PostgresAdapter.newBuilder(dataSource, "schema", ""))
+                    .isExactlyInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("tableName cannot be empty");
         }
 
         @DisplayName("that missing arguments and a blank discriminator are reported where they are configured")
@@ -2206,6 +2210,148 @@ final class DistributedCaffeineUnitTests {
 
         private void processNotifications(Synchronizer<Key, Value> synchronizer) {
             invokeMethod(synchronizer, synchronizer.getClass(), "processNotifications", List.of(), List.of());
+        }
+    }
+
+    @Nested
+    @DisplayName("Test Aware getters")
+    final class AwareUnit extends DistributedCaffeineUnitTestInstance {
+
+        @DisplayName("that what an adapter was given is what it, and the parts it is made of, answer with")
+        @Test
+        void test_Aware_answers_with_what_it_was_given() {
+            MongoClient mongoClient = mock(MongoClient.class, RETURNS_DEEP_STUBS);
+            MongoAdapter<Key, Value> adapter = MongoAdapter
+                    .newBuilder(mongoClient, "database", "collection")
+                    .withDiscriminator("d1")
+                    .build();
+            Serializer<Key, ?> keySerializer = new JavaObjectSerializer<>();
+            Serializer<Value, ?> valueSerializer = new JacksonSerializer<>(Value.class, false);
+            adapter.setKeySerializer(keySerializer);
+            adapter.setValueSerializer(valueSerializer);
+
+            assertThat(adapter.getIdentifier()).isEqualTo("mongodb:database:collection:d1");
+            assertThat(adapter.getDiscriminator()).isEqualTo("d1");
+            assertThat(adapter.getKeySerializer()).isSameAs(keySerializer);
+            assertThat(adapter.getValueSerializer()).isSameAs(valueSerializer);
+
+            // and the parts it handed them down to say the same, which is what being told them is for: before
+            // these getters existed nothing could be asked what it had been wired with
+            assertThat(adapter.getPublisher().getIdentifier()).isEqualTo(adapter.getIdentifier());
+            assertThat(adapter.getPublisher().getDiscriminator()).isEqualTo("d1");
+            assertThat(adapter.getPublisher().getKeySerializer()).isSameAs(keySerializer);
+            assertThat(adapter.getPublisher().getValueSerializer()).isSameAs(valueSerializer);
+
+            // including the one an adapter answers from rather than keeping: an adapter holds no serializer of
+            // its own, so a serializer set on it afterwards has to be what it reports
+            Serializer<Value, ?> replacement = new JacksonSerializer<>(Value.class, true);
+            adapter.setValueSerializer(replacement);
+            assertThat(adapter.getValueSerializer()).isSameAs(replacement);
+        }
+    }
+
+    @Nested
+    @DisplayName("Test StoreGuard")
+    @SuppressWarnings("java:S5778")
+    final class StoreGuardUnit extends DistributedCaffeineUnitTestInstance {
+
+        private static final String IDENTIFIER = "store:scope:default";
+        // what the guard is built with, restated here so that a change to either is a failing test rather than a
+        // test that quietly stops covering the threshold it was written for
+        private static final int FAILURE_THRESHOLD = 3;
+
+        @DisplayName("that the store is left alone after a run of failures, and asked again once it answers")
+        @Test
+        void test_StoreGuard_stops_asking_a_store_that_keeps_failing() {
+            InternalStoreGuard storeGuard = new InternalStoreGuard();
+
+            // short of the threshold the store is still asked, and what comes back is what it raised
+            for (int attempt = 1; attempt < FAILURE_THRESHOLD; attempt++) {
+                assertThatThrownBy(() -> storeGuard.runGuarded(IDENTIFIER, failing()))
+                        .as("attempt %d, which is still asking", attempt)
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessage("provoked");
+            }
+            assertThat(storeGuard.isStoreUnreachable()).isFalse();
+
+            assertThatThrownBy(() -> storeGuard.runGuarded(IDENTIFIER, failing()))
+                    .hasMessage("provoked");
+
+            // and from here it is not asked at all, which is said in terms of the store rather than of Failsafe
+            assertThat(storeGuard.isStoreUnreachable()).isTrue();
+            AtomicBoolean asked = new AtomicBoolean();
+            assertThatThrownBy(() -> storeGuard.runGuarded(IDENTIFIER, () -> asked.set(true)))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(IDENTIFIER)
+                    .hasMessageContaining("because the last 3 attempts to contact it failed");
+            assertThat(asked).isFalse();
+
+            // being told it answers is enough, which is what the maintenance worker reports once a minute
+            storeGuard.reportReachable();
+
+            assertThat(storeGuard.isStoreUnreachable()).isFalse();
+            assertThatCode(() -> storeGuard.runGuarded(IDENTIFIER, () -> asked.set(true)))
+                    .doesNotThrowAnyException();
+            assertThat(asked).isTrue();
+        }
+
+        @DisplayName("that a caller asking the store itself is never refused, while its answer still counts")
+        @Test
+        void test_StoreGuard_observes_without_refusing() throws Throwable {
+            InternalStoreGuard storeGuard = new InternalStoreGuard();
+
+            // an observed failure counts like any other: what a caller reached the store for is theirs to be
+            // told, and the outcome is evidence all the same
+            for (int attempt = 0; attempt < FAILURE_THRESHOLD; attempt++) {
+                assertThatThrownBy(() -> storeGuard.observed(failingSupplier()))
+                        .hasMessage("provoked");
+            }
+
+            // which the guarded side then acts on, and that is the whole reason for there being one of these
+            assertThat(storeGuard.isStoreUnreachable()).isTrue();
+            assertThatThrownBy(() -> storeGuard.runGuarded(IDENTIFIER, () -> {
+            })).hasMessageContaining("because the last 3 attempts to contact it failed");
+
+            // while the observing side is still carried out, however little the guard thinks of the store
+            AtomicBoolean asked = new AtomicBoolean();
+            assertThat(storeGuard.observed(() -> {
+                asked.set(true);
+                return "answered";
+            })).isEqualTo("answered");
+            assertThat(asked).isTrue();
+
+            // and an answer is better evidence than anything the guard could gather on its own, so it ends there
+            assertThat(storeGuard.isStoreUnreachable()).isFalse();
+        }
+
+        @DisplayName("that a caller is told what the store raised, whether or not it had to be carried")
+        @Test
+        void test_StoreGuard_hands_back_what_the_store_raised() {
+            InternalStoreGuard storeGuard = new InternalStoreGuard();
+
+            // Failsafe carries a checked exception out wrapped and an unchecked one as it is, and a caller is
+            // owed the difference: what wraps a store failure is decided where it is caught, not here
+            Exception checked = new Exception("checked");
+            assertThatThrownBy(() -> storeGuard.runGuarded(IDENTIFIER, () -> {
+                throw checked;
+            })).isSameAs(checked);
+
+            RuntimeException unchecked = new IllegalArgumentException("unchecked");
+            assertThatThrownBy(() -> storeGuard.getGuarded(IDENTIFIER, () -> {
+                throw unchecked;
+            })).isSameAs(unchecked);
+        }
+
+        private InternalUtils.FailableRunnable failing() {
+            return () -> {
+                throw new IllegalStateException("provoked");
+            };
+        }
+
+        private InternalUtils.FailableSupplier<String> failingSupplier() {
+            return () -> {
+                throw new IllegalStateException("provoked");
+            };
         }
     }
 

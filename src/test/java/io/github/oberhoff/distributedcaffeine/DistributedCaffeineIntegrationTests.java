@@ -43,6 +43,7 @@ import com.mongodb.client.model.Sorts;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
+import io.github.oberhoff.distributedcaffeine.DistributedPolicy.SynchronizationState;
 import io.github.oberhoff.distributedcaffeine.adapter.AbstractAdapter;
 import io.github.oberhoff.distributedcaffeine.adapter.AbstractSynchronizer;
 import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
@@ -50,6 +51,7 @@ import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
 import io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware;
+import io.github.oberhoff.distributedcaffeine.adapter.Publisher;
 import io.github.oberhoff.distributedcaffeine.adapter.Receiver;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.adapter.Synchronizer;
@@ -60,13 +62,10 @@ import io.github.oberhoff.distributedcaffeine.common.Key;
 import io.github.oberhoff.distributedcaffeine.common.Value;
 import io.github.oberhoff.distributedcaffeine.common.logging.CaptureLogger;
 import io.github.oberhoff.distributedcaffeine.common.logging.CaptureLoggerFactory;
-import io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.ForySerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.JavaObjectSerializer;
-import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
-import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.assertj.core.api.AbstractLongAssert;
 import org.bson.Document;
 import org.bson.conversions.Bson;
@@ -153,7 +152,6 @@ import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.entry;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
-import static io.github.oberhoff.distributedcaffeine.InternalMaintenanceWorker.DISTRIBUTION_DURATION;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_LOADED;
@@ -193,6 +191,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.params.ParameterizedInvocationConstants.ARGUMENTS_WITH_NAMES_PLACEHOLDER;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.ArgumentMatchers.eq;
@@ -2923,11 +2922,6 @@ final class DistributedCaffeineIntegrationTests {
                                             .withMaximumTime(FOREVER.getDuration()))),
                     DistributedCaffeine::build);
             DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
-
-            assertThat(distributedPolicy.getKeySerializer())
-                    .isInstanceOfAny(ByteArraySerializer.class, StringSerializer.class, JsonSerializer.class);
-            assertThat(distributedPolicy.getValueSerializer())
-                    .isInstanceOfAny(ByteArraySerializer.class, StringSerializer.class, JsonSerializer.class);
 
             Key key1 = Key.of(1);
             Value value1 = Value.of(1);
@@ -6176,59 +6170,197 @@ final class DistributedCaffeineIntegrationTests {
             assertThatDataStoreIsEmpty();
         }
 
-        @DisplayName("Test that maintenance backs off by the failures in a row, not by how long it has been running")
+        @DisplayName("Test that writes stop waiting for a store that keeps failing, and resume when it answers")
         @Test
-        void test_MaintenanceWorker_backs_off_by_consecutive_failures() {
+        void test_CacheManager_stops_writing_to_a_store_that_keeps_failing() throws Exception {
             DistributedCache<Key, Value> distributedCache = createCache(
                     CacheBuilder.identity(), DistributedCaffeine::build);
 
-            // Driven by hand, with the scheduled interval pushed out of the way so the background loop cannot run a
-            // cycle in the middle of one asserted here. What is under test is the bookkeeping the delay is measured
-            // in, so nothing about it has to be waited for
-            InternalMaintenanceWorker<Key, Value> maintenanceWorker = getInstanceRegistry(distributedCache)
-                    .getMaintenanceWorker();
-            InternalCacheManager<Key, Value> cacheManager = injectSpy(maintenanceWorker,
-                    InternalMaintenanceWorker.class, "cacheManager", InternalCacheManager.class);
-            Duration interval = Duration.ofHours(1);
-            writeFieldValue(maintenanceWorker, InternalMaintenanceWorker.class, "MAINTENANCE_INTERVAL", interval);
-            maintenanceWorker.deactivate();
-            maintenanceWorker.activate();
+            // A store that is gone is a store whose writes take the driver's timeout before they fail, and that is
+            // what this stands in for: the delay is what the breaker exists to stop paying, and a real outage
+            // would make every test here wait it out
+            Duration storeTimeout = Duration.ofMillis(500);
+            InternalCacheManager<Key, Value> cacheManager = getInstanceRegistry(distributedCache).getCacheManager();
+            Publisher<Key, Value> publisher = injectSpy(cacheManager, InternalCacheManager.class,
+                    "publisher", Publisher.class);
+            AtomicBoolean failing = new AtomicBoolean(true);
+            doAnswer(invocation -> {
+                if (failing.get()) {
+                    sleep(storeTimeout);
+                    throw new IllegalStateException("provoked");
+                }
+                return invocation.callRealMethod();
+            }).when(publisher).publishCacheEntries(anyList());
 
-            // a long healthy run, well past the point where the policy's own attempt count reaches its ceiling
-            for (int cycle = 0; cycle < 12; cycle++) {
-                maintenanceWorker.runMaintenanceCycle(DISTRIBUTION_DURATION);
+            // the writes that find out: each pays the timeout, and each reports the store rather than the breaker
+            for (int write = 1; write <= 3; write++) {
+                int key = write;
+                assertThatThrownBy(() -> distributedCache.put(Key.of(key), Value.of(key)))
+                        .as("write %d, which is still asking the store", key)
+                        .hasMessage("provoked");
             }
 
-            // and the first failure after it waits as a first failure, not as the twelfth attempt - which is the
-            // whole point: a cache instance that has been up for a while must not back off hardest the moment
-            // something first goes wrong
-            doThrow(new IllegalStateException("provoked")).when(cacheManager).cleanup();
-            assertThatThrownBy(() -> maintenanceWorker.runMaintenanceCycle(DISTRIBUTION_DURATION))
-                    .isInstanceOf(IllegalStateException.class);
-            assertThat(maintenanceWorker.retryDelay()).isEqualTo(interval);
+            // and from here it is not asked again: the write fails well inside the time asking would have taken
+            Instant before = Instant.now();
+            assertThatThrownBy(() -> distributedCache.put(Key.of(4), Value.of(4)))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("because the last 3 attempts to contact it failed");
+            assertThat(Duration.between(before, Instant.now()))
+                    .as("a refused write must not wait for the store it is refusing to ask")
+                    .isLessThan(storeTimeout);
 
-            // failures in a row do stretch it, so a store that stays down is not asked about every interval
-            assertThatThrownBy(() -> maintenanceWorker.runMaintenanceCycle(DISTRIBUTION_DURATION))
-                    .isInstanceOf(IllegalStateException.class);
-            assertThat(maintenanceWorker.retryDelay()).isEqualTo(interval.multipliedBy(2));
+            // nothing of it reached the store, and nothing of it was kept locally either
+            verify(publisher, times(3)).publishCacheEntries(anyList());
+            assertThat(distributedCache.getIfPresent(Key.of(4))).isNull();
 
-            // and it levels off rather than growing without end
-            for (int failure = 0; failure < 20; failure++) {
-                assertThatThrownBy(() -> maintenanceWorker.runMaintenanceCycle(DISTRIBUTION_DURATION))
-                        .isInstanceOf(IllegalStateException.class);
+            // the store answers again, and the write after the suspension is what finds out - no probe of its own
+            failing.set(false);
+
+            await("writes resuming once the store answers")
+                    .atMost(WAITING_DURATION)
+                    // the suspension has to run out before anything is attempted again, so the writes until then
+                    // are refused rather than failing an assertion - which is the behaviour under test, not a
+                    // reason to stop waiting
+                    .ignoreExceptionsInstanceOf(IllegalStateException.class)
+                    .untilAsserted(() -> {
+                        distributedCache.put(Key.of(5), Value.of(5));
+                        assertThat(distributedCache.getIfPresent(Key.of(5))).isEqualTo(Value.of(5));
+                    });
+        }
+
+        @DisplayName("Test that reads of the store on the loading path also stop waiting for a store that fails")
+        @Test
+        void test_CacheLoader_stops_reading_a_store_that_keeps_failing() throws Exception {
+            // the strategy that reads the store before it calls the cache loader, which is the configuration where
+            // every miss touches the store - and where nothing else would ever notice that it is gone
+            CacheLoader<Key, Value> cacheLoader = key -> Value.of(key.getId(), "loaded");
+            DistributedLoadingCache<Key, Value> loadingCache =
+                    (DistributedLoadingCache<Key, Value>) this.<Key, Value>createCache(
+                            dc -> dc.withCaffeine(Caffeine.newBuilder().maximumSize(1))
+                                    .withPersistence(configurer -> configurer
+                                            .withEvictedEntries(evictedEntries -> evictedEntries
+                                                    .withMaximumSize(10)
+                                                    .withLoadingStrategies(CACHE_LOADER))),
+                            dc -> dc.build(cacheLoader));
+
+            Duration storeTimeout = Duration.ofMillis(500);
+            Repository<Key, Value> repository = injectSpy(getInstanceRegistry(loadingCache).getCacheLoader(),
+                    InternalCacheLoader.class, "repository", Repository.class);
+            doAnswer(invocation -> {
+                sleep(storeTimeout);
+                throw new IllegalStateException("provoked");
+            }).when(repository).streamCacheEntries(anySet(), anySet(), anyBoolean());
+
+            // the misses that find out: the read fails before anything is published, so this is the only place the
+            // failure can be counted at all
+            for (int miss = 1; miss <= 3; miss++) {
+                int key = miss;
+                assertThatThrownBy(() -> loadingCache.get(Key.of(key)))
+                        .as("miss %d, which is still asking the store", key)
+                        .hasMessageContaining("provoked");
             }
-            assertThat(maintenanceWorker.retryDelay()).isEqualTo(interval.multipliedBy(10));
 
-            // a cycle that goes through starts the count again, so recovering is not held against the next failure
-            doCallRealMethod().when(cacheManager).cleanup();
-            maintenanceWorker.runMaintenanceCycle(DISTRIBUTION_DURATION);
+            // and from here the store is left alone, so the miss fails without waiting for it
+            Instant before = Instant.now();
+            assertThatThrownBy(() -> loadingCache.get(Key.of(4)))
+                    .hasMessageContaining("because the last 3 attempts to contact it failed");
+            assertThat(Duration.between(before, Instant.now()))
+                    .as("a miss must not wait for a store the cache has stopped contacting")
+                    .isLessThan(storeTimeout);
 
-            doThrow(new IllegalStateException("provoked")).when(cacheManager).cleanup();
-            assertThatThrownBy(() -> maintenanceWorker.runMaintenanceCycle(DISTRIBUTION_DURATION))
-                    .isInstanceOf(IllegalStateException.class);
-            assertThat(maintenanceWorker.retryDelay()).isEqualTo(interval);
+            verify(repository, times(3)).streamCacheEntries(anySet(), anySet(), anyBoolean());
+        }
 
-            doCallRealMethod().when(cacheManager).cleanup();
+        @DisplayName("Test that synchronization reports being degraded while the store does not answer")
+        @Test
+        void test_DistributedPolicy_reports_a_store_that_does_not_answer() throws Exception {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            assertThat(distributedCache.distributedPolicy().getSynchronizationState())
+                    .isEqualTo(SynchronizationState.SYNCHRONIZED);
+
+            InternalCacheManager<Key, Value> cacheManager = getInstanceRegistry(distributedCache).getCacheManager();
+            Publisher<Key, Value> publisher = injectSpy(cacheManager, InternalCacheManager.class,
+                    "publisher", Publisher.class);
+            AtomicBoolean failing = new AtomicBoolean(true);
+            doAnswer(invocation -> {
+                if (failing.get()) {
+                    throw new IllegalStateException("provoked");
+                }
+                return invocation.callRealMethod();
+            }).when(publisher).publishCacheEntries(anyList());
+
+            // failing writes alone are not a state: a cache instance whose store is merely slow or unlucky is
+            // still synchronized, and only giving up on the store is what this reports
+            assertThatThrownBy(() -> distributedCache.put(Key.of(1), Value.of(1))).hasMessage("provoked");
+            assertThat(distributedCache.distributedPolicy().getSynchronizationState())
+                    .isEqualTo(SynchronizationState.SYNCHRONIZED);
+
+            assertThatThrownBy(() -> distributedCache.put(Key.of(2), Value.of(2))).hasMessage("provoked");
+            assertThatThrownBy(() -> distributedCache.put(Key.of(3), Value.of(3))).hasMessage("provoked");
+
+            assertThat(distributedCache.distributedPolicy().getSynchronizationState())
+                    .as("the store has stopped being contacted, which is what degraded means")
+                    .isEqualTo(SynchronizationState.DEGRADED);
+
+            // reads are served throughout, which is what distinguishes this from being stopped
+            distributedCache.policy().getIfPresentQuietly(Key.of(1));
+
+            // and it recovers on its own, without synchronization being started again
+            failing.set(false);
+
+            await("the state returning once the store answers")
+                    .atMost(WAITING_DURATION)
+                    .ignoreExceptionsInstanceOf(IllegalStateException.class)
+                    .untilAsserted(() -> {
+                        distributedCache.put(Key.of(4), Value.of(4));
+                        assertThat(distributedCache.distributedPolicy().getSynchronizationState())
+                                .isEqualTo(SynchronizationState.SYNCHRONIZED);
+                    });
+
+            // stopping is reported as stopping, whatever the store has been doing
+            distributedCache.distributedPolicy().stopSynchronization();
+            assertThat(distributedCache.distributedPolicy().getSynchronizationState())
+                    .isEqualTo(SynchronizationState.STOPPED);
+        }
+
+        @DisplayName("Test that invalidating all stops waiting for a store that keeps failing")
+        @Test
+        void test_CacheManager_stops_sweeping_a_store_that_keeps_failing() throws Exception {
+            // the sweep runs only where population is distributed and there is a store keeping a record of it,
+            // which is what makes invalidating all reach more than the keys this cache instance happens to hold
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withPersistence(configurer -> configurer
+                            .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency)),
+                    DistributedCaffeine::build);
+
+            Duration storeTimeout = Duration.ofMillis(500);
+            Repository<Key, Value> repository = injectSpy(
+                    getInstanceRegistry(distributedCache).getCacheManager(),
+                    InternalCacheManager.class, "repository", Repository.class);
+            doAnswer(invocation -> {
+                sleep(storeTimeout);
+                throw new IllegalStateException("provoked");
+            }).when(repository).updateStatusOfCacheEntries(any(), anySet(), any(), any());
+
+            // The sweep runs before anything is published, so this is the only place its failure can be counted -
+            // exactly as on the loading path. Left unguarded it would pay the timeout on every call, forever
+            for (int sweep = 1; sweep <= 3; sweep++) {
+                int attempt = sweep;
+                assertThatThrownBy(distributedCache::invalidateAll)
+                        .as("sweep %d, which is still asking the store", attempt)
+                        .hasMessageContaining("provoked");
+            }
+
+            Instant before = Instant.now();
+            assertThatThrownBy(distributedCache::invalidateAll)
+                    .hasMessageContaining("because the last 3 attempts to contact it failed");
+            assertThat(Duration.between(before, Instant.now()))
+                    .as("invalidating all must not wait for a store the cache has stopped contacting")
+                    .isLessThan(storeTimeout);
+
+            verify(repository, times(3)).updateStatusOfCacheEntries(any(), anySet(), any(), any());
         }
 
         @DisplayName("Test MaintenanceWorker")
@@ -6314,7 +6446,9 @@ final class DistributedCaffeineIntegrationTests {
                                         && loggingEvent.getMessage().endsWith("Retrying..."));
                     });
 
-            loggerDistributedCaffeine.stopCapturing();
+            // kept capturing until the failure is fixed below: maintenance retries on a fixed interval, so every
+            // cycle until then fails and reports it - which belongs to what this test provokes rather than in the
+            // output of the suite
 
             // create more retained-by-size entries than the retained maximum size allows;
             // the background maintenance keeps failing, so the overflow is left unpruned
@@ -6338,6 +6472,7 @@ final class DistributedCaffeineIntegrationTests {
 
             // fix failure
             doCallRealMethod().when(cacheManager).cleanup();
+            loggerDistributedCaffeine.stopCapturing();
 
             // with the failure fixed, the background maintenance recovers on its own (no explicit trigger) and prunes
             // retained-by-size entries down to the retained maximum size; this distribution mode distributes
@@ -7911,6 +8046,44 @@ final class DistributedCaffeineIntegrationTests {
             }
         }
 
+        @DisplayName("Test that a name PostgreSQL would need quoting for is used exactly as it was given")
+        @Test
+        void test_Adapter_uses_a_name_that_needs_quoting() throws Exception {
+            // The names a plain-identifier rule would refuse, and which a schema this adapter has to live with may
+            // well already use: a table some migration tool hyphenated, a name with a space, one carrying a quote
+            // of its own. What makes them safe is the quoting every statement puts them in, not their shape - an
+            // embedded quote is doubled on the way in, so it cannot end the identifier it sits in
+            String tableName = "cache-entries \"odd\"";
+            PostgresAdapter<Key, Value> adapter = PostgresAdapter
+                    .newBuilder(dataSource, SCHEMA_NAME, tableName)
+                    .build();
+            adapter.setKeySerializer(new JavaObjectSerializer<>());
+            adapter.setValueSerializer(new JacksonSerializer<>(Value.class, false));
+            Repository<Key, Value> repository = adapter.getRepository().orElseThrow();
+
+            // the table is created, written and read back under that name like any other
+            repository.publishCacheEntries(List.of(CacheEntry.of("h1", "op1", Key.of(1), Value.of(1), CACHED,
+                    Instant.now().truncatedTo(MICROS))));
+
+            try (Stream<CacheEntry<Key, Value>> cacheEntries = repository.streamCacheEntries(null, null, false)) {
+                assertThat(cacheEntries.toList())
+                        .singleElement()
+                        .satisfies(cacheEntry -> assertThat(cacheEntry.getValue()).isEqualTo(Value.of(1)));
+            }
+
+            // and it really is the name that was asked for, rather than one the server made of it
+            try (Connection connection = dataSource.getConnection();
+                 PreparedStatement statement = connection.prepareStatement("SELECT count(*) FROM "
+                         + "information_schema.tables WHERE table_schema = ? AND table_name = ?")) {
+                statement.setString(1, SCHEMA_NAME);
+                statement.setString(2, tableName);
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    assertThat(resultSet.next()).isTrue();
+                    assertThat(resultSet.getInt(1)).isEqualTo(1);
+                }
+            }
+        }
+
         @DisplayName("Test that a timestamp is one and the same instant whatever time zone writes or reads it")
         @Test
         void test_Repository_keeps_timestamps_absolute() throws Exception {
@@ -8274,6 +8447,10 @@ final class DistributedCaffeineIntegrationTests {
                 // for the same reason the adapter does: a pooled connection may arrive still subscribed
                 execute(listener, "UNLISTEN *");
                 execute(listener, "LISTEN " + channel);
+                // and dropping what it had already been handed, for the same reason the adapter does it: this
+                // connection comes from a pool, so a cache instance of an earlier test may have left notifications
+                // queued on the session, and unsubscribing stops what comes next rather than discarding those
+                drain(listener);
                 try {
                     // the announcement cannot be sent at all
                     refuseNext.set(true);
@@ -8535,11 +8712,7 @@ final class DistributedCaffeineIntegrationTests {
                 execute(listener, "UNLISTEN *");
                 execute(listener, "LISTEN " + channel);
                 // unsubscribing stops what comes next, not what this session was already handed
-                PGConnection pgListener = listener.unwrap(PGConnection.class);
-                PGNotification[] stale;
-                do {
-                    stale = pgListener.getNotifications(1);
-                } while (stale != null && stale.length > 0);
+                drain(listener);
                 try {
                     for (String payload : payloads) {
                         notifyPayload(writer, channel, payload);
@@ -8653,6 +8826,16 @@ final class DistributedCaffeineIntegrationTests {
                 statement.setString(2, payload);
                 statement.execute();
             }
+        }
+
+        // What a pooled connection was handed before this test borrowed it, thrown away so that what arrives
+        // afterwards is this test's own. The adapter does the same on every connection it takes over
+        private void drain(Connection connection) throws SQLException {
+            PGConnection pgConnection = connection.unwrap(PGConnection.class);
+            PGNotification[] stale;
+            do {
+                stale = pgConnection.getNotifications(1);
+            } while (stale != null && stale.length > 0);
         }
 
         private List<String> notificationsOf(Connection connection, int expected) throws SQLException {

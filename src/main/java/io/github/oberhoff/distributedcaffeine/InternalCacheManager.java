@@ -75,10 +75,6 @@ import static java.util.Objects.requireNonNull;
 @SuppressWarnings({"java:S1452"})
 class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receiver<K, V> {
 
-    // a safety bound on the operations kept below, for a cache instance writing faster than the records expire.
-    // Dropping the oldest of them is safe, see the field
-    private static final int OPERATIONS_MAXIMUM_SIZE = 100_000;
-
     private final AtomicBoolean isActivated;
     // the identifier of the activation this cache instance is in, renewed with every one of them. It says which
     // activation a value is content of (see InternalValue), and an operation is it followed by a counter, which
@@ -121,6 +117,8 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalSynchronizationLock synchronizationLock;
     @SuppressWarnings("NotNullFieldNotInitialized")
+    private InternalStoreGuard storeGuard;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalHasher<K> hasher;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private Executor executor;
@@ -132,7 +130,6 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         this.operationCounter = new AtomicLong();
         this.operations = Caffeine.newBuilder()
                 .expireAfterWrite(DISTRIBUTION_DURATION)
-                .maximumSize(OPERATIONS_MAXIMUM_SIZE)
                 .build();
         this.commandOperation = new AtomicLong();
         // see also initialize()
@@ -150,6 +147,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         this.cachedEntryPersistenceConfigurer = instanceRegistry.getCachedEntryPersistenceConfigurer();
         this.evictedEntryPersistenceConfigurer = instanceRegistry.getEvictedEntryPersistenceConfigurer();
         this.synchronizationLock = instanceRegistry.getSynchronizationLock();
+        this.storeGuard = instanceRegistry.getStoreGuard();
         this.hasher = instanceRegistry.getHasher();
         this.executor = instanceRegistry.getExecutor();
     }
@@ -266,8 +264,12 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                 }
                 // transitions what is there and writes nothing for what is not, which also means it cannot resurrect
                 // a key as invalidated that no longer exists. Ahead of the cache entry below, so that a population
-                // following this operation cannot be overwritten by it afterwards
-                runFailable(() -> retaining.updateStatusOfCacheEntries(null, statuses, null, INVALIDATED));
+                // following this operation cannot be overwritten by it afterwards.
+                // Guarded like the publish it precedes, and for a reason that only shows from here: it runs first,
+                // so a store that is down fails on this one and the publish that would have reported it is never
+                // reached - leaving the sweep paying the driver's timeout under the lock, every time, forever
+                runFailable(() -> storeGuard.runGuarded(identifier,
+                        () -> retaining.updateStatusOfCacheEntries(null, statuses, null, INVALIDATED)));
             }
             // Minted and remembered like any other publish of this cache instance, only for all keys at once
             // rather than for one: what it does covers every one of them, which is what keeps whatever this cache
@@ -275,13 +277,13 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
             long counter = operationCounter.incrementAndGet();
             commandOperation.set(counter);
             String operation = activationId.get() + ":" + counter;
-            runFailable(() -> publisher.publishCacheEntries(List.of(CacheEntry.of(
+            publishGuarded(List.of(CacheEntry.of(
                     INVALIDATE_ALL.toString(),
                     operation,
                     null,
                     null,
                     COMMAND,
-                    Instant.now()))));
+                    Instant.now())));
         }
     }
 
@@ -521,9 +523,18 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                     // computing CacheEntry hashCode/equals on the write path
                     .toList();
             if (!cacheEntries.isEmpty()) {
-                runFailable(() -> publisher.publishCacheEntries(cacheEntries));
+                publishGuarded(cacheEntries);
             }
         }
+    }
+
+    // Refused rather than attempted while the store is being left alone, and reported as the store failing
+    // would be reported: what a caller can do about it is the same either way, so it is not made into a failure
+    // of its own that every caller would have to learn about
+    // Through runFailable like the plain publish it replaces, so that a caller sees a store failure wrapped
+    // exactly as it was wrapped before anything stood in front of it
+    private void publishGuarded(List<CacheEntry<K, V>> cacheEntries) {
+        runFailable(() -> storeGuard.runGuarded(identifier, () -> publisher.publishCacheEntries(cacheEntries)));
     }
 
     // Where arriving cache entries come from, which is what decides whether one that is already held may be left

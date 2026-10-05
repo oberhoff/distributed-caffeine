@@ -22,6 +22,14 @@ package io.github.oberhoff.distributedcaffeine.adapter;
  */
 public interface IdentifierAware {
 
+
+    /**
+     * Returns the identifier of this object.
+     *
+     * @return the identifier of this object
+     */
+    String getIdentifier();
+
     /**
      * Sets the identifier for this object.
      *

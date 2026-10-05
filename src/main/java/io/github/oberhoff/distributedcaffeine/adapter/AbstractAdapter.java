@@ -143,10 +143,20 @@ public abstract class AbstractAdapter<K, V> implements Adapter<K, V> {
     }
 
     @Override
+    public Serializer<K, ?> getKeySerializer() {
+        return publisher.getKeySerializer();
+    }
+
+    @Override
     public void setKeySerializer(Serializer<K, ?> keySerializer) {
         requireNonNull(keySerializer, "keySerializer cannot be null");
         this.publisher.setKeySerializer(keySerializer);
         this.synchronizer.setKeySerializer(keySerializer);
+    }
+
+    @Override
+    public Serializer<V, ?> getValueSerializer() {
+        return publisher.getValueSerializer();
     }
 
     @Override

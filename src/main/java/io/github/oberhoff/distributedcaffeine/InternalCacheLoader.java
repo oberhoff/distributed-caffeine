@@ -57,6 +57,8 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
     @SuppressWarnings("NotNullFieldNotInitialized")
     private String identifier;
     @SuppressWarnings("NotNullFieldNotInitialized")
+    private InternalStoreGuard storeGuard;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalCacheManager<K, V> cacheManager;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private EvictedEntryPersistenceConfigurer evictedEntryPersistenceConfigurer;
@@ -74,6 +76,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
     public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
         this.repository = instanceRegistry.getAdapter().getRepository().orElse(null);
         this.identifier = instanceRegistry.getAdapter().getIdentifier();
+        this.storeGuard = instanceRegistry.getStoreGuard();
         this.cacheManager = instanceRegistry.getCacheManager();
         this.evictedEntryPersistenceConfigurer = instanceRegistry.getEvictedEntryPersistenceConfigurer();
         this.hasher = instanceRegistry.getHasher();
@@ -225,10 +228,15 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
                 .map(hasher::getHash)
                 .collect(toSet());
         Repository<K, V> retaining = requireRepository(repository, identifier);
-        try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> retaining.streamCacheEntries(
-                hashes,
-                EVICTED_RETAINED_GROUP,
-                false))) {
+        // Guarded, and this is the half that would otherwise never be counted: it runs before anything is
+        // published, so a store that is down fails here and the publish that would have reported it is never
+        // reached. Left unguarded, a cache that reads the store on every miss would pay the driver's timeout for
+        // every one of them, for as long as the outage lasts, while holding the synchronization lock
+        try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> storeGuard.getGuarded(identifier,
+                () -> retaining.streamCacheEntries(
+                        hashes,
+                        EVICTED_RETAINED_GROUP,
+                        false)))) {
             //noinspection NullableProblems
             return cacheEntryStream
                     .filter(cacheEntry -> nonNull(cacheEntry.getValue()))

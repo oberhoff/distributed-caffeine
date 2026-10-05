@@ -19,7 +19,6 @@ import io.github.oberhoff.distributedcaffeine.adapter.AbstractAdapter;
 import io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware;
 
 import javax.sql.DataSource;
-import java.util.regex.Pattern;
 
 import static io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware.DEFAULT_DISCRIMINATOR;
 import static java.lang.String.format;
@@ -32,13 +31,6 @@ import static java.util.Objects.requireNonNull;
  * {@link PostgresAdapter#newBuilder(DataSource, String, String)}.
  * <p>
  * <b>Note:</b> An adapter instance belongs to exactly one cache instance and cannot be shared between them.
- * <p>
- * <b>Note:</b> The data source is expected to pool its connections. Every operation on the underlying store takes
- * a connection and returns it, which is what a data source is there to absorb, so an unpooled one opens a
- * connection of its own for each of them and exhausts the ports of the machine under load. Beside those, one
- * connection is held for as long as a cache instance listens for notifications: a notification reaches the
- * sessions listening when it is issued and nobody else, so that connection cannot be returned between polls. The
- * pool therefore has to carry one connection per cache instance on top of what their operations borrow.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
@@ -89,11 +81,6 @@ public final class PostgresAdapter<K, V> extends AbstractAdapter<K, V> {
      */
     public static final class Builder {
 
-        // a schema and a table name cannot be parameters of a statement, so they end up in its text - quoted, but
-        // checked here as well, so that anything but a plain name is rejected where it is configured rather than
-        // reaching the store
-        private static final Pattern NAME_PATTERN = Pattern.compile("[A-Za-z_][A-Za-z0-9_$]*");
-
         private final DataSource dataSource;
         private final String schemaName;
         private final String tableName;
@@ -141,9 +128,15 @@ public final class PostgresAdapter<K, V> extends AbstractAdapter<K, V> {
             return new PostgresAdapter<>(this);
         }
 
+        // Taken as it is, down to its case, and quoted wherever it reaches a statement - which is what makes a
+        // name that would otherwise need explaining usable: a table a migration tool called 'cache-entries', a
+        // schema with a space in it, a name that is not ASCII at all. Only an empty one is refused, because
+        // PostgreSQL has no such identifier to address.
+        // What keeps this safe is the quoting rather than a shape required here: an embedded quote is doubled on
+        // the way in, so a name cannot end the identifier it sits in and become statement text of its own
         private static String checkedName(String name, String what) {
-            if (!NAME_PATTERN.matcher(name).matches()) {
-                throw new IllegalArgumentException(format("%s must be a plain identifier, but was '%s'", what, name));
+            if (name.isEmpty()) {
+                throw new IllegalArgumentException(format("%s cannot be empty", what));
             }
             return name;
         }

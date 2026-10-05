@@ -17,12 +17,10 @@ package io.github.oberhoff.distributedcaffeine;
 
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.SerializersConfigurer;
 import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
-import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import org.jspecify.annotations.Nullable;
 
 import java.util.HashSet;
@@ -44,9 +42,9 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
     @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalInstanceRegistry<K, V> instanceRegistry;
     @SuppressWarnings("NotNullFieldNotInitialized")
-    private Adapter<K, V> adapter;
+    private InternalStoreGuard storeGuard;
     @SuppressWarnings("NotNullFieldNotInitialized")
-    private SerializersConfigurer<K, V> serializersConfigurer;
+    private Adapter<K, V> adapter;
     private @Nullable Repository<K, V> repository;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalHasher<K> hasher;
@@ -63,8 +61,8 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
     @Override
     public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
         this.instanceRegistry = instanceRegistry;
+        this.storeGuard = instanceRegistry.getStoreGuard();
         this.adapter = instanceRegistry.getAdapter();
-        this.serializersConfigurer = instanceRegistry.getSerializersConfigurer();
         this.repository = instanceRegistry.getAdapter().getRepository().orElse(null);
         this.hasher = instanceRegistry.getHasher();
         this.cachedEntryPersistenceConfigurer = instanceRegistry.getCachedEntryPersistenceConfigurer();
@@ -87,13 +85,15 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
     }
 
     @Override
-    public Serializer<K, ?> getKeySerializer() {
-        return serializersConfigurer.getKeySerializer();
-    }
-
-    @Override
-    public Serializer<V, ?> getValueSerializer() {
-        return serializersConfigurer.getValueSerializer();
+    public SynchronizationState getSynchronizationState() {
+        // Read in this order on purpose: a cache instance that was stopped is stopped whatever the store is doing,
+        // and the guard goes on holding what it learned while it was running
+        if (!instanceRegistry.isActivated()) {
+            return SynchronizationState.STOPPED;
+        }
+        return storeGuard.isStoreUnreachable()
+                ? SynchronizationState.DEGRADED
+                : SynchronizationState.SYNCHRONIZED;
     }
 
     @Override
@@ -123,10 +123,16 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
             return Set.of();
         }
         Repository<K, V> retaining = requireRepository(repository, adapter.getIdentifier());
-        try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> retaining.streamCacheEntries(
-                hasher.getHashes(keySet),
-                statuses,
-                false))) {
+        // Observed rather than guarded, because the caller came here for the store itself: getFromStore and
+        // getAllFromStore are the one place the API promises an answer about it, so one is fetched however the
+        // store has been behaving. What is taken from it is the outcome - a failure counts towards leaving the
+        // store alone elsewhere, and an answer ends that straight away, which is better evidence than anything
+        // the cache could gather by spending a write of its own on finding out
+        try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> storeGuard.observed(
+                () -> retaining.streamCacheEntries(
+                        hasher.getHashes(keySet),
+                        statuses,
+                        false)))) {
             return cacheEntryStream
                     .filter(cacheEntry -> nonNull(cacheEntry.getValue()))
                     .collect(Collectors.toSet());

@@ -68,9 +68,19 @@ public abstract class AbstractSynchronizer<K, V> implements Synchronizer<K, V> {
     }
 
     @Override
+    public String getIdentifier() {
+        return identifier;
+    }
+
+    @Override
     public void setIdentifier(String identifier) {
         requireNonNull(identifier, "identifier cannot be null");
         this.identifier = identifier;
+    }
+
+    @Override
+    public String getDiscriminator() {
+        return discriminator;
     }
 
     @Override
@@ -80,15 +90,25 @@ public abstract class AbstractSynchronizer<K, V> implements Synchronizer<K, V> {
     }
 
     @Override
-    public void setKeySerializer(Serializer<K, ?> keySerializer) {
-        requireNonNull(keySerializer, "keySerializer cannot be null");
-        this.keySerializer = keySerializer;
+    public Serializer<K, ?> getKeySerializer() {
+        return keySerializer;
     }
 
     @Override
     public void setValueSerializer(Serializer<V, ?> valueSerializer) {
         requireNonNull(valueSerializer, "valueSerializer cannot be null");
         this.valueSerializer = valueSerializer;
+    }
+
+    @Override
+    public Serializer<V, ?> getValueSerializer() {
+        return valueSerializer;
+    }
+
+    @Override
+    public void setKeySerializer(Serializer<K, ?> keySerializer) {
+        requireNonNull(keySerializer, "keySerializer cannot be null");
+        this.keySerializer = keySerializer;
     }
 
     @Override

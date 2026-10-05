@@ -27,13 +27,14 @@ import java.lang.System.Logger;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 
-@SuppressWarnings("UnusedReturnValue")
+@SuppressWarnings("unused")
 class InternalInstanceRegistry<K, V> {
 
     @SuppressWarnings("java:S3416")
     private final Logger logger = System.getLogger(DistributedCaffeine.class.getName());
 
     private final InternalSynchronizationLock synchronizationLock;
+    private final InternalStoreGuard storeGuard;
     private final InternalCacheManager<K, V> cacheManager;
     private final InternalMaintenanceWorker<K, V> maintenanceWorker;
 
@@ -64,6 +65,7 @@ class InternalInstanceRegistry<K, V> {
     @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalInstanceRegistry() {
         this.synchronizationLock = new InternalSynchronizationLock();
+        this.storeGuard = new InternalStoreGuard();
         this.cacheManager = new InternalCacheManager<>();
         this.maintenanceWorker = new InternalMaintenanceWorker<>();
     }
@@ -150,6 +152,10 @@ class InternalInstanceRegistry<K, V> {
 
     public InternalSynchronizationLock getSynchronizationLock() {
         return synchronizationLock;
+    }
+
+    public InternalStoreGuard getStoreGuard() {
+        return storeGuard;
     }
 
     public InternalCacheManager<K, V> getCacheManager() {

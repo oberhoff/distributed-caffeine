@@ -18,8 +18,8 @@ package io.github.oberhoff.distributedcaffeine.adapter;
 import java.util.Optional;
 
 /**
- * Interface representing an adapter that manages distributed synchronization between cache instances and,
- * optionally, persistence of cache entries.
+ * Interface representing an adapter that manages distributed synchronization between cache instances and optionally
+ * persistence of cache entries.
  * <p>
  * <b>Note:</b> An adapter instance belongs to exactly one cache instance and cannot be shared between them.
  *
@@ -45,6 +45,10 @@ public interface Adapter<K, V> extends StateAware, SerializerAware<K, V>, Receiv
 
     /**
      * Returns the identifier of this adapter.
+     * <p>
+     * <b>Note:</b> Declared here rather than inherited from {@link IdentifierAware}, because an adapter is given
+     * its identifier when it is constructed and hands it down to the parts it is made of. It is not something that
+     * can be set on it afterwards.
      *
      * @return the identifier
      */
@@ -52,6 +56,9 @@ public interface Adapter<K, V> extends StateAware, SerializerAware<K, V>, Receiv
 
     /**
      * Returns the discriminator of this adapter.
+     * <p>
+     * <b>Note:</b> Declared here rather than inherited from {@link DiscriminatorAware}, for the same reason as
+     * {@link #getIdentifier()}.
      *
      * @return the discriminator
      */
