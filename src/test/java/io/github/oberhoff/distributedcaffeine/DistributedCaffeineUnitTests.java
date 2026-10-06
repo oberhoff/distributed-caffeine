@@ -169,10 +169,7 @@ final class DistributedCaffeineUnitTests {
         @Test
         // the reads below are driven for what they do to the cache, not for what they return, so discarding their
         // result is the point rather than an oversight
-        // java:S2925 - the removal notifications are handed to an executor that has already reported itself
-        // idle, so there is no condition left to wait on and what separates "not yet delivered" from "never
-        // delivered" is time alone
-        @SuppressWarnings({"CheckReturnValue", "ResultOfMethodCallIgnored", "java:S2925"})
+        @SuppressWarnings({"CheckReturnValue", "ResultOfMethodCallIgnored"})
         void test_Caffeine_accounts_for_every_key_under_the_full_operation_mix() throws Exception {
             // The control above only writes, and it accounts for every key. This one adds the paths the stress
             // test also drives - loading through a cache loader, refreshing after every write, computing through
@@ -238,7 +235,7 @@ final class DistributedCaffeineUnitTests {
                             .atMost(Duration.ofSeconds(10))
                             .until(() -> executor.getActiveCount() == 0 && executor.getQueue().isEmpty());
                     cache.cleanUp();
-                    Thread.sleep(200);
+                    sleep(Duration.ofMillis(200));
 
                     Set<Integer> held = cache.asMap().keySet();
                     Set<Integer> unaccountedFor = touched.stream()
@@ -257,9 +254,6 @@ final class DistributedCaffeineUnitTests {
 
         @DisplayName("that every key put is either still held or was reported as removed")
         @Test
-        // java:S2925 - as above: the executor goes idle before the notifications it was handed arrive, so there is
-        // nothing left to poll for and the wait has to be a plain one
-        @SuppressWarnings("java:S2925")
         void test_Caffeine_accounts_for_every_key_under_size_pressure() throws Exception {
             // Distributed Caffeine relies on being told about every removal: an eviction is what it distributes,
             // so a key that leaves a cache unannounced is one the other cache instances go on serving. A stress
@@ -298,7 +292,8 @@ final class DistributedCaffeineUnitTests {
                         .atMost(Duration.ofSeconds(10))
                         .until(() -> cache.estimatedSize() <= maximumSize);
                 cache.cleanUp();
-                Thread.sleep(500); // removal notifications are handed to the executor, so they arrive after the fact
+                // removal notifications are handed to the executor, so they arrive after the fact
+                sleep(Duration.ofMillis(500));
 
                 Set<Integer> held = cache.asMap().keySet();
                 Set<Integer> unaccountedFor = IntStream.range(0, keys)
