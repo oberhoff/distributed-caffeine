@@ -5,9 +5,10 @@
 
 # Distributed Caffeine
 
-Distributed Caffeine is a [Caffeine](https://github.com/ben-manes/caffeine)-based distributed cache using
-[MongoDB change streams](https://www.mongodb.com/docs/manual/changeStreams) for near real-time synchronization between
-multiple cache instances, especially across different machines.
+Distributed Caffeine is a [Caffeine](https://github.com/ben-manes/caffeine)-based distributed cache that keeps cache
+instances synchronized in near real time, with optional persistence — through
+[MongoDB change streams](https://www.mongodb.com/docs/manual/changeStreams),
+[PostgreSQL LISTEN/NOTIFY](https://www.postgresql.org/docs/current/sql-notify.html), or custom adapters.
 
 ## Table of contents
 
@@ -27,14 +28,14 @@ synchronization between multiple cache instances by distributing cache operation
 [loading](https://github.com/ben-manes/caffeine/wiki/Population#loading)),
 [invalidation](https://github.com/ben-manes/caffeine/wiki/Removal#explicit-removals) (explicit removal) and
 [eviction](https://github.com/ben-manes/caffeine/wiki/Eviction) (size- or time-based removal), optionally combined with
-persistence of cache entries. Therefore, related cache instances share a dataset in an underlying store. 
+persistence of cache entries in an underlying store.
 
-By default, persistence is not used: no cache entries are retained in the underlying store, which then serves only the
-synchronization between cache instances by distributing cache operations. A fresh cache instance therefore starts empty,
-but immediately takes part in synchronization. Which types of cache operations are considered for distributed
-synchronization, and which are explicitly not, can be configured through the various distribution modes provided.
+Without configured persistence (the default), an adapter only distributes cache operations between cache instances; no
+cache entries are retained in an underlying store. A fresh cache instance therefore starts empty, but takes part in
+synchronization immediately. Which cache operations are distributed, and which are deliberately not, is decided by the
+configured distribution mode.
 
-With configured persistence, cache entries are retained in the underlying store, separately configurable for cached and
+With configured persistence, cache entries are retained in an underlying store, separately configurable for cached and
 evicted entries: cached entries can warm up a fresh cache instance, and evicted entries remain available after eviction
 (passivation) and can be reloaded on demand (activation). Combined as needed, both provide an adjustable mix of
 in-memory (first-level, L1 or client-side) and database (second-level, L2 or server-side) caching.
@@ -48,19 +49,24 @@ more complex or more expensive tools with comparable features.
 
 ### Adapters
 
-Before the actual (store-agnostic) Distributed Caffeine cache instances are specified, an adapter must be configured to
-provide the connection to the underlying store. An already built-in `MongoAdapter` for MongoDB (technically based on
-MongoDB change streams, which provide [near real-time](https://www.mongodb.com/docs/manual/changeStreams) access to data
-changes) can be used or custom adapters can be implemented based on the `Adapter` interface.
+An adapter must be configured before a cache instance is built: it provides synchronization and optional persistence,
+and keeps the cache itself independent of which adapter is used. The built-in `MongoAdapter` for MongoDB and
+`PostgresAdapter` for PostgreSQL can be used, or custom adapters can be implemented against the `Adapter` interface.
+
+Note: An adapter instance belongs to exactly one cache instance and cannot be shared between them.
 
 #### Configuration of an adapter for MongoDB
 
 The configuration of the MongoDB-based adapter always starts with a builder returned by invoking the
 `MongoAdapter.newBuilder(mongoClient, databaseName, collectionName)` method and ends with finalizing the builder by
-invoking one of the `build()` methods to construct the adapter instance. The `mongoClient`, `databaseName` and
-`collectionName` parameters refer to the MongoDB client, database name and collection name used for distributed
-synchronization and persistence. Optionally, a discriminator can be specified (using the `withDiscriminator(...)`
-method) to distinguish between cache entries from different caches that share a collection in MongoDB.
+invoking the `build()` method to construct the adapter instance. The `mongoClient`, `databaseName` and `collectionName`
+parameters refer to the MongoDB client, database name and collection name used for distributed synchronization and
+persistence. Optionally, a discriminator can be specified (using the `withDiscriminator(...)` method) to distinguish
+between cache entries from different caches that share a collection in MongoDB.
+
+Note: Each cache instance requires its own connection for watching change streams. If many cache instances are used, or
+many connections are used elsewhere, the connection pool might need to be enlarged. The default pool size is 100, which
+is sufficient for most cases.
 
 ```java
 MongoAdapter<Key, Value> adapter = MongoAdapter.newBuilder(mongoClient, databaseName, collectionName)
@@ -68,7 +74,24 @@ MongoAdapter<Key, Value> adapter = MongoAdapter.newBuilder(mongoClient, database
         .build();
 ```
 
-Note: An adapter instance belongs to exactly one cache instance and cannot be shared between them.
+#### Configuration of an adapter for PostgreSQL
+
+The configuration of the PostgreSQL-based adapter always starts with a builder returned by invoking the
+`PostgresAdapter.newBuilder(dataSource, schemaName, tableName)` method and ends with finalizing the builder by invoking
+the `build()` method to construct the adapter instance. The `dataSource`, `schemaName` and `tableName` parameters refer
+to the data source, schema name and table name used for distributed synchronization and persistence. Optionally, a
+discriminator can be specified (using the `withDiscriminator(...)` method) to distinguish between cache entries from
+different caches that share a table in PostgreSQL.
+
+Note: Each cache instance holds its own connection for as long as it listens for notifications. The data source is
+therefore expected to pool its connections, and the pool has to carry one connection per cache instance on top of what
+their operations borrow and return.
+
+```java
+PostgresAdapter<Key, Value> adapter = PostgresAdapter.newBuilder(dataSource, schemaName, tableName)
+        .withDiscriminator("discriminator") // optional (used if different caches share a table)
+        .build();
+```
 
 ### Distributed Caffeine Caches
 
@@ -201,9 +224,9 @@ DistributedLoadingCache<Key, Value> distributedLoadingCache = DistributedCaffein
         .withPersistence(configurer -> configurer
                 .withCachedEntries(cachedEntries -> cachedEntries
                         .withCacheResidency()) // as long as cached (mutual exclusive with size and/or time limits)
-                        //.withMaxiumumSize(1_000) // limited by size
-                        //.withMaximumTime(Duration.ofDays(1)) // limited by time
-                        //.withColdStart() // no warm-up (mutual exclusive with cache residency)
+                //.withMaxiumumSize(1_000) // limited by size
+                //.withMaximumTime(Duration.ofDays(1)) // limited by time
+                //.withColdStart() // no warm-up (mutual exclusive with cache residency)
                 .withEvictedEntries(evictedEntries -> evictedEntries
                         .withMaximumSize(1_000_000) // limited by size
                         .withMaximumTime(Duration.ofDays(10)) // limited by time
@@ -242,24 +265,17 @@ DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(a
   [weak or soft references for keys or values](https://github.com/ben-manes/caffeine/wiki/Eviction#reference-based) is
   not supported. Even when using Caffeine (stand-alone), it is advisable to use the more predictable size- or time-based
   eviction instead.
-* Manipulating cache entries or their metadata directly in the MongoDB collection should be done with caution.
-  Corresponding cache instances might attempt to reflect certain changes immediately, which may fail if the changed data
-  cannot be interpreted correctly anymore.
-* Adjusting the configuration of cache instances (includes changes to key and value objects) should be done with
-  caution. The newly configured cache instances attempt to synchronize any existing legacy data from the corresponding
-  MongoDB collection, which may fail if the legacy data cannot be interpreted correctly anymore. Corresponding MongoDB
-  collections should be cleaned up (or perhaps migrated) beforehand.
-* Related cache instances (sharing the same MongoDB collection and discriminator) must be configured in the same way to
+* Related cache instances — those whose adapters are specified identically — must be configured in the same way to
   prevent unpredictable behavior or even the loss of cache entries.
-* Each cache instance requires its own connection to MongoDB for watching change streams. If many cache instances are
-  used or many connections are used elsewhere, the connection pool might be enlarged. The default pool size is 100,
-  which is sufficient for most cases.
+* Changing key or value objects, their serializers, key hashing or retained cache entries directly can make existing
+  data unusable, which should be cleaned up or migrated beforehand.
 
 ## Requirements
 
-* Java 17 or newer
-* MongoDB 4.2 or newer (MongoDB 5.1 or newer is recommended due to change stream optimizations)
-* MongoDB must be configured to run as a replica set (single node replica set would be sufficient)
+* Java 17 or newer.
+* MongoDB 4.2 or newer if `MongoAdapter` is used, configured to run as a replica set (a single node replica set is
+  sufficient).
+* PostgreSQL 9.5 or newer if `PostgresAdapter` is used, accessed through a data source that pools its connections.
 
 ## Installation
 

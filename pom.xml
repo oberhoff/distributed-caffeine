@@ -33,8 +33,9 @@
 
     <name>Distributed Caffeine</name>
 
-    <description>Distributed Caffeine is a Caffeine-based distributed cache using MongoDB change streams for near
-        real-time synchronization between multiple cache instances, especially across different machines.
+    <description>Distributed Caffeine is a Caffeine-based distributed cache that keeps cache instances
+        synchronized in near real time, with optional persistence - through MongoDB change streams,
+        PostgreSQL LISTEN/NOTIFY, or custom adapters.
     </description>
 
     <url>https://github.com/oberhoff/distributed-caffeine</url>
