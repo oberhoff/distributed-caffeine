@@ -144,6 +144,7 @@ import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer.LoadingStrategy.CACHE_LOADER;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer.LoadingStrategy.MAPPING_FUNCTION;
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.DockerImage;
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.RUNS_ON_GITHUB;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION;
@@ -209,6 +210,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
@@ -4996,6 +4998,129 @@ final class DistributedCaffeineIntegrationTests {
             verify(cacheLoader, times(1)).load(key);
         }
 
+        @DisplayName("Test that the mapping function strategy reads the store first and maps only what it misses")
+        @Test
+            // The same order the cache loader strategy states, for the entry point a cache built without a cache
+            // loader has instead - and the only one it has, so without this strategy its retained evicted cache
+            // entries are reachable through getFromStore alone
+        void test_EvictedEntryPersistence_with_the_mapping_function_strategy_reads_the_store_first() throws Exception {
+            @SuppressWarnings("Convert2Lambda")
+            Function<Key, Value> mappingFunction = spy(new Function<Key, Value>() {
+                @Override
+                public Value apply(Key key) {
+                    return Value.of(key.getId(), "mapped");
+                }
+            });
+
+            DistributedCache<Key, Value> distributedCache = this.<Key, Value>createCache(
+                    dc -> dc.withCaffeine(Caffeine.newBuilder().maximumSize(1))
+                            .withPersistence(configurer -> configurer
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withMaximumSize(10)
+                                            .withLoadingStrategies(MAPPING_FUNCTION))),
+                    DistributedCaffeine::build);
+            Key key = Key.of(1);
+
+            // evicted by taking the room away rather than by writing until something gives, so which entry goes
+            // is not Caffeine's admission decision to make
+            distributedCache.put(key, Value.of(1, "written"));
+            distributedCache.policy().eviction().orElseThrow().setMaximum(0);
+            distributedCache.cleanUp();
+
+            awaitEvictionsRetained(distributedCache, key);
+
+            assertThat(distributedCache.get(key, mappingFunction))
+                    .as("the value that was written, so it came back from the store")
+                    .isEqualTo(Value.of(1, "written"));
+            verifyNoInteractions(mappingFunction);
+
+            // and the fallback: a key the store never held is what the mapping function is actually for
+            Key unknown = Key.of(99);
+            assertThat(distributedCache.get(unknown, mappingFunction)).isEqualTo(Value.of(99, "mapped"));
+            verify(mappingFunction, times(1)).apply(unknown);
+        }
+
+        @DisplayName("Test that the mapping function strategy applies a bulk mapping function to the remainder only")
+        @Test
+            // getAll is read in one go just like loadAll is: the mapping function sees what the store could not
+            // supply and is not applied at all when that leaves nothing, which is what the second read asserts by
+            // the function being untouched while both values still arrive
+        void test_EvictedEntryPersistence_with_the_mapping_function_strategy_maps_the_remainder() throws Exception {
+            @SuppressWarnings("Convert2Lambda")
+            Function<Set<? extends Key>, Map<Key, Value>> mappingFunction =
+                    spy(new Function<Set<? extends Key>, Map<Key, Value>>() {
+                        @Override
+                        public Map<Key, Value> apply(Set<? extends Key> keys) {
+                            Map<Key, Value> keyToValue = new LinkedHashMap<>();
+                            keys.forEach(key -> keyToValue.put(key, Value.of(key.getId(), "mapped")));
+                            return keyToValue;
+                        }
+                    });
+
+            DistributedCache<Key, Value> distributedCache = this.<Key, Value>createCache(
+                    dc -> dc.withCaffeine(Caffeine.newBuilder().maximumSize(10))
+                            .withPersistence(configurer -> configurer
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withMaximumSize(10)
+                                            .withLoadingStrategies(MAPPING_FUNCTION))),
+                    DistributedCaffeine::build);
+            Key key1 = Key.of(1);
+            Key key2 = Key.of(2);
+            Key unknown = Key.of(99);
+
+            // evicted by taking the room away rather than by writing until something gives, so which entries go
+            // is not Caffeine's admission decision to make
+            distributedCache.put(key1, Value.of(1, "written"));
+            distributedCache.put(key2, Value.of(2, "written"));
+            distributedCache.policy().eviction().orElseThrow().setMaximum(0);
+            distributedCache.cleanUp();
+            awaitEvictionsRetained(distributedCache, key1, key2);
+
+            assertThat(distributedCache.getAll(List.of(key1, key2, unknown), mappingFunction))
+                    .as("the two the store held plus the one it did not")
+                    .isEqualTo(Map.of(
+                            key1, Value.of(1, "written"),
+                            key2, Value.of(2, "written"),
+                            unknown, Value.of(99, "mapped")));
+            verify(mappingFunction, times(1)).apply(Set.of(unknown));
+
+            // what the read above put back was evicted again right away, so the store holds the same two once more
+            distributedCache.cleanUp();
+            awaitEvictionsRetained(distributedCache, key1, key2);
+
+            assertThat(distributedCache.getAll(List.of(key1, key2), mappingFunction))
+                    .isEqualTo(Map.of(key1, Value.of(1, "written"), key2, Value.of(2, "written")));
+            verifyNoMoreInteractions(mappingFunction);
+        }
+
+        @DisplayName("Test that the mapping function strategy does not reach the computing methods of the map view")
+        @Test
+            // The map view answers from the content of that map alone, which is both its own contract and what
+            // Caffeine does with a cache loader - so the function is applied to a key the store holds, and the
+            // value says which of the two it came from
+        void test_EvictedEntryPersistence_with_the_mapping_function_strategy_does_not_reach_the_map_view()
+                throws Exception {
+            DistributedCache<Key, Value> distributedCache = this.<Key, Value>createCache(
+                    dc -> dc.withCaffeine(Caffeine.newBuilder().maximumSize(1))
+                            .withPersistence(configurer -> configurer
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withMaximumSize(10)
+                                            .withLoadingStrategies(MAPPING_FUNCTION))),
+                    DistributedCaffeine::build);
+            Key key = Key.of(1);
+
+            // evicted by taking the room away rather than by writing until something gives, so which entry goes
+            // is not Caffeine's admission decision to make
+            distributedCache.put(key, Value.of(1, "written"));
+            distributedCache.policy().eviction().orElseThrow().setMaximum(0);
+            distributedCache.cleanUp();
+            awaitEvictionsRetained(distributedCache, key);
+
+            assertThat(distributedCache.asMap().computeIfAbsent(key, k -> Value.of(k.getId(), "computed")))
+                    .as("computed afresh rather than taken from the store")
+                    .isEqualTo(Value.of(1, "computed"));
+        }
+
         @DisplayName("Test that the cache loader strategy reads the store first and loads only what it misses")
         @Test
             // The documented order, stated here rather than left to a loader invocation count that does not move:
@@ -5042,6 +5167,17 @@ final class DistributedCaffeineIntegrationTests {
             Key unknown = Key.of(99);
             assertThat(distributedLoadingCache.get(unknown)).isEqualTo(Value.of(99, "loaded"));
             verify(cacheLoader, times(1)).load(unknown);
+        }
+
+        private void awaitEvictionsRetained(DistributedCache<Key, Value> distributedCache, Key... keys) {
+            await("the evictions being retained in the store")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> Stream.of(keys).forEach(key ->
+                            assertThat(distributedCache.distributedPolicy()
+                                    .getFromStore(key, true))
+                                    .isNotNull()
+                                    .extracting(CacheEntry::getStatus)
+                                    .isEqualTo(EVICTED_SIZE_RETAINED)));
         }
 
         @DisplayName("Test persistence of evicted entries by time")
@@ -6244,8 +6380,8 @@ final class DistributedCaffeineIntegrationTests {
                             dc -> dc.build(cacheLoader));
 
             Duration storeTimeout = Duration.ofMillis(500);
-            Repository<Key, Value> repository = injectSpy(getInstanceRegistry(loadingCache).getCacheLoader(),
-                    InternalCacheLoader.class, "repository", Repository.class);
+            Repository<Key, Value> repository = injectSpy(getInstanceRegistry(loadingCache).getCacheManager(),
+                    InternalCacheManager.class, "repository", Repository.class);
             doAnswer(invocation -> {
                 sleep(storeTimeout);
                 throw new IllegalStateException("provoked");

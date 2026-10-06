@@ -626,6 +626,12 @@ final class DistributedCaffeineUnitTests {
             assertThat(weighed).as("the configured weigher, not Caffeine's default of one per entry")
                     .contains("10=10", "20=20");
 
+            // the weigher runs while the entry is written, but the weighted size below is only accumulated once
+            // Caffeine drains its write buffer, which it schedules on the executor - so reading it straight after
+            // the writes reports 0 until that has happened, which a loaded machine is slow enough to lose. The per
+            // entry weights further down are read from the entry itself and never needed this
+            cache.cleanUp();
+
             Policy.Eviction<Key, Value> eviction = cache.policy().eviction().orElseThrow();
             assertThat(eviction.isWeighted()).isTrue();
             // what the weigher returned for that key, which is what proves it is this weigher in effect

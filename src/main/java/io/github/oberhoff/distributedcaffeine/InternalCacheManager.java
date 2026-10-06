@@ -71,6 +71,8 @@ import static java.lang.String.format;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.toMap;
+import static java.util.stream.Collectors.toSet;
 
 @SuppressWarnings({"java:S1452"})
 class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receiver<K, V> {
@@ -188,6 +190,37 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
 
     boolean isActivated() {
         return isActivated.get();
+    }
+
+    // Reloading retained evicted cache entries, for whichever loading strategy asked for it: a cache loader is not
+    // the only way into a cache instance, so this lives here rather than with the one that happens to be optional.
+    // Which strategy applies is decided by the caller, because what it falls back to when the store comes up empty
+    // is the caller's as well
+    @Nullable V loadFromStore(InternalKey<K> key) {
+        return loadAllFromStore(Set.of(key)).get(k(key));
+    }
+
+    Map<K, V> loadAllFromStore(Set<? extends InternalKey<K>> keys) {
+        // the memoizing overload caches each hash on its key instance, so a subsequent publish that reuses the same
+        // instance (putDistributedLoaded / refreshAfterWrite on the single-key load path) does not recompute it
+        Set<String> hashes = keys.stream()
+                .map(hasher::getHash)
+                .collect(toSet());
+        Repository<K, V> retaining = requireRepository(repository, identifier);
+        // Guarded, and this is the half that would otherwise never be counted: it runs before anything is
+        // published, so a store that is down fails here and the publish that would have reported it is never
+        // reached. Left unguarded, a cache that reads the store on every miss would pay the driver's timeout for
+        // every one of them, for as long as the outage lasts, while holding the synchronization lock
+        try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> storeGuard.getGuarded(identifier,
+                () -> retaining.streamCacheEntries(
+                        hashes,
+                        EVICTED_RETAINED_GROUP,
+                        false)))) {
+            //noinspection NullableProblems
+            return cacheEntryStream
+                    .filter(cacheEntry -> nonNull(cacheEntry.getValue()))
+                    .collect(toMap(CacheEntry::getKey, CacheEntry::getValue));
+        }
     }
 
     InternalValue<V> putDistributed(InternalKey<K> key, InternalValue<V> value) {

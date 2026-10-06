@@ -17,8 +17,6 @@ package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.CacheLoader;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer;
-import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
-import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.reflect.Method;
@@ -29,21 +27,16 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
-import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
 import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.im;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.nullable;
-import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireRepository;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
-import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_RETAINED_GROUP;
 import static java.util.Objects.nonNull;
 import static java.util.stream.Collectors.toCollection;
-import static java.util.stream.Collectors.toMap;
-import static java.util.stream.Collectors.toSet;
 
 @SuppressWarnings("java:S1450")
 class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable InternalValue<V>>,
@@ -53,17 +46,10 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
 
     private final CacheLoader<K, V> cacheLoader;
 
-    private @Nullable Repository<K, V> repository;
-    @SuppressWarnings("NotNullFieldNotInitialized")
-    private String identifier;
-    @SuppressWarnings("NotNullFieldNotInitialized")
-    private InternalStoreGuard storeGuard;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalCacheManager<K, V> cacheManager;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private EvictedEntryPersistenceConfigurer evictedEntryPersistenceConfigurer;
-    @SuppressWarnings("NotNullFieldNotInitialized")
-    private InternalHasher<K> hasher;
     private boolean hasLoadAll;
 
     @SuppressWarnings({"java:S2637", "NullAway.Init"})
@@ -74,12 +60,8 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
 
     @Override
     public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
-        this.repository = instanceRegistry.getAdapter().getRepository().orElse(null);
-        this.identifier = instanceRegistry.getAdapter().getIdentifier();
-        this.storeGuard = instanceRegistry.getStoreGuard();
         this.cacheManager = instanceRegistry.getCacheManager();
         this.evictedEntryPersistenceConfigurer = instanceRegistry.getEvictedEntryPersistenceConfigurer();
-        this.hasher = instanceRegistry.getHasher();
         this.hasLoadAll = hasLoadAll();
     }
 
@@ -218,29 +200,10 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
     }
 
     private @Nullable V loadFromStore(InternalKey<K> key) {
-        return loadAllFromStore(Set.of(key)).get(k(key));
+        return cacheManager.loadFromStore(key);
     }
 
     private Map<K, V> loadAllFromStore(Set<? extends InternalKey<K>> keys) {
-        // the memoizing overload caches each hash on its key instance, so a subsequent publish that reuses the same
-        // instance (putDistributedLoaded / refreshAfterWrite on the single-key load path) does not recompute it
-        Set<String> hashes = keys.stream()
-                .map(hasher::getHash)
-                .collect(toSet());
-        Repository<K, V> retaining = requireRepository(repository, identifier);
-        // Guarded, and this is the half that would otherwise never be counted: it runs before anything is
-        // published, so a store that is down fails here and the publish that would have reported it is never
-        // reached. Left unguarded, a cache that reads the store on every miss would pay the driver's timeout for
-        // every one of them, for as long as the outage lasts, while holding the synchronization lock
-        try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> storeGuard.getGuarded(identifier,
-                () -> retaining.streamCacheEntries(
-                        hashes,
-                        EVICTED_RETAINED_GROUP,
-                        false)))) {
-            //noinspection NullableProblems
-            return cacheEntryStream
-                    .filter(cacheEntry -> nonNull(cacheEntry.getValue()))
-                    .collect(toMap(CacheEntry::getKey, CacheEntry::getValue));
-        }
+        return cacheManager.loadAllFromStore(keys);
     }
 }

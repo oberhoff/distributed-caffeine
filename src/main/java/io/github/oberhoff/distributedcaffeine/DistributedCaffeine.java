@@ -54,6 +54,7 @@ import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer.LoadingStrategy.CACHE_LOADER;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer.LoadingStrategy.MAPPING_FUNCTION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailableOrNull;
@@ -865,6 +866,17 @@ public final class DistributedCaffeine<K, V> {
         public enum LoadingStrategy {
 
             /**
+             * Loading strategy for a mapping function provided to {@link DistributedCache#get(Object, Function)} or
+             * {@link DistributedCache#getAll(Iterable, Function)} that is only applied to obtain missing cache entries
+             * if these could not be reloaded from the underlying store beforehand.
+             * <p>
+             * <b>Note:</b> This does not apply to the map view returned by {@link DistributedCache#asMap()}, whose
+             * computing methods answer from the content of that map alone, which no loading strategy reaches,
+             * including {@link #CACHE_LOADER}.
+             */
+            MAPPING_FUNCTION,
+
+            /**
              * Loading strategy for a provided {@link CacheLoader} that is only invoked to obtain missing cache entries
              * if these could not be reloaded from the underlying store beforehand.
              */
@@ -967,7 +979,13 @@ public final class DistributedCaffeine<K, V> {
                     .anyMatch(Optional::isPresent);
         }
 
-        // see the cached tier: a loading strategy without a retention is rejected below
+        // see the cached tier: a loading strategy without a retention is rejected below. This one needs nothing of
+        // the cache, which is the point of it - it is what makes retained evicted cache entries reachable for a
+        // cache built without a cache loader
+        boolean hasMappingFunctionStrategy() {
+            return loadingStrategies.contains(MAPPING_FUNCTION);
+        }
+
         boolean hasCacheLoaderStrategy() {
             return loadingStrategies.contains(CACHE_LOADER);
         }

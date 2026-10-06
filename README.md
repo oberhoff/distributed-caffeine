@@ -207,11 +207,14 @@ residency. Retained cache entries are synchronized back into a cache instance as
 configured explicitly, which cache residency does not allow. Persistence of cached entries requires a distribution mode
 including population, and including eviction as well if cache residency is combined with an eviction policy.
 
-Persistence of evicted entries retains (unless invalidated) recently evicted cache entries and is limited by size and/or
-time, which is also required for enabling loading strategies. Using the loading strategy for cache loader means that a
-provided cache loader is only invoked to obtain missing cache entries if these could not be reloaded from the underlying
-store beforehand, which requires the cache to be built as a loading cache. Persistence of evicted entries requires at
-least one eviction policy, but works regardless of whether the distribution mode includes eviction.
+Persistence of evicted entries retains (unless invalidated) recently evicted cache entries and is limited by size and
+time, which is also required for enabling loading strategies. Using the loading strategy for mapping function means that
+a mapping function provided to `get(...)` or `getAll(...)` is only applied to obtain missing cache entries if these
+could not be reloaded from the underlying store beforehand, which works for any cache instance but does not extend to
+the computing methods of the map view returned by `asMap()`. Likewise, the loading strategy for cache loader means that
+a provided cache loader is only invoked to obtain missing cache entries if these could not be reloaded from the
+underlying store beforehand, which requires the cache to be built as a loading cache. Persistence of evicted entries
+requires at least one eviction policy, but works regardless of whether the distribution mode includes eviction.
 
 Alternatively, the `getFromStore(...)` or `getAllFromStore(...)` methods (via `cacheInstance.distributedPolicy()`) can
 be used to load retained cache entries directly from the underlying store bypassing the cache instance.
@@ -224,13 +227,13 @@ DistributedLoadingCache<Key, Value> distributedLoadingCache = DistributedCaffein
         .withPersistence(configurer -> configurer
                 .withCachedEntries(cachedEntries -> cachedEntries
                         .withCacheResidency()) // as long as cached (mutual exclusive with size and/or time limits)
-                //.withMaxiumumSize(1_000) // limited by size
-                //.withMaximumTime(Duration.ofDays(1)) // limited by time
-                //.withColdStart() // no warm-up (mutual exclusive with cache residency)
+                        //.withMaxiumumSize(1_000) // limited by size
+                        //.withMaximumTime(Duration.ofDays(1)) // limited by time
+                        //.withColdStart() // no warm-up (mutual exclusive with cache residency)
                 .withEvictedEntries(evictedEntries -> evictedEntries
                         .withMaximumSize(1_000_000) // limited by size
                         .withMaximumTime(Duration.ofDays(10)) // limited by time
-                        .withLoadingStrategies(CACHE_LOADER))) // loading strategy
+                        .withLoadingStrategies(MAPPING_FUNCTION, CACHE_LOADER))) // loading strategies
         .build(key -> loadExpensiveValue(key)); // cache loader
 ```
 

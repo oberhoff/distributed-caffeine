@@ -18,8 +18,11 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer;
 import org.jspecify.annotations.Nullable;
 
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
@@ -51,6 +54,8 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
     protected InternalCacheManager<K, V> cacheManager;
     @SuppressWarnings("NotNullFieldNotInitialized")
     protected InternalSynchronizationLock synchronizationLock;
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    protected EvictedEntryPersistenceConfigurer evictedEntryPersistenceConfigurer;
 
     @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalDistributedCache() {
@@ -64,6 +69,7 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
         this.policy = instanceRegistry.getCache().policy();
         this.cacheManager = instanceRegistry.getCacheManager();
         this.synchronizationLock = instanceRegistry.getSynchronizationLock();
+        this.evictedEntryPersistenceConfigurer = instanceRegistry.getEvictedEntryPersistenceConfigurer();
     }
 
     @Override
@@ -87,7 +93,14 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
         requireNonNull(key);
         requireNonNull(mappingFunction);
         Function<InternalKey<K>, @Nullable InternalValue<V>> distributedMapping = mappingKey -> {
-            InternalValue<V> value = ivn(mappingFunction.apply(k(mappingKey)));
+            // the order the cache loader strategy states, applied to the entry point a cache without a cache
+            // loader has instead: the mapping function obtains only what the store could not supply
+            InternalValue<V> value = evictedEntryPersistenceConfigurer.hasMappingFunctionStrategy()
+                    ? ivn(cacheManager.loadFromStore(mappingKey))
+                    : null;
+            value = nonNull(value)
+                    ? value
+                    : ivn(mappingFunction.apply(k(mappingKey)));
             if (nonNull(value)) {
                 cacheManager.putDistributed(mappingKey, value);
             }
@@ -103,9 +116,21 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
             ? extends Map<? extends K, ? extends V>> mappingFunction) {
         Set<K> keySet = requireNonNullIterable(keys);
         requireNonNull(mappingFunction);
-        Function<? super Set<? extends InternalKey<K>>,
-                ? extends Map<? extends InternalKey<K>, ? extends InternalValue<V>>> distributedMapping = mappingKeys ->
-                cacheManager.putAllDistributed(im(mappingFunction.apply(s(mappingKeys))));
+        Function<? super Set<? extends InternalKey<K>>, ? extends Map<? extends InternalKey<K>,
+                ? extends InternalValue<V>>> distributedMapping = mappingKeys -> {
+            Map<K, V> keyToValue = new HashMap<>();
+            Set<K> keysToMap = new HashSet<>(s(mappingKeys));
+            if (evictedEntryPersistenceConfigurer.hasMappingFunctionStrategy()) {
+                keyToValue.putAll(cacheManager.loadAllFromStore(mappingKeys));
+                keysToMap.removeAll(keyToValue.keySet());
+            }
+            // the mapping function is not applied at all once the store supplied every key, which is what Caffeine
+            // does with the keys it found itself as well - it only asks for what is missing
+            if (!keysToMap.isEmpty()) {
+                keyToValue.putAll(mappingFunction.apply(keysToMap));
+            }
+            return cacheManager.putAllDistributed(im(keyToValue));
+        };
         return synchronizationLock.getLocked(() ->
                 m(cache.getAll(iks(keySet), distributedMapping)));
     }
