@@ -19,6 +19,19 @@ import java.util.Collection;
 
 /**
  * Interface representing a publisher that manages distributed synchronization between cache instances.
+ * <p>
+ * <b>Note:</b> Published cache entries must reach all cache instances in one and the same order, not merely in
+ * order per key. Invalidating all cache entries is what requires it: it is applied to whatever a receiving cache
+ * instance holds at the moment it arrives, so its position relative to another cache instance's publication decides
+ * whether that cache entry survives it, and two cache instances observing the two in opposite orders stay different
+ * from then on.
+ * <p>
+ * <b>Note:</b> One order over everything published follows from there being a single point at which publications
+ * are serialized, which is what the underlying store is wherever it distributes them as well. An adapter that cannot
+ * offer such a point has to make up for it rather than leave it out: whenever it may have missed or reordered
+ * anything, it reports so using {@link Receiver#receiveSynchronizationRestart()}, which has the receiving cache
+ * instance reconcile against the underlying store instead of carrying on with content that may disagree with the
+ * other ones.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
