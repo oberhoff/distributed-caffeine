@@ -122,6 +122,7 @@ import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer.LoadingStrategy.CACHE_LOADER;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer.LoadingStrategy.MAPPING_FUNCTION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED;
@@ -859,7 +860,11 @@ final class DistributedCaffeineUnitTests {
                             configurer -> configurer.withCachedEntries(tier ->
                                     tier.withMaximumSize(1)),
                             configurer -> configurer.withEvictedEntries(tier ->
-                                    tier.withMaximumSize(1)))
+                                    tier.withMaximumSize(1)),
+                            // a loading strategy reads the store on a miss, so it must not get past this rule
+                            // either - it cannot, because a strategy without a retention is rejected in turn
+                            configurer -> configurer.withEvictedEntries(tier ->
+                                    tier.withMaximumSize(1).withLoadingStrategies(MAPPING_FUNCTION)))
                     .forEach(persistence -> assertThatThrownBy(() ->
                             createCache(publishingAdapter,
                                     dc -> dc.withPersistence(persistence),
