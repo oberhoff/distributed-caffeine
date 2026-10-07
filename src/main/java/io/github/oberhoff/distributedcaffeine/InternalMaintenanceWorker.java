@@ -28,7 +28,10 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.HashSet;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -45,7 +48,9 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.D
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_RETAINED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.STALE;
+import static io.github.oberhoff.distributedcaffeine.adapter.Repository.Order.ASCENDING;
 import static java.lang.String.format;
+import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 import static java.util.stream.Collectors.toUnmodifiableSet;
 
@@ -218,26 +223,82 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
         cachedEntryPersistenceConfigurer.getMaximumSize().ifPresent(maximumSize -> {
             Repository<K, V> retaining = requireRepository(repository, identifier);
             Long count = getFailable(() ->
-                    retaining.countCacheEntries(CACHED_GROUP));
+                    retaining.countCacheEntries(CACHED_GROUP, null));
             if (count > maximumSize) {
-                long limit = count - maximumSize;
-                Set<String> hashes = new HashSet<>();
-                try (Stream<CacheEntryMetadata> cacheEntryMetadataStream = getFailable(() ->
-                        retaining.streamCacheEntryMetadata(
-                                null,
-                                CACHED_GROUP,
-                                true))) {
-                    cacheEntryMetadataStream
-                            .limit(limit)
-                            .map(CacheEntryMetadata::getHash)
-                            .forEach(hashes::add);
-                }
-                if (!hashes.isEmpty()) {
+                cutOf(retaining, CACHED_GROUP, maximumSize, count).ifPresent(cut -> {
                     Instant deadline = Instant.now().minus(distributionDuration);
-                    runFailable(() -> retaining.deleteCacheEntries(hashes, CACHED_GROUP, deadline));
-                }
+                    Instant olderThan = cut.timestamp().isBefore(deadline) ? cut.timestamp() : deadline;
+                    runFailable(() -> retaining.deleteCacheEntries(null, CACHED_GROUP, olderThan));
+                    if (!cut.tiedBeyond().isEmpty()) {
+                        runFailable(() -> retaining.deleteCacheEntries(cut.tiedBeyond(), CACHED_GROUP, deadline));
+                    }
+                });
             }
         });
+    }
+
+    // Where pruning a group that is over its maximum stops: a timestamp everything strictly older than which goes,
+    // and of the records sharing that timestamp the ones that go as well.
+    // Every cache instance runs this against the same records, so another run can prune between any two of the
+    // steps below, and the count leading each size-based step is only ever a guess at how many are over. Taking
+    // that many of the oldest is what it used to do, and what made overlapping runs prune once each: a run that
+    // counts before another one prunes and reads after it takes its share from what is left. So the count only
+    // decides how far to read, and the oldest records up to there - with all those sharing the timestamp the last
+    // of them has, which becomes the cut - are candidates rather than a verdict. The verdict is a second count, of
+    // what is at or after the cut and would therefore survive: only as many as it shows to be over the maximum go
+    // from those sharing the cut, and nothing at all if it shows another run to have pruned already.
+    // That leaves no interleaving in which runs prune below the maximum between them: a run only ever removes what
+    // is older than its cut or shares it, so whatever a run with a later cut found to survive is not touched by one
+    // with an earlier cut, and runs with the same cut take from the records sharing it in the same order - lowest
+    // hash kept, which is an order the underlying store need not provide, so ordering by hash cannot widen its index.
+    // Oldest first, so that what is read is the excess and those sharing its last timestamp, not the newest records
+    // that stay
+    private static <K, V> Optional<Cut> cutOf(Repository<K, V> retaining, Set<Status> statuses, int maximumSize,
+                                              long count) {
+        long excess = count - maximumSize;
+        Instant timestamp = null;
+        List<String> tied = new ArrayList<>();
+        long older = 0;
+        try (Stream<CacheEntryMetadata> cacheEntryMetadataStream = getFailable(() ->
+                retaining.streamCacheEntryMetadata(
+                        null,
+                        statuses,
+                        ASCENDING))) {
+            Iterator<CacheEntryMetadata> iterator = cacheEntryMetadataStream.iterator();
+            long read = 0;
+            while (iterator.hasNext()) {
+                CacheEntryMetadata cacheEntryMetadata = iterator.next();
+                if (!cacheEntryMetadata.getTimestamp().equals(timestamp)) {
+                    if (read >= excess) {
+                        // newer than every candidate, and so is everything that follows
+                        break;
+                    }
+                    older = read;
+                    timestamp = cacheEntryMetadata.getTimestamp();
+                    tied.clear();
+                }
+                tied.add(cacheEntryMetadata.getHash());
+                read++;
+            }
+        }
+        if (isNull(timestamp)) {
+            return Optional.empty();
+        }
+        Instant cut = timestamp;
+        long surviving = getFailable(() -> retaining.countCacheEntries(statuses, cut));
+        if (surviving < maximumSize) {
+            // pruned meanwhile: even what is older than the cut is needed now
+            return Optional.empty();
+        }
+        long tiedOver = Math.min(Math.min(tied.size(), excess - older), surviving - maximumSize);
+        Set<String> tiedBeyond = tied.stream()
+                .sorted(Comparator.reverseOrder())
+                .limit(tiedOver)
+                .collect(toUnmodifiableSet());
+        return Optional.of(new Cut(cut, tiedBeyond));
+    }
+
+    private record Cut(Instant timestamp, Set<String> tiedBeyond) {
     }
 
     // How far back a retention of this length reaches, saturating instead of overflowing: a maximum amount of time
@@ -263,25 +324,17 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
         evictedEntryPersistenceConfigurer.getMaximumSize().ifPresent(maximumSize -> {
             Repository<K, V> retaining = requireRepository(repository, identifier);
             Long count = getFailable(() ->
-                    retaining.countCacheEntries(EVICTED_RETAINED_GROUP));
+                    retaining.countCacheEntries(EVICTED_RETAINED_GROUP, null));
             if (count > maximumSize) {
-                long limit = count - maximumSize;
-                Set<String> hashes = new HashSet<>(maximumSize);
-                try (Stream<CacheEntryMetadata> cacheEntryMetadataStream = getFailable(() ->
-                        retaining.streamCacheEntryMetadata(
-                                null,
-                                EVICTED_RETAINED_GROUP,
-                                true))) {
-                    cacheEntryMetadataStream
-                            .limit(limit)
-                            .map(CacheEntryMetadata::getHash)
-                            .forEach(hashes::add);
-                }
-                if (!hashes.isEmpty()) {
+                cutOf(retaining, EVICTED_RETAINED_GROUP, maximumSize, count).ifPresent(cut -> {
                     // transition the status (instead of hard delete)
-                    runFailable(() -> retaining.updateStatusOfCacheEntries(hashes,
-                            EVICTED_RETAINED_GROUP, null, pruningStatus()));
-                }
+                    runFailable(() -> retaining.updateStatusOfCacheEntries(null,
+                            EVICTED_RETAINED_GROUP, cut.timestamp(), pruningStatus()));
+                    if (!cut.tiedBeyond().isEmpty()) {
+                        runFailable(() -> retaining.updateStatusOfCacheEntries(cut.tiedBeyond(),
+                                EVICTED_RETAINED_GROUP, null, pruningStatus()));
+                    }
+                });
             }
         });
     }

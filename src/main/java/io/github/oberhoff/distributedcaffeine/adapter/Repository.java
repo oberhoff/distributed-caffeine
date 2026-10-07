@@ -38,6 +38,27 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 public interface Repository<K, V> extends Publisher<K, V> {
 
     /**
+     * The order in which cache entries, or their metadata, are streamed from the underlying store.
+     */
+    enum Order {
+
+        /**
+         * Ascending by timestamp (oldest first).
+         */
+        ASCENDING,
+
+        /**
+         * Descending by timestamp (newest first).
+         */
+        DESCENDING,
+
+        /**
+         * Whatever order the underlying store returns most cheaply.
+         */
+        UNORDERED
+    }
+
+    /**
      * Returns a (optionally ordered) stream of cache entries from the underlying store that match the specified
      * parameters.
      * <p>
@@ -48,15 +69,14 @@ public interface Repository<K, V> extends Publisher<K, V> {
      * do not meet the conditions of a cache entry) should be skipped and logged instead of breaking the stream
      * exceptionally.
      *
-     * @param hashes              the hashes to filter by ({@code null} means to omit this filter)
-     * @param statuses            the statuses to filter by ({@code null} means to omit this filter)
-     * @param orderByTimestampAsc {@code true} if returned cache entries should be ordered ascending by timestamp,
-     *                            otherwise {@code false} (order does not matter)
+     * @param hashes   the hashes to filter by ({@code null} means to omit this filter)
+     * @param statuses the statuses to filter by ({@code null} means to omit this filter)
+     * @param order    the {@link Order} to return cache entries in
      * @return a stream of cache entries
      * @throws Exception if streaming fails
      */
     Stream<CacheEntry<K, V>> streamCacheEntries(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
-                                                boolean orderByTimestampAsc) throws Exception;
+                                                Order order) throws Exception;
 
     /**
      * Returns a (optionally ordered) stream of metadata of cache entries from the underlying store that match the
@@ -69,15 +89,14 @@ public interface Repository<K, V> extends Publisher<K, V> {
      * the conditions of the metadata of a cache entry) should be skipped and logged instead of breaking the stream
      * exceptionally.
      *
-     * @param hashes              the hashes to filter by ({@code null} means to omit this filter)
-     * @param statuses            the statuses to filter by ({@code null} means to omit this filter)
-     * @param orderByTimestampAsc {@code true} if returned metadata of cache entries should be ordered ascending by
-     *                            timestamp, otherwise {@code false} (order does not matter)
+     * @param hashes   the hashes to filter by ({@code null} means to omit this filter)
+     * @param statuses the statuses to filter by ({@code null} means to omit this filter)
+     * @param order    the {@link Order} to return metadata of cache entries in
      * @return a stream of metadata of cache entries
      * @throws Exception if streaming fails
      */
     Stream<CacheEntryMetadata> streamCacheEntryMetadata(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
-                                                        boolean orderByTimestampAsc) throws Exception;
+                                                        Order order) throws Exception;
 
     /**
      * Updates status of cache entries from the underlying store that match the specified parameters. The operation
@@ -116,9 +135,10 @@ public interface Repository<K, V> extends Publisher<K, V> {
      * <b>Note:</b> Parameters expect conditional handling, see details below (filtering by discriminator must be
      * implicit).
      *
-     * @param statuses the statuses to filter by ({@code null} means to omit this filter)
+     * @param statuses     the statuses to filter by ({@code null} means to omit this filter)
+     * @param notOlderThan the timestamp to filter (not older cache entries) by ({@code null} means to omit this filter)
      * @return the count
      * @throws Exception if counting fails
      */
-    long countCacheEntries(@Nullable Set<Status> statuses) throws Exception;
+    long countCacheEntries(@Nullable Set<Status> statuses, @Nullable Instant notOlderThan) throws Exception;
 }

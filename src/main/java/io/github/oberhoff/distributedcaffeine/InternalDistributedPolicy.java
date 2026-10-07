@@ -33,6 +33,7 @@ import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNul
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireRepository;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_RETAINED_GROUP;
+import static io.github.oberhoff.distributedcaffeine.adapter.Repository.Order.UNORDERED;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
@@ -132,7 +133,7 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
                 () -> retaining.streamCacheEntries(
                         hasher.getHashes(keySet),
                         statuses,
-                        false)))) {
+                        UNORDERED)))) {
             return cacheEntryStream
                     .filter(cacheEntry -> nonNull(cacheEntry.getValue()))
                     .collect(Collectors.toSet());

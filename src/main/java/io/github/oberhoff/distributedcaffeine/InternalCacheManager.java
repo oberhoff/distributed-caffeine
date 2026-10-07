@@ -67,6 +67,8 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.E
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.INVALIDATED_REFRESHED_AFTER_WRITE;
+import static io.github.oberhoff.distributedcaffeine.adapter.Repository.Order.ASCENDING;
+import static io.github.oberhoff.distributedcaffeine.adapter.Repository.Order.UNORDERED;
 import static java.lang.String.format;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
@@ -215,7 +217,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                 () -> retaining.streamCacheEntries(
                         hashes,
                         EVICTED_RETAINED_GROUP,
-                        false)))) {
+                        UNORDERED)))) {
             //noinspection NullableProblems
             return cacheEntryStream
                     .filter(cacheEntry -> nonNull(cacheEntry.getValue()))
@@ -702,7 +704,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                 try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> retaining.streamCacheEntries(
                         null,
                         CACHED_GROUP,
-                        true))) {
+                        ASCENDING))) {
                     receiveCacheEntries(cacheEntryStream, Arrival.READ_BACK);
                 }
             }

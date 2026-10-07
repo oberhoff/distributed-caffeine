@@ -79,6 +79,9 @@ import static java.util.stream.Collectors.toUnmodifiableSet;
 final class PostgresRepository<K, V> extends AbstractRepository<K, V> {
 
     private static final Logger LOGGER = System.getLogger(PostgresRepository.class.getName());
+    // How many rows a stream fetches at a time: enough that a round trip is spent on many of them, few enough
+    // that a batch of cache entries with large values stays far from what holding all of them would cost
+    private static final int FETCH_SIZE = 1_000;
     // 0001-01-01T00:00:00Z, comfortably inside the range the column can represent
     private static final Instant EARLIEST = Instant.ofEpochSecond(-62135596800L);
     // SQL state class 40, transaction rollback: "40001" is a serialization failure and "40P01" a deadlock, and
@@ -332,20 +335,20 @@ final class PostgresRepository<K, V> extends AbstractRepository<K, V> {
 
     @Override
     public Stream<CacheEntry<K, V>> streamCacheEntries(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
-                                                       boolean orderByTimestampAsc) throws Exception {
-        return stream(select("*", hashes, statuses, orderByTimestampAsc), hashes, statuses,
+                                                       Order order) throws Exception {
+        return stream(select("*", hashes, statuses, order), hashes, statuses,
                 this::toCacheEntryOrNull);
     }
 
     @Override
     public Stream<CacheEntryMetadata> streamCacheEntryMetadata(@Nullable Set<String> hashes,
                                                                @Nullable Set<Status> statuses,
-                                                               boolean orderByTimestampAsc) throws Exception {
+                                                               Order order) throws Exception {
         // key and value are the columns this exists to avoid reading at all, so they are left out of the projection
         String projection = Stream.of(HASH, OPERATION, STATUS, TIMESTAMP)
                 .map(field -> quoted(field.toString()))
                 .collect(joining(", "));
-        return stream(select(projection, hashes, statuses, orderByTimestampAsc), hashes, statuses,
+        return stream(select(projection, hashes, statuses, order), hashes, statuses,
                 this::toCacheEntryMetadataOrNull);
     }
 
@@ -414,11 +417,17 @@ final class PostgresRepository<K, V> extends AbstractRepository<K, V> {
     }
 
     @Override
-    public long countCacheEntries(@Nullable Set<Status> statuses) throws Exception {
-        String sql = format("SELECT count(*) FROM %s %s", qualifiedTableName, where(null, statuses, null));
+    public long countCacheEntries(@Nullable Set<Status> statuses, @Nullable Instant notOlderThan) throws Exception {
+        // the lower bound is the one condition no other statement has, so it goes last, behind everything bind()
+        // binds, and is bound on its own
+        String sql = format("SELECT count(*) FROM %s %s%s", qualifiedTableName, where(null, statuses, null),
+                isNull(notOlderThan) ? "" : " AND " + quoted(TIMESTAMP.toString()) + " >= ?");
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
-            bind(connection, statement, 1, null, statuses, null);
+            int index = bind(connection, statement, 1, null, statuses, null);
+            if (nonNull(notOlderThan)) {
+                statement.setObject(index, toOffsetDateTime(notOlderThan), Types.TIMESTAMP_WITH_TIMEZONE);
+            }
             try (ResultSet resultSet = statement.executeQuery()) {
                 resultSet.next();
                 return resultSet.getLong(1);
@@ -461,14 +470,23 @@ final class PostgresRepository<K, V> extends AbstractRepository<K, V> {
     // Without an age to filter by, unlike the writing statements: what reads the store back is asked for hashes or
     // for statuses, never for what is older than a moment
     private String select(String projection, @Nullable Set<String> hashes, @Nullable Set<Status> statuses,
-                          boolean orderByTimestampAsc) {
+                          Order order) {
         return format("SELECT %s FROM %s %s%s", projection, qualifiedTableName, where(hashes, statuses, null),
-                orderByTimestampAsc ? " ORDER BY " + quoted(TIMESTAMP.toString()) + " ASC" : "");
+                switch (order) {
+                    case ASCENDING -> orderBy("ASC");
+                    case DESCENDING -> orderBy("DESC");
+                    case UNORDERED -> "";
+                });
+    }
+
+    private static String orderBy(String direction) {
+        return format(" ORDER BY %s %s", quoted(TIMESTAMP.toString()), direction);
     }
 
     // Bound in the order the conditions were spelled in, which is what ties the two together
-    private void bind(Connection connection, PreparedStatement statement, int index, @Nullable Set<String> hashes,
-                      @Nullable Set<Status> statuses, @Nullable Instant olderThan) throws SQLException {
+    // returns the index of the next parameter, for a statement that binds more behind these
+    private int bind(Connection connection, PreparedStatement statement, int index, @Nullable Set<String> hashes,
+                     @Nullable Set<Status> statuses, @Nullable Instant olderThan) throws SQLException {
         statement.setString(index++, discriminator);
         if (nonNull(hashes)) {
             statement.setArray(index++, connection.createArrayOf("text", hashes.toArray()));
@@ -479,17 +497,56 @@ final class PostgresRepository<K, V> extends AbstractRepository<K, V> {
                     .toArray()));
         }
         if (nonNull(olderThan)) {
-            statement.setObject(index, toOffsetDateTime(olderThan), Types.TIMESTAMP_WITH_TIMEZONE);
+            statement.setObject(index++, toOffsetDateTime(olderThan), Types.TIMESTAMP_WITH_TIMEZONE);
         }
+        return index;
     }
 
     // Lazily, so that reading the store back does not first copy it into memory. The caller closes the stream,
-    // which is what releases the result set, the statement and the connection behind it
+    // which is what releases the result set, the statement and the connection behind it.
+    // Lazy only inside a transaction: in autocommit mode the driver reads the whole result into memory before the
+    // first row is handed out, whatever fetch size is asked for, so a reader that stops early - pruning stops right
+    // after the records it may prune - would still have had every row sent, and reading a whole scope back would
+    // hold all of it at once. Inside a transaction the driver fetches a batch at a time, as the MongoDB driver does
+    // with its cursor. The difference to MongoDB is the snapshot the transaction holds until the stream is closed,
+    // which keeps vacuum from removing rows that died in the meantime; nothing here holds a stream open beyond
+    // reading it, and the connection was held for exactly as long before.
+    // Only where the result is not bounded already, though: asked for by hash, there is at most one row per hash -
+    // which is what delivering, reading the store on a miss and getFromStore ask, the paths a cache waits on - so
+    // there is nothing to fetch in batches, and the transaction would only add its rollback as a round trip to each
     private <T> Stream<T> stream(String sql, @Nullable Set<String> hashes, @Nullable Set<Status> statuses,
                                  RowReader<T> rowReader) throws SQLException {
         Connection connection = dataSource.getConnection();
+        boolean batched = isNull(hashes);
+        // reading only, so there is nothing to keep: ending it is a rollback, which ends the snapshot with it
+        AutoCloseable endTransaction = () -> {
+            if (batched) {
+                connection.rollback();
+                connection.setAutoCommit(true);
+            }
+        };
         try {
-            PreparedStatement statement = connection.prepareStatement(sql);
+            if (batched) {
+                connection.setAutoCommit(false);
+            }
+            return streamOf(connection, connection.prepareStatement(sql), batched, hashes, statuses, rowReader,
+                    () -> close(endTransaction, connection));
+        } catch (SQLException | RuntimeException e) {
+            close(endTransaction, connection);
+            throw e;
+        }
+    }
+
+    // Takes over the statement, which outlives this method and so cannot be in a try-with-resources: closing it is
+    // the stream's, once its caller is done with it, together with whatever the release closes. Until the stream
+    // exists, it is this method's, for whatever fails before that
+    private <T> Stream<T> streamOf(Connection connection, PreparedStatement statement, boolean batched,
+                                   @Nullable Set<String> hashes, @Nullable Set<Status> statuses,
+                                   RowReader<T> rowReader, AutoCloseable release) throws SQLException {
+        try {
+            if (batched) {
+                statement.setFetchSize(FETCH_SIZE);
+            }
             bind(connection, statement, 1, hashes, statuses, null);
             ResultSet resultSet = statement.executeQuery();
             Spliterator<T> spliterator = new Spliterators.AbstractSpliterator<>(Long.MAX_VALUE,
@@ -513,9 +570,9 @@ final class PostgresRepository<K, V> extends AbstractRepository<K, V> {
                 }
             };
             return StreamSupport.stream(spliterator, false)
-                    .onClose(() -> close(resultSet, statement, connection));
-        } catch (SQLException e) {
-            close(connection);
+                    .onClose(() -> close(resultSet, statement, release));
+        } catch (SQLException | RuntimeException e) {
+            close(statement);
             throw e;
         }
     }

@@ -53,6 +53,7 @@ import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
 import io.github.oberhoff.distributedcaffeine.adapter.Receiver;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
+import io.github.oberhoff.distributedcaffeine.adapter.Repository.Order;
 import io.github.oberhoff.distributedcaffeine.adapter.SerializerAware;
 import io.github.oberhoff.distributedcaffeine.adapter.Synchronizer;
 import io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoAdapter;
@@ -129,6 +130,7 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.C
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_SIZE;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_TIME;
 import static io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware.DEFAULT_DISCRIMINATOR;
+import static io.github.oberhoff.distributedcaffeine.adapter.Repository.Order.UNORDERED;
 import static java.time.temporal.ChronoUnit.FOREVER;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.SECONDS;
@@ -139,7 +141,6 @@ import static org.assertj.core.api.Assertions.assertThatException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anySet;
@@ -536,7 +537,7 @@ final class DistributedCaffeineUnitTests {
             when(adapter.getIdentifier()).thenReturn("policy.test");
             when(adapter.getPublisher()).thenReturn(repository);
             when(adapter.getRepository()).thenReturn(Optional.of(repository));
-            when(repository.streamCacheEntries(any(), any(), anyBoolean()))
+            when(repository.streamCacheEntries(any(), any(), any(Order.class)))
                     .thenAnswer(invocation -> Stream.empty());
             return adapter;
         }
@@ -680,7 +681,7 @@ final class DistributedCaffeineUnitTests {
             when(adapter.getIdentifier()).thenReturn("weigher.test");
             when(adapter.getPublisher()).thenReturn(repository);
             when(adapter.getRepository()).thenReturn(Optional.of(repository));
-            when(repository.streamCacheEntries(any(), any(), anyBoolean()))
+            when(repository.streamCacheEntries(any(), any(), any(Order.class)))
                     .thenAnswer(invocation -> Stream.empty());
             return adapter;
         }
@@ -754,7 +755,7 @@ final class DistributedCaffeineUnitTests {
             when(adapter.getIdentifier()).thenReturn("scheduler.test");
             when(adapter.getPublisher()).thenReturn(repository);
             when(adapter.getRepository()).thenReturn(Optional.of(repository));
-            when(repository.streamCacheEntries(any(), any(), anyBoolean()))
+            when(repository.streamCacheEntries(any(), any(), any(Order.class)))
                     .thenAnswer(invocation -> Stream.empty());
             return adapter;
         }
@@ -828,7 +829,7 @@ final class DistributedCaffeineUnitTests {
             when(adapter.getIdentifier()).thenReturn("expiry.test");
             when(adapter.getPublisher()).thenReturn(repository);
             when(adapter.getRepository()).thenReturn(Optional.of(repository));
-            when(repository.streamCacheEntries(any(), any(), anyBoolean()))
+            when(repository.streamCacheEntries(any(), any(), any(Order.class)))
                     .thenAnswer(invocation -> Stream.empty());
             return adapter;
         }
@@ -1155,7 +1156,7 @@ final class DistributedCaffeineUnitTests {
             when(adapter.getRepository()).thenReturn(Optional.of(repository));
             // answered rather than returned, so that every synchronization gets a stream of its own instead of
             // re-consuming one that an earlier one already closed
-            when(repository.streamCacheEntries(any(), any(), anyBoolean()))
+            when(repository.streamCacheEntries(any(), any(), any(Order.class)))
                     .thenAnswer(invocation -> Stream.empty());
             return adapter;
         }
@@ -1645,7 +1646,7 @@ final class DistributedCaffeineUnitTests {
 
             // what the query asks the store for is what decides whether the key and the value are read at all, which
             // no assertion on the returned metadata could tell (metadata never looks at those fields either way)
-            try (Stream<CacheEntryMetadata> stream = repository.streamCacheEntryMetadata(null, null, false)) {
+            try (Stream<CacheEntryMetadata> stream = repository.streamCacheEntryMetadata(null, null, UNORDERED)) {
                 assertThat(stream).isEmpty();
             }
             verify(findIterable, times(1)).projection(projectionCaptor.capture());
@@ -1656,7 +1657,7 @@ final class DistributedCaffeineUnitTests {
                     .doesNotContain(CacheEntry.Field.KEY.toString(), CacheEntry.Field.VALUE.toString());
 
             // a cache entry, in contrast, is read with all of its fields
-            try (Stream<CacheEntry<Key, Value>> stream = repository.streamCacheEntries(null, null, false)) {
+            try (Stream<CacheEntry<Key, Value>> stream = repository.streamCacheEntries(null, null, UNORDERED)) {
                 assertThat(stream).isEmpty();
             }
             verify(findIterable, times(2)).projection(projectionCaptor.capture());
@@ -2187,7 +2188,7 @@ final class DistributedCaffeineUnitTests {
             // The read-back has to find something. A mock hands back an empty stream of its own accord, and an
             // empty read-back is never handed on - so an assertion that nothing reached the receiver would hold
             // whatever the synchronizer did with the notification, which is no assertion at all
-            when(((Repository<Key, Value>) repository).streamCacheEntries(anySet(), any(), anyBoolean()))
+            when(((Repository<Key, Value>) repository).streamCacheEntries(anySet(), any(), any(Order.class)))
                     .thenAnswer(invocation -> Stream.of(CacheEntry.of("h1", "op1", Key.of(1), Value.of(1),
                             CACHED, Instant.now())));
             Constructor<?> constructor = Class.forName(SYNCHRONIZER_CLASS_NAME)

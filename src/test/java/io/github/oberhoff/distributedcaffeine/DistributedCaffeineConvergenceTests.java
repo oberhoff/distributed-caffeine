@@ -24,6 +24,7 @@ import io.github.oberhoff.distributedcaffeine.adapter.AbstractSynchronizer;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
+import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.common.Key;
 import io.github.oberhoff.distributedcaffeine.common.Value;
 import org.jspecify.annotations.NullMarked;
@@ -33,9 +34,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.lang.reflect.Method;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -53,8 +56,10 @@ import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_RETAINED_GROUP;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_SIZE_RETAINED;
+import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_TIME_RETAINED;
 import static java.lang.String.format;
-import static java.util.Comparator.comparing;
 import static java.util.Objects.isNull;
 import static java.util.stream.Collectors.toCollection;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -234,6 +239,181 @@ final class DistributedCaffeineConvergenceTests {
         } finally {
             stopped.distributedPolicy().stopSynchronization();
             evicting.distributedPolicy().stopSynchronization();
+        }
+    }
+
+    @DisplayName("Test that overlapping maintenance runs never prune evicted entries below their maximum size")
+    @ParameterizedTest(name = "with seed {0}")
+    @ValueSource(longs = {1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L, 19L, 20L,
+            21L, 22L, 23L, 24L, 25L, 26L, 27L, 28L, 29L, 30L, 31L, 32L})
+    void test_pruning_by_size_under_overlapping_maintenance(long seed) throws Exception {
+        // Every cache instance prunes the same records on its own schedule, so runs overlap, and between any two of
+        // the store calls one of them makes, another one may make any of its own - which is where pruning by size
+        // went wrong before, each run removing what a count it took earlier said was over. Here the runs are real
+        // threads, but each store call waits for its turn and the turns are drawn from the seed, so an interleaving
+        // that fails is the same one on every run of that seed. New evictions keep arriving meanwhile, and
+        // timestamps are drawn from a few milliseconds only, so that many of them coincide - the case where which
+        // records are the oldest is not decided by the order the store returns them in
+        Random random = new Random(seed);
+        int maximumSize = 1 + random.nextInt(4);
+        int runs = 2 + random.nextInt(3);
+        InMemoryBroker<Key, Value> broker = new InMemoryBroker<>();
+        AbstractAdapter<Key, Value> adapter = broker.newAdapter("in-memory-pruning");
+        DistributedCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
+                .withCaffeine(Caffeine.newBuilder().maximumSize(1))
+                .withPersistence(configurer -> configurer
+                        .withEvictedEntries(evictedEntries -> evictedEntries.withMaximumSize(maximumSize)))
+                .build();
+        // stopped, so that the cache instance's own scheduled maintenance stays out of it - what is driven below
+        // is the pruning step itself, which does not ask whether it is activated
+        cache.distributedPolicy().stopSynchronization();
+        Repository<Key, Value> repository = adapter.getRepository().orElseThrow();
+        InternalMaintenanceWorker<Key, Value> maintenanceWorker =
+                ((InternalDistributedCache<Key, Value>) cache).instanceRegistry.getMaintenanceWorker();
+        Method pruning = InternalMaintenanceWorker.class.getDeclaredMethod("processEvictedEntryPersistenceBySize");
+        pruning.setAccessible(true);
+        java.lang.reflect.Field repositoryField = InternalMaintenanceWorker.class.getDeclaredField("repository");
+        repositoryField.setAccessible(true);
+
+        Instant base = Instant.now();
+        int[] nextId = {0};
+        java.util.function.IntFunction<CacheEntry<Key, Value>> evicted = millis -> {
+            int id = nextId[0]++;
+            return CacheEntry.of("h" + id, null, Key.of(id), Value.of(id),
+                    random.nextBoolean() ? EVICTED_SIZE_RETAINED : EVICTED_TIME_RETAINED, base.plusMillis(millis));
+        };
+        int initial = maximumSize + 1 + random.nextInt(6);
+        List<CacheEntry<Key, Value>> seeded = new ArrayList<>();
+        for (int index = 0; index < initial; index++) {
+            seeded.add(evicted.apply(random.nextInt(4)));
+        }
+        repository.publishCacheEntries(seeded);
+
+        List<String> history = new ArrayList<>();
+        Interleaving interleaving = new Interleaving();
+        repositoryField.set(maintenanceWorker, interleaving.stepping(repository));
+        List<Thread> threads = new ArrayList<>();
+        List<Throwable> failures = java.util.Collections.synchronizedList(new ArrayList<>());
+        for (int run = 0; run < runs; run++) {
+            Thread thread = new Thread(() -> {
+                try {
+                    pruning.invoke(maintenanceWorker);
+                } catch (Throwable throwable) {
+                    failures.add(throwable);
+                } finally {
+                    interleaving.finish();
+                }
+            }, Interleaving.RUN_PREFIX + run);
+            threads.add(thread);
+        }
+        threads.forEach(Thread::start);
+        try {
+            int newest = 4;
+            for (List<Thread> parked = interleaving.awaitQuiescence(runs); !parked.isEmpty();
+                 parked = interleaving.awaitQuiescence(runs)) {
+                if (random.nextInt(4) == 0) {
+                    // newer than or as new as anything there, as evictions are
+                    newest += random.nextInt(2);
+                    repository.publishCacheEntries(List.of(evicted.apply(newest)));
+                    history.add("evicted one more");
+                }
+                Thread next = parked.get(random.nextInt(parked.size()));
+                history.add(next.getName() + " " + interleaving.pendingCallOf(next));
+                interleaving.release(next);
+                interleaving.awaitQuiescence(runs);
+                assertThat(repository.countCacheEntries(EVICTED_RETAINED_GROUP, null))
+                        .describedAs("retained evicted entries (maximum %d) after%n  %s", maximumSize,
+                                String.join(System.lineSeparator() + "  ", history))
+                        .isGreaterThanOrEqualTo(maximumSize);
+            }
+            for (Thread thread : threads) {
+                thread.join();
+            }
+            assertThat(failures).isEmpty();
+
+            // and on its own, a run prunes to exactly the maximum
+            repositoryField.set(maintenanceWorker, repository);
+            pruning.invoke(maintenanceWorker);
+            assertThat(repository.countCacheEntries(EVICTED_RETAINED_GROUP, null))
+                    .describedAs("retained evicted entries after a run on its own, after%n  %s",
+                            String.join(System.lineSeparator() + "  ", history))
+                    .isEqualTo(maximumSize);
+        } finally {
+            threads.forEach(Thread::interrupt);
+        }
+    }
+
+    // Lets one thread at a time through to the store, and only the one the test picks: every call to the stepping
+    // repository parks its thread until released, so between any two store calls of one run the test decides who
+    // goes next
+    private static final class Interleaving {
+
+        private static final String RUN_PREFIX = "run-";
+
+        private final Object lock = new Object();
+        private final Map<Thread, String> parked = new LinkedHashMap<>();
+        private int finished;
+
+        @SuppressWarnings("unchecked")
+        private <K, V> Repository<K, V> stepping(Repository<K, V> repository) {
+            return (Repository<K, V>) java.lang.reflect.Proxy.newProxyInstance(Repository.class.getClassLoader(),
+                    new Class<?>[]{Repository.class}, (proxy, method, arguments) -> {
+                        // only the runs under test take turns: anything else reaching the store this way - the
+                        // cache instance's own maintenance winding down, say - is not part of the interleaving
+                        if (method.getDeclaringClass() != Object.class
+                                && Thread.currentThread().getName().startsWith(RUN_PREFIX)) {
+                            step(method.getName());
+                        }
+                        try {
+                            return method.invoke(repository, arguments);
+                        } catch (java.lang.reflect.InvocationTargetException e) {
+                            throw e.getCause();
+                        }
+                    });
+        }
+
+        private void step(String call) throws InterruptedException {
+            synchronized (lock) {
+                Thread thread = Thread.currentThread();
+                parked.put(thread, call);
+                lock.notifyAll();
+                while (parked.containsKey(thread)) {
+                    lock.wait();
+                }
+            }
+        }
+
+        private void finish() {
+            synchronized (lock) {
+                finished++;
+                lock.notifyAll();
+            }
+        }
+
+        // the parked threads once every thread is either parked or done, in a stable order so that the seed alone
+        // decides which one is picked
+        private List<Thread> awaitQuiescence(int threads) throws InterruptedException {
+            synchronized (lock) {
+                while (parked.size() + finished < threads) {
+                    lock.wait();
+                }
+                return parked.keySet().stream()
+                        .sorted(Comparator.comparing(Thread::getName))
+                        .toList();
+            }
+        }
+
+        private String pendingCallOf(Thread thread) {
+            synchronized (lock) {
+                return parked.get(thread);
+            }
+        }
+
+        private void release(Thread thread) {
+            synchronized (lock) {
+                parked.remove(thread);
+                lock.notifyAll();
+            }
         }
     }
 
@@ -495,15 +675,15 @@ final class DistributedCaffeineConvergenceTests {
             @Override
             public Stream<CacheEntry<K, V>> streamCacheEntries(@Nullable Set<String> hashes,
                                                                @Nullable Set<Status> statuses,
-                                                               boolean orderByTimestampAsc) {
-                return matching(hashes, statuses, null, orderByTimestampAsc);
+                                                               Order order) {
+                return matching(hashes, statuses, null, order);
             }
 
             @Override
             public Stream<CacheEntryMetadata> streamCacheEntryMetadata(@Nullable Set<String> hashes,
                                                                        @Nullable Set<Status> statuses,
-                                                                       boolean orderByTimestampAsc) {
-                return matching(hashes, statuses, null, orderByTimestampAsc)
+                                                                       Order order) {
+                return matching(hashes, statuses, null, order)
                         .map(cacheEntry -> CacheEntryMetadata.of(cacheEntry.getHash(), cacheEntry.getOperation(),
                                 cacheEntry.getStatus(), cacheEntry.getTimestamp()));
             }
@@ -511,7 +691,7 @@ final class DistributedCaffeineConvergenceTests {
             @Override
             public void updateStatusOfCacheEntries(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
                                                    @Nullable Instant olderThan, Status newStatus) {
-                matching(hashes, statuses, olderThan, false)
+                matching(hashes, statuses, olderThan, Order.UNORDERED)
                         .toList()
                         .forEach(cacheEntry -> broker.retained.put(cacheEntry.getHash(), CacheEntry.of(
                                 cacheEntry.getHash(), null, cacheEntry.getKey(), cacheEntry.getValue(),
@@ -521,25 +701,31 @@ final class DistributedCaffeineConvergenceTests {
             @Override
             public void deleteCacheEntries(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
                                            @Nullable Instant olderThan) {
-                matching(hashes, statuses, olderThan, false)
+                matching(hashes, statuses, olderThan, Order.UNORDERED)
                         .toList()
                         .forEach(cacheEntry -> broker.retained.remove(cacheEntry.getHash()));
             }
 
             @Override
-            public long countCacheEntries(@Nullable Set<Status> statuses) {
-                return matching(null, statuses, null, false).count();
+            public long countCacheEntries(@Nullable Set<Status> statuses, @Nullable Instant notOlderThan) {
+                return matching(null, statuses, null, Order.UNORDERED)
+                        .filter(cacheEntry -> isNull(notOlderThan)
+                                || !cacheEntry.getTimestamp().isBefore(notOlderThan))
+                        .count();
             }
 
             private Stream<CacheEntry<K, V>> matching(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
-                                                      @Nullable Instant olderThan, boolean orderByTimestampAsc) {
+                                                      @Nullable Instant olderThan, Order order) {
                 Stream<CacheEntry<K, V>> matching = List.copyOf(broker.retained.values()).stream()
                         .filter(cacheEntry -> isNull(hashes) || hashes.contains(cacheEntry.getHash()))
                         .filter(cacheEntry -> isNull(statuses) || statuses.contains(cacheEntry.getStatus()))
                         .filter(cacheEntry -> isNull(olderThan) || cacheEntry.getTimestamp().isBefore(olderThan));
-                return orderByTimestampAsc
-                        ? matching.sorted(comparing(CacheEntry::getTimestamp))
-                        : matching;
+                Comparator<CacheEntry<K, V>> oldestFirst = Comparator.comparing(CacheEntry::getTimestamp);
+                return switch (order) {
+                    case ASCENDING -> matching.sorted(oldestFirst);
+                    case DESCENDING -> matching.sorted(oldestFirst.reversed());
+                    case UNORDERED -> matching;
+                };
             }
         }
 

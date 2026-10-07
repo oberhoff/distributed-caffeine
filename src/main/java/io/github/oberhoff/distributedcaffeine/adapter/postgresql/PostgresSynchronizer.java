@@ -42,6 +42,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
+import static io.github.oberhoff.distributedcaffeine.adapter.Repository.Order.UNORDERED;
 import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.util.Objects.nonNull;
@@ -251,7 +252,7 @@ final class PostgresSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
 
     private Stream<CacheEntry<K, V>> streamOf(Set<String> hashes) throws SQLException {
         try {
-            return repository.streamCacheEntries(hashes, null, false);
+            return repository.streamCacheEntries(hashes, null, UNORDERED);
         } catch (SQLException e) {
             throw e;
         } catch (Exception e) {

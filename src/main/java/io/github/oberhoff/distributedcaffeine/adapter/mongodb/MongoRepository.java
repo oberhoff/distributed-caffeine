@@ -65,6 +65,7 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field.ST
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field.TIMESTAMP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field.VALUE;
 import static java.lang.String.format;
+import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toSet;
@@ -123,8 +124,8 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
 
     @Override
     public Stream<CacheEntry<K, V>> streamCacheEntries(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
-                                                       boolean orderByTimestampAsc) {
-        return streamDocuments(hashes, statuses, orderByTimestampAsc, ALL_FIELDS_PROJECTION)
+                                                       Order order) {
+        return streamDocuments(hashes, statuses, order, ALL_FIELDS_PROJECTION)
                 .map(document -> toCacheEntryOrNull(keySerializer, valueSerializer, document, LOGGER, identifier))
                 .filter(Objects::nonNull);
     }
@@ -132,18 +133,20 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
     @Override
     public Stream<CacheEntryMetadata> streamCacheEntryMetadata(@Nullable Set<String> hashes,
                                                                @Nullable Set<Status> statuses,
-                                                               boolean orderByTimestampAsc) {
-        return streamDocuments(hashes, statuses, orderByTimestampAsc, METADATA_FIELDS_PROJECTION)
+                                                               Order order) {
+        return streamDocuments(hashes, statuses, order, METADATA_FIELDS_PROJECTION)
                 .map(document -> toCacheEntryMetadataOrNull(document, identifier))
                 .filter(Objects::nonNull);
     }
 
     private Stream<Document> streamDocuments(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
-                                             boolean orderByTimestampAsc, Bson projection) {
+                                             Order order, Bson projection) {
         Bson filter = getFilter(hashes, statuses, null);
-        Bson sort = orderByTimestampAsc
-                ? Sorts.ascending(TIMESTAMP.toString())
-                : null;
+        Bson sort = switch (order) {
+            case ASCENDING -> Sorts.ascending(TIMESTAMP.toString());
+            case DESCENDING -> Sorts.descending(TIMESTAMP.toString());
+            case UNORDERED -> null;
+        };
         MongoCursor<Document> mongoCursor = mongoCollection
                 .find(filter)
                 .projection(projection)
@@ -171,8 +174,10 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
     }
 
     @Override
-    public long countCacheEntries(@Nullable Set<Status> statuses) {
-        Bson filter = getFilter(null, statuses, null);
+    public long countCacheEntries(@Nullable Set<Status> statuses, @Nullable Instant notOlderThan) {
+        Bson filter = isNull(notOlderThan)
+                ? getFilter(null, statuses, null)
+                : Filters.and(getFilter(null, statuses, null), Filters.gte(TIMESTAMP.toString(), notOlderThan));
         return mongoCollection.countDocuments(filter);
     }
 
@@ -186,7 +191,8 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
     //   most that many documents, so a wider index adding status and timestamp behind the hash buys nothing.
     // - (discriminator, status, timestamp) serves everything filtering by status, with the timestamp trailing so
     //   that it can be used for the range filter as well as for the ordering (the status filter is a set, which
-    //   the server expands into one sorted index range per status and merges, so no blocking sort is needed).
+    //   the server expands into one sorted index range per status and merges, so no blocking sort is needed - in
+    //   either direction, since an index is walked backwards just as well).
     private void ensureIndexes() {
         IndexModel indexDiscriminatorHash = new IndexModel(
                 Indexes.compoundIndex(
