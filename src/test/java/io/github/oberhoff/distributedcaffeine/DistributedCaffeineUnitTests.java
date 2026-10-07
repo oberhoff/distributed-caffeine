@@ -1802,7 +1802,7 @@ final class DistributedCaffeineUnitTests {
             // migration tool called this, a schema with a space in it, one that is not ASCII at all. Refusing
             // them here would have bought nothing and shut out every such schema
             Stream.of("public", "_leading", "with_underscore", "With$Dollar", "a1", "cache-entries", "has space",
-                            "1leading", "a.b", "Gro\u00dfschreibung", "\u30ad\u30e3\u30c3\u30b7\u30e5")
+                            "1leading", "a.b", "Großschreibung", "キャッシュ")
                     .forEach(name -> assertThatCode(() -> PostgresAdapter.newBuilder(dataSource, name, name))
                             .doesNotThrowAnyException());
 

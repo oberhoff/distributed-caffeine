@@ -211,7 +211,6 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
-import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 @DisplayName("Distributed Caffeine Integration Test Suite")
@@ -4978,8 +4977,8 @@ final class DistributedCaffeineIntegrationTests {
             // The same order the cache loader strategy states, for the entry point a cache built without a cache
             // loader has instead - and the only one it has, so without this strategy its retained evicted cache
             // entries are reachable through getFromStore alone
-        void test_EvictedEntryPersistence_with_the_mapping_function_strategy_reads_the_store_first() throws Exception {
-            @SuppressWarnings("Convert2Lambda")
+        void test_EvictedEntryPersistence_with_the_mapping_function_strategy_reads_the_store_first() {
+            @SuppressWarnings({"Convert2Lambda", "java:S9357"})
             Function<Key, Value> mappingFunction = spy(new Function<Key, Value>() {
                 @Override
                 public Value apply(Key key) {
@@ -4987,7 +4986,7 @@ final class DistributedCaffeineIntegrationTests {
                 }
             });
 
-            DistributedCache<Key, Value> distributedCache = this.<Key, Value>createCache(
+            DistributedCache<Key, Value> distributedCache = createCache(
                     dc -> dc.withCaffeine(Caffeine.newBuilder().maximumSize(1))
                             .withPersistence(configurer -> configurer
                                     .withEvictedEntries(evictedEntries -> evictedEntries
@@ -5026,8 +5025,8 @@ final class DistributedCaffeineIntegrationTests {
             // getAll is read in one go just like loadAll is: the mapping function sees what the store could not
             // supply and is not applied at all when that leaves nothing, which is what the second read asserts by
             // the function being untouched while both values still arrive
-        void test_EvictedEntryPersistence_with_the_mapping_function_strategy_maps_the_remainder() throws Exception {
-            @SuppressWarnings("Convert2Lambda")
+        void test_EvictedEntryPersistence_with_the_mapping_function_strategy_maps_the_remainder() {
+            @SuppressWarnings({"Convert2Lambda", "java:S9357"})
             Function<Set<? extends Key>, Map<Key, Value>> mappingFunction =
                     spy(new Function<Set<? extends Key>, Map<Key, Value>>() {
                         @Override
@@ -5038,7 +5037,7 @@ final class DistributedCaffeineIntegrationTests {
                         }
                     });
 
-            DistributedCache<Key, Value> distributedCache = this.<Key, Value>createCache(
+            DistributedCache<Key, Value> distributedCache = createCache(
                     dc -> dc.withCaffeine(Caffeine.newBuilder().maximumSize(10))
                             .withPersistence(configurer -> configurer
                                     .withEvictedEntries(evictedEntries -> evictedEntries
@@ -5090,12 +5089,11 @@ final class DistributedCaffeineIntegrationTests {
 
         @DisplayName("Test that the mapping function strategy does not reach the computing methods of the map view")
         @Test
+        void test_EvictedEntryPersistence_with_the_mapping_function_strategy_does_not_reach_the_map_view() {
             // The map view answers from the content of that map alone, which is both its own contract and what
             // Caffeine does with a cache loader - so the function is applied to a key the store holds, and the
             // value says which of the two it came from
-        void test_EvictedEntryPersistence_with_the_mapping_function_strategy_does_not_reach_the_map_view()
-                throws Exception {
-            DistributedCache<Key, Value> distributedCache = this.<Key, Value>createCache(
+            DistributedCache<Key, Value> distributedCache = createCache(
                     dc -> dc.withCaffeine(Caffeine.newBuilder().maximumSize(1))
                             .withPersistence(configurer -> configurer
                                     .withEvictedEntries(evictedEntries -> evictedEntries
@@ -6458,9 +6456,8 @@ final class DistributedCaffeineIntegrationTests {
             // The sweep runs before anything is published, so this is the only place its failure can be counted -
             // exactly as on the loading path. Left unguarded it would pay the timeout on every call, forever
             for (int sweep = 1; sweep <= 3; sweep++) {
-                int attempt = sweep;
                 assertThatThrownBy(distributedCache::invalidateAll)
-                        .as("sweep %d, which is still asking the store", attempt)
+                        .as("sweep %d, which is still asking the store", sweep)
                         .hasMessageContaining("provoked");
             }
 
@@ -6527,7 +6524,6 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(distributedCache.distributedPolicy().getSynchronizationState())
                     .isEqualTo(SynchronizationState.STOPPED);
         }
-
 
 
         @DisplayName("Test MaintenanceWorker")

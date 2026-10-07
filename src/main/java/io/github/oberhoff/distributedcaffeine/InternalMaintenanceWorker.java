@@ -240,14 +240,21 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
         });
     }
 
+    // How far back a retention of this length reaches, saturating instead of overflowing: a maximum amount of time
+    // longer than the epoch is a legitimate way of saying "keep everything" (the tests use it), and subtracting it
+    // from now would run off the start of the instant range rather than widening the window
+    private static Instant deadlineOf(Duration maximumTime, Duration distributionDuration) {
+        Instant now = Instant.now().minus(distributionDuration);
+        Instant min = Instant.ofEpochMilli(Long.MIN_VALUE);
+        return maximumTime.compareTo(Duration.between(min, now)) > 0
+                ? min
+                : now.minus(maximumTime);
+    }
+
     private void processCachedEntryPersistenceByTime(Duration distributionDuration) {
         cachedEntryPersistenceConfigurer.getMaximumTime().ifPresent(maximumTime -> {
             Repository<K, V> retaining = requireRepository(repository, identifier);
-            Instant now = Instant.now().minus(distributionDuration);
-            Instant min = Instant.ofEpochMilli(Long.MIN_VALUE);
-            Instant deadline = maximumTime.compareTo(Duration.between(min, now)) > 0
-                    ? min
-                    : now.minus(maximumTime);
+            Instant deadline = deadlineOf(maximumTime, distributionDuration);
             runFailable(() -> retaining.deleteCacheEntries(null, CACHED_GROUP, deadline));
         });
     }
@@ -282,11 +289,7 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
     private void processEvictedEntryPersistenceByTime(Duration distributionDuration) {
         evictedEntryPersistenceConfigurer.getMaximumTime().ifPresent(maximumTime -> {
             Repository<K, V> retaining = requireRepository(repository, identifier);
-            Instant now = Instant.now().minus(distributionDuration);
-            Instant min = Instant.ofEpochMilli(Long.MIN_VALUE);
-            Instant deadline = maximumTime.compareTo(Duration.between(min, now)) > 0
-                    ? min
-                    : now.minus(maximumTime);
+            Instant deadline = deadlineOf(maximumTime, distributionDuration);
             // transition the status (instead of hard delete)
             runFailable(() -> retaining.updateStatusOfCacheEntries(null,
                     EVICTED_RETAINED_GROUP, deadline, pruningStatus()));
