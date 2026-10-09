@@ -487,10 +487,10 @@ final class PostgresListener {
         // the channel stays listened to once probed, because it is what the session is woken through from now on
         if (!probed && !isClosed()) {
             throw new SQLException(format("A notification sent through the data source did not reach the "
-                    + "listening connection within %d seconds. Listening needs a session of its own on the server "
-                    + "the data source writes to, which a pooler in transaction mode or a connection to another "
-                    + "server or database does not provide - see PostgresAdapter.Builder#withListenerDataSource "
-                    + "for listening through a direct or session-mode connection",
+                            + "listening connection within %d seconds. Listening needs a session of its own on the server "
+                            + "the data source writes to, which a pooler in transaction mode or a connection to another "
+                            + "server or database does not provide - see PostgresAdapter.Builder#withListenerDataSource "
+                            + "for listening through a direct or session-mode connection",
                     settings.probeTimeout().toSeconds()), "55000");
         }
         return arrived;

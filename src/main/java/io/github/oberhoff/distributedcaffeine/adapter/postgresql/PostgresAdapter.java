@@ -40,7 +40,7 @@ import static java.util.Objects.requireNonNull;
 public final class PostgresAdapter<K, V> extends AbstractAdapter<K, V> {
 
     /**
-     * Modes that define how cache instances share the connection they listen for notifications on.
+     * Modes that define how cache instances share connections they listen for notifications on.
      * <p>
      * Listening holds a connection for as long as a cache instance synchronizes - a session of its own on the server,
      * subscribed to the channels of the cache instances it serves. Sharing reduces the number of those connections and
@@ -58,18 +58,19 @@ public final class PostgresAdapter<K, V> extends AbstractAdapter<K, V> {
     public enum ListenerSharingMode {
 
         /**
-         * Every cache instance listens on a connection of its own (no sharing).
+         * Every cache instance uses a connection of its own to listen for notifications on (no sharing).
          */
         INSTANCE,
 
         /**
-         * Cache instances on the same table share one connection, whatever their discriminator.
+         * Cache instances on the same table share one connection to listen for notifications on, whatever their
+         * discriminator.
          */
         TABLE,
 
         /**
-         * Cache instances on the same database share one connection, whatever their table. This is the default
-         * listener sharing mode.
+         * Cache instances on the same database share one connection to listen for notifications on, whatever their
+         * table. This is the default listener sharing mode.
          */
         DATABASE
     }
@@ -156,6 +157,21 @@ public final class PostgresAdapter<K, V> extends AbstractAdapter<K, V> {
         }
 
         /**
+         * Specifies the mode that defines how cache instances share connections they listen for notifications on.
+         * <p>
+         * <b>Note:</b> {@link ListenerSharingMode#DATABASE} is used as default if this method is skipped.
+         *
+         * @param listenerSharingMode listener sharing mode defining how cache instances share connections they listen
+         *                            for notifications on
+         * @return a builder pattern instance for chaining additional methods
+         */
+        public Builder withListenerSharingMode(ListenerSharingMode listenerSharingMode) {
+            requireNonNull(listenerSharingMode, "listenerSharingMode cannot be null");
+            this.listenerSharingMode = listenerSharingMode;
+            return this;
+        }
+
+        /**
          * Specifies a separate data source for the connection the adapter listens for notifications on, while
          * reading and writing keep using the data source passed to
          * {@link PostgresAdapter#newBuilder(DataSource, String, String)}.
@@ -178,21 +194,6 @@ public final class PostgresAdapter<K, V> extends AbstractAdapter<K, V> {
         public Builder withListenerDataSource(DataSource listenerDataSource) {
             requireNonNull(listenerDataSource, "listenerDataSource cannot be null");
             this.listenerDataSource = listenerDataSource;
-            return this;
-        }
-
-        /**
-         * Specifies the mode that defines how cache instances share the connection they listen for notifications on.
-         * <p>
-         * <b>Note:</b> {@link ListenerSharingMode#DATABASE} is used as default if this method is skipped.
-         *
-         * @param listenerSharingMode listener sharing mode defining how cache instances share the connection they
-         *                            listen for notifications on
-         * @return a builder pattern instance for chaining additional methods
-         */
-        public Builder withListenerSharingMode(ListenerSharingMode listenerSharingMode) {
-            requireNonNull(listenerSharingMode, "listenerSharingMode cannot be null");
-            this.listenerSharingMode = listenerSharingMode;
             return this;
         }
 

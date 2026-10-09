@@ -56,7 +56,6 @@ final class PostgresSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
     private static final Logger LOGGER = System.getLogger(PostgresSynchronizer.class.getName());
 
     private static final Duration RETRY_INTERVAL = Duration.ofSeconds(1);
-    private static final Duration ACTIVATION_TIMEOUT = Duration.ofSeconds(30);
     // hashes read back in one statement, so that a burst does not turn into an arbitrarily long IN-list
     private static final int MAXIMUM_BATCH_SIZE = 500;
 
@@ -72,24 +71,28 @@ final class PostgresSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
     // exactly like one on which nothing is published, and would keep being polled forever. Fields rather than
     // constants only so that a test can shorten them before activation instead of waiting them out - and taken
     // over by the session only from the cache instance that opens it
-    @SuppressWarnings("FieldMayBeFinal")
+    @SuppressWarnings({"FieldMayBeFinal", "CanBeFinal"})
     private Duration heartbeatInterval = Duration.ofSeconds(10);
-    @SuppressWarnings("FieldMayBeFinal")
+    @SuppressWarnings({"FieldMayBeFinal", "CanBeFinal"})
     private Duration heartbeatTimeout = Duration.ofSeconds(5);
     // How long a probe sent through the data source writes use gets to arrive at the listening connection before
     // listening is considered not to work. A field for the same reason as the two above
-    @SuppressWarnings("FieldMayBeFinal")
+    @SuppressWarnings({"FieldMayBeFinal", "CanBeFinal"})
     private Duration probeTimeout = Duration.ofSeconds(5);
     // How long a single poll may stay inside the driver before the connection is aborted from outside - see the
     // watchdog of the listener. Far above what a poll takes, so that it only ever fires on a thread that is stuck.
     // A field for the same reason as the ones above
-    @SuppressWarnings("FieldMayBeFinal")
+    @SuppressWarnings({"FieldMayBeFinal", "CanBeFinal"})
     private Duration watchdogTimeout = Duration.ofSeconds(30);
     // How many hashes may wait to be read back before this cache instance is considered to have fallen behind -
     // at which point they are dropped and the cache instance is reconciled instead, so that falling behind costs
     // a reconcile rather than memory without bound. A field for the same reason as the ones above
-    @SuppressWarnings({"FieldMayBeFinal", "FieldCanBeLocal"})
+    @SuppressWarnings({"FieldMayBeFinal", "CanBeFinal", "FieldCanBeLocal"})
     private int pendingLimit = 10_000;
+    // How long activating waits for the listening session to take this cache instance in - which, while a shared
+    // session is being replaced, includes waiting for it to come back. A field for the same reason as the ones above
+    @SuppressWarnings({"FieldMayBeFinal", "CanBeFinal", "FieldCanBeLocal"})
+    private Duration activationTimeout = Duration.ofSeconds(30);
 
     private final AtomicReference<@Nullable Subscription> subscription = new AtomicReference<>();
 
@@ -123,7 +126,7 @@ final class PostgresSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
             replaced.close();
         }
         try {
-            listener.subscribe(activated).get(ACTIVATION_TIMEOUT.toSeconds(), TimeUnit.SECONDS);
+            listener.subscribe(activated).get(activationTimeout.toMillis(), TimeUnit.MILLISECONDS);
             activated.confirm();
         } catch (Exception e) {
             activated.close();
@@ -192,6 +195,10 @@ final class PostgresSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
 
         @Override
         public synchronized void receiveHashes(Set<String> hashes) {
+            // handed over in the moment between closing and the listener taking the leaving into account
+            if (isClosed()) {
+                return;
+            }
             pending.addAll(hashes);
             if (pending.size() > pendingLimit) {
                 pending = new LinkedHashSet<>();
