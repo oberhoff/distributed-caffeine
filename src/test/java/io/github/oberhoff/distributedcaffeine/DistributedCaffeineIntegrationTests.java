@@ -32,6 +32,7 @@ import com.mongodb.ExplainVerbosity;
 import com.mongodb.MongoClientException;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.MongoCommandException;
+import com.mongodb.MongoTimeoutException;
 import com.mongodb.ReadConcern;
 import com.mongodb.ReadConcernLevel;
 import com.mongodb.client.FindIterable;
@@ -57,6 +58,7 @@ import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository.Order;
 import io.github.oberhoff.distributedcaffeine.adapter.Synchronizer;
 import io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoAdapter;
+import io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoAdapter.WatcherSharingMode;
 import io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresAdapter;
 import io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresAdapter.ListenerSharingMode;
 import io.github.oberhoff.distributedcaffeine.common.DistributedCaffeineCommonTestInstance;
@@ -131,9 +133,9 @@ import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TimeZone;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
@@ -141,6 +143,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -452,7 +455,6 @@ final class DistributedCaffeineIntegrationTests {
 
     @SuppressWarnings({"java:S5838", "java:S5778", "java:S5961", "ResultOfMethodCallIgnored", "DataFlowIssue"})
     abstract static class CommonIntegration extends DistributedCaffeineIntegrationTestInstance {
-
         @DisplayName("Test put() and getIfPresent()")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentSerializers")
@@ -854,7 +856,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
                 @Override
                 @SuppressWarnings("RedundantThrows")
-                public Value load(@NonNull Key key) throws Exception {
+                public Value load(@NonNull Key key) {
                     throw new UnsupportedOperationException(); // ensure load() is never invoked
                 }
 
@@ -4541,6 +4543,374 @@ final class DistributedCaffeineIntegrationTests {
             }
         }
 
+        @DisplayName("Test that cached entries are not retained without a synchronization strategy")
+        @Test
+        void test_CachedEntryPersistence_cache_entries_are_not_retained() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+
+            distributedCache.put(key1, value1);
+
+            // the cache entry is written either way - that is how it is distributed at all. What differs is only
+            // whether it is retained beyond that, which is why getFromStore reports nothing even now, while the
+            // cache entry is demonstrably there: it answers what persistence keeps, not what a write left behind
+            await("distribution to data store")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        assertThatDataStoreHasCounts(
+                                Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
+                        assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+                    });
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(0)));
+            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+
+            // swept from the data store, but not withdrawn from the cache instances holding it: a delete is not
+            // reported as a change stream event, so the cache keeps serving what it has
+            assertThat(distributedCache.getIfPresent(key1)).isEqualTo(value1);
+        }
+
+        @DisplayName("Test that synchronization starts empty without a synchronization strategy")
+        @Test
+        void test_CachedEntryPersistence_synchronization_starts_empty() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+
+            distributedCache.put(key1, value1);
+
+            await("distribution to data store")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(1))));
+
+            distributedCache.distributedPolicy().stopSynchronization();
+            distributedCache.distributedPolicy().startSynchronization();
+
+            // nothing is read back, so nothing clears the marks and the cache is emptied rather than reconciled -
+            // even though the data store still happens to hold the cache entry at this point
+            assertThat(distributedCache.asMap()).isEmpty();
+        }
+
+        @DisplayName("Test persistence of cached entries with a cold start")
+        @Test
+        void test_CachedEntryPersistence_with_cold_start() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    // retained, but deliberately not read back - the one configuration where the underlying store
+                    // outlives what any cache instance holds without anything taking ownership of it again
+                    dc -> dc.withPersistence(configurer -> configurer
+                            .withCachedEntries(cachedEntries -> cachedEntries
+                                    .withMaximumTime(FOREVER.getDuration())
+                                    .withColdStart())),
+                    DistributedCaffeine::build);
+            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+
+            distributedCache.put(key1, value1);
+
+            await("distribution to data store")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(1))));
+
+            distributedPolicy.stopSynchronization();
+            distributedPolicy.startSynchronization();
+
+            // the retention holds, so what is asserted here is the cold start alone and not that the cache entry
+            // was swept: it is still there to be read, just not by this cache instance
+            assertThat(distributedCache.asMap()).isEmpty();
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
+            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull();
+
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
+        }
+
+        @DisplayName("Test that population is still distributed without a synchronization strategy")
+        @Test
+        void test_CachedEntryPersistence_population_is_still_distributed() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> syncedDistributedCache = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+
+            distributedCache.put(key1, value1);
+
+            // retaining cache entries and distributing them are different matters: without a synchronization
+            // strategy the data store is only a medium, and warming other cache instances still works through it
+            await("synchronization between cache instances")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() ->
+                            assertThat(syncedDistributedCache.getIfPresent(key1)).isEqualTo(value1));
+        }
+
+        @DisplayName("Test evicted cache entry persistence without a synchronization strategy")
+        @Test
+        void test_CachedEntryPersistence_without_strategy_but_with_evicted_entry_persistence() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
+                                    .maximumSize(1))
+                            .withPersistence(configurer -> configurer
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withMaximumSize(10))),
+                    DistributedCaffeine::build);
+            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+            Key key2 = Key.of(2);
+
+            distributedCache.put(key1, value1);
+            distributedCache.put(key2, Value.of(2));
+            distributedCache.cleanUp(); // evicts key1, which evicted entry persistence keeps reloadable
+
+            await("passivation")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull());
+
+            // read rather than asserted: a maximum size of one is degenerate enough for Caffeine to deny admission
+            // to both entries, so how many end up evicted is none of this test's business - only that the sweep
+            // below leaves however many there are untouched
+            Repository<?, ?> repository = repositoryOf(distributedCache);
+            long evictedCountBeforeMaintenance = getFailable(() ->
+                    repository.countCacheEntries(EVICTED_RETAINED_GROUP, null));
+            assertThat(evictedCountBeforeMaintenance).isPositive();
+
+            processMaintenance();
+
+            // the two tiers are retained independently: cached entries are swept along with the removals
+            // ones, whereas evicted ones are kept for as long as their own bound allows - so the underlying store
+            // ends up holding exactly what memory does not
+            assertThatDataStoreHasCounts(
+                    CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(0)),
+                    CountGrouped.of(EVICTED_RETAINED_GROUP,
+                            assertion -> assertion.isEqualTo(evictedCountBeforeMaintenance)));
+            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull();
+        }
+
+        @DisplayName("Test persistence of cached entries with cache residency")
+        @Test
+        void test_CachedEntryPersistence_with_cache_residency() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    // no eviction policy, so nothing ever ends the residency this retention rests on - which is
+                    // also why the distribution mode is not required to include evictions here
+                    dc -> dc.withPersistence(configurer -> configurer
+                            .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency)),
+                    DistributedCaffeine::build);
+            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+
+            distributedCache.put(key1, value1);
+
+            await("distribution to data store")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(1))));
+
+            // the very sweep that removes a cache entry which is not retained at all (see the test asserting that),
+            // deliberately run with the same accelerated window, so what is asserted below is the retention itself
+            // and not that the sweep happened to leave the cache entry alone for lack of time
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
+            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull();
+
+            // and neither pruning by time nor by size applies, so repeating it changes nothing
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
+        }
+
+        @DisplayName("Test persistence of cached entries by time")
+        @Test
+        void test_CachedEntryPersistence_by_time() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withPersistence(configurer -> configurer
+                            .withCachedEntries(cachedEntries -> cachedEntries
+                                    .withMaximumTime(Duration.ofMillis(1)))),
+                    DistributedCaffeine::build);
+            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+
+            distributedCache.put(key1, value1);
+
+            await("distribution to data store")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(1))));
+
+            // deliberately the variant that leaves the transient window alone, so that what removes the cache entry
+            // below can only be pruning by time and not the sweep for cache entries that are not retained at all
+            processMaintenance();
+
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(0)));
+            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
+
+            // pruning is a delete, so it is not reported as a change stream event and the cache keeps serving
+            assertThat(distributedCache.getIfPresent(key1)).isEqualTo(value1);
+        }
+
+        @DisplayName("Test persistence of cached entries by size")
+        @Test
+        void test_CachedEntryPersistence_by_size() {
+            int maximumSize = 2;
+            int numberOfCacheEntries = 5;
+
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withPersistence(configurer -> configurer
+                            .withCachedEntries(cachedEntries -> cachedEntries
+                                    .withMaximumSize(maximumSize))),
+                    DistributedCaffeine::build);
+
+            // no eviction policy is configured, so every cache entry stays cached and the data store is bounded by
+            // its own maximum size rather than by what the cache instance happens to hold
+            IntStream.rangeClosed(1, numberOfCacheEntries)
+                    .forEach(id -> distributedCache.put(Key.of(id), Value.of(id)));
+
+            await("distribution to data store")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(numberOfCacheEntries))));
+
+            processMaintenance();
+
+            // which cache entries are dropped follows from write order alone, so only the count is asserted here
+            assertThatDataStoreHasCounts(
+                    Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)));
+            assertThat(distributedCache.estimatedSize()).isEqualTo(numberOfCacheEntries);
+        }
+
+        @DisplayName("Test persistence of cached entries with cache residency and of evicted cache entries")
+        @Test
+        void test_CachedEntryPersistence_with_cache_residency_and_evicted_entry_persistence() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    // an eviction policy is what ends a residency, which is why the distribution mode has to
+                    // include evictions here - and it is the very same eviction that hands a cache entry from the
+                    // one tier over to the other
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
+                                    .maximumSize(1))
+                            .withPersistence(configurer -> configurer
+                                    .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency)
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withMaximumSize(10))),
+                    DistributedCaffeine::build);
+            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
+
+            Key key1 = Key.of(1);
+            Key key2 = Key.of(2);
+
+            // Kept away from here on, because what an evicted cache entry leaves in the data store is also
+            // delivered back, and the cache entry written for its population restores it - which puts the cache
+            // over its maximum again and hands the residency of the other key over to the evicted tier while this
+            // test is measuring both. What is under test is the two tiers, not that echo
+            Adapter<Key, Value> adapter = getInstanceRegistry(distributedCache).getAdapter();
+            Synchronizer<Key, Value> synchronizer = readFieldValue(adapter, AbstractAdapter.class,
+                    "synchronizer", Synchronizer.class);
+            Receiver<Key, Value> receiver = injectSpy(synchronizer, AbstractSynchronizer.class,
+                    "receiver", Receiver.class);
+            doNothing().when(receiver).receiveCacheEntries(anyList());
+
+            distributedCache.put(key1, Value.of(1));
+            distributedCache.put(key2, Value.of(2));
+            distributedCache.cleanUp(); // evicts key1, which is what moves it into the other tier
+
+            await("passivation")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull());
+
+            // read rather than asserted, see the test above: with a maximum size of one it is Caffeine's business
+            // how many cache entries end up evicted and how many stay resident alongside them
+            Repository<?, ?> repository = repositoryOf(distributedCache);
+            long cachedCountBeforeMaintenance = getFailable(() ->
+                    repository.countCacheEntries(CACHED_GROUP, null));
+            long evictedCountBeforeMaintenance = getFailable(() ->
+                    repository.countCacheEntries(EVICTED_RETAINED_GROUP, null));
+            assertThat(evictedCountBeforeMaintenance).isPositive();
+            // what cache residency amounts to, whichever cache entries Caffeine admitted
+            assertThat(cachedCountBeforeMaintenance).isEqualTo(distributedCache.estimatedSize());
+
+            processMaintenance();
+
+            // both retentions hold at once and neither reaches into the other: residency keeps what is still
+            // cached, the evicted tier keeps what is not, and each answers for its own phase of a cache entry
+            assertThatDataStoreHasCounts(
+                    CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(cachedCountBeforeMaintenance)),
+                    CountGrouped.of(EVICTED_RETAINED_GROUP,
+                            assertion -> assertion.isEqualTo(evictedCountBeforeMaintenance)));
+            assertThat(cachedCountBeforeMaintenance).isEqualTo(distributedCache.estimatedSize());
+        }
+
+        @DisplayName("Test persistence of cached entries by time and of evicted cache entries")
+        @Test
+        void test_CachedEntryPersistence_by_time_and_evicted_entry_persistence() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    // time-based rather than size-based eviction, so that it is this cache entry which is evicted
+                    // and not whichever one Caffeine decides to deny admission to
+                    dc -> dc.withCaffeine(Caffeine.newBuilder()
+                                    .expireAfterWrite(Duration.ofSeconds(2)))
+                            .withPersistence(configurer -> configurer
+                                    .withCachedEntries(cachedEntries -> cachedEntries
+                                            .withMaximumTime(Duration.ofMillis(1)))
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withMaximumSize(10))),
+                    DistributedCaffeine::build);
+            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
+
+            Key key1 = Key.of(1);
+            Value value1 = Value.of(1);
+
+            distributedCache.put(key1, value1);
+
+            await("distribution to data store")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThatDataStoreHasCounts(
+                            Count.of(CACHED, assertion -> assertion.isEqualTo(1))));
+
+            processMaintenance();
+
+            // the cached tier is done with the cache entry, and because pruning it is a delete rather than a
+            // transition, no change stream event reports that - so the cache instance goes on holding it
+            assertThatDataStoreIsEmpty();
+            assertThat(distributedCache.policy().getIfPresentQuietly(key1)).isEqualTo(value1);
+
+            // and once it is evicted the other tier writes it anew: the two tiers are phases of the same cache
+            // entry's life, so what the one stopped keeping the other one takes on, counting from the eviction
+            await("passivation")
+                    .atMost(WAITING_DURATION)
+                    .failFast("process clean up", this::cleanUp)
+                    .untilAsserted(() -> {
+                        assertThatDataStoreHasCounts(
+                                Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(1)));
+                        assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull();
+                    });
+        }
+
         @DisplayName("Test persistence of evicted entries by size")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
@@ -5869,375 +6239,6 @@ final class DistributedCaffeineIntegrationTests {
                     .hasSize(retainedMaximumSize);
         }
 
-        @DisplayName("Test that cached entries are not retained without a synchronization strategy")
-        @Test
-        void test_CachedEntryPersistence_cache_entries_are_not_retained() {
-            DistributedCache<Key, Value> distributedCache = createCache(
-                    CacheBuilder.identity(),
-                    DistributedCaffeine::build);
-            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
-
-            Key key1 = Key.of(1);
-            Value value1 = Value.of(1);
-
-            distributedCache.put(key1, value1);
-
-            // the cache entry is written either way - that is how it is distributed at all. What differs is only
-            // whether it is retained beyond that, which is why getFromStore reports nothing even now, while the
-            // cache entry is demonstrably there: it answers what persistence keeps, not what a write left behind
-            await("distribution to data store")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> {
-                        assertThatDataStoreHasCounts(
-                                Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
-                        assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
-                    });
-
-            processMaintenance();
-
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED, assertion -> assertion.isEqualTo(0)));
-            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
-
-            // swept from the data store, but not withdrawn from the cache instances holding it: a delete is not
-            // reported as a change stream event, so the cache keeps serving what it has
-            assertThat(distributedCache.getIfPresent(key1)).isEqualTo(value1);
-        }
-
-        @DisplayName("Test that synchronization starts empty without a synchronization strategy")
-        @Test
-        void test_CachedEntryPersistence_synchronization_starts_empty() {
-            DistributedCache<Key, Value> distributedCache = createCache(
-                    CacheBuilder.identity(),
-                    DistributedCaffeine::build);
-
-            Key key1 = Key.of(1);
-            Value value1 = Value.of(1);
-
-            distributedCache.put(key1, value1);
-
-            await("distribution to data store")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, assertion -> assertion.isEqualTo(1))));
-
-            distributedCache.distributedPolicy().stopSynchronization();
-            distributedCache.distributedPolicy().startSynchronization();
-
-            // nothing is read back, so nothing clears the marks and the cache is emptied rather than reconciled -
-            // even though the data store still happens to hold the cache entry at this point
-            assertThat(distributedCache.asMap()).isEmpty();
-        }
-
-        @DisplayName("Test persistence of cached entries with a cold start")
-        @Test
-        void test_CachedEntryPersistence_with_cold_start() {
-            DistributedCache<Key, Value> distributedCache = createCache(
-                    // retained, but deliberately not read back - the one configuration where the underlying store
-                    // outlives what any cache instance holds without anything taking ownership of it again
-                    dc -> dc.withPersistence(configurer -> configurer
-                            .withCachedEntries(cachedEntries -> cachedEntries
-                                    .withMaximumTime(FOREVER.getDuration())
-                                    .withColdStart())),
-                    DistributedCaffeine::build);
-            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
-
-            Key key1 = Key.of(1);
-            Value value1 = Value.of(1);
-
-            distributedCache.put(key1, value1);
-
-            await("distribution to data store")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, assertion -> assertion.isEqualTo(1))));
-
-            distributedPolicy.stopSynchronization();
-            distributedPolicy.startSynchronization();
-
-            // the retention holds, so what is asserted here is the cold start alone and not that the cache entry
-            // was swept: it is still there to be read, just not by this cache instance
-            assertThat(distributedCache.asMap()).isEmpty();
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
-            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull();
-
-            processMaintenance();
-
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
-        }
-
-        @DisplayName("Test that population is still distributed without a synchronization strategy")
-        @Test
-        void test_CachedEntryPersistence_population_is_still_distributed() {
-            DistributedCache<Key, Value> distributedCache = createCache(
-                    CacheBuilder.identity(), DistributedCaffeine::build);
-            DistributedCache<Key, Value> syncedDistributedCache = createCache(
-                    CacheBuilder.identity(), DistributedCaffeine::build);
-
-            Key key1 = Key.of(1);
-            Value value1 = Value.of(1);
-
-            distributedCache.put(key1, value1);
-
-            // retaining cache entries and distributing them are different matters: without a synchronization
-            // strategy the data store is only a medium, and warming other cache instances still works through it
-            await("synchronization between cache instances")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() ->
-                            assertThat(syncedDistributedCache.getIfPresent(key1)).isEqualTo(value1));
-        }
-
-        @DisplayName("Test evicted cache entry persistence without a synchronization strategy")
-        @Test
-        void test_CachedEntryPersistence_without_strategy_but_with_evicted_entry_persistence() {
-            DistributedCache<Key, Value> distributedCache = createCache(
-                    dc -> dc.withCaffeine(Caffeine.newBuilder()
-                                    .maximumSize(1))
-                            .withPersistence(configurer -> configurer
-                                    .withEvictedEntries(evictedEntries -> evictedEntries
-                                            .withMaximumSize(10))),
-                    DistributedCaffeine::build);
-            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
-
-            Key key1 = Key.of(1);
-            Value value1 = Value.of(1);
-            Key key2 = Key.of(2);
-
-            distributedCache.put(key1, value1);
-            distributedCache.put(key2, Value.of(2));
-            distributedCache.cleanUp(); // evicts key1, which evicted entry persistence keeps reloadable
-
-            await("passivation")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull());
-
-            // read rather than asserted: a maximum size of one is degenerate enough for Caffeine to deny admission
-            // to both entries, so how many end up evicted is none of this test's business - only that the sweep
-            // below leaves however many there are untouched
-            Repository<?, ?> repository = repositoryOf(distributedCache);
-            long evictedCountBeforeMaintenance = getFailable(() ->
-                    repository.countCacheEntries(EVICTED_RETAINED_GROUP, null));
-            assertThat(evictedCountBeforeMaintenance).isPositive();
-
-            processMaintenance();
-
-            // the two tiers are retained independently: cached entries are swept along with the removals
-            // ones, whereas evicted ones are kept for as long as their own bound allows - so the underlying store
-            // ends up holding exactly what memory does not
-            assertThatDataStoreHasCounts(
-                    CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(0)),
-                    CountGrouped.of(EVICTED_RETAINED_GROUP,
-                            assertion -> assertion.isEqualTo(evictedCountBeforeMaintenance)));
-            assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull();
-        }
-
-        @DisplayName("Test persistence of cached entries with cache residency")
-        @Test
-        void test_CachedEntryPersistence_with_cache_residency() {
-            DistributedCache<Key, Value> distributedCache = createCache(
-                    // no eviction policy, so nothing ever ends the residency this retention rests on - which is
-                    // also why the distribution mode is not required to include evictions here
-                    dc -> dc.withPersistence(configurer -> configurer
-                            .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency)),
-                    DistributedCaffeine::build);
-            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
-
-            Key key1 = Key.of(1);
-            Value value1 = Value.of(1);
-
-            distributedCache.put(key1, value1);
-
-            await("distribution to data store")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, assertion -> assertion.isEqualTo(1))));
-
-            // the very sweep that removes a cache entry which is not retained at all (see the test asserting that),
-            // deliberately run with the same accelerated window, so what is asserted below is the retention itself
-            // and not that the sweep happened to leave the cache entry alone for lack of time
-            processMaintenance();
-
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
-            assertThat(distributedPolicy.getFromStore(key1, false)).isNotNull();
-
-            // and neither pruning by time nor by size applies, so repeating it changes nothing
-            processMaintenance();
-
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED, assertion -> assertion.isEqualTo(1)));
-        }
-
-        @DisplayName("Test persistence of cached entries by time")
-        @Test
-        void test_CachedEntryPersistence_by_time() {
-            DistributedCache<Key, Value> distributedCache = createCache(
-                    dc -> dc.withPersistence(configurer -> configurer
-                            .withCachedEntries(cachedEntries -> cachedEntries
-                                    .withMaximumTime(Duration.ofMillis(1)))),
-                    DistributedCaffeine::build);
-            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
-
-            Key key1 = Key.of(1);
-            Value value1 = Value.of(1);
-
-            distributedCache.put(key1, value1);
-
-            await("distribution to data store")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, assertion -> assertion.isEqualTo(1))));
-
-            // deliberately the variant that leaves the transient window alone, so that what removes the cache entry
-            // below can only be pruning by time and not the sweep for cache entries that are not retained at all
-            processMaintenance();
-
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED, assertion -> assertion.isEqualTo(0)));
-            assertThat(distributedPolicy.getFromStore(key1, false)).isNull();
-
-            // pruning is a delete, so it is not reported as a change stream event and the cache keeps serving
-            assertThat(distributedCache.getIfPresent(key1)).isEqualTo(value1);
-        }
-
-        @DisplayName("Test persistence of cached entries by size")
-        @Test
-        void test_CachedEntryPersistence_by_size() {
-            int maximumSize = 2;
-            int numberOfCacheEntries = 5;
-
-            DistributedCache<Key, Value> distributedCache = createCache(
-                    dc -> dc.withPersistence(configurer -> configurer
-                            .withCachedEntries(cachedEntries -> cachedEntries
-                                    .withMaximumSize(maximumSize))),
-                    DistributedCaffeine::build);
-
-            // no eviction policy is configured, so every cache entry stays cached and the data store is bounded by
-            // its own maximum size rather than by what the cache instance happens to hold
-            IntStream.rangeClosed(1, numberOfCacheEntries)
-                    .forEach(id -> distributedCache.put(Key.of(id), Value.of(id)));
-
-            await("distribution to data store")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, assertion -> assertion.isEqualTo(numberOfCacheEntries))));
-
-            processMaintenance();
-
-            // which cache entries are dropped follows from write order alone, so only the count is asserted here
-            assertThatDataStoreHasCounts(
-                    Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)));
-            assertThat(distributedCache.estimatedSize()).isEqualTo(numberOfCacheEntries);
-        }
-
-        @DisplayName("Test persistence of cached entries with cache residency and of evicted cache entries")
-        @Test
-        void test_CachedEntryPersistence_with_cache_residency_and_evicted_entry_persistence() {
-            DistributedCache<Key, Value> distributedCache = createCache(
-                    // an eviction policy is what ends a residency, which is why the distribution mode has to
-                    // include evictions here - and it is the very same eviction that hands a cache entry from the
-                    // one tier over to the other
-                    dc -> dc.withCaffeine(Caffeine.newBuilder()
-                                    .maximumSize(1))
-                            .withPersistence(configurer -> configurer
-                                    .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency)
-                                    .withEvictedEntries(evictedEntries -> evictedEntries
-                                            .withMaximumSize(10))),
-                    DistributedCaffeine::build);
-            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
-
-            Key key1 = Key.of(1);
-            Key key2 = Key.of(2);
-
-            // Kept away from here on, because what an evicted cache entry leaves in the data store is also
-            // delivered back, and the cache entry written for its population restores it - which puts the cache
-            // over its maximum again and hands the residency of the other key over to the evicted tier while this
-            // test is measuring both. What is under test is the two tiers, not that echo
-            Adapter<Key, Value> adapter = getInstanceRegistry(distributedCache).getAdapter();
-            Synchronizer<Key, Value> synchronizer = readFieldValue(adapter, AbstractAdapter.class,
-                    "synchronizer", Synchronizer.class);
-            Receiver<Key, Value> receiver = injectSpy(synchronizer, AbstractSynchronizer.class,
-                    "receiver", Receiver.class);
-            doNothing().when(receiver).receiveCacheEntries(anyList());
-
-            distributedCache.put(key1, Value.of(1));
-            distributedCache.put(key2, Value.of(2));
-            distributedCache.cleanUp(); // evicts key1, which is what moves it into the other tier
-
-            await("passivation")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull());
-
-            // read rather than asserted, see the test above: with a maximum size of one it is Caffeine's business
-            // how many cache entries end up evicted and how many stay resident alongside them
-            Repository<?, ?> repository = repositoryOf(distributedCache);
-            long cachedCountBeforeMaintenance = getFailable(() ->
-                    repository.countCacheEntries(CACHED_GROUP, null));
-            long evictedCountBeforeMaintenance = getFailable(() ->
-                    repository.countCacheEntries(EVICTED_RETAINED_GROUP, null));
-            assertThat(evictedCountBeforeMaintenance).isPositive();
-            // what cache residency amounts to, whichever cache entries Caffeine admitted
-            assertThat(cachedCountBeforeMaintenance).isEqualTo(distributedCache.estimatedSize());
-
-            processMaintenance();
-
-            // both retentions hold at once and neither reaches into the other: residency keeps what is still
-            // cached, the evicted tier keeps what is not, and each answers for its own phase of a cache entry
-            assertThatDataStoreHasCounts(
-                    CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(cachedCountBeforeMaintenance)),
-                    CountGrouped.of(EVICTED_RETAINED_GROUP,
-                            assertion -> assertion.isEqualTo(evictedCountBeforeMaintenance)));
-            assertThat(cachedCountBeforeMaintenance).isEqualTo(distributedCache.estimatedSize());
-        }
-
-        @DisplayName("Test persistence of cached entries by time and of evicted cache entries")
-        @Test
-        void test_CachedEntryPersistence_by_time_and_evicted_entry_persistence() {
-            DistributedCache<Key, Value> distributedCache = createCache(
-                    // time-based rather than size-based eviction, so that it is this cache entry which is evicted
-                    // and not whichever one Caffeine decides to deny admission to
-                    dc -> dc.withCaffeine(Caffeine.newBuilder()
-                                    .expireAfterWrite(Duration.ofSeconds(2)))
-                            .withPersistence(configurer -> configurer
-                                    .withCachedEntries(cachedEntries -> cachedEntries
-                                            .withMaximumTime(Duration.ofMillis(1)))
-                                    .withEvictedEntries(evictedEntries -> evictedEntries
-                                            .withMaximumSize(10))),
-                    DistributedCaffeine::build);
-            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
-
-            Key key1 = Key.of(1);
-            Value value1 = Value.of(1);
-
-            distributedCache.put(key1, value1);
-
-            await("distribution to data store")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThatDataStoreHasCounts(
-                            Count.of(CACHED, assertion -> assertion.isEqualTo(1))));
-
-            processMaintenance();
-
-            // the cached tier is done with the cache entry, and because pruning it is a delete rather than a
-            // transition, no change stream event reports that - so the cache instance goes on holding it
-            assertThatDataStoreIsEmpty();
-            assertThat(distributedCache.policy().getIfPresentQuietly(key1)).isEqualTo(value1);
-
-            // and once it is evicted the other tier writes it anew: the two tiers are phases of the same cache
-            // entry's life, so what the one stopped keeping the other one takes on, counting from the eviction
-            await("passivation")
-                    .atMost(WAITING_DURATION)
-                    .failFast("process clean up", this::cleanUp)
-                    .untilAsserted(() -> {
-                        assertThatDataStoreHasCounts(
-                                Count.of(EVICTED_TIME_RETAINED, assertion -> assertion.isEqualTo(1)));
-                        assertThat(distributedPolicy.getFromStore(key1, true)).isNotNull();
-                    });
-        }
-
-
         @DisplayName("Test synchronization")
         @Test
         void test_DistributedCaffeine_synchronization() {
@@ -6637,7 +6638,6 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(distributedCache.distributedPolicy().getSynchronizationState())
                     .isEqualTo(SynchronizationState.STOPPED);
         }
-
 
         @DisplayName("Test MaintenanceWorker")
         @Test
@@ -7373,6 +7373,7 @@ final class DistributedCaffeineIntegrationTests {
         @DisplayName("Stress test thread safety")
         @ParameterizedTest(name = "with {0}-executor")
         @ValueSource(strings = {"same thread", "single thread", "common pool", "cached thread pool", "work stealing thread pool"})
+
         @SuppressWarnings("FutureReturnValueIgnored")
             // delayed executor shutdown, deliberately not awaited
         void stress_test_DistributedCaffeine_thread_safety(String valueSource) throws Exception {
@@ -7687,14 +7688,137 @@ final class DistributedCaffeineIntegrationTests {
             verify(cacheLoader, atLeastOnce()).asyncReload(any(Key.class), any(Value.class), any(Executor.class));
             verifyNoMoreInteractions(cacheLoader);
         }
+
+        // A TCP proxy that can stop carrying anything on the connections it holds without closing them: the
+        // bytes sent into such a connection are accepted and dropped, and nothing comes back. It can also let a
+        // few more bytes through before doing so, which cuts a message off in the middle. Connections accepted
+        // afterwards are carried as usual
+        static final class SilencingProxy implements AutoCloseable {
+
+            private final ServerSocket serverSocket;
+            private final String targetHost;
+            private final int targetPort;
+            private final Executor executor;
+            private final Set<Socket> sockets = ConcurrentHashMap.newKeySet();
+            private final Set<Budget> budgets = ConcurrentHashMap.newKeySet();
+            private volatile boolean silencingNewConnections;
+
+            SilencingProxy(String targetHost, int targetPort, Executor executor) throws IOException {
+                this.serverSocket = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
+                this.targetHost = targetHost;
+                this.targetPort = targetPort;
+                this.executor = executor;
+                executor.execute(this::accept);
+            }
+
+            int getPort() {
+                return serverSocket.getLocalPort();
+            }
+
+            void silenceOpenConnections() {
+                silenceOpenConnectionsAfter(0);
+            }
+
+            // connections accepted from now on are silent from the start, as long as this is on - so that whoever
+            // tries to reconnect meanwhile keeps failing, as during an outage that lasts
+            void silenceNewConnections(boolean silencing) {
+                silencingNewConnections = silencing;
+            }
+
+            // whichever direction they travel in, so this is for a moment in which only one side is expected to
+            // send anything
+            void silenceOpenConnectionsAfter(long bytes) {
+                budgets.forEach(budget -> budget.limit(bytes));
+            }
+
+            private void accept() {
+                while (!serverSocket.isClosed()) {
+                    try {
+                        Socket client = serverSocket.accept();
+                        Socket server = new Socket(targetHost, targetPort);
+                        sockets.add(client);
+                        sockets.add(server);
+                        Budget budget = new Budget();
+                        if (silencingNewConnections) {
+                            budget.limit(0);
+                        }
+                        budgets.add(budget);
+                        executor.execute(() -> pump(client, server, budget));
+                        executor.execute(() -> pump(server, client, budget));
+                    } catch (IOException e) {
+                        // closed, which is how accepting ends
+                    }
+                }
+            }
+
+            private void pump(Socket from, Socket to, Budget budget) {
+                byte[] buffer = new byte[8192];
+                try (InputStream in = from.getInputStream(); OutputStream out = to.getOutputStream()) {
+                    int read;
+                    while ((read = in.read(buffer)) >= 0) {
+                        int allowed = budget.take(read);
+                        if (allowed > 0) {
+                            out.write(buffer, 0, allowed);
+                            out.flush();
+                        }
+                    }
+                } catch (IOException e) {
+                    // either side closed, which is how pumping ends
+                } finally {
+                    // a silenced connection stays open, because a reset is exactly what it must not receive
+                    if (!budget.isLimited()) {
+                        closeQuietly(from);
+                        closeQuietly(to);
+                    }
+                }
+            }
+
+            private static void closeQuietly(Socket socket) {
+                try {
+                    socket.close();
+                } catch (IOException e) {
+                    // nothing left to do about it
+                }
+            }
+
+            @Override
+            public void close() throws IOException {
+                serverSocket.close();
+                sockets.forEach(SilencingProxy::closeQuietly);
+            }
+
+            // how many more bytes a connection carries, shared by both of its directions - unlimited until limited
+            private static final class Budget {
+
+                private long remaining = -1;
+
+                synchronized void limit(long bytes) {
+                    remaining = bytes;
+                }
+
+                synchronized boolean isLimited() {
+                    return remaining >= 0;
+                }
+
+                synchronized int take(int read) {
+                    if (remaining < 0) {
+                        return read;
+                    }
+                    int allowed = (int) Math.min(read, remaining);
+                    remaining -= allowed;
+                    return allowed;
+                }
+            }
+        }
+
     }
 
     @SuppressWarnings({"java:S5838", "java:S5778", "java:S5961"})
     abstract static class MongoIntegration extends CommonIntegration {
-
         static final String DATABASE_NAME = "distributedCaffeineDatabase";
 
         MongoDBContainer mongoContainer;
+
         MongoClient mongoClient;
 
         @DisplayName("Test that the adapter names and separates its scope by discriminator")
@@ -7950,8 +8074,7 @@ final class DistributedCaffeineIntegrationTests {
             // a position to resume watching from must exist before any event has arrived, otherwise a cursor failing
             // in an idle period would resume at "now" and silently skip whatever is written while watching is down.
             // The server reports one for every polled batch, so it appears without anything having happened
-            AtomicReference<?> resumeToken = readFieldValue(syncedSynchronizer,
-                    syncedSynchronizer.getClass(), "resumeToken", AtomicReference.class);
+            AtomicReference<?> resumeToken = resumeTokenOf(syncedSynchronizer);
 
             await("resume position while idle")
                     .atMost(WAITING_DURATION)
@@ -7969,7 +8092,7 @@ final class DistributedCaffeineIntegrationTests {
             // and it advances as events are applied, so a failure resumes after the last one instead of repeating it
             assertThat(resumeToken.get()).isNotEqualTo(resumeTokenWhileIdle);
 
-            // watching change streams fails and retries
+            // receiving fails and retries - for this cache instance alone, without the cursor it shares failing
             loggerMongoSynchronizer.startCapturing();
 
             // restarting reconciles the cache against the data store, and reports that it did - captured for
@@ -7990,24 +8113,24 @@ final class DistributedCaffeineIntegrationTests {
                         assertThat(loggingEvents).isNotEmpty();
                         assertThat(loggingEvents).allMatch(loggingEvent ->
                                 loggingEvent.getLevel().equals(Level.WARN)
-                                        && loggingEvent.getMessage().startsWith("Watching change streams failed")
+                                        && loggingEvent.getMessage().startsWith("Receiving change stream events failed")
                                         && loggingEvent.getMessage().endsWith("Retrying..."));
                     });
 
             loggerMongoSynchronizer.stopCapturing();
 
-            // while watching fails, the synced instance does not receive the update
+            // while receiving fails, the synced instance does not receive the update
             assertThat(syncedDistributedCache.getIfPresent(key2)).isNull();
 
-            // fix failure: the watcher recovers on its own and applies the missed update
+            // fix failure: the cache instance recovers on its own, by reconciling against the data store
             doCallRealMethod().when(syncedReceiver).receiveCacheEntries(any());
 
             await("recovery")
                     .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure
                     .untilAsserted(() -> assertThat(syncedDistributedCache.getIfPresent(key2)).isEqualTo(value2));
 
-            // and the watcher did not just resume where it left off: restarting reconciled the cache against
-            // the data store, which is what makes an entry missed while watching was down good again
+            // and it did not just carry on: restarting reconciled the cache against the data store, which is what
+            // makes an entry missed while receiving was down good again
             assertThat(loggerDistributedCaffeine.getLoggingEvents())
                     .anySatisfy(loggingEvent -> {
                         assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
@@ -8049,163 +8172,671 @@ final class DistributedCaffeineIntegrationTests {
                     .atMost(WAITING_DURATION)
                     .untilAsserted(() -> assertThat(syncedDistributedCache.getIfPresent(key4)).isEqualTo(value4));
 
-            // a failed activation must not poison later activations: the throwable recorded while activating is
-            // cleared by deactivate() only, which InternalInstanceRegistry.deactivate() skips while the cache does
-            // not count as activated - precisely the state a failed activation leaves behind. Simulate that state by
-            // planting a throwable while deactivated (the synchronizer is package-private in another package, so its
-            // class is reached via getClass()) and assert that activating still succeeds and resumes synchronizing.
+            // Deactivating and activating again subscribes anew: every activation gets a subscription of its own and
+            // never waits for one left over from before, which is what keeps a failed or stale one from blocking it
             Key key5 = Key.of(5);
             Value value5 = Value.of(5);
 
             syncedDistributedCache.distributedPolicy().stopSynchronization();
-
-            AtomicReference<Throwable> failFastThrowable = readFieldValue(syncedSynchronizer,
-                    syncedSynchronizer.getClass(), "failFastThrowable", AtomicReference.class);
-            failFastThrowable.set(new IllegalStateException("stale activation failure"));
+            assertThat(syncedSynchronizer.isActivated()).isFalse();
 
             assertThatNoException().isThrownBy(() ->
                     syncedDistributedCache.distributedPolicy().startSynchronization());
+            assertThat(syncedSynchronizer.isActivated()).isTrue();
 
             distributedCache.put(key5, value5);
 
-            await("recovery after a failed activation")
+            await("recovery after activating again")
                     .atMost(WAITING_DURATION)
                     .untilAsserted(() -> assertThat(syncedDistributedCache.getIfPresent(key5)).isEqualTo(value5));
-
-            // a retry attempt scheduled before deactivation must not start watching again. The retry policy decides
-            // whether to abort at failure time only, so an attempt already queued behind a delay still runs after
-            // deactivate() - simulated here by invoking the watcher directly while deactivated. It has to return
-            // without watching: otherwise it would report itself activated (leaving the adapter activated while the
-            // rest of the cache is deactivated) and enter a loop that never ends, so the next activation would join
-            // a future that can never complete
-            Key key6 = Key.of(6);
-            Value value6 = Value.of(6);
-
-            syncedDistributedCache.distributedPolicy().stopSynchronization();
-
-            CompletableFuture<Void> staleWatchAttempt = CompletableFuture.runAsync(() ->
-                    invokeMethod(syncedSynchronizer, syncedSynchronizer.getClass(),
-                            "processChangeStreams", List.of(), List.of()));
-
-            assertThat(staleWatchAttempt).succeedsWithin(WAITING_DURATION);
-            assertThat(syncedSynchronizer.isActivated()).isFalse();
-
-            // and activating afterwards still works, without joining a never-completing watcher
-            assertThatNoException().isThrownBy(() ->
-                    syncedDistributedCache.distributedPolicy().startSynchronization());
-
-            distributedCache.put(key6, value6);
-
-            await("recovery after a stale watch attempt")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThat(syncedDistributedCache.getIfPresent(key6)).isEqualTo(value6));
         }
 
         @DisplayName("Test that an invalidation swept while the watcher is down is not lost")
         @Test
         @ResourceLock(LOGGER_RESOURCE_LOCK)
-        void test_Synchronizer_invalidation_swept_while_watcher_is_down_is_not_lost() throws Exception {
+        void test_Synchronizer_invalidation_swept_while_watcher_is_down_is_not_lost() {
             // An invalidation reaches the other cache instances as an update of the document the population left
             // behind, and change streams are watched with UPDATE_LOOKUP, so what is delivered is that document as it
             // stands when the event is polled - not as it stood when the update happened. Maintenance deletes it a
             // distribution duration after the write, because without persistence it only ever existed to carry the
-            // removal. A cache instance whose watcher was down for longer than that therefore polls an event whose
-            // document is already gone: the lookup finds nothing, the pipeline's match on the discriminator drops
-            // the event on the server, and nothing arrives here at all - not even something recognizable as
-            // missing. The invalidation is then lost for good, because the watcher's own retrying never reconciles
-            // against the data store; only activating the cache instance does.
-            // Being down is engineered rather than waited for: the receiver of the watcher is made to throw, which
-            // is what a failure of the inbound apply step looks like, so watching fails and keeps failing while the
-            // invalidation below is written and swept. Keeping it failing is what pins the resume position before
-            // the invalidation - a watcher let through in between would apply it while the document still exists,
-            // and the test would pass without ever reproducing anything.
-            DistributedCache<Key, Value> distributedCacheA = createCache(
-                    CacheBuilder.identity(),
-                    DistributedCaffeine::build);
-            DistributedCache<Key, Value> distributedCacheB = createCache(
-                    CacheBuilder.identity(),
-                    DistributedCaffeine::build);
+            // removal. A watcher that was down for longer than that therefore polls an event whose document is
+            // already gone: the lookup finds nothing, the pipeline's match on the discriminator drops the event on
+            // the server, and nothing arrives at all - not even something recognizable as missing. Only the
+            // reconcile that resuming performs can make the invalidation good.
+            // Being down is engineered rather than waited for: the watcher of cacheA is pointed at a client that is
+            // closed, and a cache instance on a collection it does not watch yet has it reopen, which then keeps
+            // failing - with the resume position pinned before the invalidation - while the invalidation is written
+            // and swept. cacheA has a client of its own, so that the watcher taken down is its alone
+            try (MongoClient ownMongoClient = MongoClients.create(MongoClientSettings.builder()
+                    .applyConnectionString(new ConnectionString(mongoContainer.getReplicaSetUrl()))
+                    .applicationName(getDatasetName())
+                    .build());
+                 MongoClient closedMongoClient = MongoClients.create(mongoContainer.getReplicaSetUrl())) {
+                closedMongoClient.close();
+                DistributedCache<Key, Value> distributedCacheA = createCache(
+                        MongoAdapter.newBuilder(ownMongoClient, DATABASE_NAME, getDatasetName()).build(),
+                        CacheBuilder.identity(), DistributedCaffeine::build);
+                DistributedCache<Key, Value> distributedCacheB = createCache(
+                        CacheBuilder.identity(), DistributedCaffeine::build);
+                try {
+                    Key key1 = Key.of(1);
+                    Value value1 = Value.of(1);
 
-            Key key1 = Key.of(1);
-            Value value1 = Value.of(1);
-            Key key2 = Key.of(2);
-            Value value2 = Value.of(2);
+                    distributedCacheB.put(key1, value1);
 
-            distributedCacheA.put(key1, value1);
+                    await("synchronization between cache instances")
+                            .atMost(WAITING_DURATION)
+                            .untilAsserted(() -> assertThat(distributedCacheA.getIfPresent(key1)).isEqualTo(value1));
 
-            await("synchronization between cache instances")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> assertThat(distributedCacheB.getIfPresent(key1)).isEqualTo(value1));
+                    // the watcher reports every failed attempt, so the provoked ones below are captured and
+                    // asserted instead of ending up, with their stack traces, in the test output
+                    CaptureLogger loggerMongoWatcher = CaptureLoggerFactory
+                            .getCaptureLogger("io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoWatcher");
+                    loggerMongoWatcher.startCapturing();
+                    // resuming reconciles the cache against the data store, and reports that it did
+                    CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
+                            .getCaptureLogger(DistributedCaffeine.class);
+                    loggerDistributedCaffeine.startCapturing();
 
-            Adapter<Key, Value> adapter = distributedCacheA.distributedPolicy().getAdapter();
-            Synchronizer<Key, Value> synchronizer = readFieldValue(adapter, AbstractAdapter.class,
-                    "synchronizer", Synchronizer.class);
-            Receiver<Key, Value> receiver = injectSpy(synchronizer, AbstractSynchronizer.class,
-                    "receiver", Receiver.class);
+                    Object watcher = watcherOf(readFieldValue(distributedCacheA.distributedPolicy().getAdapter(),
+                            AbstractAdapter.class, "synchronizer", Synchronizer.class));
+                    Object mongoDatabase = readFieldValue(watcher, watcher.getClass(), "mongoDatabase", Object.class);
+                    writeFieldValue(watcher, watcher.getClass(), "mongoDatabase",
+                            closedMongoClient.getDatabase(DATABASE_NAME));
+                    Adapter<Key, Value> reopening = MongoAdapter.newBuilder(ownMongoClient, DATABASE_NAME,
+                            "c_" + getDatasetName().substring(2)).build();
+                    Synchronizer<?, ?> reopeningSynchronizer = readFieldValue(reopening, AbstractAdapter.class,
+                            "synchronizer", Synchronizer.class);
+                    writeFieldValue(reopeningSynchronizer, reopeningSynchronizer.getClass(), "activationTimeout",
+                            Duration.ofSeconds(1));
+                    assertThatThrownBy(() -> createCache(reopening, CacheBuilder.identity(),
+                            DistributedCaffeine::build))
+                            .isExactlyInstanceOf(MongoClientException.class);
+                    await("watcher down")
+                            .atMost(WAITING_DURATION)
+                            .until(() -> !loggerMongoWatcher.getLoggingEvents().isEmpty());
 
-            // the watcher reports every failed attempt, so the provoked ones below are captured and asserted
-            // instead of ending up, with their stack traces, in the test output
+                    distributedCacheB.invalidate(key1);
+
+                    // what maintenance does a distribution duration later, done now: a negative duration puts the
+                    // deadline ahead of every write, so nothing is left for the watcher to find once it watches again
+                    invokeMethod(getInstanceRegistry(distributedCacheB).getMaintenanceWorker(),
+                            InternalMaintenanceWorker.class, "processNotRetained",
+                            List.of(Duration.class), List.of(Duration.ZERO.minus(Duration.ofMillis(1))));
+
+                    assertThatDataStoreIsEmpty();
+
+                    writeFieldValue(watcher, watcher.getClass(), "mongoDatabase", mongoDatabase);
+
+                    // something written once watching works again arrives - asserted first, so that a watcher which
+                    // never recovered at all cannot make the assertions below pass
+                    Key key2 = Key.of(2);
+                    Value value2 = Value.of(2);
+                    distributedCacheB.put(key2, value2);
+
+                    await("recovery")
+                            .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure
+                            .untilAsserted(() -> assertThat(distributedCacheA.getIfPresent(key2)).isEqualTo(value2));
+
+                    assertThat(distributedCacheA.getIfPresent(key1)).isNull();
+                    assertThat(distributedCacheB.getIfPresent(key1)).isNull();
+
+                    // the watcher really did fail and say so, which is what the recovery above is a recovery from
+                    assertThat(loggerMongoWatcher.getLoggingEvents())
+                            .anySatisfy(loggingEvent -> {
+                                assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                                assertThat(loggingEvent.getMessage()).startsWith("Watching change streams failed");
+                            });
+                    loggerMongoWatcher.stopCapturing();
+
+                    // and the invalidation above survived because resuming reconciled the cache against the data
+                    // store - the only step that can drop a cache entry whose removal was never delivered
+                    assertThat(loggerDistributedCaffeine.getLoggingEvents())
+                            .anySatisfy(loggingEvent -> {
+                                assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                                assertThat(loggingEvent.getMessage())
+                                        .startsWith("Synchronization was interrupted for cache at");
+                            });
+                    loggerDistributedCaffeine.stopCapturing();
+                } finally {
+                    // torn down here rather than after the test, because its client is closed on the way out
+                    distributedCacheA.distributedPolicy().stopSynchronization();
+                    distributedCacheA.invalidateAll();
+                    distributedCacheInstances.remove(distributedCacheA);
+                }
+            }
+        }
+
+        @DisplayName("Test that a watching connection that silently stops carrying anything is noticed and replaced")
+        @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_replaces_a_watching_connection_that_went_silent() throws Exception {
+            // cacheB reaches the server through a proxy that can go silent on the connections it is carrying while
+            // keeping them open - what a failover moving the server's address or an expired NAT entry leaves a
+            // client with: nothing is reset, nothing arrives. Its client uses the driver's defaults, which set no
+            // limit on how long an answer may take, and connects directly, so that the members of the replica set
+            // behind the proxy are not discovered and reached around it
+            try (SilencingProxy proxy = new SilencingProxy(
+                    mongoContainer.getHost(), mongoContainer.getMappedPort(27017), executorService);
+                 MongoClient proxiedMongoClient = MongoClients.create(format(
+                         "mongodb://localhost:%d/?directConnection=true", proxy.getPort()))) {
+                DistributedCache<Key, Value> cacheA = createCache(CacheBuilder.identity(), DistributedCaffeine::build);
+                Adapter<Key, Value> adapterB = MongoAdapter
+                        .newBuilder(proxiedMongoClient, DATABASE_NAME, getDatasetName()).build();
+                // the limit on watching shortened before activation, so that noticing takes seconds rather than
+                // the production limit - the test is about the noticing, not about how long it takes
+                Synchronizer<?, ?> synchronizerB = readFieldValue(adapterB, AbstractAdapter.class,
+                        "synchronizer", Synchronizer.class);
+                writeFieldValue(synchronizerB, synchronizerB.getClass(), "watcherTimeout", Duration.ofSeconds(2));
+                DistributedCache<Key, Value> cacheB = createCache(adapterB, CacheBuilder.identity(),
+                        DistributedCaffeine::build);
+                try {
+                    cacheA.put(Key.of(1), Value.of(1));
+
+                    await("synchronization through the proxy")
+                            .atMost(WAITING_DURATION)
+                            .untilAsserted(() -> assertThat(cacheB.getIfPresent(Key.of(1))).isEqualTo(Value.of(1)));
+
+                    CaptureLogger loggerMongoWatcher = CaptureLoggerFactory
+                            .getCaptureLogger("io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoWatcher");
+                    loggerMongoWatcher.startCapturing();
+                    CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
+                            .getCaptureLogger(DistributedCaffeine.class);
+                    loggerDistributedCaffeine.startCapturing();
+
+                    // from here on, whatever cacheB had open carries nothing in either direction, while a connection
+                    // opened afterwards goes through - the server is reachable again, the old connections do not know
+                    proxy.silenceOpenConnections();
+
+                    cacheA.put(Key.of(2), Value.of(2));
+
+                    // the change went to a connection that no longer delivers, so the value can only arrive by the
+                    // watcher noticing, watching anew and reconciling
+                    await("recovery from a watching connection that went silent")
+                            .atMost(EXTENDED_WAITING_DURATION)
+                            .untilAsserted(() -> assertThat(cacheB.getIfPresent(Key.of(2))).isEqualTo(Value.of(2)));
+
+                    assertThat(loggerMongoWatcher.getLoggingEvents())
+                            .anySatisfy(loggingEvent -> {
+                                assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                                assertThat(loggingEvent.getMessage()).startsWith("Watching change streams failed");
+                            });
+                    loggerMongoWatcher.stopCapturing();
+
+                    assertThat(loggerDistributedCaffeine.getLoggingEvents())
+                            .anySatisfy(loggingEvent -> {
+                                assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                                assertThat(loggingEvent.getMessage())
+                                        .startsWith("Synchronization was interrupted for cache at");
+                            });
+                    loggerDistributedCaffeine.stopCapturing();
+                } finally {
+                    // torn down here rather than after the test, because its client is closed on the way out
+                    cacheB.distributedPolicy().stopSynchronization();
+                    distributedCacheInstances.remove(cacheB);
+                }
+            }
+        }
+
+        @DisplayName("Test that watching a single collection survives the collection being dropped")
+        @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_keeps_watching_a_collection_that_is_dropped() {
+            // A cursor on a single collection - which is what the instance and collection modes watch with - is ended
+            // by the server once its collection is dropped. Whoever recreates it then writes into a collection that
+            // nothing watches any more, unless the watcher notices that its cursor is gone. A cursor on the whole
+            // database is not ended by dropping one of its collections.
+            // What is written before the watcher watches anew can only arrive through the reconcile that follows,
+            // and persisting cached entries is what gives that reconcile something to restore
+            for (WatcherSharingMode sharingMode : List.of(WatcherSharingMode.INSTANCE, WatcherSharingMode.COLLECTION)) {
+                DistributedCache<Key, Value> cacheA = createCache(CacheBuilder.identity(),
+                        dc -> dc.withPersistence(configurer -> configurer
+                                        .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency))
+                                .build());
+                DistributedCache<Key, Value> cacheB = createCache(
+                        MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, getDatasetName())
+                                .withWatcherSharingMode(sharingMode)
+                                .build(),
+                        CacheBuilder.identity(),
+                        dc -> dc.withPersistence(configurer -> configurer
+                                        .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency))
+                                .build());
+
+                CaptureLogger loggerMongoWatcher = CaptureLoggerFactory
+                        .getCaptureLogger("io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoWatcher");
+                loggerMongoWatcher.startCapturing();
+                CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
+                        .getCaptureLogger(DistributedCaffeine.class);
+                loggerDistributedCaffeine.startCapturing();
+
+                cacheA.put(Key.of(1), Value.of(1));
+
+                await("synchronization before the drop with " + sharingMode)
+                        .atMost(WAITING_DURATION)
+                        .untilAsserted(() -> assertThat(cacheB.getIfPresent(Key.of(1))).isEqualTo(Value.of(1)));
+
+                mongoClient.getDatabase(DATABASE_NAME).getCollection(getDatasetName()).drop();
+
+                cacheA.put(Key.of(2), Value.of(2));
+
+                await("synchronization after the drop with " + sharingMode)
+                        .atMost(Duration.ofSeconds(30))
+                        .untilAsserted(() -> assertThat(cacheB.getIfPresent(Key.of(2))).isEqualTo(Value.of(2)));
+
+                // because the watcher noticed that its cursor had been ended, rather than by chance
+                assertThat(loggerMongoWatcher.getLoggingEvents())
+                        .anySatisfy(loggingEvent -> {
+                            assertThat(loggingEvent.getMessage()).startsWith("Watching change streams failed");
+                            assertThat(loggingEvent.getThrowable())
+                                    .hasMessageStartingWith("Change stream was ended by the server");
+                        });
+                loggerMongoWatcher.stopCapturing();
+                loggerDistributedCaffeine.stopCapturing();
+                cacheA.distributedPolicy().stopSynchronization();
+                cacheB.distributedPolicy().stopSynchronization();
+            }
+        }
+
+        @DisplayName("Test that a cache instance joining a cursor being replaced waits for it, or gives up in time")
+        @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_joins_a_shared_cursor_while_it_is_being_replaced() throws Exception {
+            // The cache instances watching share a client of their own, so that the watcher taken down is theirs
+            // alone: it is pointed at a client that is closed, so that replacing its cursor keeps failing for as long
+            // as that lasts. Reading and writing go on as usual
+            try (MongoClient ownMongoClient = MongoClients.create(MongoClientSettings.builder()
+                    .applyConnectionString(new ConnectionString(mongoContainer.getReplicaSetUrl()))
+                    .applicationName(getDatasetName())
+                    .build());
+                 MongoClient closedMongoClient = MongoClients.create(mongoContainer.getReplicaSetUrl())) {
+                closedMongoClient.close();
+                DistributedCache<Key, Value> cacheA = createCache(CacheBuilder.identity(), DistributedCaffeine::build);
+                DistributedCache<Key, Value> cacheB1 = createCache(watchingAdapter(ownMongoClient),
+                        CacheBuilder.identity(), DistributedCaffeine::build);
+                List<DistributedCache<Key, Value>> watching = new ArrayList<>(List.of(cacheB1));
+                try {
+                    cacheA.put(Key.of(1), Value.of(1));
+
+                    await("synchronization before the outage")
+                            .atMost(WAITING_DURATION)
+                            .untilAsserted(() -> assertThat(cacheB1.getIfPresent(Key.of(1))).isEqualTo(Value.of(1)));
+
+                    // every failed attempt to replace the cursor is reported, and so is the reconcile once it is
+                    CaptureLogger loggerMongoWatcher = CaptureLoggerFactory
+                            .getCaptureLogger("io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoWatcher");
+                    loggerMongoWatcher.startCapturing();
+                    CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
+                            .getCaptureLogger(DistributedCaffeine.class);
+                    loggerDistributedCaffeine.startCapturing();
+
+                    Object watcher = watcherOf(readFieldValue(cacheB1.distributedPolicy().getAdapter(),
+                            AbstractAdapter.class, "synchronizer", Synchronizer.class));
+                    Object mongoDatabase = readFieldValue(watcher, watcher.getClass(), "mongoDatabase", Object.class);
+                    writeFieldValue(watcher, watcher.getClass(), "mongoDatabase",
+                            closedMongoClient.getDatabase(DATABASE_NAME));
+
+                    // A cache instance on a collection the cursor does not watch yet has it reopened - by the watcher
+                    // itself, which keeps failing while pointed at the closed client. Being the one whose activation
+                    // timeout runs out first, it gives up, and says why
+                    Adapter<Key, Value> adapterB3 = MongoAdapter.newBuilder(ownMongoClient, DATABASE_NAME,
+                            "c_" + getDatasetName().substring(2)).build();
+                    Synchronizer<?, ?> synchronizerB3 = readFieldValue(adapterB3, AbstractAdapter.class,
+                            "synchronizer", Synchronizer.class);
+                    writeFieldValue(synchronizerB3, synchronizerB3.getClass(), "activationTimeout",
+                            Duration.ofSeconds(1));
+                    assertThatThrownBy(() -> createCache(adapterB3, CacheBuilder.identity(),
+                            DistributedCaffeine::build))
+                            .isExactlyInstanceOf(MongoClientException.class)
+                            .hasMessageStartingWith("Watching change streams failed for cache at")
+                            .cause()
+                            .isInstanceOf(MongoTimeoutException.class);
+                    await("cursor being replaced")
+                            .atMost(WAITING_DURATION)
+                            .until(() -> !loggerMongoWatcher.getLoggingEvents().isEmpty());
+
+                    // while one whose timeout lasts waits for the cursor to come back
+                    Adapter<Key, Value> adapterB2 = watchingAdapter(ownMongoClient);
+                    Synchronizer<?, ?> synchronizerB2 = readFieldValue(adapterB2, AbstractAdapter.class,
+                            "synchronizer", Synchronizer.class);
+                    writeFieldValue(synchronizerB2, synchronizerB2.getClass(), "activationTimeout",
+                            Duration.ofSeconds(60));
+                    CompletableFuture<DistributedCache<Key, Value>> joining = CompletableFuture.supplyAsync(() ->
+                            createCache(adapterB2, CacheBuilder.identity(), DistributedCaffeine::build), executorService);
+                    sleep(Duration.ofSeconds(2));
+                    assertThat(joining).isNotDone();
+
+                    writeFieldValue(watcher, watcher.getClass(), "mongoDatabase", mongoDatabase);
+
+                    DistributedCache<Key, Value> cacheB2 = joining.get(60, TimeUnit.SECONDS);
+                    watching.add(cacheB2);
+
+                    cacheA.put(Key.of(2), Value.of(2));
+
+                    await("synchronization of the instance that joined while the cursor was being replaced")
+                            .atMost(WAITING_DURATION)
+                            .untilAsserted(() -> assertThat(cacheB2.getIfPresent(Key.of(2))).isEqualTo(Value.of(2)));
+                    loggerMongoWatcher.stopCapturing();
+                    loggerDistributedCaffeine.stopCapturing();
+                } finally {
+                    // torn down here rather than after the test, because their client is closed on the way out
+                    watching.forEach(cache -> {
+                        cache.distributedPolicy().stopSynchronization();
+                        distributedCacheInstances.remove(cache);
+                    });
+                }
+            }
+        }
+
+        @DisplayName("Test that sharing at instance level gives every cache instance a cursor of its own")
+        @Test
+        void test_Synchronizer_shares_watchers_by_instance() {
+            assertWatchersShared(WatcherSharingMode.INSTANCE, 3);
+        }
+
+        @DisplayName("Test that sharing at collection level gives the cache instances of a collection one cursor")
+        @Test
+        void test_Synchronizer_shares_watchers_by_collection() {
+            assertWatchersShared(WatcherSharingMode.COLLECTION, 2);
+        }
+
+        @DisplayName("Test that sharing at database level gives all cache instances one cursor")
+        @Test
+        void test_Synchronizer_shares_watchers_by_database() {
+            assertWatchersShared(WatcherSharingMode.DATABASE, 1);
+        }
+
+        @DisplayName("Test that a cache instance failing to apply what it received leaves the others on its cursor alone")
+        @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_isolates_a_cache_instance_that_fails_to_apply() {
+            // all three share a cursor, which is the default
+            DistributedCache<Key, Value> cacheA = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheB = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheC = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            CaptureLogger loggerMongoWatcher = CaptureLoggerFactory
+                    .getCaptureLogger("io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoWatcher");
+            loggerMongoWatcher.startCapturing();
             CaptureLogger loggerMongoSynchronizer = CaptureLoggerFactory
                     .getCaptureLogger("io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoSynchronizer");
             loggerMongoSynchronizer.startCapturing();
-
-            // restarting reconciles the cache against the data store, and reports that it did - captured for
-            // the same reason and asserted below, because that reconcile is what the recovery under test consists of
+            // the failing cache instance recovers by reconciling, which it reports
             CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
                     .getCaptureLogger(DistributedCaffeine.class);
             loggerDistributedCaffeine.startCapturing();
 
-            CountDownLatch watcherFailed = new CountDownLatch(1);
-            doAnswer(invocation -> {
-                watcherFailed.countDown();
-                throw new IllegalStateException("provoked");
-            }).when(receiver).receiveCacheEntries(anyList());
+            InternalCacheManager<Key, Value> cacheManager = getInstanceRegistry(cacheB).getCacheManager();
+            AtomicBoolean failing = new AtomicBoolean(true);
+            cacheB.distributedPolicy().getAdapter().setReceiver(new Receiver<>() {
 
-            // something for the watcher to fail on, and the entry whose arrival proves afterwards that it recovered
-            distributedCacheB.put(key2, value2);
+                @Override
+                public void receiveCacheEntries(@NonNull List<CacheEntry<Key, Value>> cacheEntries) {
+                    if (failing.get()) {
+                        throw new IllegalStateException("provoked");
+                    }
+                    cacheManager.receiveCacheEntries(cacheEntries);
+                }
 
-            assertThat(watcherFailed.await(WAITING_DURATION.toMillis(), TimeUnit.MILLISECONDS)).isTrue();
+                @Override
+                public void receiveSynchronizationRestart() {
+                    cacheManager.receiveSynchronizationRestart();
+                }
+            });
 
-            distributedCacheB.invalidate(key1);
+            cacheA.put(Key.of(1), Value.of(1));
 
-            // what maintenance does a distribution duration later, done now: a negative duration puts the deadline
-            // ahead of every write, so nothing is left for the watcher to find once it watches again
-            invokeMethod(getInstanceRegistry(distributedCacheB).getMaintenanceWorker(),
-                    InternalMaintenanceWorker.class, "processNotRetained",
-                    List.of(Duration.class), List.of(Duration.ZERO.minus(Duration.ofMillis(1))));
+            // the cache instance next to the failing one receives as usual, through the very same cursor
+            await("synchronization next to a failing cache instance")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(cacheC.getIfPresent(Key.of(1))).isEqualTo(Value.of(1)));
+            await("failure of the cache instance that fails to apply")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(loggerMongoSynchronizer.getLoggingEvents())
+                            .anySatisfy(loggingEvent -> {
+                                assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                                assertThat(loggingEvent.getMessage())
+                                        .startsWith("Receiving change stream events failed");
+                                assertThat(loggingEvent.getThrowable()).hasMessage("provoked");
+                            }));
 
-            assertThatDataStoreIsEmpty();
+            failing.set(false);
+            cacheA.put(Key.of(2), Value.of(2));
 
-            doCallRealMethod().when(receiver).receiveCacheEntries(anyList());
-
-            // the population of the other cache instance arrives because an insert carries its cache entry in the
-            // oplog, so it survives the document being swept - asserted first, so that a watcher which never
-            // recovered at all cannot make the assertions below pass
-            await("recovery")
-                    .atMost(WAITING_DURATION.plusSeconds(10)) // retry delay is increased on failure
-                    .untilAsserted(() -> assertThat(distributedCacheA.getIfPresent(key2)).isEqualTo(value2));
-
-            assertThat(distributedCacheA.getIfPresent(key1)).isNull();
-            assertThat(distributedCacheB.getIfPresent(key1)).isNull();
-
-            // the watcher really did fail and say so, which is what the recovery above is a recovery from
-            assertThat(loggerMongoSynchronizer.getLoggingEvents())
-                    .anySatisfy(loggingEvent -> {
-                        assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
-                        assertThat(loggingEvent.getMessage()).startsWith("Watching change streams failed");
-                        assertThat(loggingEvent.getThrowable()).hasMessage("provoked");
+            // and the failing one receives again once it no longer fails - including what it failed on, which it
+            // kept and applies after reconciling
+            await("synchronization once applying no longer fails")
+                    .atMost(EXTENDED_WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        assertThat(cacheB.getIfPresent(Key.of(1))).isEqualTo(Value.of(1));
+                        assertThat(cacheB.getIfPresent(Key.of(2))).isEqualTo(Value.of(2));
                     });
-            loggerMongoSynchronizer.stopCapturing();
 
-            // and the invalidation above survived because restarting reconciled the cache against the data
-            // store - the only step that can drop a cache entry whose removal was never delivered
+            // without the cursor ever having been given up for it
+            assertThat(loggerMongoWatcher.getLoggingEvents()).isEmpty();
+            loggerMongoWatcher.stopCapturing();
+            loggerMongoSynchronizer.stopCapturing();
+            loggerDistributedCaffeine.stopCapturing();
+        }
+
+        @DisplayName("Test that a cache instance slow to apply what it received does not hold up the others")
+        @Test
+        void test_Synchronizer_does_not_hold_up_others_behind_a_slow_cache_instance() {
+            // all three share a cursor, which is the default
+            DistributedCache<Key, Value> cacheA = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheB = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheC = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            // cacheB does not get past applying until released - which, if applying happened on the thread that
+            // holds the cursor, would leave nobody else on the cursor receiving anything either
+            InternalCacheManager<Key, Value> cacheManager = getInstanceRegistry(cacheB).getCacheManager();
+            CountDownLatch released = new CountDownLatch(1);
+            cacheB.distributedPolicy().getAdapter().setReceiver(new Receiver<>() {
+
+                @Override
+                public void receiveCacheEntries(@NonNull List<CacheEntry<Key, Value>> cacheEntries) {
+                    try {
+                        released.await();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    cacheManager.receiveCacheEntries(cacheEntries);
+                }
+
+                @Override
+                public void receiveSynchronizationRestart() {
+                    cacheManager.receiveSynchronizationRestart();
+                }
+            });
+
+            try {
+                cacheA.put(Key.of(1), Value.of(1));
+                cacheA.put(Key.of(2), Value.of(2));
+
+                await("synchronization next to a cache instance that does not get past applying")
+                        .atMost(WAITING_DURATION)
+                        .untilAsserted(() -> {
+                            assertThat(cacheC.getIfPresent(Key.of(1))).isEqualTo(Value.of(1));
+                            assertThat(cacheC.getIfPresent(Key.of(2))).isEqualTo(Value.of(2));
+                        });
+                assertThat(cacheB.getIfPresent(Key.of(1))).isNull();
+            } finally {
+                released.countDown();
+            }
+
+            // and the slow one catches up once it gets past applying
+            await("synchronization of the slow cache instance once released")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(cacheB.getIfPresent(Key.of(2))).isEqualTo(Value.of(2)));
+        }
+
+        @DisplayName("Test that a cache instance falling too far behind is reconciled instead")
+        @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_reconciles_a_cache_instance_that_falls_too_far_behind() throws Exception {
+            // Persisting cached entries is what makes the recovery warm: reconciling keeps what the store confirms,
+            // and without a store that retains them there is nothing to confirm against
+            DistributedCache<Key, Value> cacheA = createCache(CacheBuilder.identity(),
+                    dc -> dc.withPersistence(configurer -> configurer
+                                    .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency))
+                            .build());
+            Adapter<Key, Value> adapterB = createAdapter();
+            // a limit low enough to be passed by a handful of writes, set before activation
+            Synchronizer<?, ?> synchronizerB = readFieldValue(adapterB, AbstractAdapter.class,
+                    "synchronizer", Synchronizer.class);
+            writeFieldValue(synchronizerB, synchronizerB.getClass(), "pendingLimit", 5);
+            DistributedCache<Key, Value> cacheB = createCache(adapterB, CacheBuilder.identity(),
+                    dc -> dc.withPersistence(configurer -> configurer
+                                    .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency))
+                            .build());
+
+            CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
+                    .getCaptureLogger(DistributedCaffeine.class);
+            loggerDistributedCaffeine.startCapturing();
+
+            // cacheB applies the first thing it receives only once released, so that everything after it piles up
+            InternalCacheManager<Key, Value> cacheManager = getInstanceRegistry(cacheB).getCacheManager();
+            CountDownLatch released = new CountDownLatch(1);
+            CountDownLatch held = new CountDownLatch(1);
+            cacheB.distributedPolicy().getAdapter().setReceiver(new Receiver<>() {
+
+                @Override
+                public void receiveCacheEntries(@NonNull List<CacheEntry<Key, Value>> cacheEntries) {
+                    held.countDown();
+                    try {
+                        released.await();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    cacheManager.receiveCacheEntries(cacheEntries);
+                }
+
+                @Override
+                public void receiveSynchronizationRestart() {
+                    cacheManager.receiveSynchronizationRestart();
+                }
+            });
+
+            cacheA.put(Key.of(0), Value.of(0));
+            assertThat(held.await(WAITING_DURATION.toMillis(), TimeUnit.MILLISECONDS)).isTrue();
+
+            // more than the limit, while cacheB is still busy with the first
+            List<Key> keys = IntStream.rangeClosed(1, 20).mapToObj(Key::of).toList();
+            keys.forEach(key -> cacheA.put(key, Value.of(key.getId())));
+            released.countDown();
+
+            await("synchronization of everything despite falling behind")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> keys.forEach(key ->
+                            assertThat(cacheB.getIfPresent(key)).isEqualTo(Value.of(key.getId()))));
+
+            // and it got there by reconciling, rather than by applying everything that piled up
             assertThat(loggerDistributedCaffeine.getLoggingEvents())
                     .anySatisfy(loggingEvent -> {
                         assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
-                        assertThat(loggingEvent.getMessage())
-                                .startsWith("Synchronization was interrupted for cache at");
+                        assertThat(loggingEvent.getMessage()).startsWith("Synchronization was interrupted for cache at");
                     });
             loggerDistributedCaffeine.stopCapturing();
+        }
+
+        private Adapter<Key, Value> watchingAdapter(MongoClient watchingMongoClient) {
+            return MongoAdapter.newBuilder(watchingMongoClient, DATABASE_NAME, getDatasetName()).build();
+        }
+
+        // Three cache instances watching through a client of their own - two on one collection, told apart by their
+        // discriminators, and one on another collection - so that the change stream cursors that client holds are
+        // the ones they share. Each of them has a peer on the shared client to be written to, so that what they
+        // receive has to come through the cursor they share
+        private void assertWatchersShared(WatcherSharingMode sharingMode, int expectedCursors) {
+            String collectionName = getDatasetName();
+            // still bounded, and still ending in the counter that makes it unique
+            String otherCollectionName = "b_" + collectionName.substring(2);
+            try (MongoClient watchingMongoClient = MongoClients.create(MongoClientSettings.builder()
+                    .applyConnectionString(new ConnectionString(mongoContainer.getReplicaSetUrl()))
+                    .applicationName(collectionName)
+                    .build())) {
+                List<DistributedCache<Key, Value>> watching = new ArrayList<>();
+                List<DistributedCache<Key, Value>> writing = new ArrayList<>();
+                List<List<String>> scopes = List.of(List.of(collectionName, "a"), List.of(collectionName, "b"),
+                        List.of(otherCollectionName, "a"));
+                try {
+                    for (List<String> scope : scopes) {
+                        watching.add(createCache(MongoAdapter.newBuilder(watchingMongoClient, DATABASE_NAME,
+                                                scope.get(0))
+                                        .withDiscriminator(scope.get(1))
+                                        .withWatcherSharingMode(sharingMode)
+                                        .build(),
+                                CacheBuilder.identity(), DistributedCaffeine::build));
+                        writing.add(createCache(MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, scope.get(0))
+                                        .withDiscriminator(scope.get(1))
+                                        .build(),
+                                CacheBuilder.identity(), DistributedCaffeine::build));
+                    }
+
+                    for (int index = 0; index < scopes.size(); index++) {
+                        writing.get(index).put(Key.of(index), Value.of(index));
+                    }
+                    for (int index = 0; index < scopes.size(); index++) {
+                        DistributedCache<Key, Value> cache = watching.get(index);
+                        Key key = Key.of(index);
+                        Value value = Value.of(index);
+                        await("synchronization over the cursor shared at " + sharingMode)
+                                .atMost(WAITING_DURATION)
+                                .untilAsserted(() -> assertThat(cache.getIfPresent(key)).isEqualTo(value));
+                    }
+
+                    // counted only now, long after the last cache instance joined, so that no cursor is being
+                    // reopened wider while counting
+                    assertThat(countChangeStreamCursors(collectionName)).isEqualTo(expectedCursors);
+                } finally {
+                    // torn down here rather than after the test, because their client is closed on the way out
+                    watching.forEach(cache -> {
+                        cache.distributedPolicy().stopSynchronization();
+                        cache.invalidateAll();
+                        distributedCacheInstances.remove(cache);
+                    });
+                }
+
+                // and a cursor is given up once its last cache instance stops
+                await("cursors given up")
+                        .atMost(WAITING_DURATION)
+                        .until(() -> countChangeStreamCursors(collectionName) == 0);
+            }
+        }
+
+        // The change stream cursors that the client of the given application name holds on the test's database,
+        // collected over a second. One look is not enough: a cursor passing between being polled and lying idle in
+        // that very moment is listed as neither, so a single look can come up short - but not ten of them
+        private int countChangeStreamCursors(String applicationName) {
+            Set<Object> cursorIds = new HashSet<>();
+            for (int look = 0; look < 10; look++) {
+                changeStreamCursorsOf(applicationName).forEach(cursor -> cursorIds.add(cursor.get("cursorId")));
+                sleep(Duration.ofMillis(100));
+            }
+            return cursorIds.size();
+        }
+
+        private List<Document> changeStreamCursorsOf(String applicationName) {
+            List<Document> operations = mongoClient.getDatabase("admin")
+                    .aggregate(List.of(new Document("$currentOp",
+                            new Document("allUsers", true).append("idleCursors", true))))
+                    .into(new ArrayList<>());
+            List<Document> cursors = new ArrayList<>();
+            for (Document operation : operations) {
+                Document cursor = operation.get("cursor", Document.class);
+                String namespace = operation.getString("ns");
+                if (applicationName.equals(operation.getString("appName")) && nonNull(cursor) && nonNull(namespace)
+                        && namespace.startsWith(DATABASE_NAME + ".")
+                        && String.valueOf(cursor.get("originatingCommand")).contains("$changeStream")) {
+                    cursors.add(new Document("ns", namespace).append("cursorId", cursor.get("cursorId")));
+                }
+            }
+            return cursors;
         }
 
         private void publishWith(Serializer<Value, ?> valueSerializer, String discriminator, Value value)
@@ -8290,6 +8921,21 @@ final class DistributedCaffeineIntegrationTests {
             return name.length() <= maximumLength ? name : name.substring(name.length() - maximumLength);
         }
 
+        // the position the watcher a synchronizer currently subscribes through resumes from - shared by every
+        // cache instance on that watcher, which is why it is reached through the subscription
+        AtomicReference<?> resumeTokenOf(Synchronizer<?, ?> synchronizer) {
+            Object watcher = watcherOf(synchronizer);
+            return readFieldValue(watcher, watcher.getClass(), "resumeToken", AtomicReference.class);
+        }
+
+        // the watcher a synchronizer currently subscribes through
+        Object watcherOf(Synchronizer<?, ?> synchronizer) {
+            AtomicReference<?> subscription = readFieldValue(synchronizer, synchronizer.getClass(), "subscription",
+                    AtomicReference.class);
+            Object activeSubscription = requireNonNull(subscription.get());
+            return readFieldValue(activeSubscription, activeSubscription.getClass(), "watcher", Object.class);
+        }
+
         @Override
         <K, V> Adapter<K, V> createAdapter() {
             return MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, getDatasetName()).build();
@@ -8301,11 +8947,11 @@ final class DistributedCaffeineIntegrationTests {
                     .withDiscriminator(discriminator)
                     .build();
         }
+
     }
 
     @SuppressWarnings({"java:S5838", "java:S5778", "SqlNoDataSourceInspection", "SqlSourceToSinkFlow"})
     abstract static class PostgresIntegration extends CommonIntegration {
-
         // whichever index serves it, for a predicate so broad that preferring one of them would be the wrong plan
         private static final Set<String> ANY_INDEX = Set.of("Index");
 
@@ -8315,6 +8961,7 @@ final class DistributedCaffeineIntegrationTests {
         static final String SCHEMA_NAME = "public";
 
         PostgreSQLContainer postgresContainer;
+
         DataSource dataSource;
 
         @DisplayName("Test that the adapter names and separates its scope by discriminator")
@@ -8486,19 +9133,6 @@ final class DistributedCaffeineIntegrationTests {
                         assertThat(loggingEvent.getThrowable()).isNotNull();
                     });
             loggerPostgresRepository.stopCapturing();
-        }
-
-        // Statements against this test's own table that are reading in a transaction, counted from another
-        // connection
-        private long countReadingInTransaction() throws SQLException {
-            String readingInTransaction = format("SELECT count(*) FROM pg_stat_activity "
-                    + "WHERE state = 'idle in transaction' AND query LIKE '%%\"%s\"%%'", getDatasetName());
-            try (Connection connection = dataSource.getConnection();
-                 Statement statement = connection.createStatement();
-                 ResultSet resultSet = statement.executeQuery(readingInTransaction)) {
-                resultSet.next();
-                return resultSet.getLong(1);
-            }
         }
 
         @DisplayName("Test that the repository streams unbounded reads in batches and reads by hash in one go")
@@ -9330,66 +9964,6 @@ final class DistributedCaffeineIntegrationTests {
             assertSessionsShared(ListenerSharingMode.DATABASE, 1);
         }
 
-        // Three cache instances listening through a pool of their own - two on one table, told apart by their
-        // discriminators, and one on another table - so that the connections the pool has out are the sessions
-        // they listen on. Each of them has a peer on the shared data source to be written to, so that what they
-        // receive has to come through the session they share
-        private void assertSessionsShared(ListenerSharingMode sharing, int expectedSessions) {
-            String tableName = getDatasetName();
-            // still bounded, and still ending in the counter that makes it unique
-            String otherTableName = "b_" + tableName.substring(2);
-            try (HikariDataSource listenerDataSource = createDataSource(postgresContainer.getDatabaseName())) {
-                List<DistributedCache<Key, Value>> listening = new ArrayList<>();
-                List<DistributedCache<Key, Value>> writing = new ArrayList<>();
-                List<List<String>> scopes = List.of(List.of(tableName, "a"), List.of(tableName, "b"),
-                        List.of(otherTableName, "a"));
-                try {
-                    for (List<String> scope : scopes) {
-                        listening.add(createCache(PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, scope.get(0))
-                                        .withDiscriminator(scope.get(1))
-                                        .withListenerDataSource(listenerDataSource)
-                                        .withListenerSharingMode(sharing)
-                                        .build(),
-                                CacheBuilder.identity(), DistributedCaffeine::build));
-                        writing.add(createCache(PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, scope.get(0))
-                                        .withDiscriminator(scope.get(1))
-                                        .build(),
-                                CacheBuilder.identity(), DistributedCaffeine::build));
-                    }
-
-                    // a session is held from the moment its first cache instance is activated, and only sessions are
-                    // taken from this pool - reading and writing go through the shared data source
-                    assertThat(listenerDataSource.getHikariPoolMXBean().getActiveConnections())
-                            .isEqualTo(expectedSessions);
-
-                    for (int index = 0; index < scopes.size(); index++) {
-                        writing.get(index).put(Key.of(index), Value.of(index));
-                    }
-                    for (int index = 0; index < scopes.size(); index++) {
-                        DistributedCache<Key, Value> cache = listening.get(index);
-                        Key key = Key.of(index);
-                        Value value = Value.of(index);
-                        await("synchronization over the session shared at " + sharing)
-                                .atMost(WAITING_DURATION)
-                                .untilAsserted(() -> assertThat(cache.getIfPresent(key)).isEqualTo(value));
-                    }
-                } finally {
-                    // torn down here rather than after the test, because the listener data source is closed on the
-                    // way out of this method
-                    listening.forEach(cache -> {
-                        cache.distributedPolicy().stopSynchronization();
-                        cache.invalidateAll();
-                        distributedCacheInstances.remove(cache);
-                    });
-                }
-
-                // and a session is given up once its last cache instance stops
-                await("sessions given up")
-                        .atMost(WAITING_DURATION)
-                        .until(() -> listenerDataSource.getHikariPoolMXBean().getActiveConnections() == 0);
-            }
-        }
-
         @DisplayName("Test that a cache instance failing to apply what it received leaves the others on its session alone")
         @Test
         @ResourceLock(LOGGER_RESOURCE_LOCK)
@@ -9459,6 +10033,94 @@ final class DistributedCaffeineIntegrationTests {
             loggerPostgresListener.stopCapturing();
             loggerPostgresSynchronizer.stopCapturing();
             loggerDistributedCaffeine.stopCapturing();
+        }
+
+        @DisplayName("Test that a cache instance joining a session being replaced waits for it, or gives up in time")
+        @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_joins_a_shared_session_while_it_is_being_replaced() throws Exception {
+            // The cache instances read and write directly and only listen through the proxy, so that the outage hits
+            // the shared listening session alone - which keeps failing to be replaced for as long as it lasts
+            try (SilencingProxy proxy = new SilencingProxy(postgresContainer.getHost(),
+                    postgresContainer.getMappedPort(PostgreSQLContainer.POSTGRESQL_PORT), executorService);
+                 HikariDataSource listenerDataSource = createProxiedDataSource(proxy)) {
+                DistributedCache<Key, Value> cacheA = createCache(CacheBuilder.identity(), DistributedCaffeine::build);
+                // the session is opened by this cache instance, so the heartbeat is shortened on it
+                Adapter<Key, Value> adapterB1 = listeningAdapter(listenerDataSource);
+                Synchronizer<?, ?> synchronizerB1 = readFieldValue(adapterB1, AbstractAdapter.class,
+                        "synchronizer", Synchronizer.class);
+                writeFieldValue(synchronizerB1, synchronizerB1.getClass(), "heartbeatInterval", Duration.ofSeconds(1));
+                writeFieldValue(synchronizerB1, synchronizerB1.getClass(), "heartbeatTimeout", Duration.ofSeconds(1));
+                DistributedCache<Key, Value> cacheB1 = createCache(adapterB1, CacheBuilder.identity(),
+                        DistributedCaffeine::build);
+                List<DistributedCache<Key, Value>> listening = new ArrayList<>(List.of(cacheB1));
+                try {
+                    cacheA.put(Key.of(1), Value.of(1));
+
+                    await("synchronization through the proxy")
+                            .atMost(WAITING_DURATION)
+                            .untilAsserted(() -> assertThat(cacheB1.getIfPresent(Key.of(1))).isEqualTo(Value.of(1)));
+
+                    // every failed attempt to replace the session is reported, and so is the reconcile once it is
+                    CaptureLogger loggerPostgresListener = CaptureLoggerFactory.getCaptureLogger(
+                            "io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresListener");
+                    loggerPostgresListener.startCapturing();
+                    CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
+                            .getCaptureLogger(DistributedCaffeine.class);
+                    loggerDistributedCaffeine.startCapturing();
+
+                    proxy.silenceNewConnections(true);
+                    proxy.silenceOpenConnections();
+
+                    await("session being replaced")
+                            .atMost(Duration.ofSeconds(10))
+                            .until(() -> !loggerPostgresListener.getLoggingEvents().isEmpty());
+
+                    // a cache instance whose activation timeout runs out first gives up, and says why
+                    Adapter<Key, Value> adapterB3 = listeningAdapter(listenerDataSource);
+                    Synchronizer<?, ?> synchronizerB3 = readFieldValue(adapterB3, AbstractAdapter.class,
+                            "synchronizer", Synchronizer.class);
+                    writeFieldValue(synchronizerB3, synchronizerB3.getClass(), "activationTimeout",
+                            Duration.ofSeconds(1));
+                    assertThatThrownBy(() -> createCache(adapterB3, CacheBuilder.identity(),
+                            DistributedCaffeine::build))
+                            .isInstanceOf(IllegalStateException.class)
+                            .hasMessageStartingWith("Listening for notifications failed for cache at")
+                            .cause()
+                            .isInstanceOf(TimeoutException.class);
+
+                    // while one whose timeout lasts waits for the session to come back
+                    Adapter<Key, Value> adapterB2 = listeningAdapter(listenerDataSource);
+                    Synchronizer<?, ?> synchronizerB2 = readFieldValue(adapterB2, AbstractAdapter.class,
+                            "synchronizer", Synchronizer.class);
+                    writeFieldValue(synchronizerB2, synchronizerB2.getClass(), "activationTimeout",
+                            Duration.ofSeconds(60));
+                    CompletableFuture<DistributedCache<Key, Value>> joining = CompletableFuture.supplyAsync(() ->
+                            createCache(adapterB2, CacheBuilder.identity(), DistributedCaffeine::build), executorService);
+                    sleep(Duration.ofSeconds(2));
+                    assertThat(joining).isNotDone();
+
+                    proxy.silenceNewConnections(false);
+
+                    DistributedCache<Key, Value> cacheB2 = joining.get(60, TimeUnit.SECONDS);
+                    listening.add(cacheB2);
+
+                    cacheA.put(Key.of(2), Value.of(2));
+
+                    await("synchronization of the instance that joined while the session was being replaced")
+                            .atMost(WAITING_DURATION)
+                            .untilAsserted(() -> assertThat(cacheB2.getIfPresent(Key.of(2))).isEqualTo(Value.of(2)));
+                    loggerPostgresListener.stopCapturing();
+                    loggerDistributedCaffeine.stopCapturing();
+                } finally {
+                    // torn down here rather than after the test, because the listener data source is closed on the
+                    // way out of this method
+                    listening.forEach(cache -> {
+                        cache.distributedPolicy().stopSynchronization();
+                        distributedCacheInstances.remove(cache);
+                    });
+                }
+            }
         }
 
         @DisplayName("Test that a cache instance slow to apply what it received does not hold up the others")
@@ -9651,6 +10313,85 @@ final class DistributedCaffeineIntegrationTests {
                     execute(listener, "UNLISTEN " + channel);
                 }
             }
+        }
+
+        // Statements against this test's own table that are reading in a transaction, counted from another
+        // connection
+        private long countReadingInTransaction() throws SQLException {
+            String readingInTransaction = format("SELECT count(*) FROM pg_stat_activity "
+                    + "WHERE state = 'idle in transaction' AND query LIKE '%%\"%s\"%%'", getDatasetName());
+            try (Connection connection = dataSource.getConnection();
+                 Statement statement = connection.createStatement();
+                 ResultSet resultSet = statement.executeQuery(readingInTransaction)) {
+                resultSet.next();
+                return resultSet.getLong(1);
+            }
+        }
+
+        // Three cache instances listening through a pool of their own - two on one table, told apart by their
+        // discriminators, and one on another table - so that the connections the pool has out are the sessions
+        // they listen on. Each of them has a peer on the shared data source to be written to, so that what they
+        // receive has to come through the session they share
+        private void assertSessionsShared(ListenerSharingMode sharing, int expectedSessions) {
+            String tableName = getDatasetName();
+            // still bounded, and still ending in the counter that makes it unique
+            String otherTableName = "b_" + tableName.substring(2);
+            try (HikariDataSource listenerDataSource = createDataSource(postgresContainer.getDatabaseName())) {
+                List<DistributedCache<Key, Value>> listening = new ArrayList<>();
+                List<DistributedCache<Key, Value>> writing = new ArrayList<>();
+                List<List<String>> scopes = List.of(List.of(tableName, "a"), List.of(tableName, "b"),
+                        List.of(otherTableName, "a"));
+                try {
+                    for (List<String> scope : scopes) {
+                        listening.add(createCache(PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, scope.get(0))
+                                        .withDiscriminator(scope.get(1))
+                                        .withListenerDataSource(listenerDataSource)
+                                        .withListenerSharingMode(sharing)
+                                        .build(),
+                                CacheBuilder.identity(), DistributedCaffeine::build));
+                        writing.add(createCache(PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, scope.get(0))
+                                        .withDiscriminator(scope.get(1))
+                                        .build(),
+                                CacheBuilder.identity(), DistributedCaffeine::build));
+                    }
+
+                    // a session is held from the moment its first cache instance is activated, and only sessions are
+                    // taken from this pool - reading and writing go through the shared data source
+                    assertThat(listenerDataSource.getHikariPoolMXBean().getActiveConnections())
+                            .isEqualTo(expectedSessions);
+
+                    for (int index = 0; index < scopes.size(); index++) {
+                        writing.get(index).put(Key.of(index), Value.of(index));
+                    }
+                    for (int index = 0; index < scopes.size(); index++) {
+                        DistributedCache<Key, Value> cache = listening.get(index);
+                        Key key = Key.of(index);
+                        Value value = Value.of(index);
+                        await("synchronization over the session shared at " + sharing)
+                                .atMost(WAITING_DURATION)
+                                .untilAsserted(() -> assertThat(cache.getIfPresent(key)).isEqualTo(value));
+                    }
+                } finally {
+                    // torn down here rather than after the test, because the listener data source is closed on the
+                    // way out of this method
+                    listening.forEach(cache -> {
+                        cache.distributedPolicy().stopSynchronization();
+                        cache.invalidateAll();
+                        distributedCacheInstances.remove(cache);
+                    });
+                }
+
+                // and a session is given up once its last cache instance stops
+                await("sessions given up")
+                        .atMost(WAITING_DURATION)
+                        .until(() -> listenerDataSource.getHikariPoolMXBean().getActiveConnections() == 0);
+            }
+        }
+
+        private Adapter<Key, Value> listeningAdapter(DataSource listenerDataSource) {
+            return PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, getDatasetName())
+                    .withListenerDataSource(listenerDataSource)
+                    .build();
         }
 
         // asserts against the access path only - what a plan costs is the planner's business, not this table's.
@@ -9867,118 +10608,6 @@ final class DistributedCaffeineIntegrationTests {
             return refusing;
         }
 
-        // A TCP proxy that can stop carrying anything on the connections it holds without closing them: the
-        // bytes sent into such a connection are accepted and dropped, and nothing comes back. It can also let a
-        // few more bytes through before doing so, which cuts a message off in the middle. Connections accepted
-        // afterwards are carried as usual
-        static final class SilencingProxy implements AutoCloseable {
-
-            private final ServerSocket serverSocket;
-            private final String targetHost;
-            private final int targetPort;
-            private final Executor executor;
-            private final Set<Socket> sockets = ConcurrentHashMap.newKeySet();
-            private final Set<Budget> budgets = ConcurrentHashMap.newKeySet();
-
-            SilencingProxy(String targetHost, int targetPort, Executor executor) throws IOException {
-                this.serverSocket = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-                this.targetHost = targetHost;
-                this.targetPort = targetPort;
-                this.executor = executor;
-                executor.execute(this::accept);
-            }
-
-            int getPort() {
-                return serverSocket.getLocalPort();
-            }
-
-            void silenceOpenConnections() {
-                silenceOpenConnectionsAfter(0);
-            }
-
-            // whichever direction they travel in, so this is for a moment in which only one side is expected to
-            // send anything
-            void silenceOpenConnectionsAfter(long bytes) {
-                budgets.forEach(budget -> budget.limit(bytes));
-            }
-
-            private void accept() {
-                while (!serverSocket.isClosed()) {
-                    try {
-                        Socket client = serverSocket.accept();
-                        Socket server = new Socket(targetHost, targetPort);
-                        sockets.add(client);
-                        sockets.add(server);
-                        Budget budget = new Budget();
-                        budgets.add(budget);
-                        executor.execute(() -> pump(client, server, budget));
-                        executor.execute(() -> pump(server, client, budget));
-                    } catch (IOException e) {
-                        // closed, which is how accepting ends
-                    }
-                }
-            }
-
-            private void pump(Socket from, Socket to, Budget budget) {
-                byte[] buffer = new byte[8192];
-                try (InputStream in = from.getInputStream(); OutputStream out = to.getOutputStream()) {
-                    int read;
-                    while ((read = in.read(buffer)) >= 0) {
-                        int allowed = budget.take(read);
-                        if (allowed > 0) {
-                            out.write(buffer, 0, allowed);
-                            out.flush();
-                        }
-                    }
-                } catch (IOException e) {
-                    // either side closed, which is how pumping ends
-                } finally {
-                    // a silenced connection stays open, because a reset is exactly what it must not receive
-                    if (!budget.isLimited()) {
-                        closeQuietly(from);
-                        closeQuietly(to);
-                    }
-                }
-            }
-
-            private static void closeQuietly(Socket socket) {
-                try {
-                    socket.close();
-                } catch (IOException e) {
-                    // nothing left to do about it
-                }
-            }
-
-            @Override
-            public void close() throws IOException {
-                serverSocket.close();
-                sockets.forEach(SilencingProxy::closeQuietly);
-            }
-
-            // how many more bytes a connection carries, shared by both of its directions - unlimited until limited
-            private static final class Budget {
-
-                private long remaining = -1;
-
-                synchronized void limit(long bytes) {
-                    remaining = bytes;
-                }
-
-                synchronized boolean isLimited() {
-                    return remaining >= 0;
-                }
-
-                synchronized int take(int read) {
-                    if (remaining < 0) {
-                        return read;
-                    }
-                    int allowed = (int) Math.min(read, remaining);
-                    remaining -= allowed;
-                    return allowed;
-                }
-            }
-        }
-
         // A pool that reaches the test's server through the proxy, set up the way a pool facing a network that can
         // go silent has to be anyway. Without the driver's timeouts, a connection that is being opened at the
         // moment the proxy goes silent hangs in its handshake for good - and with it the one thread the pool opens
@@ -10056,6 +10685,7 @@ final class DistributedCaffeineIntegrationTests {
             String name = super.getDatasetName();
             return name.length() <= 60 ? name : name.substring(name.length() - 60);
         }
+
     }
 
     abstract static class DistributedCaffeineIntegrationTestInstance extends DistributedCaffeineCommonTestInstance {

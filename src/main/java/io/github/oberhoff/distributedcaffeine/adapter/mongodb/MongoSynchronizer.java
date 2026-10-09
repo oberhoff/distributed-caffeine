@@ -16,27 +16,13 @@
 package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
 
 import com.mongodb.MongoClientException;
-import com.mongodb.MongoCommandException;
 import com.mongodb.MongoTimeoutException;
-import com.mongodb.client.ChangeStreamIterable;
-import com.mongodb.client.MongoChangeStreamCursor;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCollection;
-import com.mongodb.client.model.Aggregates;
-import com.mongodb.client.model.Filters;
-import com.mongodb.client.model.Projections;
-import com.mongodb.client.model.changestream.ChangeStreamDocument;
-import com.mongodb.client.model.changestream.FullDocument;
-import com.mongodb.client.model.changestream.OperationType;
-import dev.failsafe.Failsafe;
-import dev.failsafe.Fallback;
-import dev.failsafe.RetryPolicy;
 import io.github.oberhoff.distributedcaffeine.adapter.AbstractSynchronizer;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
-import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field;
-import org.bson.BsonDocument;
+import io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoAdapter.WatcherSharingMode;
 import org.bson.Document;
-import org.bson.conversions.Bson;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.System.Logger;
@@ -46,306 +32,324 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Stream;
 
-import static com.mongodb.client.model.changestream.OperationType.INSERT;
-import static com.mongodb.client.model.changestream.OperationType.UPDATE;
 import static io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoRepository.toCacheEntryOrNull;
 import static java.lang.Math.min;
 import static java.lang.String.format;
-import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 
+/**
+ * Receives for one cache instance through a change stream cursor that it may share with others, as the sharing mode
+ * decides.
+ * <p>
+ * Every activation subscribes anew, with a subscription of its own that does the work for this cache instance:
+ * reading the cache entries out of what the cursor hands over and applying them. Activating and deactivating run
+ * under the lock of the cache instance, and so does applying - so neither of them ever waits for the work of a
+ * subscription, and a subscription that outlives its deactivation simply finds itself closed.
+ */
 final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
 
     private static final Logger LOGGER = System.getLogger(MongoSynchronizer.class.getName());
 
-    private static final Duration WATCHER_INTERVAL = Duration.ofSeconds(1);
-    // events already buffered by the cursor are handed over together - bounded so that a backlog cannot hold the
-    // synchronization lock of the cache for arbitrarily long
+    private static final Duration RETRY_INTERVAL = Duration.ofSeconds(1);
+    // cache entries handed over in one go - bounded so that a backlog cannot hold the synchronization lock of the
+    // cache for arbitrarily long
     private static final int MAXIMUM_BATCH_SIZE = 100;
-    // "ChangeStreamHistoryLost": the resume position has fallen out of the oplog and never becomes valid again
-    private static final int CHANGE_STREAM_HISTORY_LOST = 286;
-    private static final String DOCUMENT_KEY = "documentKey";
-    private static final String CLUSTER_TIME = "clusterTime";
-    private static final String OPERATION_TYPE = "operationType";
-    private static final String FULL_DOCUMENT = "fullDocument";
 
-    private final MongoCollection<Document> mongoCollection;
-    // unlike its sibling components, which get by with a single activation flag, this one needs three states: its
-    // restarts are scheduled by a retry policy it does not control, so "stopped" has to be distinguishable from
-    // "not started yet" - an attempt queued behind a retry delay must not start watching once deactivated
-    private final AtomicReference<WatchState> watchState;
-    private final AtomicReference<@Nullable Throwable> failFastThrowable;
-    // marks how far the change stream has been consumed, so that watching can be resumed there after a failure.
-    // A resume token is used rather than an operation time because the server reports one for every batch polled,
-    // including empty ones (post-batch resume token), so a position is available while nothing happens at all. An
-    // operation time can only be taken from an event that actually arrived, which leaves no resume position until
-    // the first one does - and a cursor failing before that resumes at "now", silently losing everything written
-    // in the meantime. Being exact, it also avoids re-applying events on every resume, unlike an operation time,
-    // which is second-granular and inclusive
-    private final AtomicReference<@Nullable BsonDocument> resumeToken;
+    private final MongoClient mongoClient;
+    private final String databaseName;
+    private final String collectionName;
+    private final WatcherSharingMode sharingMode;
+    private final Object scope;
+    // How many documents may wait to be applied before this cache instance is considered to have fallen behind -
+    // at which point they are dropped and the cache instance is reconciled instead, so that falling behind costs a
+    // reconcile rather than memory without bound. A field rather than a constant only so that a test can lower it
+    // before activation instead of producing ten thousand writes
+    @SuppressWarnings({"FieldMayBeFinal", "CanBeFinal", "FieldCanBeLocal"})
+    private int pendingLimit = 10_000;
+    // How long a single operation of watching may take - polls included - before its connection is considered dead
+    // and replaced: far above what a poll takes, which is the time the server waits for something to arrive. Taken
+    // over by the watcher only from the cache instance that creates it. A field for the same reason as the one above
+    @SuppressWarnings({"FieldMayBeFinal", "CanBeFinal", "FieldCanBeLocal"})
+    private Duration watcherTimeout = Duration.ofSeconds(10);
+    // How long activating waits for watching to take this cache instance in - which, while a shared cursor is being
+    // replaced, includes waiting for it to come back. The client's own timeout if it has one, MongoDB's default of 30
+    // seconds otherwise. Not final for the same reason as the ones above
+    @SuppressWarnings({"FieldMayBeFinal", "CanBeFinal"})
+    private Duration activationTimeout;
 
-    private @Nullable CompletableFuture<Void> watcherCompletableFuture;
+    private final AtomicReference<@Nullable Subscription> subscription = new AtomicReference<>();
 
-    MongoSynchronizer(MongoClient mongoClient, String databaseName, String collectionName) {
-        this.mongoCollection = mongoClient.getDatabase(databaseName).getCollection(collectionName);
-        this.watchState = new AtomicReference<>(WatchState.STOPPED);
-        this.failFastThrowable = new AtomicReference<>(null);
-        this.resumeToken = new AtomicReference<>(null);
-        // TODO connection sharing
+    MongoSynchronizer(MongoClient mongoClient, String databaseName, String collectionName,
+                      WatcherSharingMode sharingMode) {
+        this.mongoClient = mongoClient;
+        this.databaseName = databaseName;
+        this.collectionName = collectionName;
+        MongoCollection<Document> mongoCollection = mongoClient.getDatabase(databaseName).getCollection(collectionName);
+        this.activationTimeout = Optional.ofNullable(mongoCollection.getTimeout(TimeUnit.MILLISECONDS))
+                .filter(millis -> millis > 0)
+                .map(Duration::ofMillis)
+                .orElseGet(() -> Duration.ofSeconds(30));
+        this.sharingMode = sharingMode;
+        this.scope = switch (sharingMode) {
+            // a scope nobody else has, which shares the cursor with nobody
+            case INSTANCE -> new Object();
+            case COLLECTION -> collectionName;
+            case DATABASE -> WatcherSharingMode.DATABASE;
+        };
     }
 
     @Override
     public void activate() {
-        // already watching is nothing to do: the future joined below is the one this very activation is running,
-        // and it completes only once watching stops, so joining it here would wait for itself
         if (isActivated()) {
             return;
         }
+        MongoWatcherRegistry.Key key = new MongoWatcherRegistry.Key(mongoClient, databaseName, scope);
+        MongoWatcher watcher = MongoWatcherRegistry.acquire(key, () -> new MongoWatcher(mongoClient, databaseName,
+                sharingMode == WatcherSharingMode.DATABASE ? null : collectionName,
+                sharingMode != WatcherSharingMode.INSTANCE, watcherTimeout));
+        Subscription activated = new Subscription(key, watcher);
+        // whatever this replaces is closed, which for the one deactivated before does nothing - and for one that a
+        // concurrent activation put there in the meantime keeps it from staying subscribed with nobody to close it
+        Subscription replaced = subscription.getAndSet(activated);
+        if (replaced != null) {
+            replaced.close();
+        }
+        try {
+            CompletableFuture<@Nullable Void> subscribed = watcher.subscribe(activated);
+            watcher.start();
+            // wait until watching covers this cache instance, or fail after the timeout - but fail fast if watching
+            // is not possible at all
+            subscribed.get(activationTimeout.toMillis(), TimeUnit.MILLISECONDS);
+            activated.confirm();
+        } catch (Exception e) {
+            activated.close();
+            // An interruption is addressed to the thread rather than to this call, and waiting for the watcher to
+            // come up clears the flag on its way out. Set again before the failure is reported, so that whoever
+            // asked this thread to stop is still heard by whatever it does next
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            throw new MongoClientException(format("Watching change streams failed for cache at '%s'", identifier),
+                    causeOf(e));
+        }
+    }
 
-        // wait for completion if required
-        Optional.ofNullable(watcherCompletableFuture)
-                .filter(future -> !future.isDone())
-                .ifPresent(CompletableFuture::join);
-
-        // discard any throwable recorded by a previous activation attempt (after joining that attempt, so it cannot
-        // record another one afterwards). deactivate() is the only other place clearing it, but it is reached via
-        // InternalInstanceRegistry.deactivate(), which is skipped while isActivated() is false - exactly the state
-        // left behind by a failed activation. A stale throwable would otherwise make abortIf() below abort every
-        // later activation on the first poll, so a single failed start would permanently break synchronization.
-        failFastThrowable.set(null);
-
-        watchState.set(WatchState.STARTING);
-
-        scheduleChangeStreamWatcher();
-
-        // wait until watching is activated or throw exception after timeout, but fail fast if watching is not possible
-        Duration timeoutDuration = Optional.ofNullable(mongoCollection.getTimeout(TimeUnit.SECONDS))
-                .filter(seconds -> seconds > 0)
-                .map(Duration::ofSeconds)
-                .orElseGet(() -> Duration.ofSeconds(30)); // default MongoDB timeout
-        Fallback<Boolean> fallback = Fallback.<Boolean>builderOfException(event ->
-                        new MongoClientException(format("Watching change streams failed for cache at '%s'",
-                                identifier), Optional.ofNullable(failFastThrowable.get())
-                                .orElseGet(() -> new MongoTimeoutException(format("Timeout after %s seconds",
-                                        timeoutDuration.toSeconds())))))
-                .handleResult(false)
-                .build();
-        RetryPolicy<Boolean> retryPolicy = RetryPolicy.<Boolean>builder()
-                .handleResult(false)
-                .abortIf(result -> nonNull(failFastThrowable.get()))
-                .withMaxAttempts(-1)
-                .withMaxDuration(timeoutDuration)
-                .build();
-        Failsafe.with(fallback, retryPolicy)
-                .get(this::isActivated);
+    // what activating failed for: the failure of watching itself, or the activation timeout running out first
+    private @Nullable Throwable causeOf(Exception e) {
+        if (e instanceof ExecutionException) {
+            return e.getCause();
+        }
+        if (e instanceof TimeoutException) {
+            return new MongoTimeoutException(format("Timeout after %s seconds", activationTimeout.toSeconds()));
+        }
+        return e;
     }
 
     @Override
     public void deactivate() {
-        // an attempt that failed earlier may already be scheduled (up to ten intervals ahead) and is not aborted by
-        // this, so it still runs afterwards - it observes STOPPED and returns without watching. Otherwise it would
-        // start watching and report itself activated again, leaving the adapter activated while cache manager and
-        // maintenance worker are deactivated, in a loop that never ends - so the next activate() would join a
-        // future that can never complete
-        watchState.set(WatchState.STOPPED);
-        failFastThrowable.set(null);
-        resumeToken.set(null);
+        Subscription deactivated = subscription.get();
+        if (deactivated != null) {
+            deactivated.close();
+        }
     }
 
     @Override
     public boolean isActivated() {
-        return watchState.get() == WatchState.STARTED;
+        Subscription activated = subscription.get();
+        return activated != null && activated.isActive();
     }
 
-    private boolean isStopped() {
-        return watchState.get() == WatchState.STOPPED;
-    }
+    /**
+     * What one activation of this cache instance receives through, and the worker that reads the cache entries out
+     * of what it receives and applies them.
+     * <p>
+     * What waits to be applied is kept in the order the store produced it, because a change stream carries each
+     * cache entry as it stood: unlike a notification naming a record to read back, applying an older one after a
+     * newer one would apply it as the newer state. A failure to apply concerns this cache instance alone: what was
+     * taken for the failed attempt goes back to the front, and is applied again after a growing delay - after
+     * reconciling, because the attempt may have applied anything up to all of it. That is what a cursor resuming
+     * where it failed would do, without the cursor having to fail for everybody else on it.
+     */
+    private final class Subscription implements MongoWatcher.Subscriber {
 
-    private void scheduleChangeStreamWatcher() {
-        RetryPolicy<Void> retryPolicy = RetryPolicy.<Void>builder()
-                .abortOn(throwable -> {
-                    failFastThrowable.set(throwable);
-                    // abort unless watching had already started: a failure while starting up (for example a read
-                    // concern that does not support change streams) is final and must fail fast, whereas a failure
-                    // after that is treated as transient and retried
-                    return watchState.get() != WatchState.STARTED;
-                })
-                .withMaxAttempts(-1)
-                .withDelay(WATCHER_INTERVAL)
-                .withDelayFnOn(context -> WATCHER_INTERVAL.multipliedBy(min(context.getAttemptCount(), 10)),
-                        Throwable.class)
-                .onRetryScheduled(event -> Optional.ofNullable(event.getLastException())
-                        .ifPresent(throwable -> LOGGER.log(Level.WARNING,
-                                format("Watching change streams failed for cache at '%s'. Retrying...",
-                                        identifier), throwable)))
-                .build();
-        ExecutorService executorService = Executors.newSingleThreadExecutor();
-        watcherCompletableFuture = Failsafe.with(retryPolicy)
-                .with(executorService)
-                .runAsync(this::processChangeStreams)
-                .whenComplete((result, throwable) -> executorService.shutdown());
-    }
+        private final MongoWatcherRegistry.Key key;
+        private final MongoWatcher watcher;
+        private final ExecutorService executorService = Executors.newSingleThreadExecutor();
+        private final CountDownLatch closed = new CountDownLatch(1);
+        // guarded by this
+        private List<Document> pending = new ArrayList<>();
+        private boolean restartRequested;
+        private boolean scheduled;
+        private volatile boolean confirmed;
 
-    @SuppressWarnings("java:S3776")
-    private void processChangeStreams() {
-        // this attempt may have been scheduled before deactivation, in which case watching must not be (re)started
-        // the retry policy only evaluates its abort condition at failure time, not when a delayed attempt resumes
-        if (isStopped()) {
-            return;
+        private Subscription(MongoWatcherRegistry.Key key, MongoWatcher watcher) {
+            this.key = key;
+            this.watcher = watcher;
         }
-        // get change stream iterable, resuming where a previous attempt left off if it got that far. The pipeline is
-        // built here rather than once statically because it depends on the discriminator, which is not known before
-        // the adapter has wired this synchronizer up - which is cheap enough, as this runs once per opened cursor
-        ChangeStreamIterable<Document> changeStreamIterable = mongoCollection.watch(buildAggregationPipeline())
-                .fullDocument(FullDocument.UPDATE_LOOKUP);
-        changeStreamIterable = Optional.ofNullable(resumeToken.get())
-                .map(changeStreamIterable::resumeAfter)
-                .orElse(changeStreamIterable);
-        // get the cursor to iterate over inbound change stream documents
-        try (MongoChangeStreamCursor<ChangeStreamDocument<Document>> cursor = changeStreamIterable.cursor()) {
-            // do not report activation if deactivation happened while the cursor was being opened
-            if (isStopped()) {
+
+        @Override
+        public String getCollectionName() {
+            return collectionName;
+        }
+
+        @Override
+        public String getDiscriminator() {
+            return discriminator;
+        }
+
+        @Override
+        public String getIdentifier() {
+            return identifier;
+        }
+
+        @Override
+        public synchronized void receiveDocuments(List<Document> documents) {
+            // handed over in the moment between closing and the watcher taking the leaving into account
+            if (isClosed()) {
                 return;
             }
-            // Watching having started once before means this cursor replaces one that failed, so cache entries may
-            // have been missed: an event whose document was swept in the meantime resolves to no full document and
-            // is dropped by the server-side match on the discriminator, so it never arrives and no replay can make
-            // it good. Whether that actually happened cannot be told from here - the stream that skipped it looks
-            // exactly like one with nothing to deliver - which is why the possibility is what gets reported.
-            // Reported once the new cursor is live, so that changes arriving while the cache instance recovers are
-            // delivered rather than missed in turn, which is the order activation uses for the same reason
-            if (watchState.getAndSet(WatchState.STARTED) == WatchState.STARTED) {
-                receiver.receiveSynchronizationRestart();
+            pending.addAll(documents);
+            if (pending.size() > pendingLimit) {
+                pending = new ArrayList<>();
+                restartRequested = true;
             }
-            while (!isStopped()) {
-                ChangeStreamDocument<Document> changeStreamDocument = cursor.tryNext();
-                // additional check necessary because tryNext() seems to be paced (blocked for a while)
-                if (isNull(changeStreamDocument)) {
-                    // nothing pending, so the position reported for the batch just polled can be adopted as is: it
-                    // marks how far the server has looked without there being an event that still needs to be
-                    // applied. Doing this while idle is what closes the gap, because the first event may be hours
-                    // away or never come
-                    BsonDocument postBatchResumeToken = cursor.getResumeToken();
-                    // the cursor reports none before its first poll, and a position once held must not be given up
-                    // again, because that would mean resuming at "now" - the very gap it is kept for
-                    if (nonNull(postBatchResumeToken)) {
-                        resumeToken.set(postBatchResumeToken);
+            schedule();
+        }
+
+        // What waits to be applied stays: it was delivered before the cursor failed, and is applied after the
+        // reconcile, as the replay of a resumed cursor would be
+        @Override
+        public synchronized void receiveRestart() {
+            restartRequested = true;
+            schedule();
+        }
+
+        private void confirm() {
+            confirmed = true;
+        }
+
+        private boolean isActive() {
+            return confirmed && !isClosed();
+        }
+
+        private boolean isClosed() {
+            return closed.getCount() == 0;
+        }
+
+        // Never waits for the worker: closing may happen under the lock of the cache instance, which the worker
+        // takes to apply what it read. The worker notices on its own and ends
+        private void close() {
+            synchronized (this) {
+                if (isClosed()) {
+                    return;
+                }
+                closed.countDown();
+            }
+            watcher.unsubscribe(this);
+            MongoWatcherRegistry.release(key, watcher);
+            executorService.shutdown();
+        }
+
+        // guarded by this
+        private void schedule() {
+            if (scheduled || isClosed()) {
+                return;
+            }
+            scheduled = true;
+            try {
+                executorService.execute(this::work);
+            } catch (RejectedExecutionException e) {
+                // closed in the meantime, which leaves nothing to do
+                scheduled = false;
+            }
+        }
+
+        private void work() {
+            int failures = 0;
+            while (true) {
+                boolean restart;
+                List<Document> documents;
+                synchronized (this) {
+                    if (isClosed() || (!restartRequested && pending.isEmpty())) {
+                        scheduled = false;
+                        return;
                     }
-                } else if (!isStopped()) {
-                    // whatever else the cursor already holds is taken along, so that a burst of changes is handed
-                    // over as one batch and costs one synchronization lock of the cache instead of one per event.
-                    // Not a micro-optimization: that lock is fair, so one acquisition per event yields one event
-                    // per round-trip of a writer waiting on it, which measures at the writer's own rate against
-                    // two orders of magnitude more for the same entries handed over in batches. A cache instance
-                    // receiving from more than one busy peer would fall behind for good at the former, and
-                    // falling behind is what makes a swept cache entry undeliverable in the first place.
-                    // available() is what keeps that free of charge: it counts what can be taken without going to
-                    // the server, so nothing here waits for an event that has not arrived yet - polling for one is
-                    // what is paced, and doing that before handing over what is already in hand would delay every
-                    // batch by that pacing
-                    List<ChangeStreamDocument<Document>> changeStreamDocuments = new ArrayList<>();
-                    changeStreamDocuments.add(changeStreamDocument);
-                    while (changeStreamDocuments.size() < MAXIMUM_BATCH_SIZE && cursor.available() > 0
-                            && !isStopped()) {
-                        ChangeStreamDocument<Document> bufferedChangeStreamDocument = cursor.tryNext();
-                        if (isNull(bufferedChangeStreamDocument)) {
-                            break;
+                    restart = restartRequested;
+                    restartRequested = false;
+                    documents = pending;
+                    pending = new ArrayList<>();
+                }
+                try {
+                    if (restart) {
+                        receiver.receiveSynchronizationRestart();
+                    }
+                    receive(documents);
+                    failures = 0;
+                } catch (RuntimeException e) {
+                    failures++;
+                    LOGGER.log(Level.WARNING, format("Receiving change stream events failed for cache at '%s'. "
+                            + "Retrying...", identifier), e);
+                    synchronized (this) {
+                        documents.addAll(pending);
+                        pending = documents;
+                        // beyond the limit, falling behind costs the reconcile alone, as when receiving
+                        if (pending.size() > pendingLimit) {
+                            pending = new ArrayList<>();
                         }
-                        changeStreamDocuments.add(bufferedChangeStreamDocument);
+                        restartRequested = true;
                     }
-                    processChangeStreamDocuments(changeStreamDocuments);
-                    // advance only now that the events have been applied, and to the last of them. Resuming happens
-                    // strictly *after* the recorded position, so advancing beforehand would drop events whose
-                    // processing failed - a batch failing part way through is repeated as a whole, exactly as a
-                    // single event was before. An event always carries its own position, so no null check is needed
-                    resumeToken.set(changeStreamDocuments.get(changeStreamDocuments.size() - 1).getResumeToken());
+                    if (awaitClosed(RETRY_INTERVAL.multipliedBy(min(failures, 10)))) {
+                        synchronized (this) {
+                            scheduled = false;
+                        }
+                        return;
+                    }
                 }
             }
-        } catch (MongoCommandException e) {
-            // A resume position that has fallen out of the oplog never becomes valid again, so retrying with it
-            // would repeat this failure for as long as the cache instance lives - while isActivated() keeps
-            // reporting that watching is fine, because the retry policy holds the started state through failures.
-            // Giving the position up lets the retry open a fresh cursor, which starts at "now": watching recovers,
-            // the changes made in between do not, which is why this is logged rather than passed over silently
-            if (e.getErrorCode() == CHANGE_STREAM_HISTORY_LOST) {
-                resumeToken.set(null);
-                LOGGER.log(Level.WARNING, format("Resume position lost for cache at '%s'. Watching continues "
-                        + "without it, so changes made in the meantime are not received", identifier));
-            }
-            throw e;
         }
-    }
 
-    private void processChangeStreamDocuments(List<ChangeStreamDocument<Document>> changeStreamDocuments) {
-        List<CacheEntry<K, V>> cacheEntries = new ArrayList<>(changeStreamDocuments.size());
-        for (ChangeStreamDocument<Document> changeStreamDocument : changeStreamDocuments) {
-            OperationType operationType = changeStreamDocument.getOperationType();
-            Document fullDocument = changeStreamDocument.getFullDocument();
-            if (nonNull(fullDocument) && nonNull(operationType)
-                    && (operationType.equals(INSERT) || operationType.equals(UPDATE))) {
+        // waits out the delay before the next attempt, and reports whether closing cut it short
+        private boolean awaitClosed(Duration delay) {
+            try {
+                return closed.await(delay.toMillis(), TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return true;
+            }
+        }
+
+        // Handed over in batches rather than one by one, because the receiving side takes a lock per handover and
+        // one acquisition per cache entry would leave it moving at the rate of whoever holds it
+        private void receive(List<Document> documents) {
+            List<CacheEntry<K, V>> cacheEntries = new ArrayList<>(min(documents.size(), MAXIMUM_BATCH_SIZE));
+            for (Document document : documents) {
+                if (isClosed()) {
+                    return;
+                }
                 // skipped (logged and left out) rather than thrown on, as the contract of a synchronizer asks for:
-                // the resume token is advanced only once the events have been applied, so failing here would make
-                // the watcher retry that very batch indefinitely
-                CacheEntry<K, V> cacheEntry = toCacheEntryOrNull(keySerializer, valueSerializer,
-                        fullDocument, LOGGER, identifier);
+                // a document that cannot be read now cannot be read on a retry either
+                CacheEntry<K, V> cacheEntry = toCacheEntryOrNull(keySerializer, valueSerializer, document, LOGGER,
+                        identifier);
                 if (nonNull(cacheEntry)) {
                     cacheEntries.add(cacheEntry);
                 }
+                if (cacheEntries.size() == MAXIMUM_BATCH_SIZE) {
+                    receiver.receiveCacheEntries(cacheEntries);
+                    cacheEntries = new ArrayList<>(MAXIMUM_BATCH_SIZE);
+                }
+            }
+            if (!cacheEntries.isEmpty() && !isClosed()) {
+                receiver.receiveCacheEntries(cacheEntries);
             }
         }
-        // handed over in the order the underlying store produced them, which is the order they were polled in
-        if (!cacheEntries.isEmpty()) {
-            receiver.receiveCacheEntries(cacheEntries);
-        }
-    }
-
-    private List<Bson> buildAggregationPipeline() {
-        List<String> projectionFields = new ArrayList<>();
-        projectionFields.add(DOCUMENT_KEY);
-        projectionFields.add(CLUSTER_TIME);
-        projectionFields.add(OPERATION_TYPE);
-        projectionFields.addAll(Stream.of(Field.values())
-                .map(Object::toString)
-                .map(MongoSynchronizer::fullDocument)
-                .toList());
-        return List.of(
-                Aggregates.match(
-                        Filters.and(
-                                Filters.in(OPERATION_TYPE, INSERT.getValue(), UPDATE.getValue()),
-                                // events of other caches sharing this collection are not ours to apply
-                                Filters.eq(fullDocument(DISCRIMINATOR_FIELD), discriminator))),
-                Aggregates.project(
-                        Projections.fields(
-                                Projections.include(projectionFields))));
-    }
-
-    private static String fullDocument(String field) {
-        return format("%s.%s", FULL_DOCUMENT, field);
-    }
-
-    private enum WatchState {
-
-        /**
-         * Not watching and not supposed to: either never activated or deactivated since. A scheduled retry attempt
-         * observing this state returns without watching.
-         */
-        STOPPED,
-
-        /**
-         * Activation is under way, but watching has not begun yet. A failure in this state is final (fail fast).
-         */
-        STARTING,
-
-        /**
-         * Watching has begun. This state is kept while a transient failure is being retried, so that activation is
-         * not reported as lost during a short interruption, and so that such a failure is retried instead of aborted.
-         */
-        STARTED
     }
 }

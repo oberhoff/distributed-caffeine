@@ -37,9 +37,46 @@ import static java.util.Objects.requireNonNull;
  */
 public final class MongoAdapter<K, V> extends AbstractAdapter<K, V> {
 
+    /**
+     * Modes that define how cache instances share connections they use to watch change streams on.
+     * <p>
+     * Watching holds a connection for as long as a cache instance synchronizes - a change stream cursor on the
+     * server, covering the cache instances it serves. Sharing reduces the number of those connections and cursors,
+     * and the work the server does to serve them. In exchange, cache instances on a shared connection share its
+     * fate: when it fails, all of them are reconciled. And watching on a shared connection is restarted whenever a
+     * cache instance joins whose collection it does not cover yet, which delays activating that cache instance
+     * briefly.
+     * <p>
+     * <b>Note:</b> Only cache instances whose adapters are configured with the same sharing mode, the same client and
+     * the same database share a connection. Clients are told apart by identity, so two client instances reaching the
+     * same database do not share.
+     *
+     * @author Andreas Oberhoff
+     */
+    public enum WatcherSharingMode {
+
+        /**
+         * Every cache instance uses a connection of its own to watch change streams on (no sharing).
+         */
+        INSTANCE,
+
+        /**
+         * Cache instances on the same collection share one connection to watch change streams on, whatever their
+         * discriminator.
+         */
+        COLLECTION,
+
+        /**
+         * Cache instances on the same database share one connection to watch change streams on, whatever their
+         * collection. This is the default watcher sharing mode.
+         */
+        DATABASE
+    }
+
     private MongoAdapter(Builder builder) {
         super(new MongoRepository<>(builder.mongoClient, builder.databaseName, builder.collectionName),
-                new MongoSynchronizer<>(builder.mongoClient, builder.databaseName, builder.collectionName),
+                new MongoSynchronizer<>(builder.mongoClient, builder.databaseName, builder.collectionName,
+                        builder.watcherSharingMode),
                 String.join(":", "mongodb", builder.databaseName, builder.collectionName,
                         builder.discriminator), builder.discriminator);
     }
@@ -77,6 +114,7 @@ public final class MongoAdapter<K, V> extends AbstractAdapter<K, V> {
         private final String databaseName;
         private final String collectionName;
         private String discriminator;
+        private WatcherSharingMode watcherSharingMode;
 
         private Builder(MongoClient mongoClient, String databaseName, String collectionName) {
             requireNonNull(mongoClient, "mongoClient cannot be null");
@@ -87,6 +125,7 @@ public final class MongoAdapter<K, V> extends AbstractAdapter<K, V> {
             this.collectionName = collectionName;
             // set defaults
             this.discriminator = DEFAULT_DISCRIMINATOR;
+            this.watcherSharingMode = WatcherSharingMode.DATABASE;
         }
 
         /**
@@ -104,6 +143,21 @@ public final class MongoAdapter<K, V> extends AbstractAdapter<K, V> {
                 throw new IllegalArgumentException("discriminator cannot be blank");
             }
             this.discriminator = discriminator;
+            return this;
+        }
+
+        /**
+         * Specifies the mode that defines how cache instances share connections they use to watch change streams on.
+         * <p>
+         * <b>Note:</b> {@link WatcherSharingMode#DATABASE} is used as default if this method is skipped.
+         *
+         * @param watcherSharingMode watcher sharing mode defining how cache instances share connections they use to
+         *                           watch change streams on
+         * @return a builder pattern instance for chaining additional methods
+         */
+        public Builder withWatcherSharingMode(WatcherSharingMode watcherSharingMode) {
+            requireNonNull(watcherSharingMode, "watcherSharingMode cannot be null");
+            this.watcherSharingMode = watcherSharingMode;
             return this;
         }
 

@@ -32,6 +32,7 @@ import com.github.benmanes.caffeine.cache.Weigher;
 import com.mongodb.MongoBulkWriteException;
 import com.mongodb.MongoException;
 import com.mongodb.ServerAddress;
+import com.mongodb.ServerCursor;
 import com.mongodb.WriteConcern;
 import com.mongodb.bulk.BulkWriteError;
 import com.mongodb.bulk.BulkWriteResult;
@@ -51,11 +52,9 @@ import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
-import io.github.oberhoff.distributedcaffeine.adapter.Receiver;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import io.github.oberhoff.distributedcaffeine.adapter.Repository.Order;
 import io.github.oberhoff.distributedcaffeine.adapter.SerializerAware;
-import io.github.oberhoff.distributedcaffeine.adapter.Synchronizer;
 import io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoAdapter;
 import io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresAdapter;
 import io.github.oberhoff.distributedcaffeine.common.DistributedCaffeineCommonTestInstance;
@@ -86,6 +85,7 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
@@ -126,7 +126,6 @@ import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Evicted
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer.LoadingStrategy.MAPPING_FUNCTION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION;
-import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_SIZE;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_TIME;
 import static io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware.DEFAULT_DISCRIMINATOR;
@@ -143,14 +142,16 @@ import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.anySet;
-import static org.mockito.ArgumentMatchers.startsWith;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.timeout;
@@ -844,8 +845,9 @@ final class DistributedCaffeineUnitTests {
         @SuppressWarnings({"unchecked", "java:S5778", "java:S5961"})
         void test_Builder_checks_on_arguments_and_states() {
             Adapter<Key, Value> adapter = mock(Adapter.class);
+            Repository<Key, Value> repository = mock(Repository.class);
 
-            when(adapter.getRepository()).thenReturn(Optional.of(mock(Repository.class)));
+            when(adapter.getRepository()).thenReturn(Optional.of(repository));
 
             assertThatThrownBy(() ->
                     DistributedCaffeine.newBuilder(_null()))
@@ -1703,17 +1705,17 @@ final class DistributedCaffeineUnitTests {
     }
 
     @Nested
-    @DisplayName("Test MongoSynchronizer")
-    final class MongoSynchronizerUnit extends DistributedCaffeineUnitTestInstance {
+    @DisplayName("Test MongoWatcher")
+    final class MongoWatcherUnit extends DistributedCaffeineUnitTestInstance {
 
         private static final String DATABASE_NAME = "database";
         private static final String COLLECTION_NAME = "collection";
-        private static final String MONGO_SYNCHRONIZER_CLASS_NAME =
-                "io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoSynchronizer";
+        private static final String WATCHER_CLASS_NAME =
+                "io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoWatcher";
 
         @DisplayName("that watching resumes after the position reported while no events occurred")
         @Test
-        void test_MongoSynchronizer_resumes_after_position_reported_while_idle() throws Exception {
+        void test_MongoWatcher_resumes_after_position_reported_while_idle() throws Exception {
             // the position the server reports for a polled batch, here an empty one because nothing has happened
             BsonDocument tokenWhileIdle = new BsonDocument("_data", new BsonString("tokenWhileIdle"));
 
@@ -1721,71 +1723,66 @@ final class DistributedCaffeineUnitTests {
             ChangeStreamIterable<Document> changeStreamIterable = mock();
             MongoChangeStreamCursor<ChangeStreamDocument<Document>> cursor = mock();
 
-            when(mongoClient.getDatabase(DATABASE_NAME).getCollection(COLLECTION_NAME).watch(anyList()))
+            // the watcher watches through the database limited to its operation timeout
+            when(mongoClient.getDatabase(DATABASE_NAME).withTimeout(anyLong(), any())
+                    .getCollection(COLLECTION_NAME).watch(anyList()))
                     .thenReturn(changeStreamIterable);
             when(changeStreamIterable.fullDocument(any())).thenReturn(changeStreamIterable);
             when(changeStreamIterable.resumeAfter(any())).thenReturn(changeStreamIterable);
             when(changeStreamIterable.cursor()).thenReturn(cursor);
             when(cursor.getResumeToken()).thenReturn(tokenWhileIdle);
+            // the cursor is still held by the server, so an empty poll is an idle one rather than the end of the stream
+            when(cursor.getServerCursor()).thenReturn(new ServerCursor(1, new ServerAddress()));
             // an idle poll delivering no event, then watching fails - so no event was ever there to take a position
             // from, which is the situation an operation time cannot cover (it only ever comes from an event)
             MongoException connectionLost = new MongoException("connection lost");
             when(cursor.tryNext()).thenReturn(null).thenThrow(connectionLost);
 
-            Receiver<Key, Value> receiver = mock();
-
-            Synchronizer<Key, Value> synchronizer = synchronizerOf(mongoClient);
-            synchronizer.setReceiver(receiver);
-            startWatching(synchronizer);
+            Object watcher = watcherOf(mongoClient);
+            Object subscriber = subscriberOn(watcher);
 
             // the first attempt has nothing to resume from, so it watches from wherever the stream currently is
-            assertThatThrownBy(() -> processChangeStreams(synchronizer))
-                    .isSameAs(connectionLost);
+            assertThatThrownBy(() -> watch(watcher)).isSameAs(connectionLost);
             verify(changeStreamIterable, never()).resumeAfter(any());
             // and it is a first start rather than a reopen, so nothing can have been missed yet
-            verify(receiver, never()).receiveSynchronizationRestart();
+            assertThat(invocationsOf(subscriber, "receiveRestart")).isZero();
 
             // the retry must not start over at "now", which would skip everything written while watching was down.
             // It resumes strictly after the position the failed attempt saw while idle
-            assertThatThrownBy(() -> processChangeStreams(synchronizer))
-                    .isSameAs(connectionLost);
+            assertThatThrownBy(() -> watch(watcher)).isSameAs(connectionLost);
             verify(changeStreamIterable, times(1)).resumeAfter(tokenWhileIdle);
             // resuming is a reopen, and an event whose document was swept while watching was down would not be
-            // delivered by it, so the possibility of having missed one is reported exactly once
-            verify(receiver, times(1)).receiveSynchronizationRestart();
+            // delivered by it, so the possibility of having missed one is reported - once, to whoever relied on it
+            assertThat(invocationsOf(subscriber, "receiveRestart")).isOne();
         }
 
-        // MongoSynchronizer and its watch loop are package-private in another package, so both are reached
-        // reflectively. The constructor only resolves the collection, which the deep stubs absorb
-        @SuppressWarnings("unchecked")
-        private Synchronizer<Key, Value> synchronizerOf(MongoClient mongoClient) throws Exception {
-            Constructor<?> constructor = Class.forName(MONGO_SYNCHRONIZER_CLASS_NAME)
-                    .getDeclaredConstructor(MongoClient.class, String.class, String.class);
+        // MongoWatcher and its watch loop are package-private in another package, so both are reached reflectively.
+        // A watcher of one cache instance alone, which is the one selecting by discriminator
+        private Object watcherOf(MongoClient mongoClient) throws Exception {
+            Constructor<?> constructor = Class.forName(WATCHER_CLASS_NAME)
+                    .getDeclaredConstructor(MongoClient.class, String.class, String.class, boolean.class,
+                            Duration.class);
             constructor.setAccessible(true);
-            Synchronizer<Key, Value> synchronizer = (Synchronizer<Key, Value>)
-                    constructor.newInstance(mongoClient, DATABASE_NAME, COLLECTION_NAME);
-            // wiring an adapter would normally do, which constructing the synchronizer directly skips
-            synchronizer.setDiscriminator(DEFAULT_DISCRIMINATOR);
-            return synchronizer;
+            return constructor.newInstance(mongoClient, DATABASE_NAME, COLLECTION_NAME, false, Duration.ofSeconds(10));
         }
 
-        // a freshly constructed synchronizer counts as stopped and would refuse to watch, so it is moved into the
-        // state a pending activation leaves behind (without starting the asynchronous machinery around it)
-        // unchecked: the state is held in an AtomicReference of a package-private enum, which cannot be named here, so
-        // reading the field yields a raw reference and setting the constant found by name is unverifiable for javac
-        @SuppressWarnings("unchecked")
-        private void startWatching(Synchronizer<Key, Value> synchronizer) {
-            Object starting = Stream.of(readFieldValue(synchronizer, synchronizer.getClass(), "watchState",
-                            AtomicReference.class).get().getClass().getEnumConstants())
-                    .filter(watchState -> watchState.toString().equals("STARTING"))
-                    .findFirst()
-                    .orElseThrow(NoSuchFieldError::new);
-            readFieldValue(synchronizer, synchronizer.getClass(), "watchState", AtomicReference.class)
-                    .set(starting);
+        // a subscriber of the collection watched, subscribed the way a synchronizer subscribes - its subscription is
+        // carried out by the watching thread, which is the watch loop driven by the test
+        // (the interface cannot be named here, so the mock answers by method name)
+        private Object subscriberOn(Object watcher) {
+            Class<?> subscriberClass = classOf(WATCHER_CLASS_NAME + "$Subscriber");
+            Object subscriber = mock(subscriberClass, invocation -> switch (invocation.getMethod().getName()) {
+                case "getCollectionName" -> COLLECTION_NAME;
+                case "getDiscriminator" -> DEFAULT_DISCRIMINATOR;
+                case "getIdentifier" -> "mongodb:database:collection:default";
+                default -> null;
+            });
+            invokeMethod(watcher, watcher.getClass(), "subscribe", List.of(subscriberClass), List.of(subscriber));
+            return subscriber;
         }
 
-        private void processChangeStreams(Synchronizer<Key, Value> synchronizer) {
-            invokeMethod(synchronizer, synchronizer.getClass(), "processChangeStreams", List.of(), List.of());
+        private void watch(Object watcher) {
+            invokeMethod(watcher, watcher.getClass(), "watch", List.of(), List.of());
         }
     }
 
@@ -2071,152 +2068,164 @@ final class DistributedCaffeineUnitTests {
     }
 
     @Nested
-    @DisplayName("Test PostgresSynchronizer")
+    @DisplayName("Test PostgresListener")
     @SuppressWarnings("SqlNoDataSourceInspection")
-    final class PostgresSynchronizerUnit extends DistributedCaffeineUnitTestInstance {
+    final class PostgresListenerUnit extends DistributedCaffeineUnitTestInstance {
 
-        private static final String IDENTIFIER = "postgresql:public:table:default";
-        private static final String SYNCHRONIZER_CLASS_NAME =
-                "io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresSynchronizer";
+        private static final String CHANNEL = "distributed_caffeine_test";
+        private static final String SESSION_CHANNEL_PREFIX = "distributed_caffeine_session_";
+        private static final String LISTENER_CLASS_NAME =
+                "io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresListener";
 
         @DisplayName("that a connection taken over is unsubscribed and drained before it is listened on")
         @Test
-        void test_PostgresSynchronizer_takes_over_a_connection_without_inheriting_it() throws Exception {
-            Connection connection = mock();
-            Statement statement = mock();
-            PGConnection pgConnection = mock();
-            when(connection.createStatement()).thenReturn(statement);
-            when(connection.unwrap(PGConnection.class)).thenReturn(pgConnection);
+        void test_PostgresListener_takes_over_a_connection_without_inheriting_it() throws Exception {
+            Connection connection = connectionMock();
+            Statement statement = connection.createStatement();
+            PGConnection pgConnection = connection.unwrap(PGConnection.class);
             when(connection.isValid(anyInt())).thenReturn(true);
 
             // what a previous tenant of this pooled connection was handed before it was given up, followed by the
-            // poll that ends the watch - so whatever is drained cannot be mistaken for something that arrived here
+            // poll that ends the session - so whatever is drained cannot be mistaken for something that arrived here
             PGNotification stale = mock();
+            when(stale.getName()).thenReturn(CHANNEL);
             when(stale.getParameter()).thenReturn("h1");
-            SQLException watchEnded = new SQLException("provoked");
+            SQLException sessionEnded = new SQLException("provoked");
             when(pgConnection.getNotifications(anyInt()))
                     .thenReturn(new PGNotification[]{stale})
                     .thenReturn(null)
-                    .thenThrow(watchEnded);
+                    .thenThrow(sessionEnded);
 
-            Receiver<Key, Value> receiver = mock();
-            Synchronizer<Key, Value> synchronizer = synchronizerOf(connection);
-            synchronizer.setReceiver(receiver);
-            startListening(synchronizer);
+            Object listener = listenerOf(connection);
+            Object subscriber = subscriberOn(listener);
 
-            assertThatThrownBy(() -> processNotifications(synchronizer)).isSameAs(watchEnded);
+            assertThatThrownBy(() -> listen(listener)).isSameAs(sessionEnded);
 
             // dropped first, because a connection that was not given the chance to unsubscribe hands its
-            // subscriptions on with it - and they name records of a scope this one does not hold
+            // subscriptions on with it - and they name channels nobody here subscribes to
             InOrder inOrder = inOrder(statement);
             inOrder.verify(statement).execute("UNLISTEN *");
-            inOrder.verify(statement).execute(startsWith("LISTEN "));
+            inOrder.verify(statement).addBatch("LISTEN " + CHANNEL);
 
-            // and what the session had already been handed is thrown away rather than applied: unsubscribing stops
-            // what comes next, while whatever reached it before is queued and arrives on the first poll regardless
-            verify(receiver, never()).receiveCacheEntries(anyList());
+            // and what the session had already been handed is thrown away rather than handed over: unsubscribing
+            // stops what comes next, while whatever reached it before is queued and arrives on the first poll
+            assertThat(invocationsOf(subscriber, "receiveHashes")).isZero();
         }
 
-        @DisplayName("that a first start reports nothing while listening again reports what it may have missed")
+        @DisplayName("that a first start reports nothing while listening again reports what may have been missed")
         @Test
-        void test_PostgresSynchronizer_reports_only_a_restart() throws Exception {
-            Connection connection = mock();
-            PGConnection pgConnection = mock();
-            Statement statement = mock();
-            when(connection.createStatement()).thenReturn(statement);
-            when(connection.unwrap(PGConnection.class)).thenReturn(pgConnection);
+        void test_PostgresListener_reports_only_a_restart() throws Exception {
+            Connection connection = connectionMock();
+            Statement statement = connection.createStatement();
+            PGConnection pgConnection = connection.unwrap(PGConnection.class);
             when(connection.isValid(anyInt())).thenReturn(true);
-            // Draining what the session was handed before and polling for what comes next are the same call, so
-            // they are told apart by how long each is willing to wait: the drain does not wait at all, while the
-            // poll does. Nothing is ever drained here, and the poll is what ends the watch
-            SQLException watchEnded = new SQLException("provoked");
+            // The probe arrives on the channel the session listens on for it, which is only known once listened
+            // on. Draining does not wait at all, the probe and the polls do: nothing is ever drained, the probe is
+            // answered once per session, and the poll after it is what ends the session
+            AtomicReference<String> unansweredProbe = new AtomicReference<>();
+            doAnswer(invocation -> {
+                String sql = invocation.getArgument(0);
+                if (sql.startsWith("LISTEN " + SESSION_CHANNEL_PREFIX)) {
+                    unansweredProbe.set(sql.substring("LISTEN ".length()));
+                }
+                return false;
+            }).when(statement).execute(anyString());
+            SQLException sessionEnded = new SQLException("provoked");
             when(pgConnection.getNotifications(anyInt())).thenAnswer(invocation -> {
                 if (invocation.<Integer>getArgument(0) <= 1) {
                     return null;
                 }
-                throw watchEnded;
+                String probeChannel = unansweredProbe.getAndSet(null);
+                if (probeChannel != null) {
+                    PGNotification probe = mock();
+                    when(probe.getName()).thenReturn(probeChannel);
+                    return new PGNotification[]{probe};
+                }
+                throw sessionEnded;
             });
 
-            Receiver<Key, Value> receiver = mock();
-            Synchronizer<Key, Value> synchronizer = synchronizerOf(connection);
-            synchronizer.setReceiver(receiver);
-            startListening(synchronizer);
+            Object listener = listenerOf(connection);
+            Object subscriber = subscriberOn(listener);
 
             // a first start has missed nothing, because activating reconciles anyway
-            assertThatThrownBy(() -> processNotifications(synchronizer)).isSameAs(watchEnded);
-            verify(receiver, never()).receiveSynchronizationRestart();
+            assertThatThrownBy(() -> listen(listener)).isSameAs(sessionEnded);
+            assertThat(invocationsOf(subscriber, "receiveRestart")).isZero();
 
             // and listening again means nothing was listening in between, where a notification reaches the sessions
-            // listening at the time and is kept for nobody - so the possibility of having missed one is reported
-            assertThatThrownBy(() -> processNotifications(synchronizer)).isSameAs(watchEnded);
-            verify(receiver, times(1)).receiveSynchronizationRestart();
+            // listening at the time and is kept for nobody - so the possibility of having missed one is reported to
+            // whoever relied on the session that was lost
+            assertThatThrownBy(() -> listen(listener)).isSameAs(sessionEnded);
+            assertThat(invocationsOf(subscriber, "receiveRestart")).isOne();
         }
 
         @DisplayName("that a connection which can no longer carry a statement is not unsubscribed from")
         @Test
-        void test_PostgresSynchronizer_does_not_unsubscribe_a_broken_connection() throws Exception {
-            Connection connection = mock();
-            Statement statement = mock();
-            PGConnection pgConnection = mock();
-            when(connection.createStatement()).thenReturn(statement);
-            when(connection.unwrap(PGConnection.class)).thenReturn(pgConnection);
-            SQLException watchEnded = new SQLException("connection lost");
-            when(pgConnection.getNotifications(anyInt())).thenReturn(null).thenThrow(watchEnded);
+        void test_PostgresListener_does_not_unsubscribe_a_broken_connection() throws Exception {
+            Connection connection = connectionMock();
+            Statement statement = connection.createStatement();
+            PGConnection pgConnection = connection.unwrap(PGConnection.class);
+            SQLException sessionEnded = new SQLException("connection lost");
+            when(pgConnection.getNotifications(anyInt())).thenReturn(null).thenThrow(sessionEnded);
             // a broken connection does not report itself as closed, so it is asked rather than assumed - and the
             // pool discards it instead of handing it on, so there is nothing left to unsubscribe from
             when(connection.isValid(anyInt())).thenReturn(false);
 
-            Synchronizer<Key, Value> synchronizer = synchronizerOf(connection);
-            synchronizer.setReceiver(mock());
-            startListening(synchronizer);
+            Object listener = listenerOf(connection);
+            subscriberOn(listener);
 
-            assertThatThrownBy(() -> processNotifications(synchronizer)).isSameAs(watchEnded);
+            assertThatThrownBy(() -> listen(listener)).isSameAs(sessionEnded);
 
-            verify(statement, never()).execute(startsWith("UNLISTEN distributed_caffeine"));
-            verify(connection).close();
+            // unsubscribed from everything once, on taking the connection over, and not again on giving it up
+            verify(statement, times(1)).execute("UNLISTEN *");
+            verify(connection, atLeastOnce()).close();
         }
 
-        // PostgresSynchronizer and its watch loop are package-private in another package, so both are reached
-        // reflectively
-        @SuppressWarnings("unchecked")
-        private Synchronizer<Key, Value> synchronizerOf(Connection connection) throws Exception {
+        // one connection serving both listening and the probe, which is sent through a connection of its own taken
+        // from the same mocked data source
+        private Connection connectionMock() throws SQLException {
+            Connection connection = mock();
+            Statement statement = mock();
+            PGConnection pgConnection = mock();
+            PreparedStatement preparedStatement = mock();
+            when(connection.createStatement()).thenReturn(statement);
+            when(connection.unwrap(PGConnection.class)).thenReturn(pgConnection);
+            when(connection.prepareStatement(anyString())).thenReturn(preparedStatement);
+            return connection;
+        }
+
+        // PostgresListener and its session loop are package-private in another package, so both are reached
+        // reflectively - with the production settings, none of which a test here waits out
+        private Object listenerOf(Connection connection) throws Exception {
             DataSource dataSource = mock();
             when(dataSource.getConnection()).thenReturn(connection);
-            Class<?> repositoryClass =
-                    classOf("io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresRepository");
-            Object repository = mock(repositoryClass);
-            // The read-back has to find something. A mock hands back an empty stream of its own accord, and an
-            // empty read-back is never handed on - so an assertion that nothing reached the receiver would hold
-            // whatever the synchronizer did with the notification, which is no assertion at all
-            when(((Repository<Key, Value>) repository).streamCacheEntries(anySet(), any(), any(Order.class)))
-                    .thenAnswer(invocation -> Stream.of(CacheEntry.of("h1", "op1", Key.of(1), Value.of(1),
-                            CACHED, Instant.now())));
-            Constructor<?> constructor = Class.forName(SYNCHRONIZER_CLASS_NAME)
-                    .getDeclaredConstructor(DataSource.class, repositoryClass);
+            Class<?> settingsClass = classOf(LISTENER_CLASS_NAME + "$Settings");
+            Constructor<?> settingsConstructor = settingsClass.getDeclaredConstructor(Duration.class, Duration.class,
+                    Duration.class, Duration.class);
+            settingsConstructor.setAccessible(true);
+            Object settings = settingsConstructor.newInstance(Duration.ofSeconds(10), Duration.ofSeconds(5),
+                    Duration.ofSeconds(5), Duration.ofSeconds(30));
+            Constructor<?> constructor = Class.forName(LISTENER_CLASS_NAME)
+                    .getDeclaredConstructor(DataSource.class, DataSource.class, settingsClass);
             constructor.setAccessible(true);
-            Synchronizer<Key, Value> synchronizer = (Synchronizer<Key, Value>)
-                    constructor.newInstance(dataSource, repository);
-            // wiring an adapter would normally do, which constructing the synchronizer directly skips - and the
-            // identifier matters here, because the channel is derived from it
-            synchronizer.setIdentifier(IDENTIFIER);
-            synchronizer.setDiscriminator(DEFAULT_DISCRIMINATOR);
-            return synchronizer;
+            return constructor.newInstance(dataSource, dataSource, settings);
         }
 
-        // a freshly constructed synchronizer counts as stopped and would return without listening, so it is moved
-        // into the state a pending activation leaves behind (without starting the machinery around it)
-        // the state is held in an AtomicReference of a package-private enum, which cannot be named here
-        private void startListening(Synchronizer<Key, Value> synchronizer) {
-            AtomicReference<Object> watchState =
-                    readFieldValue(synchronizer, synchronizer.getClass(), "watchState", AtomicReference.class);
-            watchState.set(Stream.of(watchState.get().getClass().getEnumConstants())
-                    .filter(state -> state.toString().equals("STARTING"))
-                    .findFirst()
-                    .orElseThrow(NoSuchFieldError::new));
+        // a subscriber of one channel, subscribed the way a synchronizer subscribes - its subscription is carried
+        // out by the listening thread, which is the session loop driven by the test (the interface cannot be named
+        // here, so the mock answers by method name)
+        private Object subscriberOn(Object listener) {
+            Class<?> subscriberClass = classOf(LISTENER_CLASS_NAME + "$Subscriber");
+            Object subscriber = mock(subscriberClass, invocation -> switch (invocation.getMethod().getName()) {
+                case "getChannel" -> CHANNEL;
+                case "getIdentifier" -> "postgresql:public:table:default";
+                default -> null;
+            });
+            invokeMethod(listener, listener.getClass(), "subscribe", List.of(subscriberClass), List.of(subscriber));
+            return subscriber;
         }
 
-        private void processNotifications(Synchronizer<Key, Value> synchronizer) {
-            invokeMethod(synchronizer, synchronizer.getClass(), "processNotifications", List.of(), List.of());
+        private void listen(Object listener) {
+            invokeMethod(listener, listener.getClass(), "listen", List.of(), List.of());
         }
     }
 
@@ -2364,6 +2373,13 @@ final class DistributedCaffeineUnitTests {
 
     // the adapter classes under test are package-private in their own package, so the tests above reach them
     // by name rather than by reference
+    // how often a mock of a type that cannot be named here was called by the given method
+    private static long invocationsOf(Object mock, String methodName) {
+        return mockingDetails(mock).getInvocations().stream()
+                .filter(invocation -> invocation.getMethod().getName().equals(methodName))
+                .count();
+    }
+
     private static Class<?> classOf(String name) {
         try {
             return Class.forName(name);

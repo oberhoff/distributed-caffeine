@@ -64,13 +64,28 @@ parameters refer to the MongoDB client, database name and collection name used f
 persistence. Optionally, a discriminator can be specified (using the `withDiscriminator(...)` method) to distinguish
 between cache entries from different caches that share a collection.
 
-Note: Each cache instance requires its own connection for watching change streams. If many cache instances are used, or
-many connections are used elsewhere, the connection pool might need to be enlarged. The default pool size is 100, which
-is sufficient for most cases.
+<details>
+<summary>Connection setup</summary>
+
+Synchronization uses MongoDB's change streams, which keep a connection open for watching.
+
+* Watcher sharing: How cache instances using the same client share connections for watching is specified using
+  `withWatcherSharingMode(...)`: `DATABASE` for one connection per database (default), `COLLECTION` for one per
+  collection or `INSTANCE` for one per cache instance. With `DATABASE`, a cache instance whose collection is not watched
+  yet takes a moment longer to start, because watching is restarted to include it.
+* Read concern: Change streams do not support every read concern. If the client is configured with one they do not
+  support, such as `local`, starting synchronization fails right away.
+* Broken connections: A watching connection that dies silently, for example during a failover, is detected and
+  replaced automatically. Operations for reading and writing on such a connection fail once TCP keepalive gives up on
+  it, after several minutes by default. If that is too long, `socketTimeoutMS` or `timeoutMS` can be set on the client
+  to fail them sooner.
+
+</details>
 
 ```java
 MongoAdapter<Key, Value> adapter = MongoAdapter.newBuilder(mongoClient, databaseName, collectionName)
         .withDiscriminator("discriminator") // optional (used if different caches share a collection)
+        .withWatcherSharingMode(WatcherSharingMode.DATABASE) // optional (used for connection sharing)
         .build();
 ```
 
@@ -89,7 +104,7 @@ different caches that share a table.
 Synchronization uses PostgreSQL's `LISTEN`/`NOTIFY`, which keeps a connection open for listening.
 
 * Listener sharing: How cache instances using the same data source share connections for listening is specified using
-  `withListenerSharingMode(...)`: `DATABASE` for one connection per database (default), `TABLE` for one per table or 
+  `withListenerSharingMode(...)`: `DATABASE` for one connection per database (default), `TABLE` for one per table or
   `INSTANCE` for one per cache instance. A single connection delivers notifications promptly up to the order of a
   thousand per second, so write-heavy cache instances are better spread over several connections.
 * Connection poolers: Listening needs a session of its own. A pooler in transaction mode lends a connection for a
@@ -98,8 +113,9 @@ Synchronization uses PostgreSQL's `LISTEN`/`NOTIFY`, which keeps a connection op
   specify a direct or session-mode connection for listening using `withListenerDataSource(...)`. If listening does not
   work, starting synchronization fails right away.
 * Broken connections: A listening connection that dies silently, for example during a failover, is detected and
-  replaced automatically. For reading and writing, set the driver's `socketTimeout` and `loginTimeout` on the data
-  source, so that such connections fail instead of blocking indefinitely.
+  replaced automatically. Operations for reading and writing on such a connection have no time limit by default, so
+  they only fail once the operating system gives up on the connection. If that is too long, `socketTimeout` can be set
+  on the data source to fail them sooner, and `loginTimeout` to do the same for opening new connections.
 
 </details>
 
