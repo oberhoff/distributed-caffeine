@@ -42,4 +42,9 @@ public class CaptureLoggerFactory implements ILoggerFactory {
     public static CaptureLogger getCaptureLogger(String name) {
         return (CaptureLogger) LoggerFactory.getLogger(name);
     }
+
+    public static void stopCapturingAll() {
+        ((CaptureLoggerFactory) LoggerFactory.getILoggerFactory()).loggerMap.values()
+                .forEach(CaptureLogger::stopCapturing);
+    }
 }

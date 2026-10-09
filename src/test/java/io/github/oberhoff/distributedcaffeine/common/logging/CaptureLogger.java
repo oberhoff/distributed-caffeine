@@ -29,7 +29,7 @@ import static java.util.Objects.nonNull;
 
 public class CaptureLogger extends AbstractLogger {
 
-    private boolean capturing;
+    private volatile boolean capturing;
     private final List<LoggingEvent> loggingEvents;
 
     public CaptureLogger(String name) {

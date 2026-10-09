@@ -7218,6 +7218,7 @@ final class DistributedCaffeineIntegrationTests {
 
         @DisplayName("Stress test synchronization from data store")
         @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
         @SuppressWarnings("FutureReturnValueIgnored")
             // background load, awaited through loopCondition/loopCounter
         void stress_test_DistributedCaffeine_synchronization_from_data_store() throws Exception {
@@ -7264,6 +7265,14 @@ final class DistributedCaffeineIntegrationTests {
                         dc -> dc.build(cacheLoader));
                 return (DistributedLoadingCache<Key, Value>) cache;
             };
+
+            CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
+                    .getCaptureLogger(DistributedCaffeine.class);
+
+            // captured for the whole test: a burst of writes can outrun what an adapter keeps pending for a cache
+            // instance, which then reconciles against the data store and reports it - which belongs to what this
+            // test provokes rather than in the output of the suite
+            loggerDistributedCaffeine.startCapturing();
 
             DistributedLoadingCache<Key, Value> distributedLoadingCache = cacheSupplier.get();
 
@@ -7368,6 +7377,16 @@ final class DistributedCaffeineIntegrationTests {
             verify(cacheLoader, atLeast(0)).reload(any(Key.class), any(Value.class));
             verify(cacheLoader, atLeast(0)).asyncReload(any(Key.class), any(Value.class), any(Executor.class));
             verifyNoMoreInteractions(cacheLoader);
+
+            // whether a burst overflowed depends on timing (and on the size, which is smaller on GitHub), so only
+            // what was reported is asserted, not that anything was
+            assertThat(loggerDistributedCaffeine.getLoggingEvents())
+                    .allSatisfy(loggingEvent -> {
+                        assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                        assertThat(loggingEvent.getMessage()).startsWith("Synchronization was interrupted");
+                    });
+
+            loggerDistributedCaffeine.stopCapturing();
         }
 
         @DisplayName("Stress test thread safety")
@@ -9087,6 +9106,7 @@ final class DistributedCaffeineIntegrationTests {
 
         @DisplayName("Test that records which are no cache entries are reported and skipped, while their metadata still reads")
         @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
         void test_Repository_skips_records_that_are_no_cache_entries() throws Exception {
             Repository<Key, Value> repository = repositoryFor(null);
             Instant timestamp = Instant.now().truncatedTo(MICROS).minusSeconds(30);
@@ -9702,6 +9722,8 @@ final class DistributedCaffeineIntegrationTests {
         @Test
         @ResourceLock(LOGGER_RESOURCE_LOCK)
         void test_Synchronizer_replaces_a_listening_connection_that_went_silent() throws Exception {
+            List<CaptureLogger> poolLoggers = startCapturingPool();
+
             // cacheB reaches the server through a proxy that can go silent on the connections it is carrying while
             // keeping them open - what a failover moving the server's address or an expired NAT entry leaves a
             // client with: nothing is reset, nothing arrives, and a connection that only waits never finds out
@@ -9784,12 +9806,16 @@ final class DistributedCaffeineIntegrationTests {
                     }
                 }
             }
+
+            assertThatPoolReportedOnlySilencedConnections(poolLoggers);
         }
 
         @DisplayName("Test that a listening connection stuck inside the driver in the middle of a message is aborted")
         @Test
         @ResourceLock(LOGGER_RESOURCE_LOCK)
         void test_Synchronizer_aborts_a_listening_connection_stuck_in_the_middle_of_a_message() throws Exception {
+            List<CaptureLogger> poolLoggers = startCapturingPool();
+
             // The driver waits for the first byte of a message with a timeout, and for the rest of it without one.
             // A connection that stops carrying anything after the first byte of a notification therefore holds the
             // listening thread inside the driver for good - which neither the poll timeout nor the heartbeat, run
@@ -9865,6 +9891,8 @@ final class DistributedCaffeineIntegrationTests {
                     }
                 }
             }
+
+            assertThatPoolReportedOnlySilencedConnections(poolLoggers);
         }
 
         @DisplayName("Test that the adapter listens through the listener data source while writing through the other")
@@ -10039,6 +10067,8 @@ final class DistributedCaffeineIntegrationTests {
         @Test
         @ResourceLock(LOGGER_RESOURCE_LOCK)
         void test_Synchronizer_joins_a_shared_session_while_it_is_being_replaced() throws Exception {
+            List<CaptureLogger> poolLoggers = startCapturingPool();
+
             // The cache instances read and write directly and only listen through the proxy, so that the outage hits
             // the shared listening session alone - which keeps failing to be replaced for as long as it lasts
             try (SilencingProxy proxy = new SilencingProxy(postgresContainer.getHost(),
@@ -10121,6 +10151,8 @@ final class DistributedCaffeineIntegrationTests {
                     });
                 }
             }
+
+            assertThatPoolReportedOnlySilencedConnections(poolLoggers);
         }
 
         @DisplayName("Test that a cache instance slow to apply what it received does not hold up the others")
@@ -10613,6 +10645,28 @@ final class DistributedCaffeineIntegrationTests {
         // moment the proxy goes silent hangs in its handshake for good - and with it the one thread the pool opens
         // connections on, so that nothing borrowed from it ever arrives again (seen as a 1-in-10 flake). And it is
         // filled before it is handed out, so that no connection is being opened at that moment to begin with
+        // The pooled connections a proxy silences are found out by the pool when it validates them or when a socket
+        // timeout breaks them, and the pool reports both - captured and asserted rather than left in the test output.
+        // Asserted only after the pool is closed, because tearing a cache instance down borrows from it as well
+        List<CaptureLogger> startCapturingPool() {
+            List<CaptureLogger> loggers = Stream.of("com.zaxxer.hikari.pool.PoolBase",
+                            "com.zaxxer.hikari.pool.ProxyConnection")
+                    .map(CaptureLoggerFactory::getCaptureLogger)
+                    .toList();
+            loggers.forEach(CaptureLogger::startCapturing);
+            return loggers;
+        }
+
+        void assertThatPoolReportedOnlySilencedConnections(List<CaptureLogger> loggers) {
+            loggers.forEach(logger -> {
+                assertThat(logger.getLoggingEvents())
+                        .filteredOn(loggingEvent -> loggingEvent.getLevel().toInt() >= Level.WARN.toInt())
+                        .allSatisfy(loggingEvent -> assertThat(loggingEvent.getMessage())
+                                .containsAnyOf("Failed to validate connection", "marked as broken"));
+                logger.stopCapturing();
+            });
+        }
+
         HikariDataSource createProxiedDataSource(SilencingProxy proxy) {
             HikariConfig hikariConfig = createHikariConfig("localhost", proxy.getPort(),
                     postgresContainer.getDatabaseName());

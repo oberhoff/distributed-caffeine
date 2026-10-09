@@ -19,6 +19,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import io.github.oberhoff.distributedcaffeine.DistributedCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
 import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
+import io.github.oberhoff.distributedcaffeine.common.logging.CaptureLoggerFactory;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -76,12 +77,18 @@ public abstract class DistributedCaffeineCommonTestInstance {
 
     @AfterEach
     void afterEach() {
-        // stop synchronization (release database connections)
-        this.distributedCacheInstances.forEach(distributedCache ->
-                distributedCache.distributedPolicy().stopSynchronization());
-        // invalidate all cache entries (only after synchronization is already stopped for all caches)
-        this.distributedCacheInstances.forEach(Cache::invalidateAll);
-        this.distributedCacheInstances.clear();
+        try {
+            // stop synchronization (release database connections)
+            this.distributedCacheInstances.forEach(distributedCache ->
+                    distributedCache.distributedPolicy().stopSynchronization());
+            // invalidate all cache entries (only after synchronization is already stopped for all caches)
+            this.distributedCacheInstances.forEach(Cache::invalidateAll);
+            this.distributedCacheInstances.clear();
+        } finally {
+            // a test failing before it stops capturing would otherwise leave its loggers swallowing the output of
+            // every test after it - stopped last, so that what tearing down reports is still captured
+            CaptureLoggerFactory.stopCapturingAll();
+        }
     }
 
     protected <K, V> DistributedCache<K, V> createCache(Adapter<K, V> adapter,
