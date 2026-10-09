@@ -95,6 +95,9 @@ import org.testcontainers.utility.DockerImageName;
 import tools.jackson.core.type.TypeReference;
 
 import javax.sql.DataSource;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Inherited;
 import java.lang.annotation.Retention;
@@ -102,6 +105,9 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.sql.Connection;
@@ -125,6 +131,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.TimeZone;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentMap;
@@ -9056,6 +9063,254 @@ final class DistributedCaffeineIntegrationTests {
             failing.set(false);
         }
 
+        @DisplayName("Test that a listening connection that silently stops carrying anything is noticed and replaced")
+        @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_replaces_a_listening_connection_that_went_silent() throws Exception {
+            // cacheB reaches the server through a proxy that can go silent on the connections it is carrying while
+            // keeping them open - what a failover moving the server's address or an expired NAT entry leaves a
+            // client with: nothing is reset, nothing arrives, and a connection that only waits never finds out
+            try (SilencingProxy proxy = new SilencingProxy(postgresContainer.getHost(),
+                    postgresContainer.getMappedPort(PostgreSQLContainer.POSTGRESQL_PORT), executorService)) {
+                try (HikariDataSource proxiedDataSource = createProxiedDataSource(proxy)) {
+                    // Persisting cached entries is what makes the recovery warm, as in the test above
+                    DistributedCache<Key, Value> cacheA = createCache(CacheBuilder.identity(),
+                            dc -> dc.withPersistence(configurer -> configurer
+                                            .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency))
+                                    .build());
+                    // the heartbeat shortened before activation, so that noticing takes seconds rather than the
+                    // production interval and timeout - the test is about the noticing, not about how long it takes
+                    Adapter<Key, Value> adapterB = PostgresAdapter.newBuilder(
+                            proxiedDataSource, SCHEMA_NAME, getDatasetName()).build();
+                    Synchronizer<?, ?> synchronizerB = readFieldValue(adapterB, AbstractAdapter.class,
+                            "synchronizer", Synchronizer.class);
+                    writeFieldValue(synchronizerB, synchronizerB.getClass(), "heartbeatInterval", Duration.ofSeconds(1));
+                    writeFieldValue(synchronizerB, synchronizerB.getClass(), "heartbeatTimeout", Duration.ofSeconds(1));
+                    DistributedCache<Key, Value> cacheB = createCache(adapterB,
+                            CacheBuilder.identity(),
+                            dc -> dc.withPersistence(configurer -> configurer
+                                            .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency))
+                                    .build());
+                    try {
+                        Key key1 = Key.of(1);
+                        Key key2 = Key.of(2);
+
+                        cacheA.put(key1, Value.of(1));
+
+                        await("synchronization through the proxy")
+                                .atMost(WAITING_DURATION)
+                                .untilAsserted(() -> assertThat(cacheB.getIfPresent(key1)).isEqualTo(Value.of(1)));
+
+                        // the replacement failure is reported, and so is the reconcile that follows it - captured
+                        // and asserted rather than left in the test output
+                        CaptureLogger loggerPostgresSynchronizer = CaptureLoggerFactory.getCaptureLogger(
+                                "io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresSynchronizer");
+                        loggerPostgresSynchronizer.startCapturing();
+                        CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
+                                .getCaptureLogger(DistributedCaffeine.class);
+                        loggerDistributedCaffeine.startCapturing();
+
+                        // from here on, whatever cacheB had open carries nothing in either direction, while a
+                        // connection opened afterwards goes through - the server is reachable again, the old
+                        // session just does not know it
+                        proxy.silenceOpenConnections();
+
+                        cacheA.put(key2, Value.of(2));
+
+                        // the notification went to a connection that no longer delivers, so the value can only
+                        // arrive by the listener noticing, listening anew and reconciling
+                        await("recovery from a listening connection that went silent")
+                                .atMost(EXTENDED_WAITING_DURATION)
+                                .untilAsserted(() -> assertThat(cacheB.getIfPresent(key2)).isEqualTo(Value.of(2)));
+
+                        assertThat(loggerPostgresSynchronizer.getLoggingEvents())
+                                .anySatisfy(loggingEvent -> {
+                                    assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                                    assertThat(loggingEvent.getMessage())
+                                            .startsWith("Listening for notifications failed");
+                                    assertThat(loggingEvent.getThrowable())
+                                            .hasMessageStartingWith("Listening connection did not respond");
+                                });
+                        loggerPostgresSynchronizer.stopCapturing();
+
+                        assertThat(loggerDistributedCaffeine.getLoggingEvents())
+                                .anySatisfy(loggingEvent -> {
+                                    assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                                    assertThat(loggingEvent.getMessage())
+                                            .startsWith("Synchronization was interrupted for cache at");
+                                });
+                        loggerDistributedCaffeine.stopCapturing();
+                    } finally {
+                        // torn down here rather than after the test, because the data source it uses is closed
+                        // on the way out of this method
+                        cacheB.distributedPolicy().stopSynchronization();
+                        cacheB.invalidateAll();
+                        distributedCacheInstances.remove(cacheB);
+                    }
+                }
+            }
+        }
+
+        @DisplayName("Test that a listening connection stuck inside the driver in the middle of a message is aborted")
+        @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_aborts_a_listening_connection_stuck_in_the_middle_of_a_message() throws Exception {
+            // The driver waits for the first byte of a message with a timeout, and for the rest of it without one.
+            // A connection that stops carrying anything after the first byte of a notification therefore holds the
+            // listening thread inside the driver for good - which neither the poll timeout nor the heartbeat, run
+            // by that same thread, can do anything about
+            try (SilencingProxy proxy = new SilencingProxy(postgresContainer.getHost(),
+                    postgresContainer.getMappedPort(PostgreSQLContainer.POSTGRESQL_PORT), executorService)) {
+                try (HikariDataSource proxiedDataSource = createProxiedDataSource(proxy)) {
+                    DistributedCache<Key, Value> cacheA = createCache(CacheBuilder.identity(),
+                            dc -> dc.withPersistence(configurer -> configurer
+                                            .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency))
+                                    .build());
+                    Adapter<Key, Value> adapterB = PostgresAdapter.newBuilder(
+                            proxiedDataSource, SCHEMA_NAME, getDatasetName()).build();
+                    Synchronizer<?, ?> synchronizerB = readFieldValue(adapterB, AbstractAdapter.class,
+                            "synchronizer", Synchronizer.class);
+                    // the watchdog shortened so that it fires within seconds, and the heartbeat put out of reach,
+                    // so that the watchdog is the only way out - which is what this test is about
+                    writeFieldValue(synchronizerB, synchronizerB.getClass(), "watchdogTimeout", Duration.ofSeconds(2));
+                    writeFieldValue(synchronizerB, synchronizerB.getClass(), "heartbeatInterval", Duration.ofDays(1));
+                    DistributedCache<Key, Value> cacheB = createCache(adapterB,
+                            CacheBuilder.identity(),
+                            dc -> dc.withPersistence(configurer -> configurer
+                                            .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency))
+                                    .build());
+                    try {
+                        Key key1 = Key.of(1);
+                        Key key2 = Key.of(2);
+
+                        cacheA.put(key1, Value.of(1));
+
+                        await("synchronization through the proxy")
+                                .atMost(WAITING_DURATION)
+                                .untilAsserted(() -> assertThat(cacheB.getIfPresent(key1)).isEqualTo(Value.of(1)));
+
+                        CaptureLogger loggerPostgresSynchronizer = CaptureLoggerFactory.getCaptureLogger(
+                                "io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresSynchronizer");
+                        loggerPostgresSynchronizer.startCapturing();
+                        CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
+                                .getCaptureLogger(DistributedCaffeine.class);
+                        loggerDistributedCaffeine.startCapturing();
+
+                        // the next thing the listening connection is sent is the notification below, and it gets
+                        // to read the first byte of it and no more
+                        proxy.silenceOpenConnectionsAfter(1);
+
+                        cacheA.put(key2, Value.of(2));
+
+                        await("recovery from a listening connection stuck in the middle of a message")
+                                .atMost(Duration.ofSeconds(30))
+                                .untilAsserted(() -> assertThat(cacheB.getIfPresent(key2)).isEqualTo(Value.of(2)));
+
+                        assertThat(loggerPostgresSynchronizer.getLoggingEvents())
+                                .anySatisfy(loggingEvent -> {
+                                    assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                                    assertThat(loggingEvent.getMessage())
+                                            .startsWith("Listening for notifications failed");
+                                    assertThat(loggingEvent.getThrowable())
+                                            .hasMessageStartingWith("Listening connection was stuck inside the driver");
+                                });
+                        loggerPostgresSynchronizer.stopCapturing();
+
+                        assertThat(loggerDistributedCaffeine.getLoggingEvents())
+                                .anySatisfy(loggingEvent -> {
+                                    assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                                    assertThat(loggingEvent.getMessage())
+                                            .startsWith("Synchronization was interrupted for cache at");
+                                });
+                        loggerDistributedCaffeine.stopCapturing();
+                    } finally {
+                        cacheB.distributedPolicy().stopSynchronization();
+                        cacheB.invalidateAll();
+                        distributedCacheInstances.remove(cacheB);
+                    }
+                }
+            }
+        }
+
+        @DisplayName("Test that the adapter listens through the listener data source while writing through the other")
+        @Test
+        void test_Synchronizer_listens_through_a_separate_listener_data_source() {
+            try (HikariDataSource listenerDataSource = createDataSource(postgresContainer.getDatabaseName())) {
+                DistributedCache<Key, Value> cacheA = createCache(
+                        CacheBuilder.identity(), DistributedCaffeine::build);
+                DistributedCache<Key, Value> cacheB = createCache(
+                        PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, getDatasetName())
+                                .withListenerDataSource(listenerDataSource)
+                                .build(),
+                        CacheBuilder.identity(), DistributedCaffeine::build);
+                try {
+                    // the listening connection is the one cacheB holds from its listener data source, and it is
+                    // all it takes from there - reading and writing go through the data source of the test
+                    assertThat(listenerDataSource.getHikariPoolMXBean().getActiveConnections()).isEqualTo(1);
+
+                    cacheA.put(Key.of(1), Value.of(1));
+
+                    await("synchronization towards the instance listening through its listener data source")
+                            .atMost(WAITING_DURATION)
+                            .untilAsserted(() -> assertThat(cacheB.getIfPresent(Key.of(1))).isEqualTo(Value.of(1)));
+
+                    cacheB.put(Key.of(2), Value.of(2));
+
+                    await("synchronization from the instance listening through its listener data source")
+                            .atMost(WAITING_DURATION)
+                            .untilAsserted(() -> assertThat(cacheA.getIfPresent(Key.of(2))).isEqualTo(Value.of(2)));
+
+                    assertThat(listenerDataSource.getHikariPoolMXBean().getActiveConnections()).isEqualTo(1);
+                } finally {
+                    // torn down here rather than after the test, because the listener data source is closed on the
+                    // way out of this method
+                    cacheB.distributedPolicy().stopSynchronization();
+                    cacheB.invalidateAll();
+                    distributedCacheInstances.remove(cacheB);
+                }
+            }
+        }
+
+        @DisplayName("Test that starting synchronization fails when what is written does not reach the listener")
+        @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_refuses_a_listener_that_does_not_receive_what_is_written() throws Exception {
+            // A listener on another database of the same server: LISTEN is accepted there, and nothing written
+            // through the data source ever arrives, because notifications do not cross databases. That is what a
+            // pooler in transaction mode looks like from the client as well - a subscription accepted on a session
+            // that then is not the one delivering - without needing a pooler to show it
+            String otherDatabase = format("other_%05d", testCounter.get());
+            try (Connection connection = dataSource.getConnection();
+                 Statement statement = connection.createStatement()) {
+                statement.execute("CREATE DATABASE " + otherDatabase);
+            }
+            try (HikariDataSource listenerDataSource = createDataSource(otherDatabase)) {
+                Adapter<Key, Value> adapter = PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, getDatasetName())
+                        .withListenerDataSource(listenerDataSource)
+                        .build();
+                // the probe shortened before activation, so that giving up takes a second rather than the
+                // production timeout - what is under test is that it gives up, not how long it waits first
+                Synchronizer<?, ?> synchronizer = readFieldValue(adapter, AbstractAdapter.class,
+                        "synchronizer", Synchronizer.class);
+                writeFieldValue(synchronizer, synchronizer.getClass(), "probeTimeout", Duration.ofSeconds(1));
+
+                assertThatThrownBy(() -> createCache(adapter, CacheBuilder.identity(), DistributedCaffeine::build))
+                        .isInstanceOf(IllegalStateException.class)
+                        .rootCause()
+                        .hasMessageStartingWith("A notification sent through the data source did not reach the "
+                                + "listening connection")
+                        .hasMessageContaining("withListenerDataSource");
+
+                // and the listening connection it gave up on went back to the pool rather than being kept
+                assertThat(listenerDataSource.getHikariPoolMXBean().getActiveConnections()).isZero();
+            } finally {
+                try (Connection connection = dataSource.getConnection();
+                     Statement statement = connection.createStatement()) {
+                    statement.execute("DROP DATABASE IF EXISTS " + otherDatabase);
+                }
+            }
+        }
+
         @DisplayName("Test that what the adapter puts into one notification is a payload the server accepts")
         @Test
         void test_Synchronizer_payloads_stay_within_what_the_server_accepts() throws Exception {
@@ -9311,6 +9566,154 @@ final class DistributedCaffeineIntegrationTests {
                         });
             });
             return refusing;
+        }
+
+        // A TCP proxy that can stop carrying anything on the connections it holds without closing them: the
+        // bytes sent into such a connection are accepted and dropped, and nothing comes back. It can also let a
+        // few more bytes through before doing so, which cuts a message off in the middle. Connections accepted
+        // afterwards are carried as usual
+        static final class SilencingProxy implements AutoCloseable {
+
+            private final ServerSocket serverSocket;
+            private final String targetHost;
+            private final int targetPort;
+            private final Executor executor;
+            private final Set<Socket> sockets = ConcurrentHashMap.newKeySet();
+            private final Set<Budget> budgets = ConcurrentHashMap.newKeySet();
+
+            SilencingProxy(String targetHost, int targetPort, Executor executor) throws IOException {
+                this.serverSocket = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
+                this.targetHost = targetHost;
+                this.targetPort = targetPort;
+                this.executor = executor;
+                executor.execute(this::accept);
+            }
+
+            int getPort() {
+                return serverSocket.getLocalPort();
+            }
+
+            void silenceOpenConnections() {
+                silenceOpenConnectionsAfter(0);
+            }
+
+            // whichever direction they travel in, so this is for a moment in which only one side is expected to
+            // send anything
+            void silenceOpenConnectionsAfter(long bytes) {
+                budgets.forEach(budget -> budget.limit(bytes));
+            }
+
+            private void accept() {
+                while (!serverSocket.isClosed()) {
+                    try {
+                        Socket client = serverSocket.accept();
+                        Socket server = new Socket(targetHost, targetPort);
+                        sockets.add(client);
+                        sockets.add(server);
+                        Budget budget = new Budget();
+                        budgets.add(budget);
+                        executor.execute(() -> pump(client, server, budget));
+                        executor.execute(() -> pump(server, client, budget));
+                    } catch (IOException e) {
+                        // closed, which is how accepting ends
+                    }
+                }
+            }
+
+            private void pump(Socket from, Socket to, Budget budget) {
+                byte[] buffer = new byte[8192];
+                try (InputStream in = from.getInputStream(); OutputStream out = to.getOutputStream()) {
+                    int read;
+                    while ((read = in.read(buffer)) >= 0) {
+                        int allowed = budget.take(read);
+                        if (allowed > 0) {
+                            out.write(buffer, 0, allowed);
+                            out.flush();
+                        }
+                    }
+                } catch (IOException e) {
+                    // either side closed, which is how pumping ends
+                } finally {
+                    // a silenced connection stays open, because a reset is exactly what it must not receive
+                    if (!budget.isLimited()) {
+                        closeQuietly(from);
+                        closeQuietly(to);
+                    }
+                }
+            }
+
+            private static void closeQuietly(Socket socket) {
+                try {
+                    socket.close();
+                } catch (IOException e) {
+                    // nothing left to do about it
+                }
+            }
+
+            @Override
+            public void close() throws IOException {
+                serverSocket.close();
+                sockets.forEach(SilencingProxy::closeQuietly);
+            }
+
+            // how many more bytes a connection carries, shared by both of its directions - unlimited until limited
+            private static final class Budget {
+
+                private long remaining = -1;
+
+                synchronized void limit(long bytes) {
+                    remaining = bytes;
+                }
+
+                synchronized boolean isLimited() {
+                    return remaining >= 0;
+                }
+
+                synchronized int take(int read) {
+                    if (remaining < 0) {
+                        return read;
+                    }
+                    int allowed = (int) Math.min(read, remaining);
+                    remaining -= allowed;
+                    return allowed;
+                }
+            }
+        }
+
+        // A pool that reaches the test's server through the proxy, set up the way a pool facing a network that can
+        // go silent has to be anyway. Without the driver's timeouts, a connection that is being opened at the
+        // moment the proxy goes silent hangs in its handshake for good - and with it the one thread the pool opens
+        // connections on, so that nothing borrowed from it ever arrives again (seen as a 1-in-10 flake). And it is
+        // filled before it is handed out, so that no connection is being opened at that moment to begin with
+        HikariDataSource createProxiedDataSource(SilencingProxy proxy) {
+            HikariConfig hikariConfig = new HikariConfig();
+            hikariConfig.setJdbcUrl(format("jdbc:postgresql://localhost:%d/%s", proxy.getPort(),
+                    postgresContainer.getDatabaseName()));
+            hikariConfig.setUsername(postgresContainer.getUsername());
+            hikariConfig.setPassword(postgresContainer.getPassword());
+            hikariConfig.setMaximumPoolSize(5);
+            hikariConfig.setMinimumIdle(5);
+            // the pooled connections go silent along with the listening one, and are told apart from live ones by
+            // validating them on the way out of the pool - quickly, so that doing so is not the test
+            hikariConfig.setValidationTimeout(1_000);
+            hikariConfig.addDataSourceProperty("loginTimeout", "5");
+            hikariConfig.addDataSourceProperty("socketTimeout", "5");
+            HikariDataSource proxiedDataSource = new HikariDataSource(hikariConfig);
+            await("filling of the pool")
+                    .atMost(WAITING_DURATION)
+                    .until(() -> proxiedDataSource.getHikariPoolMXBean().getTotalConnections() == 5);
+            return proxiedDataSource;
+        }
+
+        // a pool of its own on the test's server, for a test that needs a data source next to the shared one
+        HikariDataSource createDataSource(String databaseName) {
+            HikariConfig hikariConfig = new HikariConfig();
+            hikariConfig.setJdbcUrl(format("jdbc:postgresql://%s:%d/%s", postgresContainer.getHost(),
+                    postgresContainer.getMappedPort(PostgreSQLContainer.POSTGRESQL_PORT), databaseName));
+            hikariConfig.setUsername(postgresContainer.getUsername());
+            hikariConfig.setPassword(postgresContainer.getPassword());
+            hikariConfig.setMaximumPoolSize(5);
+            return new HikariDataSource(hikariConfig);
         }
 
         @Override

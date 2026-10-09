@@ -47,7 +47,7 @@ public final class PostgresAdapter<K, V> extends AbstractAdapter<K, V> {
 
     private PostgresAdapter(PostgresRepository<K, V> repository, Builder builder) {
         super(repository,
-                new PostgresSynchronizer<>(builder.dataSource, repository),
+                new PostgresSynchronizer<>(builder.dataSource, builder.listenerDataSource, repository),
                 String.join(":", "postgresql", builder.schemaName, builder.tableName,
                         builder.discriminator), builder.discriminator);
     }
@@ -82,6 +82,7 @@ public final class PostgresAdapter<K, V> extends AbstractAdapter<K, V> {
     public static final class Builder {
 
         private final DataSource dataSource;
+        private DataSource listenerDataSource;
         private final String schemaName;
         private final String tableName;
         private String discriminator;
@@ -94,6 +95,7 @@ public final class PostgresAdapter<K, V> extends AbstractAdapter<K, V> {
             this.schemaName = checkedName(schemaName, "schemaName");
             this.tableName = checkedName(tableName, "tableName");
             // set defaults
+            this.listenerDataSource = dataSource;
             this.discriminator = DEFAULT_DISCRIMINATOR;
         }
 
@@ -112,6 +114,32 @@ public final class PostgresAdapter<K, V> extends AbstractAdapter<K, V> {
                 throw new IllegalArgumentException("discriminator cannot be blank");
             }
             this.discriminator = discriminator;
+            return this;
+        }
+
+        /**
+         * Specifies a separate data source for the connection the adapter listens for notifications on, while
+         * reading and writing keep using the data source passed to
+         * {@link PostgresAdapter#newBuilder(DataSource, String, String)}.
+         * <p>
+         * Listening relies on {@code LISTEN}, which is session state: the connection is held for as long as the
+         * cache instance synchronizes and has to be a session of its own on the server that writes go to. A pooler
+         * in transaction mode (such as PgBouncer, or the managed connection pooling of Cloud SQL or AlloyDB in its
+         * default mode) does not provide one, so reading and writing can go through such a pooler while listening
+         * uses a direct or session-mode connection specified here.
+         * <p>
+         * Whether notifications sent through the data source for reading and writing reach the listening connection
+         * is checked whenever listening begins, and starting synchronization fails if they do not.
+         * <p>
+         * <b>Note:</b> The data source for reading and writing is used for listening as well if this method is
+         * skipped.
+         *
+         * @param listenerDataSource the data source the adapter takes its listening connection from
+         * @return a builder pattern instance for chaining additional methods
+         */
+        public Builder withListenerDataSource(DataSource listenerDataSource) {
+            requireNonNull(listenerDataSource, "listenerDataSource cannot be null");
+            this.listenerDataSource = listenerDataSource;
             return this;
         }
 

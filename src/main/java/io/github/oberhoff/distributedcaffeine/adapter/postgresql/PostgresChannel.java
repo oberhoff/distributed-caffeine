@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.adapter.postgresql;
 
 import java.util.List;
+import java.util.UUID;
 
 import static java.lang.String.format;
 
@@ -43,6 +44,12 @@ final class PostgresChannel {
         // something nobody will see - and a collision costs a read that matches nothing anyway, because the
         // read carries the discriminator
         return PREFIX + PostgresIdentifier.digestOf(identifier, 16);
+    }
+
+    // A channel of its own for one probe, so that nobody but the prober is woken by it. Random rather than derived
+    // from the identifier, because two cache instances of one scope probing at once must not take each other's
+    static String probeChannel() {
+        return PREFIX + "probe_" + UUID.randomUUID().toString().replace("-", "");
     }
 
     // A publish larger than one payload becomes several notifications rather than one that is rejected: the server
