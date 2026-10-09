@@ -62,7 +62,7 @@ The configuration of the MongoDB-based adapter always starts with a builder retu
 invoking the `build()` method to construct the adapter instance. The `mongoClient`, `databaseName` and `collectionName`
 parameters refer to the MongoDB client, database name and collection name used for distributed synchronization and
 persistence. Optionally, a discriminator can be specified (using the `withDiscriminator(...)` method) to distinguish
-between cache entries from different caches that share a collection in MongoDB.
+between cache entries from different caches that share a collection.
 
 Note: Each cache instance requires its own connection for watching change streams. If many cache instances are used, or
 many connections are used elsewhere, the connection pool might need to be enlarged. The default pool size is 100, which
@@ -81,15 +81,33 @@ The configuration of the PostgreSQL-based adapter always starts with a builder r
 the `build()` method to construct the adapter instance. The `dataSource`, `schemaName` and `tableName` parameters refer
 to the data source, schema name and table name used for distributed synchronization and persistence. Optionally, a
 discriminator can be specified (using the `withDiscriminator(...)` method) to distinguish between cache entries from
-different caches that share a table in PostgreSQL.
+different caches that share a table.
 
-Note: Each cache instance holds its own connection for as long as it listens for notifications. The data source is
-therefore expected to pool its connections, and the pool has to carry one connection per cache instance on top of what
-their operations borrow and return.
+<details>
+<summary>Connection setup</summary>
+
+Synchronization uses PostgreSQL's `LISTEN`/`NOTIFY`, which keeps a connection open for listening.
+
+* Listener sharing: How cache instances using the same data source share connections for listening is specified using
+  `withListenerSharingMode(...)`: `DATABASE` for one connection per database (default), `TABLE` for one per table or 
+  `INSTANCE` for one per cache instance. A single connection delivers notifications promptly up to the order of a
+  thousand per second, so write-heavy cache instances are better spread over several connections.
+* Connection poolers: Listening needs a session of its own. A pooler in transaction mode lends a connection for a
+  single transaction only, so it cannot be listened on. Such poolers are common in front of managed cloud databases
+  and database clusters, often as their default endpoint. In that case, keep the pooler for reading and writing and
+  specify a direct or session-mode connection for listening using `withListenerDataSource(...)`. If listening does not
+  work, starting synchronization fails right away.
+* Broken connections: A listening connection that dies silently, for example during a failover, is detected and
+  replaced automatically. For reading and writing, set the driver's `socketTimeout` and `loginTimeout` on the data
+  source, so that such connections fail instead of blocking indefinitely.
+
+</details>
 
 ```java
 PostgresAdapter<Key, Value> adapter = PostgresAdapter.newBuilder(dataSource, schemaName, tableName)
         .withDiscriminator("discriminator") // optional (used if different caches share a table)
+        .withListenerSharingMode(ListenerSharingMode.DATABASE) // optional (used for connection sharing)
+        .withListenerDataSource(listenerDataSource) // optional (used if the data source cannot be listened on)
         .build();
 ```
 
@@ -272,6 +290,9 @@ DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(a
   prevent unpredictable behavior or even the loss of cache entries.
 * Changing key or value objects, their serializers, key hashing or retained cache entries directly can make existing
   data unusable, which should be cleaned up or migrated beforehand.
+* Synchronization runs in background threads of the application. Cloud platforms that allocate CPU to the application
+  only during requests, as is common for serverless deployments, should allocate it permanently instead, otherwise
+  cache instances fall behind while idle.
 
 ## Requirements
 

@@ -46,10 +46,11 @@ final class PostgresChannel {
         return PREFIX + PostgresIdentifier.digestOf(identifier, 16);
     }
 
-    // A channel of its own for one probe, so that nobody but the prober is woken by it. Random rather than derived
-    // from the identifier, because two cache instances of one scope probing at once must not take each other's
-    static String probeChannel() {
-        return PREFIX + "probe_" + UUID.randomUUID().toString().replace("-", "");
+    // A channel of its own for one listening session - probed when the session begins, and woken through for as
+    // long as it lasts - so that nobody but that session is woken by it. Random rather than derived from anything,
+    // because two sessions beginning at once must not take each other's
+    static String sessionChannel() {
+        return PREFIX + "session_" + UUID.randomUUID().toString().replace("-", "");
     }
 
     // A publish larger than one payload becomes several notifications rather than one that is rejected: the server

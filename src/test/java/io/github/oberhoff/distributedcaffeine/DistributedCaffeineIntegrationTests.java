@@ -58,6 +58,7 @@ import io.github.oberhoff.distributedcaffeine.adapter.Repository.Order;
 import io.github.oberhoff.distributedcaffeine.adapter.Synchronizer;
 import io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoAdapter;
 import io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresAdapter;
+import io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresAdapter.ListenerSharingMode;
 import io.github.oberhoff.distributedcaffeine.common.DistributedCaffeineCommonTestInstance;
 import io.github.oberhoff.distributedcaffeine.common.Key;
 import io.github.oberhoff.distributedcaffeine.common.Value;
@@ -130,7 +131,6 @@ import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TimeZone;
-import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -8488,6 +8488,19 @@ final class DistributedCaffeineIntegrationTests {
             loggerPostgresRepository.stopCapturing();
         }
 
+        // Statements against this test's own table that are reading in a transaction, counted from another
+        // connection
+        private long countReadingInTransaction() throws SQLException {
+            String readingInTransaction = format("SELECT count(*) FROM pg_stat_activity "
+                    + "WHERE state = 'idle in transaction' AND query LIKE '%%\"%s\"%%'", getDatasetName());
+            try (Connection connection = dataSource.getConnection();
+                 Statement statement = connection.createStatement();
+                 ResultSet resultSet = statement.executeQuery(readingInTransaction)) {
+                resultSet.next();
+                return resultSet.getLong(1);
+            }
+        }
+
         @DisplayName("Test that the repository streams unbounded reads in batches and reads by hash in one go")
         @Test
             // In autocommit mode the driver reads a whole result into memory before handing out the first row, so a
@@ -8507,28 +8520,16 @@ final class DistributedCaffeineIntegrationTests {
             }
             repository.publishCacheEntries(cacheEntries);
 
-            // read from another connection, and only for statements against this test's own table
-            String readingInTransaction = format("SELECT count(*) FROM pg_stat_activity "
-                    + "WHERE state = 'idle in transaction' AND query LIKE '%%\"%s\"%%'", getDatasetName());
-            Callable<Long> countReading = () -> {
-                try (Connection connection = dataSource.getConnection();
-                     Statement statement = connection.createStatement();
-                     ResultSet resultSet = statement.executeQuery(readingInTransaction)) {
-                    resultSet.next();
-                    return resultSet.getLong(1);
-                }
-            };
-
             for (boolean metadataOnly : List.of(false, true)) {
                 try (Stream<?> stream = metadataOnly
                         ? repository.streamCacheEntryMetadata(null, EVICTED_RETAINED_GROUP, DESCENDING)
                         : repository.streamCacheEntries(null, null, UNORDERED)) {
                     assertThat(stream.iterator().next()).isNotNull();
-                    assertThat(countReading.call())
+                    assertThat(countReadingInTransaction())
                             .as("reading in a transaction while open (metadata only: %s)", metadataOnly)
                             .isEqualTo(1);
                 }
-                assertThat(countReading.call())
+                assertThat(countReadingInTransaction())
                         .as("reading in a transaction once closed (metadata only: %s)", metadataOnly)
                         .isZero();
             }
@@ -8543,7 +8544,7 @@ final class DistributedCaffeineIntegrationTests {
                         : repository.streamCacheEntries(hashes, null, UNORDERED)) {
                     Iterator<?> iterator = stream.iterator();
                     assertThat(iterator.next()).isNotNull();
-                    assertThat(countReading.call())
+                    assertThat(countReadingInTransaction())
                             .as("reading by hash in a transaction while open (metadata only: %s)", metadataOnly)
                             .isZero();
                     int read = 1;
@@ -8978,10 +8979,10 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(cacheB.getIfPresent(key)).isNull();
         }
 
-        @DisplayName("Test that what a lost notification would have carried is recovered when listening restarts")
+        @DisplayName("Test that a cache instance that failed to apply what it received recovers by reconciling")
         @Test
         @ResourceLock(LOGGER_RESOURCE_LOCK)
-        void test_Synchronizer_recovers_what_was_published_while_not_listening() {
+        void test_Synchronizer_recovers_a_cache_instance_that_failed_to_apply() {
             // Persisting cached entries is what makes the recovery warm: reconciling keeps what the store confirms,
             // and without a store that retains them there is nothing to confirm against
             DistributedCache<Key, Value> cacheA = createCache(CacheBuilder.identity(),
@@ -9002,12 +9003,12 @@ final class DistributedCaffeineIntegrationTests {
                     .atMost(WAITING_DURATION)
                     .untilAsserted(() -> assertThat(cacheB.getIfPresent(key1)).isEqualTo(Value.of(1)));
 
-            // Failing the apply is what takes the listener down: it fails, closes its connection and listens again -
-            // and a notification issued while nothing was listening is gone, because nothing keeps it for anyone.
-            // Handing over cache entries keeps failing throughout, so the only way the value below can arrive is the
-            // reconcile that restarting performs, which is exactly what is under test here
-            // the listener reports every failed attempt, so the provoked ones below are captured and asserted
-            // instead of ending up, with their stack traces, in the test output
+            // Failing the apply drops what was taken for it and has this cache instance alone recover by restarting -
+            // without the session, which other cache instances may share, being given up for it. Handing over cache
+            // entries keeps failing throughout, so the only way the value below can arrive is the reconcile that
+            // restarting performs, which is exactly what is under test here
+            // every failed attempt is reported, so the provoked ones below are captured and asserted instead of
+            // ending up, with their stack traces, in the test output
             CaptureLogger loggerPostgresSynchronizer = CaptureLoggerFactory.getCaptureLogger(
                     "io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresSynchronizer");
             loggerPostgresSynchronizer.startCapturing();
@@ -9046,7 +9047,7 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(loggerPostgresSynchronizer.getLoggingEvents())
                     .anySatisfy(loggingEvent -> {
                         assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
-                        assertThat(loggingEvent.getMessage()).startsWith("Listening for notifications failed");
+                        assertThat(loggingEvent.getMessage()).startsWith("Receiving notifications failed");
                         assertThat(loggingEvent.getThrowable()).hasMessage("provoked");
                     });
             loggerPostgresSynchronizer.stopCapturing();
@@ -9104,7 +9105,7 @@ final class DistributedCaffeineIntegrationTests {
                         // the replacement failure is reported, and so is the reconcile that follows it - captured
                         // and asserted rather than left in the test output
                         CaptureLogger loggerPostgresSynchronizer = CaptureLoggerFactory.getCaptureLogger(
-                                "io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresSynchronizer");
+                                "io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresListener");
                         loggerPostgresSynchronizer.startCapturing();
                         CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
                                 .getCaptureLogger(DistributedCaffeine.class);
@@ -9190,7 +9191,7 @@ final class DistributedCaffeineIntegrationTests {
                                 .untilAsserted(() -> assertThat(cacheB.getIfPresent(key1)).isEqualTo(Value.of(1)));
 
                         CaptureLogger loggerPostgresSynchronizer = CaptureLoggerFactory.getCaptureLogger(
-                                "io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresSynchronizer");
+                                "io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresListener");
                         loggerPostgresSynchronizer.startCapturing();
                         CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
                                 .getCaptureLogger(DistributedCaffeine.class);
@@ -9309,6 +9310,304 @@ final class DistributedCaffeineIntegrationTests {
                     statement.execute("DROP DATABASE IF EXISTS " + otherDatabase);
                 }
             }
+        }
+
+        @DisplayName("Test that sharing at instance level gives every cache instance a session of its own")
+        @Test
+        void test_Synchronizer_shares_sessions_by_instance() {
+            assertSessionsShared(ListenerSharingMode.INSTANCE, 3);
+        }
+
+        @DisplayName("Test that sharing at table level gives the cache instances of a table one session")
+        @Test
+        void test_Synchronizer_shares_sessions_by_table() {
+            assertSessionsShared(ListenerSharingMode.TABLE, 2);
+        }
+
+        @DisplayName("Test that sharing at database level gives all cache instances one session")
+        @Test
+        void test_Synchronizer_shares_sessions_by_database() {
+            assertSessionsShared(ListenerSharingMode.DATABASE, 1);
+        }
+
+        // Three cache instances listening through a pool of their own - two on one table, told apart by their
+        // discriminators, and one on another table - so that the connections the pool has out are the sessions
+        // they listen on. Each of them has a peer on the shared data source to be written to, so that what they
+        // receive has to come through the session they share
+        private void assertSessionsShared(ListenerSharingMode sharing, int expectedSessions) {
+            String tableName = getDatasetName();
+            // still bounded, and still ending in the counter that makes it unique
+            String otherTableName = "b_" + tableName.substring(2);
+            try (HikariDataSource listenerDataSource = createDataSource(postgresContainer.getDatabaseName())) {
+                List<DistributedCache<Key, Value>> listening = new ArrayList<>();
+                List<DistributedCache<Key, Value>> writing = new ArrayList<>();
+                List<List<String>> scopes = List.of(List.of(tableName, "a"), List.of(tableName, "b"),
+                        List.of(otherTableName, "a"));
+                try {
+                    for (List<String> scope : scopes) {
+                        listening.add(createCache(PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, scope.get(0))
+                                        .withDiscriminator(scope.get(1))
+                                        .withListenerDataSource(listenerDataSource)
+                                        .withListenerSharingMode(sharing)
+                                        .build(),
+                                CacheBuilder.identity(), DistributedCaffeine::build));
+                        writing.add(createCache(PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, scope.get(0))
+                                        .withDiscriminator(scope.get(1))
+                                        .build(),
+                                CacheBuilder.identity(), DistributedCaffeine::build));
+                    }
+
+                    // a session is held from the moment its first cache instance is activated, and only sessions are
+                    // taken from this pool - reading and writing go through the shared data source
+                    assertThat(listenerDataSource.getHikariPoolMXBean().getActiveConnections())
+                            .isEqualTo(expectedSessions);
+
+                    for (int index = 0; index < scopes.size(); index++) {
+                        writing.get(index).put(Key.of(index), Value.of(index));
+                    }
+                    for (int index = 0; index < scopes.size(); index++) {
+                        DistributedCache<Key, Value> cache = listening.get(index);
+                        Key key = Key.of(index);
+                        Value value = Value.of(index);
+                        await("synchronization over the session shared at " + sharing)
+                                .atMost(WAITING_DURATION)
+                                .untilAsserted(() -> assertThat(cache.getIfPresent(key)).isEqualTo(value));
+                    }
+                } finally {
+                    // torn down here rather than after the test, because the listener data source is closed on the
+                    // way out of this method
+                    listening.forEach(cache -> {
+                        cache.distributedPolicy().stopSynchronization();
+                        cache.invalidateAll();
+                        distributedCacheInstances.remove(cache);
+                    });
+                }
+
+                // and a session is given up once its last cache instance stops
+                await("sessions given up")
+                        .atMost(WAITING_DURATION)
+                        .until(() -> listenerDataSource.getHikariPoolMXBean().getActiveConnections() == 0);
+            }
+        }
+
+        @DisplayName("Test that a cache instance failing to apply what it received leaves the others on its session alone")
+        @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_isolates_a_cache_instance_that_fails_to_apply() {
+            // all three share a session, which is the default
+            DistributedCache<Key, Value> cacheA = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheB = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheC = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            CaptureLogger loggerPostgresListener = CaptureLoggerFactory.getCaptureLogger(
+                    "io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresListener");
+            loggerPostgresListener.startCapturing();
+            CaptureLogger loggerPostgresSynchronizer = CaptureLoggerFactory.getCaptureLogger(
+                    "io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresSynchronizer");
+            loggerPostgresSynchronizer.startCapturing();
+            // the failing cache instance recovers by reconciling, which it reports
+            CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
+                    .getCaptureLogger(DistributedCaffeine.class);
+            loggerDistributedCaffeine.startCapturing();
+
+            InternalCacheManager<Key, Value> cacheManager = getInstanceRegistry(cacheB).getCacheManager();
+            AtomicBoolean failing = new AtomicBoolean(true);
+            cacheB.distributedPolicy().getAdapter().setReceiver(new Receiver<>() {
+
+                @Override
+                public void receiveCacheEntries(@NonNull List<CacheEntry<Key, Value>> cacheEntries) {
+                    if (failing.get()) {
+                        throw new IllegalStateException("provoked");
+                    }
+                    cacheManager.receiveCacheEntries(cacheEntries);
+                }
+
+                @Override
+                public void receiveSynchronizationRestart() {
+                    cacheManager.receiveSynchronizationRestart();
+                }
+            });
+
+            cacheA.put(Key.of(1), Value.of(1));
+
+            // the cache instance next to the failing one receives as usual, over the very same session
+            await("synchronization next to a failing cache instance")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(cacheC.getIfPresent(Key.of(1))).isEqualTo(Value.of(1)));
+            await("failure of the cache instance that fails to apply")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(loggerPostgresSynchronizer.getLoggingEvents())
+                            .anySatisfy(loggingEvent -> {
+                                assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                                assertThat(loggingEvent.getMessage()).startsWith("Receiving notifications failed");
+                                assertThat(loggingEvent.getThrowable()).hasMessage("provoked");
+                            }));
+
+            failing.set(false);
+            cacheA.put(Key.of(2), Value.of(2));
+
+            // and the failing one receives again once it no longer fails
+            await("synchronization once applying no longer fails")
+                    .atMost(EXTENDED_WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(cacheB.getIfPresent(Key.of(2))).isEqualTo(Value.of(2)));
+
+            // without the session ever having been given up for it
+            assertThat(loggerPostgresListener.getLoggingEvents()).isEmpty();
+            loggerPostgresListener.stopCapturing();
+            loggerPostgresSynchronizer.stopCapturing();
+            loggerDistributedCaffeine.stopCapturing();
+        }
+
+        @DisplayName("Test that a cache instance slow to apply what it received does not hold up the others")
+        @Test
+        void test_Synchronizer_does_not_hold_up_others_behind_a_slow_cache_instance() {
+            // all three share a session, which is the default
+            DistributedCache<Key, Value> cacheA = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheB = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+            DistributedCache<Key, Value> cacheC = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            // cacheB does not get past applying until released - which, if applying happened on the thread that
+            // holds the session, would leave nobody else on the session receiving anything either
+            InternalCacheManager<Key, Value> cacheManager = getInstanceRegistry(cacheB).getCacheManager();
+            CountDownLatch released = new CountDownLatch(1);
+            cacheB.distributedPolicy().getAdapter().setReceiver(new Receiver<>() {
+
+                @Override
+                public void receiveCacheEntries(@NonNull List<CacheEntry<Key, Value>> cacheEntries) {
+                    try {
+                        released.await();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    cacheManager.receiveCacheEntries(cacheEntries);
+                }
+
+                @Override
+                public void receiveSynchronizationRestart() {
+                    cacheManager.receiveSynchronizationRestart();
+                }
+            });
+
+            try {
+                cacheA.put(Key.of(1), Value.of(1));
+                cacheA.put(Key.of(2), Value.of(2));
+
+                await("synchronization next to a cache instance that does not get past applying")
+                        .atMost(WAITING_DURATION)
+                        .untilAsserted(() -> {
+                            assertThat(cacheC.getIfPresent(Key.of(1))).isEqualTo(Value.of(1));
+                            assertThat(cacheC.getIfPresent(Key.of(2))).isEqualTo(Value.of(2));
+                        });
+                assertThat(cacheB.getIfPresent(Key.of(1))).isNull();
+            } finally {
+                released.countDown();
+            }
+
+            // and the slow one catches up once it gets past applying
+            await("synchronization of the slow cache instance once released")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(cacheB.getIfPresent(Key.of(2))).isEqualTo(Value.of(2)));
+        }
+
+        @DisplayName("Test that cache instances joining a shared session wake it rather than wait for its polls")
+        @Test
+        void test_Synchronizer_joins_a_shared_session_without_waiting_for_its_polls() {
+            DistributedCache<Key, Value> cacheA = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            // The driver holds the connection for the whole of a poll, so a subscription can only be carried out
+            // once the poll under way is over - and one joining right after the previous one was confirmed arrives
+            // just as the next poll begins, so without being woken it waits out all of it. Measured for ten joining
+            // one after the other, each with everything building a cache instance takes: one second without waking,
+            // a fifth of one with it. The bound sits between the two with room on either side
+            long startedAt = System.nanoTime();
+            List<DistributedCache<Key, Value>> joining = new ArrayList<>();
+            for (int index = 0; index < 10; index++) {
+                joining.add(createCache(CacheBuilder.identity(), DistributedCaffeine::build));
+            }
+            Duration joiningTook = Duration.ofNanos(System.nanoTime() - startedAt);
+            assertThat(joiningTook).isLessThan(Duration.ofMillis(600));
+
+            cacheA.put(Key.of(1), Value.of(1));
+
+            joining.forEach(cache -> await("synchronization of every cache instance that joined")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(cache.getIfPresent(Key.of(1))).isEqualTo(Value.of(1))));
+        }
+
+        @DisplayName("Test that a cache instance falling too far behind is reconciled instead")
+        @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_reconciles_a_cache_instance_that_falls_too_far_behind() throws Exception {
+            // Persisting cached entries is what makes the recovery warm: reconciling keeps what the store confirms,
+            // and without a store that retains them there is nothing to confirm against
+            DistributedCache<Key, Value> cacheA = createCache(CacheBuilder.identity(),
+                    dc -> dc.withPersistence(configurer -> configurer
+                                    .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency))
+                            .build());
+            Adapter<Key, Value> adapterB = createAdapter();
+            // a limit low enough to be passed by a handful of writes, set before activation
+            Synchronizer<?, ?> synchronizerB = readFieldValue(adapterB, AbstractAdapter.class,
+                    "synchronizer", Synchronizer.class);
+            writeFieldValue(synchronizerB, synchronizerB.getClass(), "pendingLimit", 5);
+            DistributedCache<Key, Value> cacheB = createCache(adapterB, CacheBuilder.identity(),
+                    dc -> dc.withPersistence(configurer -> configurer
+                                    .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency))
+                            .build());
+
+            CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
+                    .getCaptureLogger(DistributedCaffeine.class);
+            loggerDistributedCaffeine.startCapturing();
+
+            // cacheB applies the first thing it receives only once released, so that everything after it piles up
+            InternalCacheManager<Key, Value> cacheManager = getInstanceRegistry(cacheB).getCacheManager();
+            CountDownLatch released = new CountDownLatch(1);
+            CountDownLatch held = new CountDownLatch(1);
+            cacheB.distributedPolicy().getAdapter().setReceiver(new Receiver<>() {
+
+                @Override
+                public void receiveCacheEntries(@NonNull List<CacheEntry<Key, Value>> cacheEntries) {
+                    held.countDown();
+                    try {
+                        released.await();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    cacheManager.receiveCacheEntries(cacheEntries);
+                }
+
+                @Override
+                public void receiveSynchronizationRestart() {
+                    cacheManager.receiveSynchronizationRestart();
+                }
+            });
+
+            cacheA.put(Key.of(0), Value.of(0));
+            assertThat(held.await(WAITING_DURATION.toMillis(), TimeUnit.MILLISECONDS)).isTrue();
+
+            // more than the limit, while cacheB is still busy with the first
+            List<Key> keys = IntStream.rangeClosed(1, 20).mapToObj(Key::of).toList();
+            keys.forEach(key -> cacheA.put(key, Value.of(key.getId())));
+            released.countDown();
+
+            await("synchronization of everything despite falling behind")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> keys.forEach(key ->
+                            assertThat(cacheB.getIfPresent(key)).isEqualTo(Value.of(key.getId()))));
+
+            // and it got there by reconciling, rather than by reading back everything that piled up
+            assertThat(loggerDistributedCaffeine.getLoggingEvents())
+                    .anySatisfy(loggingEvent -> {
+                        assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                        assertThat(loggingEvent.getMessage()).startsWith("Synchronization was interrupted for cache at");
+                    });
+            loggerDistributedCaffeine.stopCapturing();
         }
 
         @DisplayName("Test that what the adapter puts into one notification is a payload the server accepts")
@@ -9686,12 +9985,8 @@ final class DistributedCaffeineIntegrationTests {
         // connections on, so that nothing borrowed from it ever arrives again (seen as a 1-in-10 flake). And it is
         // filled before it is handed out, so that no connection is being opened at that moment to begin with
         HikariDataSource createProxiedDataSource(SilencingProxy proxy) {
-            HikariConfig hikariConfig = new HikariConfig();
-            hikariConfig.setJdbcUrl(format("jdbc:postgresql://localhost:%d/%s", proxy.getPort(),
-                    postgresContainer.getDatabaseName()));
-            hikariConfig.setUsername(postgresContainer.getUsername());
-            hikariConfig.setPassword(postgresContainer.getPassword());
-            hikariConfig.setMaximumPoolSize(5);
+            HikariConfig hikariConfig = createHikariConfig("localhost", proxy.getPort(),
+                    postgresContainer.getDatabaseName());
             hikariConfig.setMinimumIdle(5);
             // the pooled connections go silent along with the listening one, and are told apart from live ones by
             // validating them on the way out of the pool - quickly, so that doing so is not the test
@@ -9707,13 +10002,18 @@ final class DistributedCaffeineIntegrationTests {
 
         // a pool of its own on the test's server, for a test that needs a data source next to the shared one
         HikariDataSource createDataSource(String databaseName) {
-            HikariConfig hikariConfig = new HikariConfig();
-            hikariConfig.setJdbcUrl(format("jdbc:postgresql://%s:%d/%s", postgresContainer.getHost(),
+            return new HikariDataSource(createHikariConfig(postgresContainer.getHost(),
                     postgresContainer.getMappedPort(PostgreSQLContainer.POSTGRESQL_PORT), databaseName));
+        }
+
+        // a small pool on the test's server, reached at the given address - directly or through a proxy
+        private HikariConfig createHikariConfig(String host, int port, String databaseName) {
+            HikariConfig hikariConfig = new HikariConfig();
+            hikariConfig.setJdbcUrl(format("jdbc:postgresql://%s:%d/%s", host, port, databaseName));
             hikariConfig.setUsername(postgresContainer.getUsername());
             hikariConfig.setPassword(postgresContainer.getPassword());
             hikariConfig.setMaximumPoolSize(5);
-            return new HikariDataSource(hikariConfig);
+            return hikariConfig;
         }
 
         @Override

@@ -39,6 +39,41 @@ import static java.util.Objects.requireNonNull;
  */
 public final class PostgresAdapter<K, V> extends AbstractAdapter<K, V> {
 
+    /**
+     * Modes that define how cache instances share the connection they listen for notifications on.
+     * <p>
+     * Listening holds a connection for as long as a cache instance synchronizes - a session of its own on the server,
+     * subscribed to the channels of the cache instances it serves. Sharing reduces the number of those connections and
+     * sessions, and the work the server does to deliver notifications to them. In exchange, cache instances on a
+     * shared connection share its fate: when it fails, all of them are reconciled. And a single connection delivers
+     * notifications promptly only up to the order of a thousand per second, so write-heavy cache instances are
+     * better spread over several connections with {@link #TABLE} or {@link #INSTANCE}.
+     * <p>
+     * <b>Note:</b> Only cache instances whose adapters are configured with the same sharing mode, the same data source
+     * and the same listener data source (which defaults to the data source) share a connection. Data sources are told
+     * apart by identity, so two data source instances reaching the same database do not share.
+     *
+     * @author Andreas Oberhoff
+     */
+    public enum ListenerSharingMode {
+
+        /**
+         * Every cache instance listens on a connection of its own (no sharing).
+         */
+        INSTANCE,
+
+        /**
+         * Cache instances on the same table share one connection, whatever their discriminator.
+         */
+        TABLE,
+
+        /**
+         * Cache instances on the same database share one connection, whatever their table. This is the default
+         * listener sharing mode.
+         */
+        DATABASE
+    }
+
     private PostgresAdapter(Builder builder) {
         // through a second constructor so that the synchronizer can be handed the repository it reads through:
         // what a notification carries is which records changed, not the records themselves
@@ -47,7 +82,8 @@ public final class PostgresAdapter<K, V> extends AbstractAdapter<K, V> {
 
     private PostgresAdapter(PostgresRepository<K, V> repository, Builder builder) {
         super(repository,
-                new PostgresSynchronizer<>(builder.dataSource, builder.listenerDataSource, repository),
+                new PostgresSynchronizer<>(builder.dataSource, builder.listenerDataSource, builder.listenerSharingMode,
+                        builder.schemaName, builder.tableName, repository),
                 String.join(":", "postgresql", builder.schemaName, builder.tableName,
                         builder.discriminator), builder.discriminator);
     }
@@ -83,6 +119,7 @@ public final class PostgresAdapter<K, V> extends AbstractAdapter<K, V> {
 
         private final DataSource dataSource;
         private DataSource listenerDataSource;
+        private ListenerSharingMode listenerSharingMode;
         private final String schemaName;
         private final String tableName;
         private String discriminator;
@@ -96,6 +133,7 @@ public final class PostgresAdapter<K, V> extends AbstractAdapter<K, V> {
             this.tableName = checkedName(tableName, "tableName");
             // set defaults
             this.listenerDataSource = dataSource;
+            this.listenerSharingMode = ListenerSharingMode.DATABASE;
             this.discriminator = DEFAULT_DISCRIMINATOR;
         }
 
@@ -122,17 +160,17 @@ public final class PostgresAdapter<K, V> extends AbstractAdapter<K, V> {
          * reading and writing keep using the data source passed to
          * {@link PostgresAdapter#newBuilder(DataSource, String, String)}.
          * <p>
-         * Listening relies on {@code LISTEN}, which is session state: the connection is held for as long as the
-         * cache instance synchronizes and has to be a session of its own on the server that writes go to. A pooler
-         * in transaction mode (such as PgBouncer, or the managed connection pooling of Cloud SQL or AlloyDB in its
-         * default mode) does not provide one, so reading and writing can go through such a pooler while listening
-         * uses a direct or session-mode connection specified here.
+         * Listening relies on {@code LISTEN}, which needs a connection of its own to the server that writes go to,
+         * held for as long as synchronization lasts. A connection pooler in transaction mode cannot provide that,
+         * because it hands a server connection to a client only for the duration of a single transaction. Such
+         * poolers are common in front of managed cloud databases and database clusters, often as their default
+         * endpoint. Reading and writing may go through such a pooler while listening uses a direct or session-mode
+         * connection specified here.
          * <p>
-         * Whether notifications sent through the data source for reading and writing reach the listening connection
-         * is checked whenever listening begins, and starting synchronization fails if they do not.
+         * Listening is checked when it begins, and starting synchronization fails if notifications sent through
+         * the data source do not reach the listening connection.
          * <p>
-         * <b>Note:</b> The data source for reading and writing is used for listening as well if this method is
-         * skipped.
+         * <b>Note:</b> The listener data source defaults to the data source if this method is skipped.
          *
          * @param listenerDataSource the data source the adapter takes its listening connection from
          * @return a builder pattern instance for chaining additional methods
@@ -140,6 +178,21 @@ public final class PostgresAdapter<K, V> extends AbstractAdapter<K, V> {
         public Builder withListenerDataSource(DataSource listenerDataSource) {
             requireNonNull(listenerDataSource, "listenerDataSource cannot be null");
             this.listenerDataSource = listenerDataSource;
+            return this;
+        }
+
+        /**
+         * Specifies the mode that defines how cache instances share the connection they listen for notifications on.
+         * <p>
+         * <b>Note:</b> {@link ListenerSharingMode#DATABASE} is used as default if this method is skipped.
+         *
+         * @param listenerSharingMode listener sharing mode defining how cache instances share the connection they
+         *                            listen for notifications on
+         * @return a builder pattern instance for chaining additional methods
+         */
+        public Builder withListenerSharingMode(ListenerSharingMode listenerSharingMode) {
+            requireNonNull(listenerSharingMode, "listenerSharingMode cannot be null");
+            this.listenerSharingMode = listenerSharingMode;
             return this;
         }
 
