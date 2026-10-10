@@ -69,7 +69,7 @@ between cache entries from different caches that share a collection.
 
 Synchronization uses MongoDB's change streams, which keep a connection open for watching.
 
-* Watcher sharing: How cache instances using the same client share connections for watching is specified using
+* Watcher sharing: How cache instances (using the same client) share connections for watching is specified using
   `withWatcherSharingMode(...)`: `DATABASE` for one connection per database (default), `COLLECTION` for one per
   collection or `INSTANCE` for one per cache instance. With `DATABASE`, a cache instance whose collection is not watched
   yet takes a moment longer to start, because watching is restarted to include it.
@@ -103,7 +103,7 @@ different caches that share a table.
 
 Synchronization uses PostgreSQL's `LISTEN`/`NOTIFY`, which keeps a connection open for listening.
 
-* Listener sharing: How cache instances using the same data source share connections for listening is specified using
+* Listener sharing: How cache instances (using the same data source) share connections for listening is specified using
   `withListenerSharingMode(...)`: `DATABASE` for one connection per database (default), `TABLE` for one per table or
   `INSTANCE` for one per cache instance. A single connection delivers notifications promptly up to the order of a
   thousand per second, so write-heavy cache instances are better spread over several connections.
