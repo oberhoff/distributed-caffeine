@@ -17,10 +17,17 @@ package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
 
 import com.mongodb.ErrorCategory;
 import com.mongodb.MongoBulkWriteException;
+import com.mongodb.MongoCommandException;
+import com.mongodb.MongoNamespace;
+import com.mongodb.ReadConcern;
+import com.mongodb.ReadPreference;
 import com.mongodb.WriteConcern;
+import com.mongodb.client.FindIterable;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoCursor;
+import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.cursor.TimeoutMode;
 import com.mongodb.client.model.BulkWriteOptions;
 import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.IndexModel;
@@ -31,6 +38,7 @@ import com.mongodb.client.model.Sorts;
 import com.mongodb.client.model.UpdateOneModel;
 import com.mongodb.client.model.UpdateOptions;
 import com.mongodb.client.model.Updates;
+import com.mongodb.connection.ClusterType;
 import io.github.oberhoff.distributedcaffeine.adapter.AbstractRepository;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field;
@@ -39,7 +47,6 @@ import io.github.oberhoff.distributedcaffeine.adapter.CacheEntryMetadata;
 import io.github.oberhoff.distributedcaffeine.adapter.SerializerAware;
 import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
-import org.bson.BsonDocument;
 import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.bson.types.Binary;
@@ -55,6 +62,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.Spliterator;
 import java.util.Spliterators;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
@@ -68,11 +76,11 @@ import static java.lang.String.format;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
-import static java.util.stream.Collectors.toSet;
 
 final class MongoRepository<K, V> extends AbstractRepository<K, V> {
 
     private static final Logger LOGGER = System.getLogger(MongoRepository.class.getName());
+    private static final int NAMESPACE_NOT_FOUND_ERROR_CODE = 26;
     private static final UpdateOptions UPSERT_OPTIONS = new UpdateOptions().upsert(true);
     private static final BulkWriteOptions UNORDERED_BULK_WRITE_OPTIONS = new BulkWriteOptions().ordered(false);
     private static final Bson ALL_FIELDS_PROJECTION = Projections.include(Stream.of(Field.values())
@@ -92,9 +100,25 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
         // to be distributable at all. Should it then be rolled back, no other cache instance ever saw it, while the
         // one that wrote it is already holding it locally, and nothing says so until that key is written again.
         // Not a precaution against misconfiguration alone: before MongoDB 5.0 the server's own default is w:1, and
-        // a client shared with an application that chose w:1 would hand it over on any version
+        // a client shared with an application that chose w:1 would hand it over on any version.
+        // The primary rather than whatever the client brings, for a similar reason: what is read here is a snapshot
+        // that the change stream continues from the moment it was opened, so it must be at least as recent as that
+        // moment. A secondary lagging behind answers with an older one, and a change made in between is then in
+        // neither - not in the snapshot, and not in the stream, which never looks back past where it began - so the
+        // cache instance holds a stale value that nothing corrects until that key is written again. The change
+        // stream itself keeps the client's preference, since what it delivers is majority-committed on any member.
+        // And the server's default read concern rather than whatever the client brings, for the same snapshot: a
+        // change stream begins after the latest write the primary has applied, while a majority read leaves out
+        // what is applied but not yet replicated - so a write made just before the change stream was opened is in
+        // neither, once again. Measured on a replica set whose secondaries were held back from replicating: the
+        // default read saw such a write, a majority read did not, and the change stream never delivered it. What
+        // the default read may see in addition is a write that is rolled back later, which takes the primary
+        // failing - and that fails the change stream on it as well, which has the cache instance reconcile
         this.mongoCollection = mongoClient.getDatabase(databaseName).getCollection(collectionName)
-                .withWriteConcern(WriteConcern.MAJORITY);
+                .withWriteConcern(WriteConcern.MAJORITY)
+                .withReadPreference(ReadPreference.primary())
+                .withReadConcern(ReadConcern.DEFAULT);
+        ensureUnsharded(mongoClient);
         ensureIndexes();
     }
 
@@ -147,11 +171,19 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
             case DESCENDING -> Sorts.descending(TIMESTAMP.toString());
             case UNORDERED -> null;
         };
-        MongoCursor<Document> mongoCursor = mongoCollection
+        FindIterable<Document> findIterable = mongoCollection
                 .find(filter)
                 .projection(projection)
-                .sort(sort)
-                .cursor();
+                .sort(sort);
+        // A client timeout bounds an operation as a whole, and a cursor counts as one by default, from opening it to
+        // exhausting it. What is streamed here is consumed as it is applied, which for a large cache takes far longer
+        // than any one round trip - so the timeout is applied to every batch fetched instead, which is what it is
+        // there for: noticing a store that does not answer, not limiting how much a cache instance may read. Only
+        // with a timeout, because the mode means nothing - and is refused - without one
+        if (nonNull(mongoCollection.getTimeout(TimeUnit.MILLISECONDS))) {
+            findIterable = findIterable.timeoutMode(TimeoutMode.ITERATION);
+        }
+        MongoCursor<Document> mongoCursor = findIterable.cursor();
         return streamFromMongoCursor(mongoCursor);
     }
 
@@ -181,6 +213,39 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
         return mongoCollection.countDocuments(filter);
     }
 
+    // A collection in a sharded cluster is fine, a sharded collection is not. MongoDB requires a unique index to
+    // begin with the shard key and an upsert to name all of it, and this adapter relies on both: its unique
+    // (discriminator, hash) index keeps one document per key, and its upserts are filtered by exactly these fields -
+    // so any other shard key leaves either refused, and creating the index would fail below with nothing pointing
+    // here. Not worth supporting the one shard key that would fit either: the collection is about as large as what
+    // a single cache instance holds in memory, and a change stream on a sharded collection waits for every shard
+    // before it delivers anything. Checked before the indexes, so that a sharded collection is named as the cause.
+    // The cluster type is only known once the client has reached a server, hence the ping. Through the router
+    // collStats tells whether a collection is sharded - including one that does not exist yet, which is not - and
+    // takes no more than the read role grants. Only a database that does not exist yet has it fail, as on a first
+    // start, and nothing in it is sharded either
+    private void ensureUnsharded(MongoClient mongoClient) {
+        MongoNamespace namespace = mongoCollection.getNamespace();
+        MongoDatabase mongoDatabase = mongoClient.getDatabase(namespace.getDatabaseName());
+        mongoDatabase.runCommand(new Document("ping", 1), ReadPreference.primary());
+        if (mongoClient.getClusterDescription().getType() == ClusterType.SHARDED) {
+            Document collectionStats;
+            try {
+                collectionStats = mongoDatabase.runCommand(
+                        new Document("collStats", namespace.getCollectionName()), ReadPreference.primary());
+            } catch (MongoCommandException e) {
+                if (e.getErrorCode() == NAMESPACE_NOT_FOUND_ERROR_CODE) {
+                    return;
+                }
+                throw e;
+            }
+            if (Boolean.TRUE.equals(collectionStats.get("sharded"))) {
+                throw new IllegalStateException(format("The collection '%s' is sharded, which is not supported - "
+                        + "it may live in a sharded cluster, but must not be sharded itself", namespace));
+            }
+        }
+    }
+
     // Every query this repository issues filters by the discriminator and by nothing else unconditionally, so it
     // leads both indexes: that makes it the equality prefix of every plan and keeps even a query filtering by
     // nothing else off a collection scan.
@@ -193,6 +258,9 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
     //   that it can be used for the range filter as well as for the ordering (the status filter is a set, which
     //   the server expands into one sorted index range per status and merges, so no blocking sort is needed - in
     //   either direction, since an index is walked backwards just as well).
+    // Indexes of anyone else are left alone, so that whoever uses the collection beyond caching may index it as
+    // needed. Should a later version need other indexes than these, it is the ones it no longer needs that it drops,
+    // rather than all it does not know
     private void ensureIndexes() {
         IndexModel indexDiscriminatorHash = new IndexModel(
                 Indexes.compoundIndex(
@@ -206,25 +274,7 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
                         Indexes.ascending(TIMESTAMP.toString())),
                 new IndexOptions().unique(false));
 
-        List<IndexModel> indexes = List.of(indexDiscriminatorHash, indexDiscriminatorStatusTimestamp);
-
-        mongoCollection.createIndexes(indexes);
-
-        // collect keys for necessary indexes
-        Set<BsonDocument> indexKeys = indexes.stream()
-                .map(IndexModel::getKeys)
-                .map(Bson::toBsonDocument)
-                .collect(toSet());
-        // add key for default index
-        indexKeys.add(new Document("_id", 1).toBsonDocument());
-
-        // drop any other index not in collected keys
-        mongoCollection.listIndexes().forEach(existingIndex -> {
-            Bson key = existingIndex.get("key", Document.class);
-            if (!indexKeys.contains(key.toBsonDocument())) {
-                mongoCollection.dropIndex(key);
-            }
-        });
+        mongoCollection.createIndexes(List.of(indexDiscriminatorHash, indexDiscriminatorStatusTimestamp));
     }
 
     // An upsert filtered by something other than '_id' is not atomic against a concurrent insert of the same key:

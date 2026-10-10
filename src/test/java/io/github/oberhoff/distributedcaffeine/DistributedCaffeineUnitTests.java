@@ -31,6 +31,8 @@ import com.github.benmanes.caffeine.cache.Scheduler;
 import com.github.benmanes.caffeine.cache.Weigher;
 import com.mongodb.MongoBulkWriteException;
 import com.mongodb.MongoException;
+import com.mongodb.ReadConcern;
+import com.mongodb.ReadPreference;
 import com.mongodb.ServerAddress;
 import com.mongodb.ServerCursor;
 import com.mongodb.WriteConcern;
@@ -1641,6 +1643,8 @@ final class DistributedCaffeineUnitTests {
             when(mongoCollection.find(any(Bson.class))).thenReturn(findIterable);
             when(findIterable.projection(any())).thenReturn(findIterable);
             when(findIterable.sort(any())).thenReturn(findIterable);
+            // deep stubs report a timeout, so the per-batch timeout mode is applied as with a client that has one
+            when(findIterable.timeoutMode(any())).thenReturn(findIterable);
             when(findIterable.cursor()).thenReturn(mongoCursor);
             when(mongoCursor.hasNext()).thenReturn(false);
 
@@ -1671,9 +1675,12 @@ final class DistributedCaffeineUnitTests {
 
         private MongoCollection<Document> mongoCollectionOf(MongoClient mongoClient) {
             // deep stubs return the same collection mock the repository resolves for these names - the write
-            // concern it pins included, which resolves a collection of its own that the calls below land on
+            // concern, read preference and read concern it pins included, each resolving a collection of its own that the calls
+            // below land on
             return mongoClient.getDatabase(DATABASE_NAME).getCollection(COLLECTION_NAME)
-                    .withWriteConcern(WriteConcern.MAJORITY);
+                    .withWriteConcern(WriteConcern.MAJORITY)
+                    .withReadPreference(ReadPreference.primary())
+                    .withReadConcern(ReadConcern.DEFAULT);
         }
 
         // MongoRepository is package-private in another package, so it is constructed reflectively - but Repository

@@ -79,6 +79,12 @@ Synchronization uses MongoDB's change streams, which keep a connection open for 
   replaced automatically. Operations for reading and writing on such a connection fail once TCP keepalive gives up on
   it, after several minutes by default. If that is too long, `socketTimeoutMS` or `timeoutMS` can be set on the client
   to fail them sooner.
+  * Failovers: Cache instances stay consistent with the client's defaults. A write may occasionally fail with an
+    exception while the primary changes, because the driver retries it only once. Setting `timeoutMS` on the client
+    above the duration of an election (for example 30 seconds) makes the driver retry until the timeout instead, and
+    also bounds writes that would otherwise wait forever while no majority of data-bearing members is available.
+* Sharded clusters: The collection may live in a sharded cluster, but must not be sharded itself. Building an adapter
+  for a sharded collection fails.
 
 </details>
 
@@ -314,7 +320,7 @@ DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(a
 
 * Java 17 or newer.
 * MongoDB 4.2 or newer if `MongoAdapter` is used, configured to run as a replica set (a single node replica set is
-  sufficient).
+  sufficient; more members might slow down writes, and a sharded cluster delays synchronization).
 * PostgreSQL 9.5 or newer if `PostgresAdapter` is used, accessed through a data source that pools its connections.
 
 ## Installation

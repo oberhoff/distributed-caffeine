@@ -27,20 +27,31 @@ import com.github.benmanes.caffeine.cache.RemovalListener;
 import com.github.benmanes.caffeine.cache.Weigher;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import com.github.benmanes.caffeine.cache.stats.StatsCounter;
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.model.ExposedPort;
+import com.github.dockerjava.api.model.PortBinding;
+import com.github.dockerjava.api.model.Ports;
 import com.mongodb.ConnectionString;
 import com.mongodb.ExplainVerbosity;
 import com.mongodb.MongoClientException;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.MongoCommandException;
+import com.mongodb.MongoException;
 import com.mongodb.MongoTimeoutException;
 import com.mongodb.ReadConcern;
 import com.mongodb.ReadConcernLevel;
+import com.mongodb.ReadPreference;
 import com.mongodb.client.FindIterable;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.Sorts;
+import com.mongodb.event.ConnectionCheckedInEvent;
+import com.mongodb.event.ConnectionCheckedOutEvent;
+import com.mongodb.event.ConnectionPoolListener;
+import com.mongodb.spi.dns.InetAddressResolver;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
@@ -82,15 +93,25 @@ import org.junit.jupiter.api.Named;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
+import org.junit.jupiter.api.extension.ConditionEvaluationResult;
+import org.junit.jupiter.api.extension.ExecutionCondition;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.ExtensionContext;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.platform.commons.support.AnnotationSupport;
 import org.postgresql.PGConnection;
 import org.postgresql.PGNotification;
 import org.slf4j.event.Level;
 import org.slf4j.event.LoggingEvent;
+import org.testcontainers.DockerClientFactory;
+import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.containers.Network;
+import org.testcontainers.containers.wait.strategy.Wait;
+import org.testcontainers.images.ImagePullPolicy;
 import org.testcontainers.images.PullPolicy;
 import org.testcontainers.mongodb.MongoDBContainer;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -101,11 +122,14 @@ import javax.sql.DataSource;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Inherited;
+import java.lang.annotation.Repeatable;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
+import java.lang.reflect.AnnotatedElement;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.net.InetAddress;
@@ -123,6 +147,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -137,6 +162,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -159,6 +185,12 @@ import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Evicted
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer.LoadingStrategy.MAPPING_FUNCTION;
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.DockerImage;
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.RUNS_ON_GITHUB;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.MongoIntegration.DisabledOnTopology;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.MongoIntegration.MongoTopology.SHARDED_CLUSTER;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.MongoIntegration.MongoTopology.SINGLE_NODE_REPLICA_SET;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.MongoIntegration.MongoTopology.THREE_NODE_REPLICA_SET;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.MongoIntegration.MongoTopology.THREE_NODE_REPLICA_SET_WITH_ARBITER;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.MongoIntegration.Topology;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION_AND_EVICTION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION;
@@ -196,6 +228,7 @@ import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 import static java.util.Objects.requireNonNullElse;
+import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toMap;
 import static java.util.stream.Collectors.toSet;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -232,91 +265,391 @@ import static org.mockito.Mockito.when;
 final class DistributedCaffeineIntegrationTests {
 
     @Nested
-    @DisplayName("MongoDB 4.2.0")
-    @DockerImage("mongo:4.2.0") // oldest version supported by the latest driver
+    @DisplayName("MongoDB 4.2.0 (Single-Node Replica Set)")
+    @DockerImage("mongo:4.2.0")
+    @Topology(SINGLE_NODE_REPLICA_SET)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_4_2_0 extends MongoIntegration {
+    final class Mongo_4_2_0__Single_Node_Replica_Set extends MongoIntegration {
     }
 
     @Nested
-    @DisplayName("MongoDB 4.latest")
+    @DisplayName("MongoDB 4.2.0 (Three-Node Replica Set)")
+    @DockerImage("mongo:4.2.0")
+    @Topology(THREE_NODE_REPLICA_SET)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_4_2_0__Three_Node_Replica_Set extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 4.2.0 (Three-Node Replica Set with Arbiter)")
+    @DockerImage("mongo:4.2.0")
+    @Topology(THREE_NODE_REPLICA_SET_WITH_ARBITER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_4_2_0__Three_Node_Replica_Set_with_Arbiter extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 4.2.0 (Sharded Cluster with Two Shards)")
+    @DockerImage("mongo:4.2.0")
+    @Topology(SHARDED_CLUSTER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_4_2_0__Sharded_Cluster_with_Two_Shards extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 4.latest (Single-Node Replica Set)")
     @DockerImage("mongo:4")
+    @Topology(SINGLE_NODE_REPLICA_SET)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_4_latest extends MongoIntegration {
+    final class Mongo_4_latest__Single_Node_Replica_Set extends MongoIntegration {
     }
 
     @Nested
-    @DisplayName("MongoDB 5.0.0")
+    @DisplayName("MongoDB 4.latest (Three-Node Replica Set)")
+    @DockerImage("mongo:4")
+    @Topology(THREE_NODE_REPLICA_SET)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_4_latest__Three_Node_Replica_Set extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 4.latest (Three-Node Replica Set with Arbiter)")
+    @DockerImage("mongo:4")
+    @Topology(THREE_NODE_REPLICA_SET_WITH_ARBITER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_4_latest__Three_Node_Replica_Set_with_Arbiter extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 4.latest (Sharded Cluster with Two Shards)")
+    @DockerImage("mongo:4")
+    @Topology(SHARDED_CLUSTER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_4_latest__Sharded_Cluster_with_Two_Shards extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 5.0.0 (Single-Node Replica Set)")
     @DockerImage("mongo:5.0.0")
+    @Topology(SINGLE_NODE_REPLICA_SET)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_5_0_0 extends MongoIntegration {
+    final class Mongo_5_0_0__Single_Node_Replica_Set extends MongoIntegration {
     }
 
     @Nested
-    @DisplayName("MongoDB 5.latest")
+    @DisplayName("MongoDB 5.0.0 (Three-Node Replica Set)")
+    @DockerImage("mongo:5.0.0")
+    @Topology(THREE_NODE_REPLICA_SET)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_5_0_0__Three_Node_Replica_Set extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 5.0.0 (Three-Node Replica Set with Arbiter)")
+    @DockerImage("mongo:5.0.0")
+    @Topology(THREE_NODE_REPLICA_SET_WITH_ARBITER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_5_0_0__Three_Node_Replica_Set_with_Arbiter extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 5.0.0 (Sharded Cluster with Two Shards)")
+    @DockerImage("mongo:5.0.0")
+    @Topology(SHARDED_CLUSTER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_5_0_0__Sharded_Cluster_with_Two_Shards extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 5.latest (Single-Node Replica Set)")
     @DockerImage("mongo:5")
+    @Topology(SINGLE_NODE_REPLICA_SET)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_5_latest extends MongoIntegration {
+    final class Mongo_5_latest__Single_Node_Replica_Set extends MongoIntegration {
     }
 
     @Nested
-    @DisplayName("MongoDB 6.0.1")
+    @DisplayName("MongoDB 5.latest (Three-Node Replica Set)")
+    @DockerImage("mongo:5")
+    @Topology(THREE_NODE_REPLICA_SET)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_5_latest__Three_Node_Replica_Set extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 5.latest (Three-Node Replica Set with Arbiter)")
+    @DockerImage("mongo:5")
+    @Topology(THREE_NODE_REPLICA_SET_WITH_ARBITER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_5_latest__Three_Node_Replica_Set_with_Arbiter extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 5.latest (Sharded Cluster with Two Shards)")
+    @DockerImage("mongo:5")
+    @Topology(SHARDED_CLUSTER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_5_latest__Sharded_Cluster_with_Two_Shards extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 6.0.1 (Single-Node Replica Set)")
+    @DockerImage("mongo:6.0.1")
+    @Topology(SINGLE_NODE_REPLICA_SET)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_6_0_1__Single_Node_Replica_Set extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 6.0.1 (Three-Node Replica Set)")
     @DockerImage("mongo:6.0.1") // mongo:6.0.0 is not available
+    @Topology(THREE_NODE_REPLICA_SET)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_6_0_1 extends MongoIntegration {
+    final class Mongo_6_0_1__Three_Node_Replica_Set extends MongoIntegration {
     }
 
     @Nested
-    @DisplayName("MongoDB 6.latest")
+    @DisplayName("MongoDB 6.0.1 (Three-Node Replica Set with Arbiter)")
+    @DockerImage("mongo:6.0.1")
+    @Topology(THREE_NODE_REPLICA_SET_WITH_ARBITER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_6_0_1__Three_Node_Replica_Set_with_Arbiter extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 6.0.1 (Sharded Cluster with Two Shards)")
+    @DockerImage("mongo:6.0.1")
+    @Topology(SHARDED_CLUSTER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_6_0_1__Sharded_Cluster_with_Two_Shards extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 6.latest (Single-Node Replica Set)")
     @DockerImage("mongo:6")
+    @Topology(SINGLE_NODE_REPLICA_SET)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_6_latest extends MongoIntegration {
+    final class Mongo_6_latest__Single_Node_Replica_Set extends MongoIntegration {
     }
 
     @Nested
-    @DisplayName("MongoDB 7.0.0")
+    @DisplayName("MongoDB 6.latest (Three-Node Replica Set)")
+    @DockerImage("mongo:6")
+    @Topology(THREE_NODE_REPLICA_SET)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_6_latest__Three_Node_Replica_Set extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 6.latest (Three-Node Replica Set with Arbiter)")
+    @DockerImage("mongo:6")
+    @Topology(THREE_NODE_REPLICA_SET_WITH_ARBITER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_6_latest__Three_Node_Replica_Set_with_Arbiter extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 6.latest (Sharded Cluster with Two Shards)")
+    @DockerImage("mongo:6")
+    @Topology(SHARDED_CLUSTER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_6_latest__Sharded_Cluster_with_Two_Shards extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 7.0.0 (Single-Node Replica Set)")
     @DockerImage("mongo:7.0.0")
+    @Topology(SINGLE_NODE_REPLICA_SET)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_7_0_0 extends MongoIntegration {
+    final class Mongo_7_0_0__Single_Node_Replica_Set extends MongoIntegration {
     }
 
     @Nested
-    @DisplayName("MongoDB 7.latest")
+    @DisplayName("MongoDB 7.0.0 (Three-Node Replica Set)")
+    @DockerImage("mongo:7.0.0")
+    @Topology(THREE_NODE_REPLICA_SET)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_7_0_0__Three_Node_Replica_Set extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 7.0.0 (Three-Node Replica Set with Arbiter)")
+    @DockerImage("mongo:7.0.0")
+    @Topology(THREE_NODE_REPLICA_SET_WITH_ARBITER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_7_0_0__Three_Node_Replica_Set_with_Arbiter extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 7.0.0 (Sharded Cluster with Two Shards)")
+    @DockerImage("mongo:7.0.0")
+    @Topology(SHARDED_CLUSTER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_7_0_0__Sharded_Cluster_with_Two_Shards extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 7.latest (Single-Node Replica Set)")
     @DockerImage("mongo:7")
+    @Topology(SINGLE_NODE_REPLICA_SET)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_7_latest extends MongoIntegration {
+    final class Mongo_7_latest__Single_Node_Replica_Set extends MongoIntegration {
     }
 
     @Nested
-    @DisplayName("MongoDB 8.0.0")
+    @DisplayName("MongoDB 7.latest (Three-Node Replica Set)")
+    @DockerImage("mongo:7")
+    @Topology(THREE_NODE_REPLICA_SET)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_7_latest__Three_Node_Replica_Set extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 7.latest (Three-Node Replica Set with Arbiter)")
+    @DockerImage("mongo:7")
+    @Topology(THREE_NODE_REPLICA_SET_WITH_ARBITER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_7_latest__Three_Node_Replica_Set_with_Arbiter extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 7.latest (Sharded Cluster with Two Shards)")
+    @DockerImage("mongo:7")
+    @Topology(SHARDED_CLUSTER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_7_latest__Sharded_Cluster_with_Two_Shards extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 8.0.0 (Single-Node Replica Set)")
     @DockerImage("mongo:8.0.0")
+    @Topology(SINGLE_NODE_REPLICA_SET)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_8_0_0 extends MongoIntegration {
+    final class Mongo_8_0_0__Single_Node_Replica_Set extends MongoIntegration {
     }
 
     @Nested
-    @DisplayName("MongoDB 8.latest")
+    @DisplayName("MongoDB 8.0.0 (Three-Node Replica Set)")
+    @DockerImage("mongo:8.0.0")
+    @Topology(THREE_NODE_REPLICA_SET)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_8_0_0__Three_Node_Replica_Set extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 8.0.0 (Three-Node Replica Set with Arbiter)")
+    @DockerImage("mongo:8.0.0")
+    @Topology(THREE_NODE_REPLICA_SET_WITH_ARBITER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_8_0_0__Three_Node_Replica_Set_with_Arbiter extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 8.0.0 (Sharded Cluster with Two Shards)")
+    @DockerImage("mongo:8.0.0")
+    @Topology(SHARDED_CLUSTER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_8_0_0__Sharded_Cluster_with_Two_Shards extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 8.latest (Single-Node Replica Set)")
     @DockerImage("mongo:8")
+    @Topology(SINGLE_NODE_REPLICA_SET)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_8_latest extends MongoIntegration {
+    final class Mongo_8_latest__Single_Node_Replica_Set extends MongoIntegration {
     }
 
     @Nested
-    @DisplayName("MongoDB 9.0.2")
+    @DisplayName("MongoDB 8.latest (Three-Node Replica Set)")
+    @DockerImage("mongo:8")
+    @Topology(THREE_NODE_REPLICA_SET)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_8_latest__Three_Node_Replica_Set extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 8.latest (Three-Node Replica Set with Arbiter)")
+    @DockerImage("mongo:8")
+    @Topology(THREE_NODE_REPLICA_SET_WITH_ARBITER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_8_latest__Three_Node_Replica_Set_with_Arbiter extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 8.latest (Sharded Cluster with Two Shards)")
+    @DockerImage("mongo:8")
+    @Topology(SHARDED_CLUSTER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_8_latest__Sharded_Cluster_with_Two_Shards extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 9.0.2 (Single-Node Replica Set)")
+    @DockerImage("mongo:9.0.2")
+    @Topology(SINGLE_NODE_REPLICA_SET)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_9_0_2__Single_Node_Replica_Set extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 9.0.2 (Three-Node Replica Set)")
     @DockerImage("mongo:9.0.2") // mongo:9.0.0 is not available
+    @Topology(THREE_NODE_REPLICA_SET)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_9_0_2 extends MongoIntegration {
+    final class Mongo_9_0_2__Three_Node_Replica_Set extends MongoIntegration {
     }
 
     @Nested
-    @DisplayName("MongoDB 9.latest")
+    @DisplayName("MongoDB 9.0.2 (Three-Node Replica Set with Arbiter)")
+    @DockerImage("mongo:9.0.2")
+    @Topology(THREE_NODE_REPLICA_SET_WITH_ARBITER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_9_0_2__Three_Node_Replica_Set_with_Arbiter extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 9.0.2 (Sharded Cluster with Two Shards)")
+    @DockerImage("mongo:9.0.2")
+    @Topology(SHARDED_CLUSTER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_9_0_2__Sharded_Cluster_with_Two_Shards extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 9.latest (Single-Node Replica Set)")
     @DockerImage("mongo:9")
-    final class Mongo_9_latest extends MongoIntegration {
+    @Topology(SINGLE_NODE_REPLICA_SET)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_9_latest__Single_Node_Replica_Set extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 9.latest (Three-Node Replica Set)")
+    @DockerImage("mongo:9")
+    @Topology(THREE_NODE_REPLICA_SET)
+    final class Mongo_9_latest__Three_Node_Replica_Set extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 9.latest (Three-Node Replica Set with Arbiter)")
+    @DockerImage("mongo:9")
+    @Topology(THREE_NODE_REPLICA_SET_WITH_ARBITER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_9_latest__Three_Node_Replica_Set_with_Arbiter extends MongoIntegration {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 9.latest (Sharded Cluster with Two Shards)")
+    @DockerImage("mongo:9")
+    @Topology(SHARDED_CLUSTER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Mongo_9_latest__Sharded_Cluster_with_Two_Shards extends MongoIntegration {
     }
 
     @Nested
     @DisplayName("PostgreSQL 9.5.25")
-    @DockerImage("postgres:9.5.25") // oldest version offering all features needed
+    @DockerImage("postgres:9.5.25")
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
     final class Postgres_9_5_25 extends PostgresIntegration {
     }
@@ -455,6 +788,7 @@ final class DistributedCaffeineIntegrationTests {
 
     @SuppressWarnings({"java:S5838", "java:S5778", "java:S5961", "ResultOfMethodCallIgnored", "DataFlowIssue"})
     abstract static class CommonIntegration extends DistributedCaffeineIntegrationTestInstance {
+
         @DisplayName("Test put() and getIfPresent()")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentSerializers")
@@ -3534,6 +3868,11 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(distributedCache.getIfPresent(key)).isEqualTo(value);
         }
 
+        // Through the router of a sharded cluster a change is delivered a second or more after it was made, which is
+        // longer than these tests leave between one step and the next - so what a step publishes arrives after the
+        // next one and decides differently, the instances agreeing with each other and with the store nonetheless.
+        // What is asserted here is the same whatever the topology, and is covered by the topologies of a replica set
+        @DisabledOnTopology(SHARDED_CLUSTER)
         @DisplayName("Test eviction by size")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
@@ -3771,6 +4110,11 @@ final class DistributedCaffeineIntegrationTests {
             }
         }
 
+        // Through the router of a sharded cluster a change is delivered a second or more after it was made, which is
+        // longer than these tests leave between one step and the next - so what a step publishes arrives after the
+        // next one and decides differently, the instances agreeing with each other and with the store nonetheless.
+        // What is asserted here is the same whatever the topology, and is covered by the topologies of a replica set
+        @DisabledOnTopology(SHARDED_CLUSTER)
         @DisplayName("Test eviction by time")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
@@ -4678,6 +5022,15 @@ final class DistributedCaffeineIntegrationTests {
             Key key1 = Key.of(1);
             Value value1 = Value.of(1);
             Key key2 = Key.of(2);
+
+            // the own echo restoring an evicted key would move the counts this test is about - arriving a second or
+            // more later through the router of a sharded cluster, it does so after they have been read
+            Adapter<Key, Value> adapter = getInstanceRegistry(distributedCache).getAdapter();
+            Synchronizer<Key, Value> synchronizer = readFieldValue(adapter, AbstractAdapter.class,
+                    "synchronizer", Synchronizer.class);
+            Receiver<Key, Value> receiver = injectSpy(synchronizer, AbstractSynchronizer.class,
+                    "receiver", Receiver.class);
+            doNothing().when(receiver).receiveCacheEntries(anyList());
 
             distributedCache.put(key1, value1);
             distributedCache.put(key2, Value.of(2));
@@ -5715,6 +6068,11 @@ final class DistributedCaffeineIntegrationTests {
             verifyNoMoreInteractions(cacheLoader);
         }
 
+        // Through the router of a sharded cluster a change is delivered a second or more after it was made, which is
+        // longer than these tests leave between one step and the next - so what a step publishes arrives after the
+        // next one and decides differently, the instances agreeing with each other and with the store nonetheless.
+        // What is asserted here is the same whatever the topology, and is covered by the topologies of a replica set
+        @DisabledOnTopology(SHARDED_CLUSTER)
         @DisplayName("Test persistence of evicted entries by time")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
         @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
@@ -6670,6 +7028,15 @@ final class DistributedCaffeineIntegrationTests {
             maintenanceWorker.deactivate();
             maintenanceWorker.activate();
 
+            // the own echo restoring an evicted key would move the counts this test is about - arriving a second or
+            // more later through the router of a sharded cluster, it does so after the next key is put
+            Adapter<Key, Value> adapter = getInstanceRegistry(distributedCache).getAdapter();
+            Synchronizer<Key, Value> synchronizer = readFieldValue(adapter, AbstractAdapter.class,
+                    "synchronizer", Synchronizer.class);
+            Receiver<Key, Value> receiver = injectSpy(synchronizer, AbstractSynchronizer.class,
+                    "receiver", Receiver.class);
+            doNothing().when(receiver).receiveCacheEntries(anyList());
+
             Key key1 = Key.of(1);
             Key key2 = Key.of(2);
             Key key3 = Key.of(3);
@@ -7602,7 +7969,8 @@ final class DistributedCaffeineIntegrationTests {
                 return (DistributedLoadingCache<Key, Value>) cache;
             };
 
-            List<DistributedLoadingCache<Key, Value>> distributedLoadingCaches = new ArrayList<>();
+            // added to from every thread that creates one, so it has to take concurrent additions
+            List<DistributedLoadingCache<Key, Value>> distributedLoadingCaches = new CopyOnWriteArrayList<>();
             List<CompletableFuture<Void>> completableFutures = new ArrayList<>();
 
             IntStream.rangeClosed(1, levelOfParallelism).forEach(cacheIndex ->
@@ -7836,7 +8204,29 @@ final class DistributedCaffeineIntegrationTests {
     abstract static class MongoIntegration extends CommonIntegration {
         static final String DATABASE_NAME = "distributedCaffeineDatabase";
 
+        static final String REPLICA_SET_NAME = "rs0";
+        static final String MEMBER_ALIAS = "member";
+        // The members of a replica set of several are announced by their network aliases, which resolve inside
+        // their Docker network and nowhere else. Here they resolve to this host, where every member is published
+        // on the very port it listens on - so that one address reaches a member both from the other members and
+        // from the tests, which is what the driver needs to find whichever of them is primary
+        static final InetAddressResolver MEMBER_RESOLVER = host -> host.matches(MEMBER_ALIAS + "\\d+")
+                ? List.of(InetAddress.getByAddress(host, new byte[]{127, 0, 0, 1}))
+                : List.of(InetAddress.getAllByName(host));
+
+        // a single member
         MongoDBContainer mongoContainer;
+        // or several, of a replica set or a sharded cluster
+        Network mongoNetwork;
+        List<GenericContainer<?>> mongoMembers;
+        // what stops, kills and starts members behind the back of Testcontainers - its own client, which it closes
+        // by itself, so not one to close here
+        final DockerClient dockerClient = DockerClientFactory.instance().client();
+
+        String replicaSetUrl;
+        // where the member preferred as primary is reached directly
+        String primaryHost;
+        int primaryPort;
 
         MongoClient mongoClient;
 
@@ -8037,14 +8427,106 @@ final class DistributedCaffeineIntegrationTests {
                             .isEqualTo("asDocument"));
         }
 
+        @DisplayName("Test that the repository keeps indexes it did not create")
+        @Test
+        void test_Repository_keeps_indexes_it_did_not_create() {
+            // An index of whoever uses the collection beyond caching, such as one for querying by a field of the
+            // values stored as documents
+            MongoCollection<Document> mongoCollection = mongoClient.getDatabase(DATABASE_NAME)
+                    .getCollection(getDatasetName());
+            Document foreignIndexKey = new Document(CacheEntry.Field.VALUE.toString().concat(".name"), 1);
+            mongoCollection.createIndex(foreignIndexKey);
+
+            MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, getDatasetName()).build();
+
+            assertThat(mongoCollection.listIndexes().map(index -> index.get("key", Document.class))
+                    .into(new ArrayList<>()))
+                    .contains(foreignIndexKey)
+                    .hasSize(4); // the default one on '_id', the one above and the two of the repository
+        }
+
+        @DisplayName("Test that the repository refuses a sharded collection")
+        @Test
+        @EnabledOnTopology(SHARDED_CLUSTER)
+        void test_Repository_refuses_a_sharded_collection() {
+            // Sharded by hashed '_id', as a collection commonly is. That the collection may live in a sharded cluster
+            // without being sharded itself is what every other test on this topology shows
+            MongoDatabase admin = mongoClient.getDatabase("admin");
+            admin.runCommand(new Document("enableSharding", DATABASE_NAME));
+            admin.runCommand(new Document("shardCollection", format("%s.%s", DATABASE_NAME, getDatasetName()))
+                    .append("key", new Document("_id", "hashed")));
+
+            assertThatIllegalStateException()
+                    .isThrownBy(() -> MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, getDatasetName()).build())
+                    .withMessageContaining("is sharded");
+        }
+
+        @DisplayName("Test that the repository reads from the primary at the default read concern whatever the client prefers")
+        @Test
+        void test_Repository_reads_from_the_primary_at_the_default_read_concern() throws Exception {
+            // What is checked is the handle the repository reads through rather than a stale read, which would take
+            // a secondary lagging behind or a write held back from replicating at the very moment of reading: a client
+            // preferring secondaries, or majority reads, must not hand that on to the snapshots the change stream
+            // continues from
+            try (MongoClient secondaryPreferringMongoClient = MongoClients.create(mongoClientSettings()
+                    .readPreference(ReadPreference.secondaryPreferred())
+                    .readConcern(ReadConcern.MAJORITY)
+                    .build())) {
+                Repository<?, ?> repository = MongoAdapter
+                        .newBuilder(secondaryPreferringMongoClient, DATABASE_NAME, getDatasetName())
+                        .build()
+                        .getRepository()
+                        .orElseThrow();
+                MongoCollection<?> mongoCollection = readFieldValue(repository,
+                        Class.forName("io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoRepository"),
+                        "mongoCollection", MongoCollection.class);
+                assertThat(mongoCollection.getReadPreference()).isEqualTo(ReadPreference.primary());
+                assertThat(mongoCollection.getReadConcern()).isEqualTo(ReadConcern.DEFAULT);
+            }
+        }
+
+        @DisplayName("Test that reading the store back is not cut short by a client timeout it outlasts as a whole")
+        @Test
+        void test_Repository_streams_within_a_client_timeout_per_batch() throws Exception {
+            // A client timeout bounds an operation as a whole, and a cursor by default counts as one operation from
+            // opening to exhaustion - batches it fetches later included. What reads the store back in full is
+            // consumed while the cache instance applies it, so it lives as long as applying takes, which for a large
+            // cache can be far longer than any one round trip. Here every batch arrives well within the timeout,
+            // while consuming all of them takes several times as long
+            int count = 1_000;
+            repositoryFor(null).publishCacheEntries(IntStream.range(0, count)
+                    .mapToObj(index -> CacheEntry.of("h" + index, "op" + index, Key.of(index), Value.of(index), CACHED,
+                            Instant.now().truncatedTo(MILLIS)))
+                    .toList());
+            try (MongoClient timeoutMongoClient = MongoClients.create(mongoClientSettings()
+                    .timeout(1, TimeUnit.SECONDS)
+                    .build())) {
+                MongoAdapter<Key, Value> adapter = MongoAdapter
+                        .newBuilder(timeoutMongoClient, DATABASE_NAME, getDatasetName())
+                        .build();
+                adapter.setKeySerializer(new JavaObjectSerializer<>());
+                adapter.setValueSerializer(new JacksonSerializer<>(Value.class, false));
+                AtomicInteger consumed = new AtomicInteger();
+                try (Stream<CacheEntry<Key, Value>> stream = adapter.getRepository().orElseThrow()
+                        .streamCacheEntries(null, null, UNORDERED)) {
+                    stream.forEach(cacheEntry -> {
+                        // three seconds in all, spent while the first batch is consumed
+                        if (consumed.incrementAndGet() <= 100) {
+                            sleep(Duration.ofMillis(30));
+                        }
+                    });
+                }
+                assertThat(consumed).hasValue(count);
+            }
+        }
+
         @DisplayName("Test failure handling while watching change streams")
         @Test
         @ResourceLock(LOGGER_RESOURCE_LOCK)
         void test_Synchronizer_fails_and_retries() throws Exception {
             // early (fail-fast) failure: watching change streams requires majority read concern, so building a cache
             // whose collection uses a local read concern fails immediately (without retrying)
-            try (MongoClient failFastMongoClient = MongoClients.create(MongoClientSettings.builder()
-                    .applyConnectionString(new ConnectionString(mongoContainer.getReplicaSetUrl()))
+            try (MongoClient failFastMongoClient = MongoClients.create(mongoClientSettings()
                     .readConcern(ReadConcern.LOCAL)
                     .build())) {
                 MongoAdapter<Key, Value> localReadConcernAdapter = MongoAdapter
@@ -8226,11 +8708,10 @@ final class DistributedCaffeineIntegrationTests {
             // closed, and a cache instance on a collection it does not watch yet has it reopen, which then keeps
             // failing - with the resume position pinned before the invalidation - while the invalidation is written
             // and swept. cacheA has a client of its own, so that the watcher taken down is its alone
-            try (MongoClient ownMongoClient = MongoClients.create(MongoClientSettings.builder()
-                    .applyConnectionString(new ConnectionString(mongoContainer.getReplicaSetUrl()))
+            try (MongoClient ownMongoClient = MongoClients.create(mongoClientSettings()
                     .applicationName(getDatasetName())
                     .build());
-                 MongoClient closedMongoClient = MongoClients.create(mongoContainer.getReplicaSetUrl())) {
+                 MongoClient closedMongoClient = MongoClients.create(mongoClientSettings().build())) {
                 closedMongoClient.close();
                 DistributedCache<Key, Value> distributedCacheA = createCache(
                         MongoAdapter.newBuilder(ownMongoClient, DATABASE_NAME, getDatasetName()).build(),
@@ -8336,7 +8817,7 @@ final class DistributedCaffeineIntegrationTests {
             // limit on how long an answer may take, and connects directly, so that the members of the replica set
             // behind the proxy are not discovered and reached around it
             try (SilencingProxy proxy = new SilencingProxy(
-                    mongoContainer.getHost(), mongoContainer.getMappedPort(27017), executorService);
+                    primaryHost, primaryPort, executorService);
                  MongoClient proxiedMongoClient = MongoClients.create(format(
                          "mongodb://localhost:%d/?directConnection=true", proxy.getPort()))) {
                 DistributedCache<Key, Value> cacheA = createCache(CacheBuilder.identity(), DistributedCaffeine::build);
@@ -8397,6 +8878,135 @@ final class DistributedCaffeineIntegrationTests {
             }
         }
 
+        @DisplayName("Test that a failover of the primary pauses writing without losing or diverging anything")
+        @Test
+        // stepping down needs another data-bearing member to hand the primary to
+        @EnabledOnTopology(THREE_NODE_REPLICA_SET)
+        @EnabledOnTopology(THREE_NODE_REPLICA_SET_WITH_ARBITER)
+        void test_Synchronizer_rides_out_a_failover_of_the_primary() throws Exception {
+            assertWritingRidesOut(MongoIntegration::stepDownAndHandBack);
+        }
+
+        @DisplayName("Test that a write a failover makes fail leaves the cache instances consistent")
+        @Test
+        @EnabledOnTopology(THREE_NODE_REPLICA_SET)
+        @EnabledOnTopology(THREE_NODE_REPLICA_SET_WITH_ARBITER)
+        void test_Synchronizer_stays_consistent_when_a_failover_fails_a_write() throws Exception {
+            // On the client's defaults, which set no timeout, the driver retries a write interrupted by stepping down
+            // only once, and on some server versions that retry still lands inside the stepping down, so the write
+            // fails. Whatever became of it in the store - kept, as a write the old primary had already applied, or
+            // lost - both cache instances have to agree on it, the one whose write failed included
+            try (MongoClient defaultMongoClient = MongoClients.create(mongoClientSettings().build())) {
+                assertWritingRidesOut(defaultMongoClient, true, MongoIntegration::stepDownAndHandBack);
+            }
+        }
+
+        @DisplayName("Test that writing while no majority of data-bearing members is available fails rather than waits")
+        @Test
+        // only an arbiter keeps a primary in place without a majority of data-bearing members
+        @EnabledOnTopology(THREE_NODE_REPLICA_SET_WITH_ARBITER)
+        void test_Synchronizer_fails_writes_while_no_majority_of_data_bearing_members_is_available() {
+            // The secondary going down leaves the primary in place, held there by the arbiter's vote, while a majority
+            // write can be acknowledged by nobody. Bounded by a client timeout - without one it would wait for as long
+            // as the secondary is gone - writing fails, and failing three times in a row has the cache instance report
+            // being degraded. The writes were applied by the primary nonetheless, so once the secondary is back they
+            // are majority-committed after all, and both cache instances hold the last of them
+            try (MongoClient timedMongoClient = MongoClients.create(mongoClientSettings()
+                    .timeout(3, TimeUnit.SECONDS)
+                    .build());
+                 MongoClient preferredClient = MongoClients.create(
+                         format("mongodb://%s:%d/?directConnection=true", primaryHost, primaryPort))) {
+                List<DistributedCache<Key, Value>> created = new ArrayList<>();
+                try {
+                    for (int index = 0; index < 2; index++) {
+                        created.add(createCache(MongoAdapter
+                                        .newBuilder(timedMongoClient, DATABASE_NAME, getDatasetName())
+                                        .build(),
+                                CacheBuilder.identity(), DistributedCaffeine::build));
+                    }
+                    DistributedCache<Key, Value> cacheA = created.get(0);
+                    DistributedCache<Key, Value> cacheB = created.get(1);
+                    cacheA.put(Key.of(1), Value.of(1));
+                    await("synchronization before the secondary goes")
+                            .atMost(WAITING_DURATION)
+                            .untilAsserted(() -> assertThat(cacheB.getIfPresent(Key.of(1))).isEqualTo(Value.of(1)));
+
+                    String secondary = mongoMembers.get(1).getContainerId();
+                    dockerClient.stopContainerCmd(secondary).exec();
+                    try {
+                        for (int attempt = 2; attempt <= 4; attempt++) {
+                            Value value = Value.of(attempt);
+                            assertThatThrownBy(() -> cacheA.put(Key.of(1), value))
+                                    .satisfiesAnyOf(
+                                            thrown -> assertThat(thrown).isInstanceOf(MongoException.class),
+                                            thrown -> assertThat(thrown).hasRootCauseInstanceOf(MongoException.class));
+                        }
+                        assertThat(cacheA.distributedPolicy().getSynchronizationState())
+                                .isEqualTo(SynchronizationState.DEGRADED);
+                    } finally {
+                        dockerClient.startContainerCmd(secondary).exec();
+                        awaitReplicaSetHealthy(preferredClient.getDatabase("admin"));
+                    }
+
+                    await("writing again")
+                            .atMost(EXTENDED_WAITING_DURATION)
+                            .ignoreExceptions()
+                            .until(() -> {
+                                cacheA.put(Key.of(2), Value.of(2));
+                                return true;
+                            });
+                    await("convergence on what the failed writes left in the store")
+                            .atMost(EXTENDED_WAITING_DURATION)
+                            .untilAsserted(() -> {
+                                assertThat(cacheA.getIfPresent(Key.of(1))).isEqualTo(Value.of(4));
+                                assertThat(cacheB.getIfPresent(Key.of(1))).isEqualTo(Value.of(4));
+                            });
+                } finally {
+                    // torn down here rather than after the test, because their client is closed on the way out
+                    created.forEach(cache -> {
+                        cache.distributedPolicy().stopSynchronization();
+                        distributedCacheInstances.remove(cache);
+                    });
+                }
+            }
+        }
+
+        @DisplayName("Test that a secondary going down and coming back leaves writing undisturbed")
+        @Test
+        // only with three data-bearing members does losing one of them leave a majority of them
+        @EnabledOnTopology(THREE_NODE_REPLICA_SET)
+        void test_Synchronizer_rides_out_a_restart_of_a_secondary() throws Exception {
+            // What a rolling update does to every secondary in turn: stopped as gracefully as an update stops it,
+            // and started again on the data it had. The two members left are a majority, so writing goes on
+            assertWritingRidesOut(preferredAdmin -> {
+                String containerId = mongoMembers.get(mongoMembers.size() - 1).getContainerId();
+                dockerClient.stopContainerCmd(containerId).exec();
+                sleep(Duration.ofSeconds(1));
+                dockerClient.startContainerCmd(containerId).exec();
+            });
+        }
+
+        @DisplayName("Test that a primary dying abruptly pauses writing without losing or diverging anything")
+        @Test
+        @EnabledOnTopology(THREE_NODE_REPLICA_SET)
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_rides_out_a_primary_dying_abruptly() throws Exception {
+            // Killed rather than stepped down, so that it hands nothing over: the other members only notice it is
+            // gone once their heartbeats go unanswered for the election timeout, which is the longest a failover
+            // keeps a write waiting. Started again on the data it had, and handed the primary back once it is in
+            assertWritingRidesOut(preferredAdmin -> {
+                String containerId = mongoMembers.get(0).getContainerId();
+                dockerClient.killContainerCmd(containerId).exec();
+                MongoDatabase admin = mongoClient.getDatabase("admin");
+                await("another member primary")
+                        .atMost(EXTENDED_WAITING_DURATION)
+                        .ignoreExceptions()
+                        .until(() -> !primaryOf(admin).startsWith(MEMBER_ALIAS + 0 + ":"));
+                dockerClient.startContainerCmd(containerId).exec();
+                handBackPrimary(preferredAdmin);
+            });
+        }
+
         @DisplayName("Test that watching a single collection survives the collection being dropped")
         @Test
         @ResourceLock(LOGGER_RESOURCE_LOCK)
@@ -8442,13 +9052,17 @@ final class DistributedCaffeineIntegrationTests {
                         .atMost(Duration.ofSeconds(30))
                         .untilAsserted(() -> assertThat(cacheB.getIfPresent(Key.of(2))).isEqualTo(Value.of(2)));
 
-                // because the watcher noticed that its cursor had been ended, rather than by chance
-                assertThat(loggerMongoWatcher.getLoggingEvents())
-                        .anySatisfy(loggingEvent -> {
-                            assertThat(loggingEvent.getMessage()).startsWith("Watching change streams failed");
-                            assertThat(loggingEvent.getThrowable())
-                                    .hasMessageStartingWith("Change stream was ended by the server");
-                        });
+                // because the watcher noticed that its cursor had been ended, rather than by chance. Through the router
+                // of a sharded cluster the cursor is not ended by the drop in the first place, and what is written to
+                // the collection recreated arrives on it as before - with no reconcile, nothing else could deliver it
+                if (topology() != SHARDED_CLUSTER) {
+                    assertThat(loggerMongoWatcher.getLoggingEvents())
+                            .anySatisfy(loggingEvent -> {
+                                assertThat(loggingEvent.getMessage()).startsWith("Watching change streams failed");
+                                assertThat(loggingEvent.getThrowable())
+                                        .hasMessageStartingWith("Change stream was ended by the server");
+                            });
+                }
                 loggerMongoWatcher.stopCapturing();
                 loggerDistributedCaffeine.stopCapturing();
                 cacheA.distributedPolicy().stopSynchronization();
@@ -8463,11 +9077,10 @@ final class DistributedCaffeineIntegrationTests {
             // The cache instances watching share a client of their own, so that the watcher taken down is theirs
             // alone: it is pointed at a client that is closed, so that replacing its cursor keeps failing for as long
             // as that lasts. Reading and writing go on as usual
-            try (MongoClient ownMongoClient = MongoClients.create(MongoClientSettings.builder()
-                    .applyConnectionString(new ConnectionString(mongoContainer.getReplicaSetUrl()))
+            try (MongoClient ownMongoClient = MongoClients.create(mongoClientSettings()
                     .applicationName(getDatasetName())
                     .build());
-                 MongoClient closedMongoClient = MongoClients.create(mongoContainer.getReplicaSetUrl())) {
+                 MongoClient closedMongoClient = MongoClients.create(mongoClientSettings().build())) {
                 closedMongoClient.close();
                 DistributedCache<Key, Value> cacheA = createCache(CacheBuilder.identity(), DistributedCaffeine::build);
                 DistributedCache<Key, Value> cacheB1 = createCache(watchingAdapter(ownMongoClient),
@@ -8562,6 +9175,86 @@ final class DistributedCaffeineIntegrationTests {
         @Test
         void test_Synchronizer_shares_watchers_by_database() {
             assertWatchersShared(WatcherSharingMode.DATABASE, 1);
+        }
+
+        @DisplayName("Test that a shared cursor holds its connection until the last cache instance on it stops")
+        @Test
+        void test_Synchronizer_releases_a_shared_watcher_with_its_last_cache_instance() {
+            String collectionName = getDatasetName();
+            // still bounded, and still ending in the counter that makes it unique
+            String otherCollectionName = "b_" + collectionName.substring(2);
+            // Connections of the watching client that are checked out of its pool right now. A watcher keeps one
+            // checked out for as long as its cursor is open, while everything else this client does - reading and
+            // writing - returns its connection as soon as it is done
+            AtomicInteger checkedOut = new AtomicInteger();
+            try (MongoClient watchingMongoClient = MongoClients.create(mongoClientSettings()
+                    .applicationName(collectionName)
+                    .applyToConnectionPoolSettings(builder -> builder.addConnectionPoolListener(
+                            new ConnectionPoolListener() {
+                                @Override
+                                public void connectionCheckedOut(@NonNull ConnectionCheckedOutEvent event) {
+                                    checkedOut.incrementAndGet();
+                                }
+
+                                @Override
+                                public void connectionCheckedIn(@NonNull ConnectionCheckedInEvent event) {
+                                    checkedOut.decrementAndGet();
+                                }
+                            }))
+                    .build())) {
+                List<DistributedCache<Key, Value>> watching = new ArrayList<>();
+                List<List<String>> scopes = List.of(List.of(collectionName, "a"), List.of(collectionName, "b"),
+                        List.of(otherCollectionName, "a"));
+                try {
+                    for (List<String> scope : scopes) {
+                        watching.add(createCache(MongoAdapter.newBuilder(watchingMongoClient, DATABASE_NAME,
+                                                scope.get(0))
+                                        .withDiscriminator(scope.get(1))
+                                        .withWatcherSharingMode(WatcherSharingMode.DATABASE)
+                                        .build(),
+                                CacheBuilder.identity(), DistributedCaffeine::build));
+                    }
+                    DistributedCache<Key, Value> last = watching.get(scopes.size() - 1);
+                    DistributedCache<Key, Value> writing = createCache(MongoAdapter
+                                    .newBuilder(mongoClient, DATABASE_NAME, otherCollectionName)
+                                    .withDiscriminator("a")
+                                    .build(),
+                            CacheBuilder.identity(), DistributedCaffeine::build);
+                    assertChangeStreamCursors(collectionName, 1);
+
+                    // stopping all but one leaves the cursor open, and still delivering to the one that is left
+                    watching.subList(0, scopes.size() - 1)
+                            .forEach(cache -> cache.distributedPolicy().stopSynchronization());
+                    assertChangeStreamCursors(collectionName, 1);
+                    writing.put(Key.of(1), Value.of(1));
+                    await("synchronization over the cursor its peers left")
+                            .atMost(WAITING_DURATION)
+                            .untilAsserted(() -> assertThat(last.getIfPresent(Key.of(1))).isEqualTo(Value.of(1)));
+
+                    // stopping the last one gives up the cursor and returns its connection to the pool
+                    last.distributedPolicy().stopSynchronization();
+                    await("shared watcher released")
+                            .atMost(WAITING_DURATION)
+                            .until(() -> checkedOut.get() == 0);
+                    assertChangeStreamCursors(collectionName, 0);
+
+                    // and starting again takes a connection anew, which is released again in turn
+                    last.distributedPolicy().startSynchronization();
+                    assertChangeStreamCursors(collectionName, 1);
+                    last.distributedPolicy().stopSynchronization();
+                    await("restarted watcher released")
+                            .atMost(WAITING_DURATION)
+                            .until(() -> checkedOut.get() == 0);
+                    assertChangeStreamCursors(collectionName, 0);
+                } finally {
+                    // torn down here rather than after the test, because their client is closed on the way out
+                    watching.forEach(cache -> {
+                        cache.distributedPolicy().stopSynchronization();
+                        cache.invalidateAll();
+                        distributedCacheInstances.remove(cache);
+                    });
+                }
+            }
         }
 
         @DisplayName("Test that a cache instance failing to apply what it received leaves the others on its cursor alone")
@@ -8763,6 +9456,188 @@ final class DistributedCaffeineIntegrationTests {
             loggerDistributedCaffeine.stopCapturing();
         }
 
+        MongoTopology topology() {
+            return Optional.ofNullable(getClass().getAnnotation(Topology.class))
+                    .map(Topology::value)
+                    .orElseThrow(() -> new IllegalStateException(
+                            format("%s declares no topology", getClass().getSimpleName())));
+        }
+
+        // The preferred member stepping down and taking the primary back afterwards - which is what a rolling update
+        // does to the primary, once for updating it and once for handing it back
+        private static void stepDownAndHandBack(MongoDatabase preferredAdmin) {
+            String preferredPrimary = primaryOf(preferredAdmin);
+            try {
+                preferredAdmin.runCommand(new Document("replSetStepDown", 5)
+                        .append("secondaryCatchUpPeriodSecs", 2));
+            } catch (MongoException e) {
+                // the connection the command came on may be closed by the stepping down, which is the point
+            }
+            await("another member primary")
+                    .atMost(EXTENDED_WAITING_DURATION)
+                    .ignoreExceptions()
+                    .until(() -> !preferredPrimary.equals(primaryOf(preferredAdmin)));
+            handBackPrimary(preferredAdmin);
+        }
+
+        // Both cache instances write in turns, over the same keys, while the replica set is disrupted - and are
+        // expected to have waited out whatever the disruption does to the primary rather than to have failed, and
+        // to end up holding what was written last, whichever of them wrote it and whichever primary took it. The
+        // replica set is left as it was found, so that the tests after this one find it healthy
+        // On a client with the timeout the README offers, which is what has the driver retry an interrupted write
+        // for as long as a failover takes rather than once - without it a write may fail, which the test below
+        // allows for
+        private void assertWritingRidesOut(Disruption disruption) throws Exception {
+            try (MongoClient timedMongoClient = MongoClients.create(mongoClientSettings()
+                    .timeout(30, TimeUnit.SECONDS)
+                    .build())) {
+                assertWritingRidesOut(timedMongoClient, false, disruption);
+            }
+        }
+
+        // Cache instances of their own client, torn down here rather than after the test, because their client is
+        // closed on the way out
+        private void assertWritingRidesOut(MongoClient client, boolean failuresAllowed, Disruption disruption)
+                throws Exception {
+            List<DistributedCache<Key, Value>> created = new ArrayList<>();
+            try {
+                assertWritingRidesOut(() -> {
+                    DistributedCache<Key, Value> cache = createCache(MongoAdapter
+                                    .newBuilder(client, DATABASE_NAME, getDatasetName())
+                                    .build(),
+                            CacheBuilder.identity(), DistributedCaffeine::build);
+                    created.add(cache);
+                    return cache;
+                }, failuresAllowed, disruption);
+            } finally {
+                created.forEach(cache -> {
+                    cache.distributedPolicy().stopSynchronization();
+                    distributedCacheInstances.remove(cache);
+                });
+            }
+        }
+
+        // Where writes may fail, a failed write leaves its key in doubt: the store may have kept it or not, and
+        // either is fine as long as both cache instances agree - so a key then holds what was last written to it
+        // successfully or the value whose write failed, the same one in both
+        private void assertWritingRidesOut(Supplier<DistributedCache<Key, Value>> cacheSupplier,
+                                           boolean failuresAllowed, Disruption disruption) throws Exception {
+            DistributedCache<Key, Value> cacheA = cacheSupplier.get();
+            DistributedCache<Key, Value> cacheB = cacheSupplier.get();
+            List<Key> keys = IntStream.range(0, 100).mapToObj(Key::of).toList();
+
+            AtomicBoolean writing = new AtomicBoolean(true);
+            List<Throwable> failures = new CopyOnWriteArrayList<>();
+            AtomicLong longestWriteNanos = new AtomicLong();
+            // written by the writer alone and read once it is done
+            Map<Key, Value> lastWritten = new HashMap<>();
+            Map<Key, Set<Value>> inDoubt = new HashMap<>();
+            CompletableFuture<Void> writer = CompletableFuture.runAsync(() -> {
+                for (int index = 0; writing.get(); index++) {
+                    DistributedCache<Key, Value> cache = index % 2 == 0 ? cacheA : cacheB;
+                    Key key = keys.get(index % keys.size());
+                    // a key whose write failed is not written again, so that the failed write stays the last word on
+                    // it - what the cache instance whose write failed then holds is up to the store alone, which it
+                    // only learns of by its own write coming back
+                    if (inDoubt.containsKey(key)) {
+                        continue;
+                    }
+                    long started = System.nanoTime();
+                    try {
+                        cache.put(key, Value.of(index));
+                        lastWritten.put(key, Value.of(index));
+                    } catch (RuntimeException e) {
+                        failures.add(e);
+                        inDoubt.computeIfAbsent(key, ignored -> new HashSet<>()).add(Value.of(index));
+                    }
+                    longestWriteNanos.accumulateAndGet(System.nanoTime() - started, Math::max);
+                }
+            }, executorService);
+
+            // connected directly, so that the preferred member is reached whichever member is primary
+            try (MongoClient preferredClient = MongoClients.create(
+                    format("mongodb://%s:%d/?directConnection=true", primaryHost, primaryPort))) {
+                MongoDatabase preferredAdmin = preferredClient.getDatabase("admin");
+                // writes under way before the disruption, so that some of them are caught by it
+                sleep(Duration.ofMillis(500));
+                disruption.run(preferredAdmin);
+                awaitReplicaSetHealthy(preferredAdmin);
+                // The client the tests after this one share may still take another member for the primary, and pool
+                // connections that a restarted member no longer knows of - a server without a streaming heartbeat
+                // (before 4.4) leaves its client unaware of either for up to its heartbeat interval, and a command
+                // that is not retryable, like creating indexes, fails on it. So it is awaited here until that client
+                // sees the preferred member as primary again, which it only does once it has heard from it anew
+                await("shared client seeing the preferred member as primary")
+                        .atMost(EXTENDED_WAITING_DURATION)
+                        .until(() -> mongoClient.getClusterDescription().getServerDescriptions().stream()
+                                .anyMatch(server -> server.isPrimary()
+                                        && server.getAddress().getHost().equals(MEMBER_ALIAS + 0)));
+                // and writes that run against the replica set restored
+                sleep(Duration.ofMillis(500));
+            } finally {
+                writing.set(false);
+                writer.get(EXTENDED_WAITING_DURATION.toMillis(), TimeUnit.MILLISECONDS);
+            }
+
+            if (!failuresAllowed) {
+                assertThat(failures).isEmpty();
+                // paused while there was no primary, but never left waiting until the driver gives up on finding one
+                assertThat(Duration.ofNanos(longestWriteNanos.get())).isLessThan(Duration.ofSeconds(30));
+            }
+            // failing only as the store failed, never on something of the cache instance's own
+            assertThat(failures).allSatisfy(failure -> assertThat(failure).satisfiesAnyOf(
+                    thrown -> assertThat(thrown).isInstanceOf(MongoException.class),
+                    thrown -> assertThat(thrown).hasRootCauseInstanceOf(MongoException.class)));
+            assertThat(keys).allSatisfy(key -> assertThat(lastWritten.containsKey(key) || inDoubt.containsKey(key))
+                    .isTrue());
+            await("convergence after the disruption")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        assertThat(cacheA.asMap()).isEqualTo(cacheB.asMap());
+                        assertThat(keys).allSatisfy(key -> assertThat(cacheA.getIfPresent(key))
+                                .isIn(Stream.concat(Stream.ofNullable(lastWritten.get(key)),
+                                        inDoubt.getOrDefault(key, Set.of()).stream()).toList()));
+                    });
+        }
+
+        // Handed back on purpose rather than left to the preferred member's priority, which takes the primary back
+        // only once it is caught up and any step-down period is over, and so takes anything from seconds to a
+        // minute. Unfreezing ends that period, and stepping up calls the election
+        private static void handBackPrimary(MongoDatabase preferredAdmin) {
+            await("preferred member primary again")
+                    .atMost(EXTENDED_WAITING_DURATION)
+                    .ignoreExceptions()
+                    .until(() -> {
+                        preferredAdmin.runCommand(new Document("replSetFreeze", 0));
+                        preferredAdmin.runCommand(new Document("replSetStepUp", 1));
+                        return primaryOf(preferredAdmin).startsWith(MEMBER_ALIAS + 0 + ":");
+                    });
+        }
+
+        // Healthy once the preferred member is primary and every other one is a secondary - until then a majority
+        // write waits for a member that is still starting up or catching up
+        private static void awaitReplicaSetHealthy(MongoDatabase preferredAdmin) {
+            await("replica set healthy")
+                    .atMost(Duration.ofMinutes(2))
+                    .ignoreExceptions()
+                    .until(() -> preferredAdmin.runCommand(new Document("replSetGetStatus", 1))
+                            .getList("members", Document.class).stream()
+                            .allMatch(status -> status.getInteger("_id") == 0
+                                    ? status.getInteger("state") == 1
+                                    : Set.of(2, 7).contains(status.getInteger("state"))));
+        }
+
+
+        // the member that is primary, as the replica set itself sees it
+        private static String primaryOf(MongoDatabase admin) {
+            return admin.runCommand(new Document("replSetGetStatus", 1))
+                    .getList("members", Document.class).stream()
+                    .filter(status -> status.getInteger("state") == 1)
+                    .map(status -> status.getString("name"))
+                    .findFirst()
+                    .orElseThrow();
+        }
+
         private Adapter<Key, Value> watchingAdapter(MongoClient watchingMongoClient) {
             return MongoAdapter.newBuilder(watchingMongoClient, DATABASE_NAME, getDatasetName()).build();
         }
@@ -8775,8 +9650,7 @@ final class DistributedCaffeineIntegrationTests {
             String collectionName = getDatasetName();
             // still bounded, and still ending in the counter that makes it unique
             String otherCollectionName = "b_" + collectionName.substring(2);
-            try (MongoClient watchingMongoClient = MongoClients.create(MongoClientSettings.builder()
-                    .applyConnectionString(new ConnectionString(mongoContainer.getReplicaSetUrl()))
+            try (MongoClient watchingMongoClient = MongoClients.create(mongoClientSettings()
                     .applicationName(collectionName)
                     .build())) {
                 List<DistributedCache<Key, Value>> watching = new ArrayList<>();
@@ -8811,7 +9685,7 @@ final class DistributedCaffeineIntegrationTests {
 
                     // counted only now, long after the last cache instance joined, so that no cursor is being
                     // reopened wider while counting
-                    assertThat(countChangeStreamCursors(collectionName)).isEqualTo(expectedCursors);
+                    assertChangeStreamCursors(collectionName, expectedCursors);
                 } finally {
                     // torn down here rather than after the test, because their client is closed on the way out
                     watching.forEach(cache -> {
@@ -8824,7 +9698,15 @@ final class DistributedCaffeineIntegrationTests {
                 // and a cursor is given up once its last cache instance stops
                 await("cursors given up")
                         .atMost(WAITING_DURATION)
-                        .until(() -> countChangeStreamCursors(collectionName) == 0);
+                        .until(() -> topology() == SHARDED_CLUSTER || countChangeStreamCursors(collectionName) == 0);
+            }
+        }
+
+        // Asserted where the cursors can be counted: through the router of a sharded cluster, the cursors on the
+        // shards are opened by the router and carry its application name rather than the client's
+        private void assertChangeStreamCursors(String applicationName, int expected) {
+            if (topology() != SHARDED_CLUSTER) {
+                assertThat(countChangeStreamCursors(applicationName)).isEqualTo(expected);
             }
         }
 
@@ -8890,10 +9772,19 @@ final class DistributedCaffeineIntegrationTests {
                     // nothing to sort by
                 }
             }
-            String winningPlan = findIterable.explain(ExplainVerbosity.QUERY_PLANNER)
+            Document routedPlan = findIterable.explain(ExplainVerbosity.QUERY_PLANNER)
                     .get("queryPlanner", Document.class)
-                    .get("winningPlan", Document.class)
-                    .toJson();
+                    .get("winningPlan", Document.class);
+            // Through the router of a sharded cluster, the winning plan is the routing, and what each shard plans -
+            // its rejected plans included - is nested in it. What the shards execute is their own winning plans,
+            // which is what has to be indexed there
+            String winningPlan = (routedPlan.containsKey("shards")
+                    ? routedPlan.getList("shards", Document.class).stream()
+                    .map(shard -> shard.get("winningPlan", Document.class))
+                    .toList()
+                    : List.of(routedPlan)).stream()
+                    .map(Document::toJson)
+                    .collect(joining(", "));
             assertThat(winningPlan)
                     .describedAs("%nWinning plan for filter %s", filter)
                     .doesNotContain("COLLSCAN");
@@ -8909,23 +9800,196 @@ final class DistributedCaffeineIntegrationTests {
 
         @Override
         void startStore(DockerImageName dockerImageName, String displayName) {
-            this.mongoContainer = new MongoDBContainer(dockerImageName)
-                    .withReplicaSet()
-                    .withCreateContainerCmdModifier(cmd -> cmd.withName(displayName))
-                    .withImagePullPolicy(PullPolicy.alwaysPull());
-            this.mongoContainer.start();
-            this.mongoClient = MongoClients.create(MongoClientSettings.builder()
-                    .applyConnectionString(new ConnectionString(mongoContainer.getReplicaSetUrl()))
+            switch (topology()) {
+                case SINGLE_NODE_REPLICA_SET -> {
+                    this.mongoContainer = new MongoDBContainer(dockerImageName)
+                            .withReplicaSet()
+                            .withCreateContainerCmdModifier(cmd -> cmd.withName(displayName))
+                            .withImagePullPolicy(PullPolicy.alwaysPull());
+                    this.mongoContainer.start();
+                    this.replicaSetUrl = mongoContainer.getReplicaSetUrl();
+                    this.primaryHost = mongoContainer.getHost();
+                    this.primaryPort = mongoContainer.getMappedPort(27017);
+                }
+                case THREE_NODE_REPLICA_SET -> startReplicaSet(dockerImageName, displayName, false);
+                case THREE_NODE_REPLICA_SET_WITH_ARBITER -> startReplicaSet(dockerImageName, displayName, true);
+                case SHARDED_CLUSTER -> startShardedCluster(dockerImageName, displayName);
+            }
+            this.mongoClient = MongoClients.create(mongoClientSettings()
                     .applyToSocketSettings(socketSettings -> socketSettings
                             .connectTimeout(30, TimeUnit.SECONDS)
                             .readTimeout(30, TimeUnit.SECONDS))
                     .build());
         }
 
+        // Every member in a container of its own, on a network of their own, listening on a port that is free on
+        // this host and published there as the same port. The first member is preferred as primary, so that it
+        // takes the primary back by itself after a test has made another member primary. With an arbiter, the last
+        // member is one, which can never be primary and holds no data
+        private void startReplicaSet(DockerImageName dockerImageName, String displayName, boolean withArbiter) {
+            int members = 3;
+            this.mongoNetwork = Network.newNetwork();
+            this.mongoMembers = new ArrayList<>();
+            List<Integer> ports = freePorts(members);
+            List<Document> memberConfigurations = new ArrayList<>();
+            for (int index = 0; index < members; index++) {
+                int port = ports.get(index);
+                String alias = MEMBER_ALIAS + index;
+                // stopped with the store rather than here, like every other member
+                // noinspection resource
+                GenericContainer<?> member = new GenericContainer<>(dockerImageName)
+                        .withNetwork(mongoNetwork)
+                        .withNetworkAliases(alias)
+                        .withCommand("--replSet", REPLICA_SET_NAME, "--bind_ip_all", "--port", String.valueOf(port))
+                        .withCreateContainerCmdModifier(cmd -> cmd
+                                .withName(displayName + "-" + alias)
+                                .withExposedPorts(ExposedPort.tcp(port))
+                                .withHostConfig(requireNonNull(cmd.getHostConfig()).withPortBindings(
+                                        new PortBinding(Ports.Binding.bindPort(port), ExposedPort.tcp(port)))))
+                        // pulled once, for the first member - the others start from what that pulled
+                        .withImagePullPolicy(index == 0 ? PullPolicy.alwaysPull() : PullPolicy.defaultPolicy())
+                        // spelled in lower case before MongoDB 4.4 and capitalized in the structured log after
+                        .waitingFor(Wait.forLogMessage("(?is).*waiting for connections.*", 1));
+                mongoMembers.add(member);
+                boolean arbiter = withArbiter && index == members - 1;
+                memberConfigurations.add(new Document("_id", index)
+                        .append("host", alias + ":" + port)
+                        .append("priority", arbiter ? 0 : index == 0 ? 2 : 1)
+                        .append("arbiterOnly", arbiter));
+            }
+            mongoMembers.get(0).start();
+            mongoMembers.subList(1, mongoMembers.size()).parallelStream().forEach(GenericContainer::start);
+
+            try (MongoClient memberClient = MongoClients.create(
+                    format("mongodb://localhost:%d/?directConnection=true", ports.get(0)))) {
+                MongoDatabase admin = memberClient.getDatabase("admin");
+                admin.runCommand(new Document("replSetInitiate", new Document("_id", REPLICA_SET_NAME)
+                        .append("members", memberConfigurations)));
+                // before the first test, which would otherwise be charged with the replica set still starting up
+                awaitReplicaSetHealthy(admin);
+            }
+
+            this.replicaSetUrl = format("mongodb://%s/test?replicaSet=%s", memberConfigurations.stream()
+                    .map(configuration -> configuration.getString("host"))
+                    .collect(joining(",")), REPLICA_SET_NAME);
+            this.primaryHost = "localhost";
+            this.primaryPort = ports.get(0);
+        }
+
+        // A config server, two shards and a router, the config server and each shard a replica set of a single member
+        // (which both have to be), on a network of their own. Only the router is reached from here - the driver speaks
+        // to nothing else of a sharded cluster - so the others are told apart by their network aliases alone and
+        // published on whatever port is free, just so that they can be initiated
+        private void startShardedCluster(DockerImageName dockerImageName, String displayName) {
+            this.mongoNetwork = Network.newNetwork();
+            this.mongoMembers = new ArrayList<>();
+            GenericContainer<?> configServer = shardedClusterMember(dockerImageName, displayName, "config", 27019,
+                    PullPolicy.alwaysPull(), "--configsvr", "--replSet", "config", "--bind_ip_all", "--port", "27019");
+            List<GenericContainer<?>> shards = IntStream.range(0, 2)
+                    .<GenericContainer<?>>mapToObj(index -> shardedClusterMember(dockerImageName, displayName, "shard" + index, 27018,
+                            PullPolicy.defaultPolicy(), "--shardsvr", "--replSet", "shard" + index, "--bind_ip_all",
+                            "--port", "27018",
+                            // A change stream through the router delivers an event only once every shard has moved
+                            // past it, and an idle shard moves on by a no-op written every 10 seconds by default -
+                            // so with the collection on one shard, the other one holds every event back by up to
+                            // that long. The shortest interval there is keeps that within what the tests wait for
+                            "--setParameter", "periodicNoopIntervalSecs=1"))
+                    .toList();
+            // noinspection resource
+            GenericContainer<?> router = shardedClusterMember(dockerImageName, displayName, "router", 27017,
+                    PullPolicy.defaultPolicy(), "mongos", "--configdb", "config/config:27019", "--bind_ip_all",
+                    "--port", "27017");
+            configServer.start();
+            shards.parallelStream().forEach(GenericContainer::start);
+
+            initiateSingleMemberReplicaSet(configServer, "config", "config:27019", true);
+            for (int index = 0; index < shards.size(); index++) {
+                initiateSingleMemberReplicaSet(shards.get(index), "shard" + index, "shard" + index + ":27018", false);
+            }
+            router.start();
+
+            this.replicaSetUrl = format("mongodb://%s:%d/test", router.getHost(), router.getMappedPort(27017));
+            this.primaryHost = router.getHost();
+            this.primaryPort = router.getMappedPort(27017);
+            try (MongoClient routerClient = MongoClients.create(replicaSetUrl)) {
+                MongoDatabase admin = routerClient.getDatabase("admin");
+                for (int index = 0; index < shards.size(); index++) {
+                    String shard = format("shard%d/shard%d:27018", index, index);
+                    await("shard added")
+                            .atMost(Duration.ofMinutes(2))
+                            .ignoreExceptions()
+                            .until(() -> admin.runCommand(new Document("addShard", shard)).get("ok") != null);
+                }
+            }
+        }
+
+        private GenericContainer<?> shardedClusterMember(DockerImageName dockerImageName, String displayName,
+                                                         String alias, int port, ImagePullPolicy pullPolicy,
+                                                         String... command) {
+            // stopped with the store rather than here, like every other member
+            // noinspection resource
+            GenericContainer<?> member = new GenericContainer<>(dockerImageName)
+                    .withNetwork(mongoNetwork)
+                    .withNetworkAliases(alias)
+                    .withExposedPorts(port)
+                    .withCommand(command)
+                    .withCreateContainerCmdModifier(cmd -> cmd.withName(displayName + "-" + alias))
+                    .withImagePullPolicy(pullPolicy)
+                    // spelled in lower case before MongoDB 4.4 and capitalized in the structured log after
+                    .waitingFor(Wait.forLogMessage("(?is).*waiting for connections.*", 1));
+            mongoMembers.add(member);
+            return member;
+        }
+
+        private static void initiateSingleMemberReplicaSet(GenericContainer<?> member, String name, String host,
+                                                           boolean configServer) {
+            try (MongoClient memberClient = MongoClients.create(format("mongodb://%s:%d/?directConnection=true",
+                    member.getHost(), member.getMappedPort(member.getExposedPorts().get(0))))) {
+                MongoDatabase admin = memberClient.getDatabase("admin");
+                Document configuration = new Document("_id", name)
+                        .append("members", List.of(new Document("_id", 0).append("host", host)));
+                if (configServer) {
+                    configuration.append("configsvr", true);
+                }
+                admin.runCommand(new Document("replSetInitiate", configuration));
+                awaitReplicaSetHealthy(admin);
+            }
+        }
+
+        // held open together while they are picked, so that no two of them are the same
+        private static List<Integer> freePorts(int count) {
+            return freePorts(count, new ArrayList<>());
+        }
+
+        // each one held open until those picked after it are, which is what picking them one level deeper each does
+        private static List<Integer> freePorts(int count, List<Integer> ports) {
+            if (ports.size() == count) {
+                return List.copyOf(ports);
+            }
+            try (ServerSocket serverSocket = new ServerSocket(0)) {
+                ports.add(serverSocket.getLocalPort());
+                return freePorts(count, ports);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
+
+        // what every client of the tests is built from, so that it reaches the replica set whatever its shape
+        MongoClientSettings.Builder mongoClientSettings() {
+            return MongoClientSettings.builder()
+                    .applyConnectionString(new ConnectionString(replicaSetUrl))
+                    .inetAddressResolver(MEMBER_RESOLVER);
+        }
+
         @Override
         void stopStore() {
             this.mongoClient.close();
-            this.mongoContainer.stop();
+            if (nonNull(mongoContainer)) {
+                this.mongoContainer.stop();
+            } else {
+                this.mongoMembers.forEach(GenericContainer::stop);
+                this.mongoNetwork.close();
+            }
         }
 
         // before MongoDB 4.4 the fully qualified namespace is capped at 120 bytes, and a collection name is
@@ -8965,6 +10029,100 @@ final class DistributedCaffeineIntegrationTests {
             return MongoAdapter.newBuilder(mongoClient, DATABASE_NAME, getDatasetName())
                     .withDiscriminator(discriminator)
                     .build();
+        }
+
+        // The shape of the deployment a class runs the tests against, declared by every class next to its image,
+        // because what holds during a failover depends on it
+        enum MongoTopology {
+            // a replica set of a single member
+            SINGLE_NODE_REPLICA_SET,
+            // three data-bearing members
+            THREE_NODE_REPLICA_SET,
+            // a primary, a secondary and an arbiter
+            THREE_NODE_REPLICA_SET_WITH_ARBITER,
+            // a config server, two shards and a router, with the collections of the tests left unsharded
+            SHARDED_CLUSTER
+        }
+
+        @Target(ElementType.TYPE)
+        @Retention(RetentionPolicy.RUNTIME)
+        @Inherited
+        @interface Topology {
+
+            MongoTopology value();
+        }
+
+        // Enables a test on the given topology only, repeated for every topology it is enabled on - where the class
+        // declares one, that is: a class without a topology, which is any class not running against MongoDB, is never
+        // affected
+        @Target(ElementType.METHOD)
+        @Retention(RetentionPolicy.RUNTIME)
+        @Repeatable(EnabledOnTopologies.class)
+        @ExtendWith(TopologyCondition.class)
+        @interface EnabledOnTopology {
+
+            MongoTopology value();
+        }
+
+        @Target(ElementType.METHOD)
+        @Retention(RetentionPolicy.RUNTIME)
+        @ExtendWith(TopologyCondition.class)
+        @interface EnabledOnTopologies {
+
+            // filled by the compiler when the annotation is repeated and read by reflection, never called directly
+            // noinspection UnusedReturnValue
+            EnabledOnTopology[] value();
+        }
+
+        // and disables it on the given topology, for a test meant for every topology but some
+        @Target(ElementType.METHOD)
+        @Retention(RetentionPolicy.RUNTIME)
+        @Repeatable(DisabledOnTopologies.class)
+        @ExtendWith(TopologyCondition.class)
+        @interface DisabledOnTopology {
+
+            MongoTopology value();
+        }
+
+        @Target(ElementType.METHOD)
+        @Retention(RetentionPolicy.RUNTIME)
+        @ExtendWith(TopologyCondition.class)
+        @interface DisabledOnTopologies {
+
+            // filled by the compiler when the annotation is repeated and read by reflection, never called directly
+            // noinspection UnusedReturnValue
+            DisabledOnTopology[] value();
+        }
+
+        static final class TopologyCondition implements ExecutionCondition {
+
+            @Override
+            public @NonNull ConditionEvaluationResult evaluateExecutionCondition(@NonNull ExtensionContext context) {
+                Optional<MongoTopology> topology = context.getTestClass()
+                        .map(testClass -> testClass.getAnnotation(Topology.class))
+                        .map(Topology::value);
+                Optional<AnnotatedElement> element = context.getElement();
+                if (topology.isEmpty() || element.isEmpty()) {
+                    return ConditionEvaluationResult.enabled("no topology");
+                }
+                Set<MongoTopology> enabledOn = AnnotationSupport
+                        .findRepeatableAnnotations(element.get(), EnabledOnTopology.class).stream()
+                        .map(EnabledOnTopology::value)
+                        .collect(toSet());
+                Set<MongoTopology> disabledOn = AnnotationSupport
+                        .findRepeatableAnnotations(element.get(), DisabledOnTopology.class).stream()
+                        .map(DisabledOnTopology::value)
+                        .collect(toSet());
+                return disabledOn.contains(topology.get()) || !(enabledOn.isEmpty() || enabledOn.contains(topology.get()))
+                        ? ConditionEvaluationResult.disabled("not on " + topology.get())
+                        : ConditionEvaluationResult.enabled("on " + topology.get());
+            }
+        }
+
+        @FunctionalInterface
+        interface Disruption {
+
+            void run(MongoDatabase preferredAdmin);
         }
 
     }
@@ -9992,6 +11150,68 @@ final class DistributedCaffeineIntegrationTests {
             assertSessionsShared(ListenerSharingMode.DATABASE, 1);
         }
 
+        @DisplayName("Test that a shared session holds its connection until the last cache instance on it stops")
+        @Test
+        void test_Synchronizer_releases_a_shared_session_with_its_last_cache_instance() {
+            String tableName = getDatasetName();
+            // still bounded, and still ending in the counter that makes it unique
+            String otherTableName = "b_" + tableName.substring(2);
+            // only the session is taken from this pool - reading and writing go through the shared data source
+            try (HikariDataSource listenerDataSource = createDataSource(postgresContainer.getDatabaseName())) {
+                List<DistributedCache<Key, Value>> listening = new ArrayList<>();
+                List<List<String>> scopes = List.of(List.of(tableName, "a"), List.of(tableName, "b"),
+                        List.of(otherTableName, "a"));
+                try {
+                    for (List<String> scope : scopes) {
+                        listening.add(createCache(PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, scope.get(0))
+                                        .withDiscriminator(scope.get(1))
+                                        .withListenerDataSource(listenerDataSource)
+                                        .withListenerSharingMode(ListenerSharingMode.DATABASE)
+                                        .build(),
+                                CacheBuilder.identity(), DistributedCaffeine::build));
+                    }
+                    DistributedCache<Key, Value> last = listening.get(scopes.size() - 1);
+                    DistributedCache<Key, Value> writing = createCache(PostgresAdapter
+                                    .newBuilder(dataSource, SCHEMA_NAME, otherTableName)
+                                    .withDiscriminator("a")
+                                    .build(),
+                            CacheBuilder.identity(), DistributedCaffeine::build);
+                    assertThat(listenerDataSource.getHikariPoolMXBean().getActiveConnections()).isEqualTo(1);
+
+                    // stopping all but one leaves the session held, and still delivering to the one that is left
+                    listening.subList(0, scopes.size() - 1)
+                            .forEach(cache -> cache.distributedPolicy().stopSynchronization());
+                    writing.put(Key.of(1), Value.of(1));
+                    await("synchronization over the session its peers left")
+                            .atMost(WAITING_DURATION)
+                            .untilAsserted(() -> assertThat(last.getIfPresent(Key.of(1))).isEqualTo(Value.of(1)));
+                    assertThat(listenerDataSource.getHikariPoolMXBean().getActiveConnections()).isEqualTo(1);
+
+                    // stopping the last one gives up the session and returns its connection to the pool
+                    last.distributedPolicy().stopSynchronization();
+                    await("shared session released")
+                            .atMost(WAITING_DURATION)
+                            .until(() -> listenerDataSource.getHikariPoolMXBean().getActiveConnections() == 0);
+
+                    // and starting again takes a connection anew, which is released again in turn
+                    last.distributedPolicy().startSynchronization();
+                    assertThat(listenerDataSource.getHikariPoolMXBean().getActiveConnections()).isEqualTo(1);
+                    last.distributedPolicy().stopSynchronization();
+                    await("restarted session released")
+                            .atMost(WAITING_DURATION)
+                            .until(() -> listenerDataSource.getHikariPoolMXBean().getActiveConnections() == 0);
+                } finally {
+                    // torn down here rather than after the test, because the listener data source is closed on the
+                    // way out of this method
+                    listening.forEach(cache -> {
+                        cache.distributedPolicy().stopSynchronization();
+                        cache.invalidateAll();
+                        distributedCacheInstances.remove(cache);
+                    });
+                }
+            }
+        }
+
         @DisplayName("Test that a cache instance failing to apply what it received leaves the others on its session alone")
         @Test
         @ResourceLock(LOGGER_RESOURCE_LOCK)
@@ -10788,6 +12008,8 @@ final class DistributedCaffeineIntegrationTests {
                     .map(DisplayName::value)
                     .map(value -> value.replace(" ", "-"))
                     .map(String::toLowerCase)
+                    // what a container name may consist of, which leaves out the brackets naming a topology
+                    .map(value -> value.replaceAll("[^a-z0-9_.-]", ""))
                     .orElseThrow();
 
             startStore(dockerImageName, displayName);

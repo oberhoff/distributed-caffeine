@@ -34,10 +34,10 @@ import org.junit.platform.commons.util.ReflectionUtils;
 import java.lang.reflect.Field;
 import java.time.Duration;
 import java.util.Collection;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -72,7 +72,9 @@ public abstract class DistributedCaffeineCommonTestInstance {
     void beforeEach(TestInfo testInfo) {
         this.testCounter.incrementAndGet();
         this.testInfo = testInfo;
-        this.distributedCacheInstances = new HashSet<>();
+        // concurrent, because stress tests create cache instances from several threads at once, and one lost here
+        // is never stopped after its test
+        this.distributedCacheInstances = ConcurrentHashMap.newKeySet();
     }
 
     @AfterEach
