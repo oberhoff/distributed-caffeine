@@ -113,7 +113,8 @@
         <!-- The PostgreSQL driver's class files reference these annotations, which javac reads when compiling
              against it, while the driver itself declares them at runtime scope only - so they are absent exactly
              where they are needed and a warning about it fails the build. Provided, so nothing of it reaches a
-             user of this library, and at the version the driver asks for. -->
+             user of this library, and at any version that still has them, since the driver's class files only name
+             them - so it is kept current like every other dependency rather than at the driver's version. -->
         <dependency>
             <groupId>org.checkerframework</groupId>
             <artifactId>checker-qual</artifactId>

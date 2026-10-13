@@ -99,6 +99,7 @@ import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.OptionalInt;
@@ -108,6 +109,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -2270,6 +2272,113 @@ final class DistributedCaffeineUnitTests {
             Serializer<Value, ?> replacement = new JacksonSerializer<>(Value.class, true);
             adapter.setValueSerializer(replacement);
             assertThat(adapter.getValueSerializer()).isSameAs(replacement);
+        }
+    }
+
+    @Nested
+    @DisplayName("Test asynchronous publishing")
+    final class AsynchronousPublishingUnit extends DistributedCaffeineUnitTestInstance {
+
+        // What is published asynchronously - evictions and what refreshing after a write comes to - is written by a
+        // single drain rather than by a task of its own each: in the order handed over, one write at a time, without
+        // waiting for a batch to fill, and with what piles up during a write going out together with the next one.
+        // A key comes once per batch at most, because a store may apply the writes of one batch in any order
+        @DisplayName("that asynchronous publishes are written in order, one batch at a time and each key once per batch")
+        @Test
+        void test_asynchronous_publishes_are_drained_in_order_one_batch_at_a_time() throws Exception {
+            List<List<Integer>> batches = new CopyOnWriteArrayList<>();
+            AtomicInteger writing = new AtomicInteger();
+            AtomicInteger mostWriting = new AtomicInteger();
+            CountDownLatch release = new CountDownLatch(1);
+            @SuppressWarnings("unchecked")
+            Repository<Key, Value> repository = mock(Repository.class);
+            @SuppressWarnings("unchecked")
+            Adapter<Key, Value> adapter = mock(Adapter.class);
+            when(adapter.getIdentifier()).thenReturn("asynchronous.test");
+            when(adapter.getPublisher()).thenReturn(repository);
+            when(adapter.getRepository()).thenReturn(Optional.of(repository));
+            when(repository.streamCacheEntries(any(), any(), any(Order.class)))
+                    .thenAnswer(invocation -> Stream.empty());
+            doAnswer(invocation -> {
+                mostWriting.accumulateAndGet(writing.incrementAndGet(), Math::max);
+                List<CacheEntry<Key, Value>> cacheEntries = invocation.getArgument(0);
+                batches.add(cacheEntries.stream()
+                        .map(cacheEntry -> requireNonNull(cacheEntry.getKey()).getId())
+                        .toList());
+                assertThat(release.await(10, SECONDS)).isTrue();
+                writing.decrementAndGet();
+                return null;
+            }).when(repository).publishCacheEntries(any());
+
+            DistributedCache<Key, Value> cache = createCache(adapter, dc -> dc, DistributedCaffeine::build);
+            InternalCacheManager<Key, Value> cacheManager =
+                    ((InternalDistributedCache<Key, Value>) cache).instanceRegistry.getCacheManager();
+            for (int id : List.of(1, 2, 3, 2, 4)) {
+                invokeMethod(cacheManager, InternalCacheManager.class, "publishCacheEntriesAsync",
+                        List.of(Map.class, Status.class),
+                        List.of(Map.of(InternalKey.ik(Key.of(id)), InternalValue.iv(Value.of(id))), EVICTED_SIZE));
+                if (id == 1) {
+                    // the first one written right away, and the others handed over while it is
+                    await("the first write under way")
+                            .atMost(Duration.ofSeconds(10))
+                            .until(() -> batches.size() == 1);
+                }
+            }
+            release.countDown();
+
+            await("everything written")
+                    .atMost(Duration.ofSeconds(10))
+                    .untilAsserted(() -> assertThat(batches)
+                            .containsExactly(List.of(1), List.of(2, 3), List.of(2, 4)));
+            assertThat(mostWriting).hasValue(1);
+        }
+    }
+
+    @Nested
+    @DisplayName("Test Echo")
+    final class EchoUnit extends DistributedCaffeineUnitTestInstance {
+
+        // A write may fail although the store took it - a connection lost while the commit is under way - and then
+        // its echo is the only way the cache instance that wrote it learns of it. A later write of the same key that
+        // failed as well, and never reached the store, is never delivered: it must not make the earlier one look
+        // overtaken, or that cache instance keeps what it held before while every other one applies the echo
+        @DisplayName("that a write which failed but reached the store is applied when it comes back, although a later one failed too")
+        @Test
+        void test_Echo_of_a_failed_write_that_landed_is_applied_after_a_later_failed_write() throws Exception {
+            List<CacheEntry<Key, Value>> published = new CopyOnWriteArrayList<>();
+            @SuppressWarnings("unchecked")
+            Repository<Key, Value> repository = mock(Repository.class);
+            @SuppressWarnings("unchecked")
+            Adapter<Key, Value> adapter = mock(Adapter.class);
+            when(adapter.getIdentifier()).thenReturn("echo.test");
+            when(adapter.getPublisher()).thenReturn(repository);
+            when(adapter.getRepository()).thenReturn(Optional.of(repository));
+            when(repository.streamCacheEntries(any(), any(), any(Order.class)))
+                    .thenAnswer(invocation -> Stream.empty());
+            doAnswer(invocation -> {
+                published.addAll(invocation.getArgument(0));
+                return null;
+            }).doAnswer(invocation -> {
+                published.addAll(invocation.getArgument(0));
+                throw new IllegalStateException("taken by the store, but the confirmation was lost");
+            }).doThrow(new IllegalStateException("never reached the store"))
+                    .when(repository).publishCacheEntries(any());
+
+            DistributedCache<Key, Value> cache = createCache(adapter, dc -> dc, DistributedCaffeine::build);
+            Key key = Key.of(1);
+            cache.put(key, Value.of(1));
+            assertThatThrownBy(() -> cache.put(key, Value.of(2)))
+                    .hasStackTraceContaining("taken by the store, but the confirmation was lost");
+            assertThatThrownBy(() -> cache.put(key, Value.of(3)))
+                    .hasStackTraceContaining("never reached the store");
+            assertThat(cache.getIfPresent(key)).isEqualTo(Value.of(1));
+
+            CacheEntry<Key, Value> landed = published.get(published.size() - 1);
+            assertThat(landed.getValue()).isEqualTo(Value.of(2));
+            ((InternalDistributedCache<Key, Value>) cache).instanceRegistry.getCacheManager()
+                    .receiveCacheEntries(List.of(landed));
+
+            assertThat(cache.getIfPresent(key)).isEqualTo(Value.of(2));
         }
     }
 

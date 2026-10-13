@@ -462,11 +462,7 @@ final class PostgresListener {
         try (Statement statement = connection.createStatement()) {
             statement.execute(LISTEN + probeChannel);
         }
-        try (Connection probing = dataSource.getConnection();
-             PreparedStatement statement = probing.prepareStatement("SELECT pg_notify(?, '')")) {
-            statement.setString(1, probeChannel);
-            statement.execute();
-        }
+        sendProbe(probeChannel);
         List<PGNotification> arrived = new ArrayList<>();
         long deadline = System.nanoTime() + settings.probeTimeout().toNanos();
         boolean probed = false;
@@ -494,6 +490,37 @@ final class PostgresListener {
                     settings.probeTimeout().toSeconds()), "55000");
         }
         return arrived;
+    }
+
+    // Sends the probe in a transaction, as a write sends it: a write commits the record and its notification
+    // together, which a pooler in statement mode refuses - while a notification on its own would pass, and leave
+    // the first write to fail instead
+    // A pooler refusing it closes the connection as well, so what cleaning up fails on is kept along with the
+    // refusal rather than taking its place
+    private void sendProbe(String probeChannel) throws SQLException {
+        try (Connection probing = dataSource.getConnection()) {
+            probing.setAutoCommit(false);
+            try {
+                try (PreparedStatement statement = probing.prepareStatement("SELECT pg_notify(?, '')")) {
+                    statement.setString(1, probeChannel);
+                    statement.execute();
+                }
+                probing.commit();
+            } catch (SQLException e) {
+                SQLException failure = new SQLException("Sending a notification in a transaction through the data "
+                        + "source failed. Writing sends one in the same transaction as the record it announces, which "
+                        + "needs a data source that allows transactions - a pooler in statement mode does not",
+                        e.getSQLState(), e);
+                try {
+                    probing.rollback();
+                    probing.setAutoCommit(true);
+                } catch (SQLException cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+                throw failure;
+            }
+            probing.setAutoCommit(true);
+        }
     }
 
     private static void drainNotifications(Watchdog watchdog) throws SQLException {

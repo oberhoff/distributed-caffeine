@@ -31,12 +31,15 @@ import org.jspecify.annotations.Nullable;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.time.Instant;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -73,11 +76,15 @@ import static java.lang.String.format;
 import static java.util.Objects.isNull;
 import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.toCollection;
 import static java.util.stream.Collectors.toMap;
 import static java.util.stream.Collectors.toSet;
 
 @SuppressWarnings({"java:S1452"})
 class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receiver<K, V> {
+
+    // the most one asynchronous publish writes at once, so that a backlog goes out in writes of a bounded size
+    private static final int MAXIMUM_ASYNCHRONOUS_BATCH = 1_000;
 
     private final AtomicBoolean isActivated;
     // the identifier of the activation this cache instance is in, renewed with every one of them. It says which
@@ -126,6 +133,10 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     private InternalHasher<K> hasher;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private Executor executor;
+    // What the asynchronous publishers hand over, in the order they did, and whether a drain is under way to write
+    // it - both guarded by the queue itself (see publishCacheEntriesAsync)
+    private final Deque<PendingPublish<K, V>> pendingPublishes;
+    private boolean draining;
 
     @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalCacheManager() {
@@ -136,6 +147,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                 .expireAfterWrite(DISTRIBUTION_DURATION)
                 .build();
         this.commandOperation = new AtomicLong();
+        this.pendingPublishes = new ArrayDeque<>();
         // see also initialize()
     }
 
@@ -232,7 +244,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
 
     Map<? extends InternalKey<K>, ? extends InternalValue<V>> putAllDistributed(
             Map<? extends InternalKey<K>, ? extends InternalValue<V>> map) {
-        publishCacheEntries(map, CACHED, true);
+        publishCacheEntries(map, CACHED);
         return map;
     }
 
@@ -243,13 +255,13 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
 
     Map<? extends InternalKey<K>, ? extends InternalValue<V>> putAllDistributedLoaded(
             Map<? extends InternalKey<K>, ? extends InternalValue<V>> map) {
-        publishCacheEntries(map, CACHED_LOADED, true);
+        publishCacheEntries(map, CACHED_LOADED);
         return map;
     }
 
     Map<? extends InternalKey<K>, ? extends InternalValue<V>> putAllDistributedRefresh(
             Map<? extends InternalKey<K>, ? extends InternalValue<V>> map) {
-        publishCacheEntries(map, CACHED_REFRESHED, true);
+        publishCacheEntries(map, CACHED_REFRESHED);
         return map;
     }
 
@@ -278,7 +290,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     Set<InternalKey<K>> invalidateAllDistributed(Set<InternalKey<K>> keys) {
         Map<InternalKey<K>, @Nullable InternalValue<V>> map = new HashMap<>(); // allow null values
         keys.forEach(key -> map.put(key, null));
-        publishCacheEntries(map, INVALIDATED, true);
+        publishCacheEntries(map, INVALIDATED);
         return keys;
     }
 
@@ -325,7 +337,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     Set<InternalKey<K>> invalidateAllDistributedRefresh(Set<InternalKey<K>> keys) {
         Map<InternalKey<K>, @Nullable InternalValue<V>> map = new HashMap<>(); // allow null values
         keys.forEach(key -> map.put(key, null));
-        publishCacheEntries(map, INVALIDATED_REFRESHED, true);
+        publishCacheEntries(map, INVALIDATED_REFRESHED);
         return keys;
     }
 
@@ -491,52 +503,116 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         cache.invalidateAll(toRemove);
     }
 
-    // the three callers of this method publish outside the synchronization lock because they run where taking it
+    // The three callers of this method publish outside the synchronization lock because they run where taking it
     // would deadlock with Caffeine's internal lock. It is also the one way a publish can be decided while this cache
     // instance takes part in synchronization and be carried out when it no longer does, so every caller declines an
     // entry the data store has not confirmed before it gets here (see the pointers on the three of them).
-    // Whatever the returned future carries is the only trace a failure leaves, and dropping it hides a store that is
-    // refusing writes: the distribution is simply lost, while locally everything looks like it succeeded
+    // Handed over to the one drain below rather than written by a task of its own each: a task per cache entry
+    // holds a connection of the store per cache entry, so under load they take every connection there is and the
+    // writes of the cache instance itself wait behind them, and fail once waiting for a connection times out. The
+    // drain holds one, and what is handed over while it writes goes out with its next write - nothing waits for a
+    // batch to fill, so a cache entry is written as soon as the one write ahead of it is done.
+    // In the order handed over, and filtered here by the same rule a publish applies, so that nothing waits in line
+    // that would not be written anyway
+    private void publishCacheEntriesAsync(Map<? extends InternalKey<K>, ? extends @Nullable InternalValue<V>> map,
+                                          Status status) {
+        // persistence of evicted entries should work regardless of the distribution mode
+        if (!status.isConsideredBy(distributionMode) && !status.isEvictedRetained()) {
+            return;
+        }
+        boolean startDraining;
+        synchronized (pendingPublishes) {
+            map.forEach((key, value) -> pendingPublishes.add(new PendingPublish<>(key, value, status)));
+            startDraining = !draining;
+            draining = true;
+        }
+        if (startDraining) {
+            try {
+                executor.execute(this::drainPendingPublishes);
+            } catch (RuntimeException e) {
+                // left in line for the next hand-over to start draining
+                synchronized (pendingPublishes) {
+                    draining = false;
+                }
+                throw e;
+            }
+        }
+    }
+
+    // Writes what is in line, a batch at a time, until nothing is left. A batch takes every key once at most: a
+    // store may apply the writes of one batch in any order - the MongoDB adapter writes them unordered - and two of
+    // the same key would then land the wrong way round as often as not, so the second one starts the next batch
+    private void drainPendingPublishes() {
+        boolean drained = false;
+        try {
+            while (!drained) {
+                List<PendingPublish<K, V>> batch = new ArrayList<>();
+                synchronized (pendingPublishes) {
+                    Set<InternalKey<K>> keys = new HashSet<>();
+                    while (batch.size() < MAXIMUM_ASYNCHRONOUS_BATCH && !pendingPublishes.isEmpty()
+                            && keys.add(pendingPublishes.getFirst().key())) {
+                        batch.add(pendingPublishes.removeFirst());
+                    }
+                    if (batch.isEmpty()) {
+                        draining = false;
+                        drained = true;
+                    }
+                }
+                if (!drained) {
+                    publishPending(batch);
+                }
+            }
+        } finally {
+            // whatever ended it otherwise, the next hand-over starts draining again
+            if (!drained) {
+                synchronized (pendingPublishes) {
+                    draining = false;
+                }
+            }
+        }
+    }
+
+    // Deliberately without an operation, so that what is published here arrives like a change of any other cache
+    // instance. Carrying one would order it against the later operations of this cache instance and let this one
+    // skip it - which for an eviction means keeping a cache entry the store no longer has as cached, because the
+    // eviction is written whenever the drain gets around to it and can land after the population following it.
+    // Every other cache instance then drops the cache entry while this one keeps it, and nothing reads the store
+    // again to notice. Losing the population everywhere is wrong too, but at least it is not a divergence between
+    // the instances - see the corresponding disabled test.
+    // A failure is logged rather than thrown, because nobody waits for this write to throw to
     // TODO logging makes such a failure visible but does not make the instances converge again. Retrying is not
     // enough on its own, because upsertCacheEntries() writes the status unconditionally, so a delayed retry can
     // overwrite a newer CACHED write for the same key with a stale EVICTED one. Letting the data store drive the
     // correction (as invalidate-on-prune does for persistence of evicted entries) is the more promising direction
-    private void publishCacheEntriesAsync(Map<? extends InternalKey<K>, ? extends @Nullable InternalValue<V>> map,
-                                          Status status) {
-        // Deliberately without an operation, so that what is published here arrives like a change of any other cache
-        // instance. Carrying one would order it against the later operations of this cache instance and let this one
-        // skip it - which for an eviction means keeping a cache entry the store no longer has as cached, because the
-        // eviction is written whenever the executor gets around to it and can land after the population following
-        // it. Every other cache instance then drops the cache entry while this one keeps it, and nothing reads the
-        // store again to notice. Losing the population everywhere is wrong too, but at least it is not a divergence
-        // between the instances - see the corresponding disabled test
-        CompletableFuture.runAsync(() -> {
-                    if (isActivated()) { // just if the future runs late
-                        publishCacheEntries(map, status, false);
-                    }
-                }, executor)
-                .exceptionally(throwable -> {
-                    logger.log(Level.WARNING, format("Distributing %s for %s failed for cache at '%s'",
-                            status, map.keySet(), identifier), throwable);
-                    return null;
-                });
+    private void publishPending(List<PendingPublish<K, V>> batch) {
+        // just if the cache instance stopped since it was handed over
+        if (!isActivated()) {
+            return;
+        }
+        List<CacheEntry<K, V>> cacheEntries = batch.stream()
+                .map(pending -> CacheEntry.of(hasher.getHash(pending.key()), null, k(pending.key()),
+                        vn(pending.value()), pending.status(), Instant.now()))
+                .toList();
+        try {
+            publishGuarded(cacheEntries);
+        } catch (RuntimeException e) {
+            logger.log(Level.WARNING, format("Distributing %s for %s failed for cache at '%s'",
+                    batch.stream().map(PendingPublish::status).collect(toCollection(LinkedHashSet::new)),
+                    batch.stream().map(PendingPublish::key).toList(), identifier), e);
+        }
     }
 
+    // Marked ahead of everything below, because whether a cache entry is published says nothing about whether the
+    // value handed over here stays in this cache: without population being distributed nothing is published for a
+    // population at all, and the value still belongs to this activation. These are the operations taking place
+    // right here - the asynchronous ones are marked by the listener and the loader deciding them, not when they are
+    // finally published
     private void publishCacheEntries(Map<? extends InternalKey<K>, ? extends @Nullable InternalValue<V>> map,
-                                     Status status, boolean manage) {
-        // Marked ahead of everything below, because whether a cache entry is published says nothing about whether
-        // the value handed over here stays in this cache: without population being distributed nothing is published
-        // for a population at all, and the value still belongs to this activation. Only for the managed operations
-        // though, which are the ones taking place right here - the asynchronous ones are marked by the listener and
-        // the loader deciding them, not when they are finally published
-        if (manage) {
-            stampOperations(map);
-        }
+                                     Status status) {
+        stampOperations(map);
         // persistence of evicted entries should work regardless of the distribution mode
         if (isActivated() && (status.isConsideredBy(distributionMode) || status.isEvictedRetained())) {
-            if (manage) {
-                synchronizationLock.ensureLock();
-            }
+            synchronizationLock.ensureLock();
             // deliberately without a check of whether this cache instance holds the key: whether it does says
             // nothing about the other ones, which may well be serving it, so skipping the write here would leave
             // them doing so indefinitely. Filtering by what is held belongs on the receiving side (see
@@ -548,7 +624,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                                 // memoizing overload: reuses the hash cached on the key instance (e.g. stamped when
                                 // the entry was put/loaded/received) instead of recomputing it under the lock
                                 hasher.getHash(entry.getKey()),
-                                manage ? operationOf(entry.getKey(), value) : null,
+                                operationOf(entry.getKey(), value),
                                 k(entry.getKey()),
                                 vn(value),
                                 status,
@@ -558,7 +634,19 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                     // computing CacheEntry hashCode/equals on the write path
                     .toList();
             if (!cacheEntries.isEmpty()) {
-                publishGuarded(cacheEntries);
+                try {
+                    publishGuarded(cacheEntries);
+                } catch (RuntimeException e) {
+                    // A write that failed may have reached the data store or not, so what was remembered for it
+                    // says nothing any more about which of the writes of this cache instance comes back last - and
+                    // where it is not the one the data store ends up with, it would hold back the one that is. Like a
+                    // write of its own that failed in doubt and landed, followed by another one that failed without
+                    // landing: the first one is delivered, the second never, and remembering the second discards the
+                    // first for good, while every other cache instance applies it. Forgotten instead, which is the
+                    // safe way round for the same reason a record that is merely gone is (see isApplicable)
+                    map.keySet().forEach(operations::invalidate);
+                    throw e;
+                }
             }
         }
     }
@@ -719,5 +807,9 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         if (isActivated()) {
             cache.cleanUp();
         }
+    }
+
+    // a cache entry handed over for an asynchronous publish, with the status it is published with
+    private record PendingPublish<K, V>(InternalKey<K> key, @Nullable InternalValue<V> value, Status status) {
     }
 }

@@ -28,6 +28,7 @@ import io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import org.jspecify.annotations.Nullable;
+import org.postgresql.PGConnection;
 
 import javax.sql.DataSource;
 import java.lang.System.Logger;
@@ -44,6 +45,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -51,6 +53,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.Spliterator;
 import java.util.Spliterators;
+import java.util.WeakHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
@@ -79,6 +83,9 @@ import static java.util.stream.Collectors.toUnmodifiableSet;
 final class PostgresRepository<K, V> extends AbstractRepository<K, V> {
 
     private static final Logger LOGGER = System.getLogger(PostgresRepository.class.getName());
+    // the physical connections found to lead to the primary, see ensurePrimary
+    private static final Set<PGConnection> PRIMARY_CONNECTIONS =
+            Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
     // How many rows a stream fetches at a time: enough that a round trip is spent on many of them, few enough
     // that a batch of cache entries with large values stays far from what holding all of them would cost
     private static final int FETCH_SIZE = 1_000;
@@ -117,6 +124,40 @@ final class PostgresRepository<K, V> extends AbstractRepository<K, V> {
         ensureTable();
     }
 
+    // What is read here has to be at least as recent as what was notified, and only the primary guarantees that:
+    // a notification is sent by the primary as the write commits, and a standby replays that write some time
+    // later. Reading a record that was just notified from a standby lagging behind answers with what it said
+    // before, which the cache instance then holds until that key is written again - the same gap the MongoDB
+    // adapter closes by reading from its primary. Unlike a MongoDB client, a data source cannot be told to, so it
+    // is checked instead: a data source that reaches a standby, whether always or for some connections only - as
+    // with several hosts and targetServerType=any or preferSecondary in the connection URL, or a load balancer in
+    // front of the servers - fails the read rather than answering it from there. Writing needs no check, because a
+    // standby refuses that anyway.
+    // Once per physical connection rather than per read: a server becomes a standby only through a restart, which
+    // ends every connection to it, so a connection found to lead to the primary keeps doing so. A standby being
+    // promoted is the other way around, which is why only the primary is remembered. Where the driver's connection
+    // cannot be reached through what the data source hands out - a wrapping driver or instrumentation that does not
+    // unwrap - there is nothing to remember it by, so every read is checked instead, at a round trip each
+    private static void ensurePrimary(Connection connection) throws SQLException {
+        PGConnection physicalConnection = connection.isWrapperFor(PGConnection.class)
+                ? connection.unwrap(PGConnection.class)
+                : null;
+        if (nonNull(physicalConnection) && PRIMARY_CONNECTIONS.contains(physicalConnection)) {
+            return;
+        }
+        try (Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("SELECT pg_is_in_recovery()")) {
+            if (resultSet.next() && resultSet.getBoolean(1)) {
+                throw new SQLException("The data source reached a standby server, whose records may lag behind "
+                        + "what the primary has notified - reading needs the primary, for example by "
+                        + "targetServerType=primary in the connection URL", "55000");
+            }
+        }
+        if (nonNull(physicalConnection)) {
+            PRIMARY_CONNECTIONS.add(physicalConnection);
+        }
+    }
+
     // In the constructor, where the MongoDB adapter ensures its indexes - except that a table has to exist before
     // anything can be written at all, so a failure here is not recoverable and is raised rather than reported.
     // The shape is checked whether or not this is the one that made the table, because CREATE TABLE IF NOT EXISTS
@@ -125,6 +166,7 @@ final class PostgresRepository<K, V> extends AbstractRepository<K, V> {
     // that is wrong
     private void ensureTable() {
         try (Connection connection = dataSource.getConnection()) {
+            ensurePrimary(connection);
             createOrFindTable(connection);
             validateTable(connection);
         } catch (SQLException e) {
@@ -248,6 +290,13 @@ final class PostgresRepository<K, V> extends AbstractRepository<K, V> {
                 // record it cannot yet read - and a publish that fails leaves neither behind
                 connection.setAutoCommit(false);
                 try {
+                    // Several records at once are a multi-row write like the ones lockScope serializes - and they
+                    // come as one, because what is published in the background is written in batches - so they
+                    // take part in the same cycles and queue behind the same lock. A single record cannot: it
+                    // never holds one row while waiting for another
+                    if (cacheEntries.size() > 1) {
+                        lockScope(connection);
+                    }
                     try (PreparedStatement statement = connection.prepareStatement(sql)) {
                         for (CacheEntry<K, V> cacheEntry : cacheEntries) {
                             // walked rather than numbered, so that a storage added to the enum widens the columns
@@ -422,23 +471,25 @@ final class PostgresRepository<K, V> extends AbstractRepository<K, V> {
         // binds, and is bound on its own
         String sql = format("SELECT count(*) FROM %s %s%s", qualifiedTableName, where(null, statuses, null),
                 isNull(notOlderThan) ? "" : " AND " + quoted(TIMESTAMP.toString()) + " >= ?");
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            int index = bind(connection, statement, 1, null, statuses, null);
-            if (nonNull(notOlderThan)) {
-                statement.setObject(index, toOffsetDateTime(notOlderThan), Types.TIMESTAMP_WITH_TIMEZONE);
-            }
-            try (ResultSet resultSet = statement.executeQuery()) {
-                resultSet.next();
-                return resultSet.getLong(1);
+        try (Connection connection = dataSource.getConnection()) {
+            ensurePrimary(connection);
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                int index = bind(connection, statement, 1, null, statuses, null);
+                if (nonNull(notOlderThan)) {
+                    statement.setObject(index, toOffsetDateTime(notOlderThan), Types.TIMESTAMP_WITH_TIMEZONE);
+                }
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    resultSet.next();
+                    return resultSet.getLong(1);
+                }
             }
         }
     }
 
     // Serializes the multi-row writes of one scope against each other, which is what keeps them from deadlocking.
-    // Six writes sweep these records - two by hash, four by status and age - and their filters lead them through
-    // the table in different orders, so two cache instances running maintenance at once can each hold what the
-    // other waits for. PostgreSQL breaks that by killing one, which the retry repeats; measured on PostgreSQL 9.5
+    // Six writes sweep these records - two by hash, four by status and age - and publishing several records at once
+    // is a seventh. Their filters and the order of what is published lead them through the table in different
+    // orders, so two cache instances running maintenance at once can each hold what the other waits for. PostgreSQL breaks that by killing one, which the retry repeats; measured on PostgreSQL 9.5
     // under the stress test, three attempts were not enough. One lock per scope removes the cycle instead of
     // narrowing it, and costs a round trip rather than the sorted sub-select that imposing a lock order would.
     // Keyed on the scope, so only writers over the same records queue - another discriminator touches none of
@@ -518,16 +569,20 @@ final class PostgresRepository<K, V> extends AbstractRepository<K, V> {
                                  RowReader<T> rowReader) throws SQLException {
         Connection connection = dataSource.getConnection();
         boolean batched = isNull(hashes);
-        // reading only, so there is nothing to keep: ending it is a rollback, which ends the snapshot with it
+        // reading only, so there is nothing to keep: ending it is a rollback, which ends the snapshot with it - once
+        // it has begun, that is, which a connection failing before then never gets to
+        AtomicBoolean inTransaction = new AtomicBoolean();
         AutoCloseable endTransaction = () -> {
-            if (batched) {
+            if (inTransaction.get()) {
                 connection.rollback();
                 connection.setAutoCommit(true);
             }
         };
         try {
+            ensurePrimary(connection);
             if (batched) {
                 connection.setAutoCommit(false);
+                inTransaction.set(true);
             }
             return streamOf(connection, connection.prepareStatement(sql), batched, hashes, statuses, rowReader,
                     () -> close(endTransaction, connection));

@@ -54,6 +54,7 @@ import com.mongodb.event.ConnectionPoolListener;
 import com.mongodb.spi.dns.InetAddressResolver;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.failsafe.CircuitBreakerOpenException;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
 import io.github.oberhoff.distributedcaffeine.DistributedPolicy.SynchronizationState;
 import io.github.oberhoff.distributedcaffeine.adapter.AbstractAdapter;
@@ -86,6 +87,7 @@ import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.NullUnmarked;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -108,11 +110,14 @@ import org.postgresql.PGNotification;
 import org.slf4j.event.Level;
 import org.slf4j.event.LoggingEvent;
 import org.testcontainers.DockerClientFactory;
+import org.testcontainers.containers.Container.ExecResult;
+import org.testcontainers.containers.ExecConfig;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.images.ImagePullPolicy;
 import org.testcontainers.images.PullPolicy;
+import org.testcontainers.images.builder.Transferable;
 import org.testcontainers.mongodb.MongoDBContainer;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
@@ -130,7 +135,9 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 import java.lang.reflect.AnnotatedElement;
+import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.net.InetAddress;
 import java.net.ServerSocket;
@@ -138,9 +145,11 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
@@ -155,6 +164,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.NoSuchElementException;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TimeZone;
@@ -185,18 +195,22 @@ import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Evicted
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer.LoadingStrategy.MAPPING_FUNCTION;
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.DockerImage;
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.RUNS_ON_GITHUB;
-import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.MongoIntegration.DisabledOnTopology;
-import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.MongoIntegration.MongoTopology.SHARDED_CLUSTER;
-import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.MongoIntegration.MongoTopology.SINGLE_NODE_REPLICA_SET;
-import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.MongoIntegration.MongoTopology.THREE_NODE_REPLICA_SET;
-import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.MongoIntegration.MongoTopology.THREE_NODE_REPLICA_SET_WITH_ARBITER;
-import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.MongoIntegration.Topology;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.StoreTopology.PRIMARY_WITH_ASYNCHRONOUS_STANDBY;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.StoreTopology.PRIMARY_WITH_SYNCHRONOUS_STANDBY;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.StoreTopology.SHARDED_CLUSTER;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.StoreTopology.SINGLE_NODE_REPLICA_SET;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.StoreTopology.SINGLE_SERVER;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.StoreTopology.SINGLE_SERVER_BEHIND_TRANSACTION_POOLER;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.StoreTopology.THREE_NODE_REPLICA_SET;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.StoreTopology.THREE_NODE_REPLICA_SET_WITH_ARBITER;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.Topology;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION_AND_EVICTION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.entry;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.runFailable;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_GROUP;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_LOADED;
@@ -648,142 +662,500 @@ final class DistributedCaffeineIntegrationTests {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 9.5.25")
+    @DisplayName("PostgreSQL 9.5.25 (Single Server)")
     @DockerImage("postgres:9.5.25")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_9_5_25 extends PostgresIntegration {
+    final class Postgres_9_5_25__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 9.latest")
+    @DisplayName("PostgreSQL 9.5.25 (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:9.5.25")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_9_5_25__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 9.5.25 (Primary with Synchronous Standby)")
+    @DockerImage("postgres:9.5.25")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_9_5_25__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 9.5.25 (Single Server behind Transaction Pooler)")
+    @DockerImage("postgres:9.5.25")
+    @Topology(SINGLE_SERVER_BEHIND_TRANSACTION_POOLER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    // a pooler behaves the same whichever version is behind it, so the oldest and the newest stand for all
+    final class Postgres_9_5_25__Single_Server_behind_Transaction_Pooler extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 9.latest (Single Server)")
     @DockerImage("postgres:9")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_9_latest extends PostgresIntegration {
+    final class Postgres_9_latest__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 10.0")
+    @DisplayName("PostgreSQL 9.latest (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:9")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_9_latest__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 9.latest (Primary with Synchronous Standby)")
+    @DockerImage("postgres:9")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_9_latest__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 10.0 (Single Server)")
     @DockerImage("postgres:10.0")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_10_0 extends PostgresIntegration {
+    final class Postgres_10_0__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 10.latest")
+    @DisplayName("PostgreSQL 10.0 (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:10.0")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_10_0__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 10.0 (Primary with Synchronous Standby)")
+    @DockerImage("postgres:10.0")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_10_0__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 10.latest (Single Server)")
     @DockerImage("postgres:10")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_10_latest extends PostgresIntegration {
+    final class Postgres_10_latest__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 11.0")
+    @DisplayName("PostgreSQL 10.latest (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:10")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_10_latest__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 10.latest (Primary with Synchronous Standby)")
+    @DockerImage("postgres:10")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_10_latest__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 11.0 (Single Server)")
     @DockerImage("postgres:11.0")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_11_0 extends PostgresIntegration {
+    final class Postgres_11_0__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 11.latest")
+    @DisplayName("PostgreSQL 11.0 (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:11.0")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_11_0__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 11.0 (Primary with Synchronous Standby)")
+    @DockerImage("postgres:11.0")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_11_0__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 11.latest (Single Server)")
     @DockerImage("postgres:11")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_11_latest extends PostgresIntegration {
+    final class Postgres_11_latest__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 12.0")
+    @DisplayName("PostgreSQL 11.latest (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:11")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_11_latest__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 11.latest (Primary with Synchronous Standby)")
+    @DockerImage("postgres:11")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_11_latest__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 12.0 (Single Server)")
     @DockerImage("postgres:12.0")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_12_0 extends PostgresIntegration {
+    final class Postgres_12_0__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 12.latest")
+    @DisplayName("PostgreSQL 12.0 (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:12.0")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_12_0__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 12.0 (Primary with Synchronous Standby)")
+    @DockerImage("postgres:12.0")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_12_0__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 12.latest (Single Server)")
     @DockerImage("postgres:12")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_12_latest extends PostgresIntegration {
+    final class Postgres_12_latest__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 13.0")
+    @DisplayName("PostgreSQL 12.latest (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:12")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_12_latest__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 12.latest (Primary with Synchronous Standby)")
+    @DockerImage("postgres:12")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_12_latest__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 13.0 (Single Server)")
     @DockerImage("postgres:13.0")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_13_0 extends PostgresIntegration {
+    final class Postgres_13_0__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 13.latest")
+    @DisplayName("PostgreSQL 13.0 (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:13.0")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_13_0__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 13.0 (Primary with Synchronous Standby)")
+    @DockerImage("postgres:13.0")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_13_0__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 13.latest (Single Server)")
     @DockerImage("postgres:13")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_13_latest extends PostgresIntegration {
+    final class Postgres_13_latest__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 14.0")
+    @DisplayName("PostgreSQL 13.latest (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:13")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_13_latest__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 13.latest (Primary with Synchronous Standby)")
+    @DockerImage("postgres:13")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_13_latest__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 14.0 (Single Server)")
     @DockerImage("postgres:14.0")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_14_0 extends PostgresIntegration {
+    final class Postgres_14_0__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 14.latest")
+    @DisplayName("PostgreSQL 14.0 (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:14.0")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_14_0__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 14.0 (Primary with Synchronous Standby)")
+    @DockerImage("postgres:14.0")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_14_0__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 14.latest (Single Server)")
     @DockerImage("postgres:14")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_14_latest extends PostgresIntegration {
+    final class Postgres_14_latest__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 15.0")
+    @DisplayName("PostgreSQL 14.latest (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:14")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_14_latest__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 14.latest (Primary with Synchronous Standby)")
+    @DockerImage("postgres:14")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_14_latest__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 15.0 (Single Server)")
     @DockerImage("postgres:15.0")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_15_0 extends PostgresIntegration {
+    final class Postgres_15_0__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 15.latest")
+    @DisplayName("PostgreSQL 15.0 (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:15.0")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_15_0__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 15.0 (Primary with Synchronous Standby)")
+    @DockerImage("postgres:15.0")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_15_0__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 15.latest (Single Server)")
     @DockerImage("postgres:15")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_15_latest extends PostgresIntegration {
+    final class Postgres_15_latest__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 16.0")
+    @DisplayName("PostgreSQL 15.latest (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:15")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_15_latest__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 15.latest (Primary with Synchronous Standby)")
+    @DockerImage("postgres:15")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_15_latest__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 16.0 (Single Server)")
     @DockerImage("postgres:16.0")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_16_0 extends PostgresIntegration {
+    final class Postgres_16_0__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 16.latest")
+    @DisplayName("PostgreSQL 16.0 (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:16.0")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_16_0__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 16.0 (Primary with Synchronous Standby)")
+    @DockerImage("postgres:16.0")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_16_0__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 16.latest (Single Server)")
     @DockerImage("postgres:16")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_16_latest extends PostgresIntegration {
+    final class Postgres_16_latest__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 17.0")
+    @DisplayName("PostgreSQL 16.latest (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:16")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_16_latest__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 16.latest (Primary with Synchronous Standby)")
+    @DockerImage("postgres:16")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_16_latest__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 17.0 (Single Server)")
     @DockerImage("postgres:17.0")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_17_0 extends PostgresIntegration {
+    final class Postgres_17_0__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 17.latest")
+    @DisplayName("PostgreSQL 17.0 (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:17.0")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_17_0__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 17.0 (Primary with Synchronous Standby)")
+    @DockerImage("postgres:17.0")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_17_0__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 17.latest (Single Server)")
     @DockerImage("postgres:17")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_17_latest extends PostgresIntegration {
+    final class Postgres_17_latest__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 18.0")
+    @DisplayName("PostgreSQL 17.latest (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:17")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_17_latest__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 17.latest (Primary with Synchronous Standby)")
+    @DockerImage("postgres:17")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_17_latest__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 18.0 (Single Server)")
     @DockerImage("postgres:18.0")
+    @Topology(SINGLE_SERVER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Postgres_18_0 extends PostgresIntegration {
+    final class Postgres_18_0__Single_Server extends PostgresIntegration {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 18.latest")
+    @DisplayName("PostgreSQL 18.0 (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:18.0")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_18_0__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 18.0 (Primary with Synchronous Standby)")
+    @DockerImage("postgres:18.0")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_18_0__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 18.latest (Single Server)")
     @DockerImage("postgres:18")
-    final class Postgres_18_latest extends PostgresIntegration {
+    @Topology(SINGLE_SERVER)
+    final class Postgres_18_latest__Single_Server extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 18.latest (Primary with Asynchronous Standby)")
+    @DockerImage("postgres:18")
+    @Topology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_18_latest__Primary_with_Asynchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 18.latest (Primary with Synchronous Standby)")
+    @DockerImage("postgres:18")
+    @Topology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    final class Postgres_18_latest__Primary_with_Synchronous_Standby extends PostgresIntegration {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 18.latest (Single Server behind Transaction Pooler)")
+    @DockerImage("postgres:18")
+    @Topology(SINGLE_SERVER_BEHIND_TRANSACTION_POOLER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    // a pooler behaves the same whichever version is behind it, so the oldest and the newest stand for all
+    final class Postgres_18_latest__Single_Server_behind_Transaction_Pooler extends PostgresIntegration {
     }
 
     @SuppressWarnings({"java:S5838", "java:S5778", "java:S5961", "ResultOfMethodCallIgnored", "DataFlowIssue"})
@@ -7920,160 +8292,309 @@ final class DistributedCaffeineIntegrationTests {
         @DisplayName("Stress test with multiple threads")
         @Test
         void stress_test_DistributedCaffeine_multiple_threads() throws Exception {
-            int maximumSize = 1_000;
-            int retainedMaximumSize = maximumSize / 2;
-            int numberOfOperations = 10_000;
-            int levelOfParallelism = runsOnGitHub(3, 10);
+            // Delivered in bursts through the router of a sharded cluster, changes can pile up beyond what a cache
+            // instance lets wait to be applied while all of them write as fast as they can - which a cache instance
+            // answers by reconciling instead, and reports. Nothing else is reported, see assertWritingRidesOut
+            try (CapturedReports reports = new CapturedReports(Map.of(DistributedCaffeine.class.getName(),
+                    List.of("Synchronization was interrupted")))) {
+                int maximumSize = 1_000;
+                int retainedMaximumSize = maximumSize / 2;
+                int numberOfOperations = 10_000;
+                int levelOfParallelism = runsOnGitHub(3, 10);
 
-            @SuppressWarnings("unchecked")
-            RemovalListener<Key, Value> removalListener = mock(RemovalListener.class);
-            @SuppressWarnings("unchecked")
-            RemovalListener<Key, Value> evictionListener = mock(RemovalListener.class);
+                @SuppressWarnings("unchecked")
+                RemovalListener<Key, Value> removalListener = mock(RemovalListener.class);
+                @SuppressWarnings("unchecked")
+                RemovalListener<Key, Value> evictionListener = mock(RemovalListener.class);
 
-            CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
-                @Override
-                public Value load(@NonNull Key key) {
-                    return nextInt(10) == 0
-                            ? null
-                            : Value.of(key.getId(), nameWithMillisAndPrefixes("load"));
-                }
+                CacheLoader<Key, Value> cacheLoader = spy(new CacheLoader<>() {
+                    @Override
+                    public Value load(@NonNull Key key) {
+                        return nextInt(10) == 0
+                                ? null
+                                : Value.of(key.getId(), nameWithMillisAndPrefixes("load"));
+                    }
 
-                @Override
-                public @NonNull Map<? extends Key, ? extends Value> loadAll(@NonNull Set<? extends Key> keys) {
-                    return keys.stream()
-                            .collect(toMap(Function.identity(),
-                                    key -> Value.of(key.getId(), nameWithMillisAndPrefixes("load"))));
-                }
-            });
+                    @Override
+                    public @NonNull Map<? extends Key, ? extends Value> loadAll(@NonNull Set<? extends Key> keys) {
+                        return keys.stream()
+                                .collect(toMap(Function.identity(),
+                                        key -> Value.of(key.getId(), nameWithMillisAndPrefixes("load"))));
+                    }
+                });
 
-            Function<AtomicLong, DistributedLoadingCache<Key, Value>> cacheSupplier = ticker -> {
-                DistributedCache<Key, Value> cache = createCache(
-                        dc -> dc.withCaffeine(Caffeine.newBuilder()
-                                        .ticker(ticker::get)
-                                        .removalListener(removalListener)
-                                        .evictionListener(evictionListener)
-                                        .executor(executorService)
-                                        .maximumSize(maximumSize)
-                                        .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration()))
-                                        .refreshAfterWrite(Duration.ofNanos(1)))
-                                // these stress tests stop and start synchronization midway and then assert that
-                                // the cache instances converge, which is what synchronizing from the data store
-                                // does - and they assert a count of cached entries there, which presupposes
-                                // that those are retained rather than swept once distributed
-                                .withPersistence(configurer -> configurer
-                                        .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency)
-                                        .withEvictedEntries(evictedEntries -> evictedEntries
-                                                .withMaximumSize(retainedMaximumSize)
-                                                .withLoadingStrategies(MAPPING_FUNCTION, CACHE_LOADER))),
-                        dc -> dc.build(cacheLoader));
-                return (DistributedLoadingCache<Key, Value>) cache;
-            };
+                Function<AtomicLong, DistributedLoadingCache<Key, Value>> cacheSupplier = ticker -> {
+                    DistributedCache<Key, Value> cache = createCache(
+                            dc -> dc.withCaffeine(Caffeine.newBuilder()
+                                            .ticker(ticker::get)
+                                            .removalListener(removalListener)
+                                            .evictionListener(evictionListener)
+                                            .executor(executorService)
+                                            .maximumSize(maximumSize)
+                                            .expireAfter(Expiry.creating((key, value) -> FOREVER.getDuration()))
+                                            .refreshAfterWrite(Duration.ofNanos(1)))
+                                    // these stress tests stop and start synchronization midway and then assert that
+                                    // the cache instances converge, which is what synchronizing from the data store
+                                    // does - and they assert a count of cached entries there, which presupposes
+                                    // that those are retained rather than swept once distributed
+                                    .withPersistence(configurer -> configurer
+                                            .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency)
+                                            .withEvictedEntries(evictedEntries -> evictedEntries
+                                                    .withMaximumSize(retainedMaximumSize)
+                                                    .withLoadingStrategies(MAPPING_FUNCTION, CACHE_LOADER))),
+                            dc -> dc.build(cacheLoader));
+                    return (DistributedLoadingCache<Key, Value>) cache;
+                };
 
-            // added to from every thread that creates one, so it has to take concurrent additions
-            List<DistributedLoadingCache<Key, Value>> distributedLoadingCaches = new CopyOnWriteArrayList<>();
-            List<CompletableFuture<Void>> completableFutures = new ArrayList<>();
+                // added to from every thread that creates one, so it has to take concurrent additions
+                List<DistributedLoadingCache<Key, Value>> distributedLoadingCaches = new CopyOnWriteArrayList<>();
+                List<CompletableFuture<Void>> completableFutures = new ArrayList<>();
 
-            IntStream.rangeClosed(1, levelOfParallelism).forEach(cacheIndex ->
-                    completableFutures.add(CompletableFuture.runAsync(() -> {
-                        sleep(Duration.ofSeconds(1).multipliedBy(min(10, cacheIndex - 1)));
-                        AtomicLong ticker = new AtomicLong(0);
-                        DistributedLoadingCache<Key, Value> distributedLoadingCache = cacheSupplier.apply(ticker);
-                        distributedLoadingCaches.add(distributedLoadingCache);
-                        IntStream.rangeClosed(1, numberOfOperations).forEach(operationIndex -> {
-                            executeRandomOperation(distributedLoadingCache, maximumSize);
-                            if (operationIndex == numberOfOperations / 2) {
-                                distributedLoadingCache.distributedPolicy().stopSynchronization();
-                                sleep(Duration.ofSeconds(1).multipliedBy(min(10, cacheIndex)));
-                                distributedLoadingCache.distributedPolicy().startSynchronization();
-                                // set ticker to start triggering expiration/refreshing
-                                ticker.addAndGet(Duration.ofHours(1).toNanos());
+                IntStream.rangeClosed(1, levelOfParallelism).forEach(cacheIndex ->
+                        completableFutures.add(CompletableFuture.runAsync(() -> {
+                            sleep(Duration.ofSeconds(1).multipliedBy(min(10, cacheIndex - 1)));
+                            AtomicLong ticker = new AtomicLong(0);
+                            DistributedLoadingCache<Key, Value> distributedLoadingCache = cacheSupplier.apply(ticker);
+                            distributedLoadingCaches.add(distributedLoadingCache);
+                            IntStream.rangeClosed(1, numberOfOperations).forEach(operationIndex -> {
+                                executeRandomOperation(distributedLoadingCache, maximumSize);
+                                if (operationIndex == numberOfOperations / 2) {
+                                    distributedLoadingCache.distributedPolicy().stopSynchronization();
+                                    sleep(Duration.ofSeconds(1).multipliedBy(min(10, cacheIndex)));
+                                    distributedLoadingCache.distributedPolicy().startSynchronization();
+                                    // set ticker to start triggering expiration/refreshing
+                                    ticker.addAndGet(Duration.ofHours(1).toNanos());
+                                }
+                            });
+                            // increment ticker to trigger last pending evictions
+                            ticker.addAndGet(Duration.ofHours(1).toNanos());
+                        }, executorService)));
+
+                CompletableFuture.allOf(completableFutures.toArray(CompletableFuture[]::new)).join();
+
+                DistributedLoadingCache<Key, Value> lastDistributedLoadingCache = distributedLoadingCaches
+                        .get(distributedLoadingCaches.size() - 1);
+
+                await("synchronization between cache instances")
+                        .atMost(EXTENDED_WAITING_DURATION)
+                        .pollInterval(EXTENDED_POLL_INTERVAL)
+                        .failFast("process clean up", this::cleanUp)
+                        .untilAsserted(() -> {
+                            IntStream.range(0, distributedLoadingCaches.size() - 1).forEach(i ->
+                                    assertThat(distributedLoadingCaches.get(i).asMap())
+                                            .describedAs(() -> format("%s (%s) vs. %s (%s)",
+                                                    i, distributedLoadingCaches.get(i),
+                                                    i + 1, distributedLoadingCaches.get(i + 1)))
+                                            .containsExactlyInAnyOrderEntriesOf(distributedLoadingCaches.get(i + 1).asMap()));
+                            assertThatDataStoreHasCounts(
+                                    CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(lastDistributedLoadingCache.estimatedSize())));
+                        });
+
+                // no reset of ticker, wait for still inbounding 'refresh after write' entries
+                AtomicLong estimatedSize = new AtomicLong(lastDistributedLoadingCache.estimatedSize());
+                await("inbounding refreshes")
+                        .atMost(EXTENDED_WAITING_DURATION)
+                        .pollInterval(EXTENDED_POLL_INTERVAL)
+                        .failFast("process clean up", this::cleanUp)
+                        .during(WAITING_DURATION)
+                        .until(() -> {
+                            if (lastDistributedLoadingCache.estimatedSize() == estimatedSize.get()) {
+                                return true;
+                            } else {
+                                estimatedSize.set(lastDistributedLoadingCache.estimatedSize());
+                                return false;
                             }
                         });
-                        // increment ticker to trigger last pending evictions
-                        ticker.addAndGet(Duration.ofHours(1).toNanos());
-                    }, executorService)));
 
-            CompletableFuture.allOf(completableFutures.toArray(CompletableFuture[]::new)).join();
+                distributedLoadingCaches.forEach(distributedCache ->
+                        completableFutures.add(CompletableFuture
+                                .runAsync(distributedCache::invalidateAll, executorService)));
 
-            DistributedLoadingCache<Key, Value> lastDistributedLoadingCache = distributedLoadingCaches
-                    .get(distributedLoadingCaches.size() - 1);
+                CompletableFuture.allOf(completableFutures.toArray(CompletableFuture[]::new)).join();
 
-            await("synchronization between cache instances")
+                await("synchronization between cache instances")
+                        .atMost(EXTENDED_WAITING_DURATION)
+                        .pollInterval(EXTENDED_POLL_INTERVAL)
+                        .failFast("process clean up", this::cleanUp)
+                        .untilAsserted(() -> {
+                            assertThat(distributedLoadingCaches)
+                                    .allSatisfy(distributedLoadingCache -> assertThat(distributedLoadingCache.estimatedSize()).isEqualTo(0));
+                            assertThatDataStoreHasCounts(
+                                    CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(0)),
+                                    CountGrouped.of(EVICTED_RETAINED_GROUP, assertion -> assertion.isEqualTo(0)),
+                                    CountGrouped.of(INVALIDATED_GROUP, assertion -> assertion.isGreaterThanOrEqualTo(retainedMaximumSize)));
+                        });
+
+                await("maintenance")
+                        .atMost(EXTENDED_WAITING_DURATION)
+                        .pollInterval(EXTENDED_POLL_INTERVAL)
+                        .failFast("process maintenance", this::processMaintenance)
+                        .untilAsserted(() ->
+                                assertThatDataStoreHasCounts(
+                                        CountGrouped.of(DISTRIBUTION_ONLY_GROUP, assertion -> assertion.isEqualTo(0)),
+                                        CountGrouped.of(EVICTED_RETAINED_GROUP, assertion -> assertion.isEqualTo(0))));
+
+                verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPLICIT));
+                verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.REPLACED));
+                verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.SIZE));
+                verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPIRED));
+                verifyNoMoreInteractions(removalListener);
+
+                verify(evictionListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.SIZE));
+                verify(evictionListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPIRED));
+                verifyNoMoreInteractions(evictionListener);
+
+                verify(cacheLoader, atLeastOnce()).load(any(Key.class));
+                verify(cacheLoader, atLeastOnce()).loadAll(anySet());
+                verify(cacheLoader, atLeastOnce()).asyncLoad(any(Key.class), any(Executor.class));
+                verify(cacheLoader, never()).asyncLoadAll(anySet(), any(Executor.class));
+                verify(cacheLoader, atLeastOnce()).reload(any(Key.class), any(Value.class));
+                verify(cacheLoader, atLeastOnce()).asyncReload(any(Key.class), any(Value.class), any(Executor.class));
+                verifyNoMoreInteractions(cacheLoader);
+
+                reports.assertExplained();
+            }
+        }
+
+        // Both cache instances write in turns, over the same keys, while the store is disrupted - and are expected
+        // to have waited out whatever the disruption does to the primary rather than to have failed, and to end up
+        // holding what was written last, whichever of them wrote it and whichever primary took it. The disruption
+        // leaves the store as healthy as it found it, so that the tests after this one find it so.
+        // Where writes may fail, a failed write leaves its key in doubt: the store may have kept it or not, and
+        // either is fine as long as both cache instances agree - so a key then holds what was last written to it
+        // successfully or the value whose write failed, the same one in both
+        // Where the disruption may even lose writes the store confirmed, the last write is not the last word any
+        // more: the store goes back to whichever earlier write of the key it kept, and both cache instances with it
+        // - which one is up to the store, whose cached entries are swept once distributed unless they are persisted,
+        // so what is asserted is that both agree on one of the values the key was written with.
+        // A key may also be held by neither: a disruption that interrupts synchronization has the cache instances
+        // reconcile, which drops what the store does not confirm - and without persisted cached entries it confirms
+        // nothing. Leaving a key out is never wrong, holding another value than the store would be
+        // What the disruption has the driver, the pool, the adapter and the cache instances report is captured rather
+        // than left in the test output, and asserted to be explained by it: each logger reports nothing but what the
+        // given reports list for it
+        void assertWritingRidesOut(Supplier<DistributedCache<Key, Value>> cacheSupplier, boolean failuresAllowed,
+                                   boolean confirmedWritesMayBeLost, Class<? extends Exception> storeFailure,
+                                   Map<String, List<String>> expectedReports, StoreDisruption disruption)
+                throws Exception {
+            try (CapturedReports reports = new CapturedReports(expectedReports)) {
+                assertWritingRidesOut(cacheSupplier, failuresAllowed, confirmedWritesMayBeLost, storeFailure,
+                        disruption);
+                reports.assertExplained();
+            }
+        }
+
+        private void assertWritingRidesOut(Supplier<DistributedCache<Key, Value>> cacheSupplier,
+                                           boolean failuresAllowed, boolean confirmedWritesMayBeLost,
+                                           Class<? extends Exception> storeFailure, StoreDisruption disruption)
+                throws Exception {
+            DistributedCache<Key, Value> cacheA = cacheSupplier.get();
+            DistributedCache<Key, Value> cacheB = cacheSupplier.get();
+            List<Key> keys = IntStream.range(0, 100).mapToObj(Key::of).toList();
+
+            AtomicBoolean writing = new AtomicBoolean(true);
+            List<Throwable> failures = new CopyOnWriteArrayList<>();
+            AtomicLong longestWriteNanos = new AtomicLong();
+            // written by the writer alone and read once it is done
+            Map<Key, Value> lastWritten = new HashMap<>();
+            Map<Key, Set<Value>> inDoubt = new HashMap<>();
+            Map<Key, Set<Value>> everWritten = new HashMap<>();
+            CompletableFuture<Void> writer = CompletableFuture.runAsync(() -> {
+                for (int index = 0; writing.get(); index++) {
+                    DistributedCache<Key, Value> cache = index % 2 == 0 ? cacheA : cacheB;
+                    Key key = keys.get(index % keys.size());
+                    // a key whose write failed is not written again, so that the failed write stays the last word on
+                    // it - what the cache instance whose write failed then holds is up to the store alone, which it
+                    // only learns of by its own write coming back
+                    if (inDoubt.containsKey(key)) {
+                        continue;
+                    }
+                    long started = System.nanoTime();
+                    everWritten.computeIfAbsent(key, ignored -> new HashSet<>()).add(Value.of(index));
+                    try {
+                        cache.put(key, Value.of(index));
+                        lastWritten.put(key, Value.of(index));
+                    } catch (RuntimeException e) {
+                        failures.add(e);
+                        inDoubt.computeIfAbsent(key, ignored -> new HashSet<>()).add(Value.of(index));
+                    }
+                    longestWriteNanos.accumulateAndGet(System.nanoTime() - started, Math::max);
+                }
+            }, executorService);
+
+            try {
+                // writes under way before the disruption, so that some of them are caught by it
+                sleep(Duration.ofMillis(500));
+                disruption.run();
+                // and writes that run against the store restored
+                sleep(Duration.ofMillis(500));
+            } finally {
+                writing.set(false);
+                writer.get(EXTENDED_WAITING_DURATION.toMillis(), TimeUnit.MILLISECONDS);
+            }
+
+            if (!failuresAllowed) {
+                assertThat(failures).isEmpty();
+                // paused while there was no primary, but never left waiting until the driver gives up on finding one
+                assertThat(Duration.ofNanos(longestWriteNanos.get())).isLessThan(Duration.ofSeconds(30));
+            }
+            // failing only as the store failed, never on something of the cache instance's own - or refused, once it
+            // failed three times in a row, until the store is tried again
+            assertThat(failures).allSatisfy(failure -> assertThat(Stream.iterate(failure, Objects::nonNull,
+                    Throwable::getCause)).anyMatch(cause -> storeFailure.isInstance(cause)
+                    || cause instanceof CircuitBreakerOpenException));
+            assertThat(keys).allSatisfy(key -> assertThat(lastWritten.containsKey(key) || inDoubt.containsKey(key))
+                    .isTrue());
+            await("convergence after the disruption")
                     .atMost(EXTENDED_WAITING_DURATION)
-                    .pollInterval(EXTENDED_POLL_INTERVAL)
-                    .failFast("process clean up", this::cleanUp)
                     .untilAsserted(() -> {
-                        IntStream.range(0, distributedLoadingCaches.size() - 1).forEach(i ->
-                                assertThat(distributedLoadingCaches.get(i).asMap())
-                                        .describedAs(() -> format("%s (%s) vs. %s (%s)",
-                                                i, distributedLoadingCaches.get(i),
-                                                i + 1, distributedLoadingCaches.get(i + 1)))
-                                        .containsExactlyInAnyOrderEntriesOf(distributedLoadingCaches.get(i + 1).asMap()));
-                        assertThatDataStoreHasCounts(
-                                CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(lastDistributedLoadingCache.estimatedSize())));
-                    });
-
-            // no reset of ticker, wait for still inbounding 'refresh after write' entries
-            AtomicLong estimatedSize = new AtomicLong(lastDistributedLoadingCache.estimatedSize());
-            await("inbounding refreshes")
-                    .atMost(EXTENDED_WAITING_DURATION)
-                    .pollInterval(EXTENDED_POLL_INTERVAL)
-                    .failFast("process clean up", this::cleanUp)
-                    .during(WAITING_DURATION)
-                    .until(() -> {
-                        if (lastDistributedLoadingCache.estimatedSize() == estimatedSize.get()) {
-                            return true;
+                        assertThat(cacheA.asMap()).isEqualTo(cacheB.asMap());
+                        if (confirmedWritesMayBeLost) {
+                            assertThat(keys).allSatisfy(key -> assertThat(cacheA.getIfPresent(key))
+                                    .isIn(Stream.concat(Stream.of((Value) null),
+                                            everWritten.getOrDefault(key, Set.of()).stream()).toList()));
                         } else {
-                            estimatedSize.set(lastDistributedLoadingCache.estimatedSize());
-                            return false;
+                            assertThat(keys).allSatisfy(key -> assertThat(cacheA.getIfPresent(key))
+                                    .isIn(Stream.concat(Stream.of((Value) null), Stream.concat(
+                                            Stream.ofNullable(lastWritten.get(key)),
+                                            inDoubt.getOrDefault(key, Set.of()).stream())).toList()));
                         }
                     });
+        }
 
-            distributedLoadingCaches.forEach(distributedCache ->
-                    completableFutures.add(CompletableFuture
-                            .runAsync(distributedCache::invalidateAll, executorService)));
+        // The loggers a test expects reports from, captured while it runs, with what each of them may report - a
+        // message containing any of the fragments listed for it, or nothing where none are. Only warnings and worse
+        // are asserted, while everything a captured logger reports stays out of the test output
+        static final class CapturedReports implements AutoCloseable {
 
-            CompletableFuture.allOf(completableFutures.toArray(CompletableFuture[]::new)).join();
+            private final Map<CaptureLogger, List<String>> loggers;
 
-            await("synchronization between cache instances")
-                    .atMost(EXTENDED_WAITING_DURATION)
-                    .pollInterval(EXTENDED_POLL_INTERVAL)
-                    .failFast("process clean up", this::cleanUp)
-                    .untilAsserted(() -> {
-                        assertThat(distributedLoadingCaches)
-                                .allSatisfy(distributedLoadingCache -> assertThat(distributedLoadingCache.estimatedSize()).isEqualTo(0));
-                        assertThatDataStoreHasCounts(
-                                CountGrouped.of(CACHED_GROUP, assertion -> assertion.isEqualTo(0)),
-                                CountGrouped.of(EVICTED_RETAINED_GROUP, assertion -> assertion.isEqualTo(0)),
-                                CountGrouped.of(INVALIDATED_GROUP, assertion -> assertion.isGreaterThanOrEqualTo(retainedMaximumSize)));
-                    });
+            CapturedReports(Map<String, List<String>> expectedReports) {
+                this.loggers = new LinkedHashMap<>();
+                expectedReports.forEach((name, fragments) ->
+                        loggers.put(CaptureLoggerFactory.getCaptureLogger(name), fragments));
+                loggers.keySet().forEach(CaptureLogger::startCapturing);
+            }
 
-            await("maintenance")
-                    .atMost(EXTENDED_WAITING_DURATION)
-                    .pollInterval(EXTENDED_POLL_INTERVAL)
-                    .failFast("process maintenance", this::processMaintenance)
-                    .untilAsserted(() ->
-                            assertThatDataStoreHasCounts(
-                                    CountGrouped.of(DISTRIBUTION_ONLY_GROUP, assertion -> assertion.isEqualTo(0)),
-                                    CountGrouped.of(EVICTED_RETAINED_GROUP, assertion -> assertion.isEqualTo(0))));
+            void assertExplained() {
+                loggers.forEach((logger, fragments) -> assertThat(logger.getLoggingEvents())
+                        .filteredOn(loggingEvent -> loggingEvent.getLevel().toInt() >= Level.WARN.toInt())
+                        .allSatisfy(loggingEvent -> assertThat(loggingEvent.getMessage())
+                                .describedAs("reported by %s", logger.getName())
+                                .satisfies(message -> assertThat(fragments).anyMatch(message::contains))));
+            }
 
-            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPLICIT));
-            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.REPLACED));
-            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.SIZE));
-            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPIRED));
-            verifyNoMoreInteractions(removalListener);
+            @Override
+            public void close() {
+                loggers.keySet().forEach(CaptureLogger::stopCapturing);
+            }
+        }
 
-            verify(evictionListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.SIZE));
-            verify(evictionListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPIRED));
-            verifyNoMoreInteractions(evictionListener);
+        // what a test disrupts the store with, the store restored by the time it returns
+        @FunctionalInterface
+        interface StoreDisruption {
 
-            verify(cacheLoader, atLeastOnce()).load(any(Key.class));
-            verify(cacheLoader, atLeastOnce()).loadAll(anySet());
-            verify(cacheLoader, atLeastOnce()).asyncLoad(any(Key.class), any(Executor.class));
-            verify(cacheLoader, never()).asyncLoadAll(anySet(), any(Executor.class));
-            verify(cacheLoader, atLeastOnce()).reload(any(Key.class), any(Value.class));
-            verify(cacheLoader, atLeastOnce()).asyncReload(any(Key.class), any(Value.class), any(Executor.class));
-            verifyNoMoreInteractions(cacheLoader);
+            void run() throws Exception;
         }
 
         // A TCP proxy that can stop carrying anything on the connections it holds without closing them: the
@@ -8205,6 +8726,15 @@ final class DistributedCaffeineIntegrationTests {
         static final String DATABASE_NAME = "distributedCaffeineDatabase";
 
         static final String REPLICA_SET_NAME = "rs0";
+        // what a disruption of the replica set explains being reported, see assertWritingRidesOut
+        static final Map<String, List<String>> DISRUPTION_REPORTS = Map.of(
+                DistributedCaffeine.class.getName(), List.of("Synchronization was interrupted", "Distributing"),
+                "io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoWatcher",
+                List.of("Watching change streams failed", "Resume position lost"),
+                "io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoSynchronizer",
+                List.of("Receiving change stream events failed"),
+                // which reports a member going away at INFO, with what it failed on, and nothing worse
+                "org.mongodb.driver.cluster", List.of());
         static final String MEMBER_ALIAS = "member";
         // The members of a replica set of several are announced by their network aliases, which resolve inside
         // their Docker network and nowhere else. Here they resolve to this host, where every member is published
@@ -8219,9 +8749,6 @@ final class DistributedCaffeineIntegrationTests {
         // or several, of a replica set or a sharded cluster
         Network mongoNetwork;
         List<GenericContainer<?>> mongoMembers;
-        // what stops, kills and starts members behind the back of Testcontainers - its own client, which it closes
-        // by itself, so not one to close here
-        final DockerClient dockerClient = DockerClientFactory.instance().client();
 
         String replicaSetUrl;
         // where the member preferred as primary is reached directly
@@ -8915,7 +9442,9 @@ final class DistributedCaffeineIntegrationTests {
                     .timeout(3, TimeUnit.SECONDS)
                     .build());
                  MongoClient preferredClient = MongoClients.create(
-                         format("mongodb://%s:%d/?directConnection=true", primaryHost, primaryPort))) {
+                         format("mongodb://%s:%d/?directConnection=true", primaryHost, primaryPort));
+                 // what the failing writes have the adapter and the cache instances report, see assertWritingRidesOut
+                 CapturedReports reports = new CapturedReports(DISRUPTION_REPORTS)) {
                 List<DistributedCache<Key, Value>> created = new ArrayList<>();
                 try {
                     for (int index = 0; index < 2; index++) {
@@ -8961,6 +9490,7 @@ final class DistributedCaffeineIntegrationTests {
                                 assertThat(cacheA.getIfPresent(Key.of(1))).isEqualTo(Value.of(4));
                                 assertThat(cacheB.getIfPresent(Key.of(1))).isEqualTo(Value.of(4));
                             });
+                    reports.assertExplained();
                 } finally {
                     // torn down here rather than after the test, because their client is closed on the way out
                     created.forEach(cache -> {
@@ -9456,13 +9986,6 @@ final class DistributedCaffeineIntegrationTests {
             loggerDistributedCaffeine.stopCapturing();
         }
 
-        MongoTopology topology() {
-            return Optional.ofNullable(getClass().getAnnotation(Topology.class))
-                    .map(Topology::value)
-                    .orElseThrow(() -> new IllegalStateException(
-                            format("%s declares no topology", getClass().getSimpleName())));
-        }
-
         // The preferred member stepping down and taking the primary back afterwards - which is what a rolling update
         // does to the primary, once for updating it and once for handing it back
         private static void stepDownAndHandBack(MongoDatabase preferredAdmin) {
@@ -9480,10 +10003,6 @@ final class DistributedCaffeineIntegrationTests {
             handBackPrimary(preferredAdmin);
         }
 
-        // Both cache instances write in turns, over the same keys, while the replica set is disrupted - and are
-        // expected to have waited out whatever the disruption does to the primary rather than to have failed, and
-        // to end up holding what was written last, whichever of them wrote it and whichever primary took it. The
-        // replica set is left as it was found, so that the tests after this one find it healthy
         // On a client with the timeout the README offers, which is what has the driver retry an interrupted write
         // for as long as a failover takes rather than once - without it a write may fail, which the test below
         // allows for
@@ -9508,96 +10027,32 @@ final class DistributedCaffeineIntegrationTests {
                             CacheBuilder.identity(), DistributedCaffeine::build);
                     created.add(cache);
                     return cache;
-                }, failuresAllowed, disruption);
+                }, failuresAllowed, false, MongoException.class, DISRUPTION_REPORTS, () -> {
+                    // connected directly, so that the preferred member is reached whichever member is primary
+                    try (MongoClient preferredClient = MongoClients.create(
+                            format("mongodb://%s:%d/?directConnection=true", primaryHost, primaryPort))) {
+                        MongoDatabase preferredAdmin = preferredClient.getDatabase("admin");
+                        disruption.run(preferredAdmin);
+                        awaitReplicaSetHealthy(preferredAdmin);
+                    }
+                    // The client the tests after this one share may still take another member for the primary, and
+                    // pool connections that a restarted member no longer knows of - a server without a streaming
+                    // heartbeat (before 4.4) leaves its client unaware of either for up to its heartbeat interval, and
+                    // a command that is not retryable, like creating indexes, fails on it. So it is awaited here until
+                    // that client sees the preferred member as primary again, which it only does once it has heard
+                    // from it anew
+                    await("shared client seeing the preferred member as primary")
+                            .atMost(EXTENDED_WAITING_DURATION)
+                            .until(() -> mongoClient.getClusterDescription().getServerDescriptions().stream()
+                                    .anyMatch(server -> server.isPrimary()
+                                            && server.getAddress().getHost().equals(MEMBER_ALIAS + 0)));
+                });
             } finally {
                 created.forEach(cache -> {
                     cache.distributedPolicy().stopSynchronization();
                     distributedCacheInstances.remove(cache);
                 });
             }
-        }
-
-        // Where writes may fail, a failed write leaves its key in doubt: the store may have kept it or not, and
-        // either is fine as long as both cache instances agree - so a key then holds what was last written to it
-        // successfully or the value whose write failed, the same one in both
-        private void assertWritingRidesOut(Supplier<DistributedCache<Key, Value>> cacheSupplier,
-                                           boolean failuresAllowed, Disruption disruption) throws Exception {
-            DistributedCache<Key, Value> cacheA = cacheSupplier.get();
-            DistributedCache<Key, Value> cacheB = cacheSupplier.get();
-            List<Key> keys = IntStream.range(0, 100).mapToObj(Key::of).toList();
-
-            AtomicBoolean writing = new AtomicBoolean(true);
-            List<Throwable> failures = new CopyOnWriteArrayList<>();
-            AtomicLong longestWriteNanos = new AtomicLong();
-            // written by the writer alone and read once it is done
-            Map<Key, Value> lastWritten = new HashMap<>();
-            Map<Key, Set<Value>> inDoubt = new HashMap<>();
-            CompletableFuture<Void> writer = CompletableFuture.runAsync(() -> {
-                for (int index = 0; writing.get(); index++) {
-                    DistributedCache<Key, Value> cache = index % 2 == 0 ? cacheA : cacheB;
-                    Key key = keys.get(index % keys.size());
-                    // a key whose write failed is not written again, so that the failed write stays the last word on
-                    // it - what the cache instance whose write failed then holds is up to the store alone, which it
-                    // only learns of by its own write coming back
-                    if (inDoubt.containsKey(key)) {
-                        continue;
-                    }
-                    long started = System.nanoTime();
-                    try {
-                        cache.put(key, Value.of(index));
-                        lastWritten.put(key, Value.of(index));
-                    } catch (RuntimeException e) {
-                        failures.add(e);
-                        inDoubt.computeIfAbsent(key, ignored -> new HashSet<>()).add(Value.of(index));
-                    }
-                    longestWriteNanos.accumulateAndGet(System.nanoTime() - started, Math::max);
-                }
-            }, executorService);
-
-            // connected directly, so that the preferred member is reached whichever member is primary
-            try (MongoClient preferredClient = MongoClients.create(
-                    format("mongodb://%s:%d/?directConnection=true", primaryHost, primaryPort))) {
-                MongoDatabase preferredAdmin = preferredClient.getDatabase("admin");
-                // writes under way before the disruption, so that some of them are caught by it
-                sleep(Duration.ofMillis(500));
-                disruption.run(preferredAdmin);
-                awaitReplicaSetHealthy(preferredAdmin);
-                // The client the tests after this one share may still take another member for the primary, and pool
-                // connections that a restarted member no longer knows of - a server without a streaming heartbeat
-                // (before 4.4) leaves its client unaware of either for up to its heartbeat interval, and a command
-                // that is not retryable, like creating indexes, fails on it. So it is awaited here until that client
-                // sees the preferred member as primary again, which it only does once it has heard from it anew
-                await("shared client seeing the preferred member as primary")
-                        .atMost(EXTENDED_WAITING_DURATION)
-                        .until(() -> mongoClient.getClusterDescription().getServerDescriptions().stream()
-                                .anyMatch(server -> server.isPrimary()
-                                        && server.getAddress().getHost().equals(MEMBER_ALIAS + 0)));
-                // and writes that run against the replica set restored
-                sleep(Duration.ofMillis(500));
-            } finally {
-                writing.set(false);
-                writer.get(EXTENDED_WAITING_DURATION.toMillis(), TimeUnit.MILLISECONDS);
-            }
-
-            if (!failuresAllowed) {
-                assertThat(failures).isEmpty();
-                // paused while there was no primary, but never left waiting until the driver gives up on finding one
-                assertThat(Duration.ofNanos(longestWriteNanos.get())).isLessThan(Duration.ofSeconds(30));
-            }
-            // failing only as the store failed, never on something of the cache instance's own
-            assertThat(failures).allSatisfy(failure -> assertThat(failure).satisfiesAnyOf(
-                    thrown -> assertThat(thrown).isInstanceOf(MongoException.class),
-                    thrown -> assertThat(thrown).hasRootCauseInstanceOf(MongoException.class)));
-            assertThat(keys).allSatisfy(key -> assertThat(lastWritten.containsKey(key) || inDoubt.containsKey(key))
-                    .isTrue());
-            await("convergence after the disruption")
-                    .atMost(WAITING_DURATION)
-                    .untilAsserted(() -> {
-                        assertThat(cacheA.asMap()).isEqualTo(cacheB.asMap());
-                        assertThat(keys).allSatisfy(key -> assertThat(cacheA.getIfPresent(key))
-                                .isIn(Stream.concat(Stream.ofNullable(lastWritten.get(key)),
-                                        inDoubt.getOrDefault(key, Set.of()).stream()).toList()));
-                    });
         }
 
         // Handed back on purpose rather than left to the preferred member's priority, which takes the primary back
@@ -9814,6 +10269,7 @@ final class DistributedCaffeineIntegrationTests {
                 case THREE_NODE_REPLICA_SET -> startReplicaSet(dockerImageName, displayName, false);
                 case THREE_NODE_REPLICA_SET_WITH_ARBITER -> startReplicaSet(dockerImageName, displayName, true);
                 case SHARDED_CLUSTER -> startShardedCluster(dockerImageName, displayName);
+                default -> throw new IllegalStateException(format("%s is no topology of MongoDB", topology()));
             }
             this.mongoClient = MongoClients.create(mongoClientSettings()
                     .applyToSocketSettings(socketSettings -> socketSettings
@@ -9956,24 +10412,6 @@ final class DistributedCaffeineIntegrationTests {
             }
         }
 
-        // held open together while they are picked, so that no two of them are the same
-        private static List<Integer> freePorts(int count) {
-            return freePorts(count, new ArrayList<>());
-        }
-
-        // each one held open until those picked after it are, which is what picking them one level deeper each does
-        private static List<Integer> freePorts(int count, List<Integer> ports) {
-            if (ports.size() == count) {
-                return List.copyOf(ports);
-            }
-            try (ServerSocket serverSocket = new ServerSocket(0)) {
-                ports.add(serverSocket.getLocalPort());
-                return freePorts(count, ports);
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
-            }
-        }
-
         // what every client of the tests is built from, so that it reaches the replica set whatever its shape
         MongoClientSettings.Builder mongoClientSettings() {
             return MongoClientSettings.builder()
@@ -10031,94 +10469,6 @@ final class DistributedCaffeineIntegrationTests {
                     .build();
         }
 
-        // The shape of the deployment a class runs the tests against, declared by every class next to its image,
-        // because what holds during a failover depends on it
-        enum MongoTopology {
-            // a replica set of a single member
-            SINGLE_NODE_REPLICA_SET,
-            // three data-bearing members
-            THREE_NODE_REPLICA_SET,
-            // a primary, a secondary and an arbiter
-            THREE_NODE_REPLICA_SET_WITH_ARBITER,
-            // a config server, two shards and a router, with the collections of the tests left unsharded
-            SHARDED_CLUSTER
-        }
-
-        @Target(ElementType.TYPE)
-        @Retention(RetentionPolicy.RUNTIME)
-        @Inherited
-        @interface Topology {
-
-            MongoTopology value();
-        }
-
-        // Enables a test on the given topology only, repeated for every topology it is enabled on - where the class
-        // declares one, that is: a class without a topology, which is any class not running against MongoDB, is never
-        // affected
-        @Target(ElementType.METHOD)
-        @Retention(RetentionPolicy.RUNTIME)
-        @Repeatable(EnabledOnTopologies.class)
-        @ExtendWith(TopologyCondition.class)
-        @interface EnabledOnTopology {
-
-            MongoTopology value();
-        }
-
-        @Target(ElementType.METHOD)
-        @Retention(RetentionPolicy.RUNTIME)
-        @ExtendWith(TopologyCondition.class)
-        @interface EnabledOnTopologies {
-
-            // filled by the compiler when the annotation is repeated and read by reflection, never called directly
-            // noinspection UnusedReturnValue
-            EnabledOnTopology[] value();
-        }
-
-        // and disables it on the given topology, for a test meant for every topology but some
-        @Target(ElementType.METHOD)
-        @Retention(RetentionPolicy.RUNTIME)
-        @Repeatable(DisabledOnTopologies.class)
-        @ExtendWith(TopologyCondition.class)
-        @interface DisabledOnTopology {
-
-            MongoTopology value();
-        }
-
-        @Target(ElementType.METHOD)
-        @Retention(RetentionPolicy.RUNTIME)
-        @ExtendWith(TopologyCondition.class)
-        @interface DisabledOnTopologies {
-
-            // filled by the compiler when the annotation is repeated and read by reflection, never called directly
-            // noinspection UnusedReturnValue
-            DisabledOnTopology[] value();
-        }
-
-        static final class TopologyCondition implements ExecutionCondition {
-
-            @Override
-            public @NonNull ConditionEvaluationResult evaluateExecutionCondition(@NonNull ExtensionContext context) {
-                Optional<MongoTopology> topology = context.getTestClass()
-                        .map(testClass -> testClass.getAnnotation(Topology.class))
-                        .map(Topology::value);
-                Optional<AnnotatedElement> element = context.getElement();
-                if (topology.isEmpty() || element.isEmpty()) {
-                    return ConditionEvaluationResult.enabled("no topology");
-                }
-                Set<MongoTopology> enabledOn = AnnotationSupport
-                        .findRepeatableAnnotations(element.get(), EnabledOnTopology.class).stream()
-                        .map(EnabledOnTopology::value)
-                        .collect(toSet());
-                Set<MongoTopology> disabledOn = AnnotationSupport
-                        .findRepeatableAnnotations(element.get(), DisabledOnTopology.class).stream()
-                        .map(DisabledOnTopology::value)
-                        .collect(toSet());
-                return disabledOn.contains(topology.get()) || !(enabledOn.isEmpty() || enabledOn.contains(topology.get()))
-                        ? ConditionEvaluationResult.disabled("not on " + topology.get())
-                        : ConditionEvaluationResult.enabled("on " + topology.get());
-            }
-        }
-
         @FunctionalInterface
         interface Disruption {
 
@@ -10134,12 +10484,50 @@ final class DistributedCaffeineIntegrationTests {
 
         // what the adapter sends a notification with, spelled as it spells it
         private static final String NOTIFY_STATEMENT = "SELECT pg_notify(?, ?)";
+        // what the servers reach one another by, numbered, and where a standby keeps the copy it replays into
+        private static final String SERVER_ALIAS = "postgres";
+        // the pooler of the topology behind one, from the image of the PgBouncer project's namespace
+        private static final String POOLER_IMAGE = "pgbouncer/pgbouncer:latest";
+        private static final int POOLER_PORT = 6432;
+        // the test's database once more under another name, which the pooler lends in statement mode instead
+        private static final String STATEMENT_POOLED_DATABASE_NAME = "test_statement_pooled";
+        private static final String STANDBY_DIRECTORY = "/tmp/standby";
+        // what a disruption of the servers explains being reported, see assertWritingRidesOut
+        static final Map<String, List<String>> DISRUPTION_REPORTS = Map.of(
+                DistributedCaffeine.class.getName(), List.of("Synchronization was interrupted", "Distributing"),
+                "io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresListener",
+                List.of("Listening for notifications failed"),
+                "io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresSynchronizer",
+                List.of("Receiving notifications failed"),
+                "io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresRepository",
+                List.of("Closing a JDBC resource failed"),
+                "com.zaxxer.hikari.pool.PoolBase", List.of("Failed to validate connection"),
+                "com.zaxxer.hikari.pool.ProxyConnection", List.of("marked as broken"));
+        // the superuser and the database the image creates, the same on every server of a test
+        private static final String USERNAME = "test";
+        private static final String PASSWORD = "test";
+        private static final String DATABASE_NAME = "test";
 
         static final String SCHEMA_NAME = "public";
 
-        PostgreSQLContainer postgresContainer;
+        // The servers of the topology, the first one primary to begin with, each published on this host on a port of
+        // its own - which a server rebuilt in place of another one keeps, so that a connection URL naming all of
+        // them goes on reaching whichever of them is primary
+        List<GenericContainer<?>> postgresServers;
+        List<Integer> postgresPorts;
+        // which of them is primary, for what is addressed to it directly rather than through a data source
+        int primaryIndex;
+        // what they are started on, along with a standby a test starts of its own
+        Network postgresNetwork;
+        // PgBouncer in front of the server, for the topology that is read from and written to through it
+        GenericContainer<?> postgresPooler;
+        DockerImageName postgresImage;
+        String postgresDisplayName;
 
         DataSource dataSource;
+        // what the cache instances of a test listen through: the shared data source itself, except behind a pooler
+        // in transaction mode, which cannot be listened through - a direct connection to the server then
+        DataSource listenerDataSource;
 
         @DisplayName("Test that the adapter names and separates its scope by discriminator")
         @Test
@@ -10181,8 +10569,7 @@ final class DistributedCaffeineIntegrationTests {
             // of its own. What makes them safe is the quoting every statement puts them in, not their shape - an
             // embedded quote is doubled on the way in, so it cannot end the identifier it sits in
             String tableName = "cache-entries \"odd\"";
-            PostgresAdapter<Key, Value> adapter = PostgresAdapter
-                    .newBuilder(dataSource, SCHEMA_NAME, tableName)
+            PostgresAdapter<Key, Value> adapter = newAdapterBuilder(tableName)
                     .build();
             adapter.setKeySerializer(new JavaObjectSerializer<>());
             adapter.setValueSerializer(new JacksonSerializer<>(Value.class, false));
@@ -10481,7 +10868,7 @@ final class DistributedCaffeineIntegrationTests {
             }
 
             HikariConfig hikariConfig = new HikariConfig();
-            hikariConfig.setJdbcUrl(postgresContainer.getJdbcUrl());
+            hikariConfig.setJdbcUrl(jdbcUrl(DATABASE_NAME));
             hikariConfig.setUsername(role);
             hikariConfig.setPassword("secret");
             hikariConfig.setMaximumPoolSize(2);
@@ -10522,6 +10909,93 @@ final class DistributedCaffeineIntegrationTests {
                     .hasMessageContaining("value_jsonb expected as jsonb but missing");
         }
 
+        @DisplayName("Test that the repository refuses to read from a standby, which may lag behind what was notified")
+        @Test
+        void test_Repository_refuses_to_read_from_a_standby() {
+            int standbyPort = freePorts(1).get(0);
+            try (GenericContainer<?> ignored = startStandby(standbyPort);
+                 HikariDataSource standbyDataSource = new HikariDataSource(createHikariConfig(standbyPort,
+                         DATABASE_NAME))) {
+                // a data source reaching nothing but the standby is refused at construction
+                assertThatThrownBy(() -> PostgresAdapter.newBuilder(standbyDataSource, SCHEMA_NAME, getDatasetName())
+                        .build())
+                        .isInstanceOf(IllegalStateException.class)
+                        .rootCause()
+                        .hasMessageContaining("reached a standby server");
+
+                // and one reaching it for some connections only - as one balancing them over several servers
+                // does - fails every read on those, whatever it reads
+                AtomicReference<DataSource> reached = new AtomicReference<>(dataSource);
+                DataSource balancingDataSource = (DataSource) Proxy.newProxyInstance(
+                        DataSource.class.getClassLoader(), new Class<?>[]{DataSource.class},
+                        (proxy, method, arguments) -> {
+                            try {
+                                return method.invoke(reached.get(), arguments);
+                            } catch (InvocationTargetException e) {
+                                throw e.getCause();
+                            }
+                        });
+                PostgresAdapter<Key, Value> adapter = PostgresAdapter
+                        .newBuilder(balancingDataSource, SCHEMA_NAME, getDatasetName())
+                        .build();
+                adapter.setKeySerializer(new JavaObjectSerializer<>());
+                adapter.setValueSerializer(new JacksonSerializer<>(Value.class, false));
+                Repository<Key, Value> repository = adapter.getRepository().orElseThrow();
+                reached.set(standbyDataSource);
+                assertThatThrownBy(() -> repository.countCacheEntries(null, null))
+                        .hasMessageContaining("reached a standby server");
+                assertThatThrownBy(() -> repository.streamCacheEntries(Set.of("hash"), null, UNORDERED))
+                        .hasMessageContaining("reached a standby server");
+                assertThatThrownBy(() -> repository.streamCacheEntryMetadata(null, null, UNORDERED))
+                        .hasMessageContaining("reached a standby server");
+            }
+        }
+
+        @DisplayName("Test that the repository checks every read for a standby where the driver's connection cannot be reached")
+        @Test
+        void test_Repository_checks_every_read_through_a_driver_that_does_not_unwrap() throws Exception {
+            // A wrapping driver or instrumentation that does not unwrap to the connection of the PostgreSQL JDBC driver
+            // leaves nothing to remember a connection reaching the primary by. Reading works all the same, checked
+            // every time - so that what reaches a standby later is still refused
+            int standbyPort = freePorts(1).get(0);
+            try (GenericContainer<?> ignored = startStandby(standbyPort);
+                 HikariDataSource standbyDataSource = new HikariDataSource(createHikariConfig(standbyPort,
+                         DATABASE_NAME))) {
+                AtomicReference<DataSource> reached = new AtomicReference<>(dataSource);
+                DataSource notUnwrapping = (DataSource) Proxy.newProxyInstance(DataSource.class.getClassLoader(),
+                        new Class<?>[]{DataSource.class}, (dataSourceProxy, dataSourceMethod, dataSourceArguments) -> {
+                            Object result = invokeUnwrapped(dataSourceMethod, reached.get(), dataSourceArguments);
+                            if (!(result instanceof Connection connection)) {
+                                return result;
+                            }
+                            return Proxy.newProxyInstance(Connection.class.getClassLoader(),
+                                    new Class<?>[]{Connection.class}, (connectionProxy, method, arguments) ->
+                                            switch (method.getName()) {
+                                                case "isWrapperFor" -> false;
+                                                case "unwrap" -> throw new SQLFeatureNotSupportedException();
+                                                default -> invokeUnwrapped(method, connection, arguments);
+                                            });
+                        });
+                PostgresAdapter<Key, Value> adapter = PostgresAdapter
+                        .newBuilder(notUnwrapping, SCHEMA_NAME, getDatasetName())
+                        .withListenerDataSource(listenerDataSource)
+                        .build();
+                adapter.setKeySerializer(new JavaObjectSerializer<>());
+                adapter.setValueSerializer(new JacksonSerializer<>(Value.class, false));
+                Repository<Key, Value> repository = adapter.getRepository().orElseThrow();
+                repository.publishCacheEntries(List.of(CacheEntry.of("h", "op", Key.of(1), Value.of(1), CACHED,
+                        Instant.now().truncatedTo(MICROS))));
+                assertThat(repository.countCacheEntries(null, null)).isEqualTo(1);
+                try (Stream<CacheEntry<Key, Value>> stream = repository.streamCacheEntries(null, null, UNORDERED)) {
+                    assertThat(stream.count()).isEqualTo(1);
+                }
+
+                reached.set(standbyDataSource);
+                assertThatThrownBy(() -> repository.countCacheEntries(null, null))
+                        .hasMessageContaining("reached a standby server");
+            }
+        }
+
         @DisplayName("Test that each serializer stores into a column of its own, so that records stay legible")
         @Test
         void test_Repository_uses_a_column_per_serializer() throws Exception {
@@ -10557,9 +11031,9 @@ final class DistributedCaffeineIntegrationTests {
             String shorter = "t".repeat(55);
             String longer = shorter + "_status";
 
-            PostgresAdapter<Key, Value> shorterAdapter = PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, shorter)
+            PostgresAdapter<Key, Value> shorterAdapter = newAdapterBuilder(shorter)
                     .build();
-            PostgresAdapter<Key, Value> longerAdapter = PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, longer)
+            PostgresAdapter<Key, Value> longerAdapter = newAdapterBuilder(longer)
                     .build();
 
             assertThat(shorterAdapter.getRepository()).isPresent();
@@ -10629,7 +11103,7 @@ final class DistributedCaffeineIntegrationTests {
                     Class.forName("io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresChannel"),
                     "channelOf", List.of(String.class), List.of(adapter.getIdentifier()));
 
-            try (Connection listener = dataSource.getConnection()) {
+            try (Connection listener = listenerDataSource.getConnection()) {
                 // for the same reason the adapter does: a pooled connection may arrive still subscribed
                 execute(listener, "UNLISTEN *");
                 execute(listener, "LISTEN " + channel);
@@ -10885,8 +11359,7 @@ final class DistributedCaffeineIntegrationTests {
             // cacheB reaches the server through a proxy that can go silent on the connections it is carrying while
             // keeping them open - what a failover moving the server's address or an expired NAT entry leaves a
             // client with: nothing is reset, nothing arrives, and a connection that only waits never finds out
-            try (SilencingProxy proxy = new SilencingProxy(postgresContainer.getHost(),
-                    postgresContainer.getMappedPort(PostgreSQLContainer.POSTGRESQL_PORT), executorService)) {
+            try (SilencingProxy proxy = new SilencingProxy("localhost", primaryPort(), executorService)) {
                 try (HikariDataSource proxiedDataSource = createProxiedDataSource(proxy)) {
                     // Persisting cached entries is what makes the recovery warm, as in the test above
                     DistributedCache<Key, Value> cacheA = createCache(CacheBuilder.identity(),
@@ -10978,8 +11451,7 @@ final class DistributedCaffeineIntegrationTests {
             // A connection that stops carrying anything after the first byte of a notification therefore holds the
             // listening thread inside the driver for good - which neither the poll timeout nor the heartbeat, run
             // by that same thread, can do anything about
-            try (SilencingProxy proxy = new SilencingProxy(postgresContainer.getHost(),
-                    postgresContainer.getMappedPort(PostgreSQLContainer.POSTGRESQL_PORT), executorService)) {
+            try (SilencingProxy proxy = new SilencingProxy("localhost", primaryPort(), executorService)) {
                 try (HikariDataSource proxiedDataSource = createProxiedDataSource(proxy)) {
                     DistributedCache<Key, Value> cacheA = createCache(CacheBuilder.identity(),
                             dc -> dc.withPersistence(configurer -> configurer
@@ -11056,18 +11528,18 @@ final class DistributedCaffeineIntegrationTests {
         @DisplayName("Test that the adapter listens through the listener data source while writing through the other")
         @Test
         void test_Synchronizer_listens_through_a_separate_listener_data_source() {
-            try (HikariDataSource listenerDataSource = createDataSource(postgresContainer.getDatabaseName())) {
+            try (HikariDataSource listenerPool = createDataSource(DATABASE_NAME)) {
                 DistributedCache<Key, Value> cacheA = createCache(
                         CacheBuilder.identity(), DistributedCaffeine::build);
                 DistributedCache<Key, Value> cacheB = createCache(
-                        PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, getDatasetName())
-                                .withListenerDataSource(listenerDataSource)
+                        newAdapterBuilder(getDatasetName())
+                                .withListenerDataSource(listenerPool)
                                 .build(),
                         CacheBuilder.identity(), DistributedCaffeine::build);
                 try {
                     // the listening connection is the one cacheB holds from its listener data source, and it is
                     // all it takes from there - reading and writing go through the data source of the test
-                    assertThat(listenerDataSource.getHikariPoolMXBean().getActiveConnections()).isEqualTo(1);
+                    assertThat(listenerPool.getHikariPoolMXBean().getActiveConnections()).isEqualTo(1);
 
                     cacheA.put(Key.of(1), Value.of(1));
 
@@ -11081,7 +11553,7 @@ final class DistributedCaffeineIntegrationTests {
                             .atMost(WAITING_DURATION)
                             .untilAsserted(() -> assertThat(cacheA.getIfPresent(Key.of(2))).isEqualTo(Value.of(2)));
 
-                    assertThat(listenerDataSource.getHikariPoolMXBean().getActiveConnections()).isEqualTo(1);
+                    assertThat(listenerPool.getHikariPoolMXBean().getActiveConnections()).isEqualTo(1);
                 } finally {
                     // torn down here rather than after the test, because the listener data source is closed on the
                     // way out of this method
@@ -11089,6 +11561,99 @@ final class DistributedCaffeineIntegrationTests {
                     cacheB.invalidateAll();
                     distributedCacheInstances.remove(cacheB);
                 }
+            }
+        }
+
+        @DisplayName("Test that starting synchronization fails when listening through a pooler in transaction mode")
+        @Test
+        @EnabledOnTopology(SINGLE_SERVER_BEHIND_TRANSACTION_POOLER)
+        void test_Synchronizer_refuses_listening_through_a_pooler_in_transaction_mode() {
+            // What the other tests of this topology are spared by listening directly: by default an adapter listens
+            // through the data source it writes through, here the pooler, which accepts the subscription on a server
+            // session it lends to somebody else as soon as the statement is over
+            Adapter<Key, Value> adapter = PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, getDatasetName()).build();
+            // the probe shortened before activation, see the test with the listener on another database
+            Synchronizer<?, ?> synchronizer = readFieldValue(adapter, AbstractAdapter.class,
+                    "synchronizer", Synchronizer.class);
+            writeFieldValue(synchronizer, synchronizer.getClass(), "probeTimeout", Duration.ofSeconds(1));
+
+            assertThatThrownBy(() -> createCache(adapter, CacheBuilder.identity(), DistributedCaffeine::build))
+                    .isInstanceOf(IllegalStateException.class)
+                    .rootCause()
+                    .hasMessageStartingWith("A notification sent through the data source did not reach the "
+                            + "listening connection")
+                    .hasMessageContaining("withListenerDataSource");
+        }
+
+        @DisplayName("Test that starting synchronization fails when reading and writing through a pooler in statement mode")
+        @Test
+        @EnabledOnTopology(SINGLE_SERVER_BEHIND_TRANSACTION_POOLER)
+        void test_Synchronizer_refuses_a_pooler_in_statement_mode() {
+            // The pooler lending the test's database one statement at a time, which refuses the transaction every
+            // write is - the real refusal the test below imitates. Listening is direct, so that it is the writing
+            // that is in question
+            try (HikariDataSource statementPooled = new HikariDataSource(createHikariConfig(
+                    postgresPooler.getMappedPort(POOLER_PORT), STATEMENT_POOLED_DATABASE_NAME))) {
+                Adapter<Key, Value> adapter = PostgresAdapter.newBuilder(statementPooled, SCHEMA_NAME, getDatasetName())
+                        .withListenerDataSource(listenerDataSource)
+                        .build();
+                // maintenance starts ahead of listening, and its first run is refused the same way - once, because
+                // a start that fails stops what it started - and the pool reports the connections the pooler closed
+                try (CapturedReports reports = new CapturedReports(Map.of(
+                        DistributedCaffeine.class.getName(), List.of("Maintenance failed"),
+                        "com.zaxxer.hikari.pool.ProxyConnection", List.of("marked as broken")))) {
+                    assertThatThrownBy(() -> createCache(adapter, CacheBuilder.identity(), DistributedCaffeine::build))
+                            .isInstanceOf(IllegalStateException.class)
+                            .satisfies(thrown -> assertThat(Stream.iterate(thrown, Objects::nonNull,
+                                    Throwable::getCause).map(Throwable::getMessage))
+                                    .anyMatch(message -> nonNull(message) && message.startsWith(
+                                            "Sending a notification in a transaction through the data source failed")))
+                            .rootCause()
+                            .hasMessageContaining("transaction blocks not allowed in statement pooling mode");
+                    reports.assertExplained();
+                }
+            }
+        }
+
+        @DisplayName("Test that starting synchronization fails when the data source does not allow transactions")
+        @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_refuses_a_data_source_without_transactions() {
+            // A pooler in statement mode hands out a server session for one statement at a time, and refuses a
+            // transaction spanning several - which is what every write is, the record and its notification committed
+            // together. Imitated by refusing the commit as PgBouncer does, without needing a pooler to show it
+            InvocationHandler refusingCommits = (proxy, method, arguments) -> {
+                throw new SQLException("transaction blocks not allowed in statement pooling mode", "08P01");
+            };
+            DataSource statementPooled = (DataSource) Proxy.newProxyInstance(DataSource.class.getClassLoader(),
+                    new Class<?>[]{DataSource.class}, (dataSourceProxy, dataSourceMethod, dataSourceArguments) -> {
+                        Object result = invokeUnwrapped(dataSourceMethod, dataSource, dataSourceArguments);
+                        if (!(result instanceof Connection connection)) {
+                            return result;
+                        }
+                        return Proxy.newProxyInstance(Connection.class.getClassLoader(),
+                                new Class<?>[]{Connection.class}, (connectionProxy, method, arguments) ->
+                                        method.getName().equals("commit")
+                                                ? refusingCommits.invoke(connectionProxy, method, arguments)
+                                                : invokeUnwrapped(method, connection, arguments));
+                    });
+            Adapter<Key, Value> adapter = PostgresAdapter.newBuilder(statementPooled, SCHEMA_NAME, getDatasetName())
+                    .withListenerDataSource(dataSource)
+                    .build();
+
+            // maintenance starts ahead of listening, and its first run is refused the same way - once, because a
+            // start that fails stops what it started
+            try (CapturedReports reports = new CapturedReports(Map.of(DistributedCaffeine.class.getName(),
+                    List.of("Maintenance failed")))) {
+                assertThatThrownBy(() -> createCache(adapter, CacheBuilder.identity(), DistributedCaffeine::build))
+                        .isInstanceOf(IllegalStateException.class)
+                        .satisfies(thrown -> assertThat(Stream.iterate(thrown, Objects::nonNull, Throwable::getCause)
+                                .map(Throwable::getMessage))
+                                .anyMatch(message -> nonNull(message) && message.startsWith(
+                                        "Sending a notification in a transaction through the data source failed")))
+                        .rootCause()
+                        .hasMessage("transaction blocks not allowed in statement pooling mode");
+                reports.assertExplained();
             }
         }
 
@@ -11105,9 +11670,9 @@ final class DistributedCaffeineIntegrationTests {
                  Statement statement = connection.createStatement()) {
                 statement.execute("CREATE DATABASE " + otherDatabase);
             }
-            try (HikariDataSource listenerDataSource = createDataSource(otherDatabase)) {
-                Adapter<Key, Value> adapter = PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, getDatasetName())
-                        .withListenerDataSource(listenerDataSource)
+            try (HikariDataSource listenerPool = createDataSource(otherDatabase)) {
+                Adapter<Key, Value> adapter = newAdapterBuilder(getDatasetName())
+                        .withListenerDataSource(listenerPool)
                         .build();
                 // the probe shortened before activation, so that giving up takes a second rather than the
                 // production timeout - what is under test is that it gives up, not how long it waits first
@@ -11123,7 +11688,7 @@ final class DistributedCaffeineIntegrationTests {
                         .hasMessageContaining("withListenerDataSource");
 
                 // and the listening connection it gave up on went back to the pool rather than being kept
-                assertThat(listenerDataSource.getHikariPoolMXBean().getActiveConnections()).isZero();
+                assertThat(listenerPool.getHikariPoolMXBean().getActiveConnections()).isZero();
             } finally {
                 try (Connection connection = dataSource.getConnection();
                      Statement statement = connection.createStatement()) {
@@ -11157,26 +11722,25 @@ final class DistributedCaffeineIntegrationTests {
             // still bounded, and still ending in the counter that makes it unique
             String otherTableName = "b_" + tableName.substring(2);
             // only the session is taken from this pool - reading and writing go through the shared data source
-            try (HikariDataSource listenerDataSource = createDataSource(postgresContainer.getDatabaseName())) {
+            try (HikariDataSource listenerPool = createDataSource(DATABASE_NAME)) {
                 List<DistributedCache<Key, Value>> listening = new ArrayList<>();
                 List<List<String>> scopes = List.of(List.of(tableName, "a"), List.of(tableName, "b"),
                         List.of(otherTableName, "a"));
                 try {
                     for (List<String> scope : scopes) {
-                        listening.add(createCache(PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, scope.get(0))
+                        listening.add(createCache(newAdapterBuilder(scope.get(0))
                                         .withDiscriminator(scope.get(1))
-                                        .withListenerDataSource(listenerDataSource)
+                                        .withListenerDataSource(listenerPool)
                                         .withListenerSharingMode(ListenerSharingMode.DATABASE)
                                         .build(),
                                 CacheBuilder.identity(), DistributedCaffeine::build));
                     }
                     DistributedCache<Key, Value> last = listening.get(scopes.size() - 1);
-                    DistributedCache<Key, Value> writing = createCache(PostgresAdapter
-                                    .newBuilder(dataSource, SCHEMA_NAME, otherTableName)
+                    DistributedCache<Key, Value> writing = createCache(newAdapterBuilder(otherTableName)
                                     .withDiscriminator("a")
                                     .build(),
                             CacheBuilder.identity(), DistributedCaffeine::build);
-                    assertThat(listenerDataSource.getHikariPoolMXBean().getActiveConnections()).isEqualTo(1);
+                    assertThat(listenerPool.getHikariPoolMXBean().getActiveConnections()).isEqualTo(1);
 
                     // stopping all but one leaves the session held, and still delivering to the one that is left
                     listening.subList(0, scopes.size() - 1)
@@ -11185,21 +11749,21 @@ final class DistributedCaffeineIntegrationTests {
                     await("synchronization over the session its peers left")
                             .atMost(WAITING_DURATION)
                             .untilAsserted(() -> assertThat(last.getIfPresent(Key.of(1))).isEqualTo(Value.of(1)));
-                    assertThat(listenerDataSource.getHikariPoolMXBean().getActiveConnections()).isEqualTo(1);
+                    assertThat(listenerPool.getHikariPoolMXBean().getActiveConnections()).isEqualTo(1);
 
                     // stopping the last one gives up the session and returns its connection to the pool
                     last.distributedPolicy().stopSynchronization();
                     await("shared session released")
                             .atMost(WAITING_DURATION)
-                            .until(() -> listenerDataSource.getHikariPoolMXBean().getActiveConnections() == 0);
+                            .until(() -> listenerPool.getHikariPoolMXBean().getActiveConnections() == 0);
 
                     // and starting again takes a connection anew, which is released again in turn
                     last.distributedPolicy().startSynchronization();
-                    assertThat(listenerDataSource.getHikariPoolMXBean().getActiveConnections()).isEqualTo(1);
+                    assertThat(listenerPool.getHikariPoolMXBean().getActiveConnections()).isEqualTo(1);
                     last.distributedPolicy().stopSynchronization();
                     await("restarted session released")
                             .atMost(WAITING_DURATION)
-                            .until(() -> listenerDataSource.getHikariPoolMXBean().getActiveConnections() == 0);
+                            .until(() -> listenerPool.getHikariPoolMXBean().getActiveConnections() == 0);
                 } finally {
                     // torn down here rather than after the test, because the listener data source is closed on the
                     // way out of this method
@@ -11291,12 +11855,11 @@ final class DistributedCaffeineIntegrationTests {
 
             // The cache instances read and write directly and only listen through the proxy, so that the outage hits
             // the shared listening session alone - which keeps failing to be replaced for as long as it lasts
-            try (SilencingProxy proxy = new SilencingProxy(postgresContainer.getHost(),
-                    postgresContainer.getMappedPort(PostgreSQLContainer.POSTGRESQL_PORT), executorService);
-                 HikariDataSource listenerDataSource = createProxiedDataSource(proxy)) {
+            try (SilencingProxy proxy = new SilencingProxy("localhost", primaryPort(), executorService);
+                 HikariDataSource listenerPool = createProxiedDataSource(proxy)) {
                 DistributedCache<Key, Value> cacheA = createCache(CacheBuilder.identity(), DistributedCaffeine::build);
                 // the session is opened by this cache instance, so the heartbeat is shortened on it
-                Adapter<Key, Value> adapterB1 = listeningAdapter(listenerDataSource);
+                Adapter<Key, Value> adapterB1 = listeningAdapter(listenerPool);
                 Synchronizer<?, ?> synchronizerB1 = readFieldValue(adapterB1, AbstractAdapter.class,
                         "synchronizer", Synchronizer.class);
                 writeFieldValue(synchronizerB1, synchronizerB1.getClass(), "heartbeatInterval", Duration.ofSeconds(1));
@@ -11327,7 +11890,7 @@ final class DistributedCaffeineIntegrationTests {
                             .until(() -> !loggerPostgresListener.getLoggingEvents().isEmpty());
 
                     // a cache instance whose activation timeout runs out first gives up, and says why
-                    Adapter<Key, Value> adapterB3 = listeningAdapter(listenerDataSource);
+                    Adapter<Key, Value> adapterB3 = listeningAdapter(listenerPool);
                     Synchronizer<?, ?> synchronizerB3 = readFieldValue(adapterB3, AbstractAdapter.class,
                             "synchronizer", Synchronizer.class);
                     writeFieldValue(synchronizerB3, synchronizerB3.getClass(), "activationTimeout",
@@ -11340,7 +11903,7 @@ final class DistributedCaffeineIntegrationTests {
                             .isInstanceOf(TimeoutException.class);
 
                     // while one whose timeout lasts waits for the session to come back
-                    Adapter<Key, Value> adapterB2 = listeningAdapter(listenerDataSource);
+                    Adapter<Key, Value> adapterB2 = listeningAdapter(listenerPool);
                     Synchronizer<?, ?> synchronizerB2 = readFieldValue(adapterB2, AbstractAdapter.class,
                             "synchronizer", Synchronizer.class);
                     writeFieldValue(synchronizerB2, synchronizerB2.getClass(), "activationTimeout",
@@ -11540,7 +12103,7 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(payloads).hasSizeGreaterThan(1);
 
             String channel = "distributed_caffeine_payload_bound";
-            try (Connection listener = dataSource.getConnection();
+            try (Connection listener = listenerDataSource.getConnection();
                  Connection writer = dataSource.getConnection()) {
                 // for the same reason the adapter does: a pooled connection may arrive still subscribed
                 execute(listener, "UNLISTEN *");
@@ -11567,6 +12130,177 @@ final class DistributedCaffeineIntegrationTests {
             }
         }
 
+        @DisplayName("Test that a failover from the primary to the standby keeps the cache instances consistent")
+        @Test
+        @EnabledOnTopology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+        @EnabledOnTopology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_rides_out_a_failover_of_the_primary() throws Exception {
+            // What an update of the primary does to it: stopped as gracefully as an update stops it, which sends the
+            // standby everything it wrote, and the standby promoted in its place. The driver does not retry a write
+            // whose connection went away, and no new connection finds a primary until the standby is promoted, so
+            // writes in between fail - whatever became of them, both cache instances have to agree on it. Their
+            // listening connections are replaced on the promoted standby, and what was notified while there was none
+            // is caught up with by the reconcile that follows
+            assertWritingRidesOut(() -> createCache(CacheBuilder.identity(), DistributedCaffeine::build), true,
+                    false, SQLException.class, DISRUPTION_REPORTS, () -> {
+                        dockerClient.stopContainerCmd(postgresServers.get(primaryIndex).getContainerId()).exec();
+                        failOver();
+                    });
+        }
+
+        @DisplayName("Test that a primary dying abruptly leaves the cache instances agreeing with what the standby took over")
+        @Test
+        @EnabledOnTopology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+        @EnabledOnTopology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_rides_out_a_primary_dying_abruptly() throws Exception {
+            // Killed rather than stopped, so that it sends the standby nothing more. Synchronously that loses nothing
+            // a write was confirmed for, because every confirmation waited for the standby; asynchronously a write
+            // confirmed but not yet sent is lost, after the cache instances were notified of it - so there the store
+            // has the last word, and the cache instances have to come round to what it holds
+            assertWritingRidesOut(() -> createCache(CacheBuilder.identity(), DistributedCaffeine::build), true,
+                    topology() == PRIMARY_WITH_ASYNCHRONOUS_STANDBY, SQLException.class, DISRUPTION_REPORTS,
+                    () -> {
+                        dockerClient.killContainerCmd(postgresServers.get(primaryIndex).getContainerId()).exec();
+                        failOver();
+                    });
+        }
+
+        @DisplayName("Test that the standby going down and coming back leaves writing undisturbed")
+        @Test
+        @EnabledOnTopology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+        @EnabledOnTopology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+        void test_Synchronizer_rides_out_a_restart_of_the_standby() throws Exception {
+            // What an update does to the standby. Asynchronously the primary does not wait for it at all;
+            // synchronously every commit waits until it is back, which writing waits out rather than fails on
+            assertWritingRidesOut(() -> createCache(CacheBuilder.identity(), DistributedCaffeine::build), false,
+                    false, SQLException.class, DISRUPTION_REPORTS, () -> {
+                        String standby = postgresServers.get(standbyIndex()).getContainerId();
+                        dockerClient.stopContainerCmd(standby).exec();
+                        sleep(Duration.ofSeconds(1));
+                        dockerClient.startContainerCmd(standby).exec();
+                        awaitReplicating();
+                    });
+        }
+
+        @DisplayName("Test that a write the primary confirmed but the standby never got is undone in the cache instances by the failover")
+        @Test
+        @EnabledOnTopology(PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_Synchronizer_stays_consistent_when_a_failover_loses_a_confirmed_write() throws Exception {
+            // Asynchronous replication confirms a commit before the standby has it, and the notification goes out
+            // with the commit - so the cache instances apply a write that a failover to the standby loses. What the
+            // promoted standby holds is what the store says from then on, and the cache instances must not go on
+            // holding anything else: their listening connections fail along with the primary, and the reconcile
+            // after they are replaced drops what the store does not confirm - which, without persisted cached
+            // entries, leaves the key out rather than restoring what the standby holds
+            // what the failover has the pool, the adapter and the cache instances report, see assertWritingRidesOut
+            try (CapturedReports reports = new CapturedReports(DISRUPTION_REPORTS)) {
+                DistributedCache<Key, Value> cacheA = createCache(CacheBuilder.identity(), DistributedCaffeine::build);
+                DistributedCache<Key, Value> cacheB = createCache(CacheBuilder.identity(), DistributedCaffeine::build);
+                Key key = Key.of(1);
+
+                cacheA.put(key, Value.of(1));
+                await("replication of the first write")
+                        .atMost(WAITING_DURATION)
+                        .ignoreExceptions()
+                        .until(() -> queryServer(standbyIndex(), format("SELECT count(*) FROM \"%s\".\"%s\"",
+                                SCHEMA_NAME, getDatasetName()), Long.class) == 1);
+                await("synchronization of the first write")
+                        .atMost(WAITING_DURATION)
+                        .untilAsserted(() -> assertThat(cacheB.getIfPresent(key)).isEqualTo(Value.of(1)));
+
+                cutReplication();
+                cacheA.put(key, Value.of(2));
+                await("synchronization of the write the standby never gets")
+                        .atMost(WAITING_DURATION)
+                        .untilAsserted(() -> assertThat(cacheB.getIfPresent(key)).isEqualTo(Value.of(2)));
+
+                dockerClient.killContainerCmd(postgresServers.get(primaryIndex).getContainerId()).exec();
+                failOver();
+
+                await("the lost write undone")
+                        .atMost(EXTENDED_WAITING_DURATION)
+                        .untilAsserted(() -> {
+                            assertThat(cacheA.getIfPresent(key)).isIn(null, Value.of(1));
+                            assertThat(cacheB.getIfPresent(key)).isEqualTo(cacheA.getIfPresent(key));
+                        });
+                reports.assertExplained();
+            }
+        }
+
+        @DisplayName("Test that writing while the synchronous standby is gone fails rather than waits, given a time limit")
+        @Test
+        @EnabledOnTopology(PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+        void test_Synchronizer_fails_writes_while_the_synchronous_standby_is_unavailable() {
+            // Every commit waits for the standby to confirm it, so with the standby gone writing waits for as long as
+            // it is gone. Bounded by a socket timeout of the data source, writing fails instead, and failing three
+            // times in a row has the cache instance report being degraded. The first of these writes was committed
+            // by the primary nonetheless and only waits to be confirmed, holding on to its row until it is - so the
+            // ones after it wait for that row, and once their connections are gone they are rolled back rather than
+            // committed. Once the standby is back the first one is confirmed and notified, and both cache instances
+            // hold it - the one whose write it was included, although its later writes failed as well
+            HikariConfig hikariConfig = createHikariConfig(DATABASE_NAME);
+            hikariConfig.addDataSourceProperty("socketTimeout", "3");
+            // what the timed out writes have the pool report, see assertWritingRidesOut
+            try (HikariDataSource timedDataSource = new HikariDataSource(hikariConfig);
+                 CapturedReports reports = new CapturedReports(DISRUPTION_REPORTS)) {
+                List<DistributedCache<Key, Value>> created = new ArrayList<>();
+                try {
+                    for (int index = 0; index < 2; index++) {
+                        created.add(createCache(PostgresAdapter
+                                        .newBuilder(timedDataSource, SCHEMA_NAME, getDatasetName())
+                                        .build(),
+                                CacheBuilder.identity(), DistributedCaffeine::build));
+                    }
+                    DistributedCache<Key, Value> cacheA = created.get(0);
+                    DistributedCache<Key, Value> cacheB = created.get(1);
+                    cacheA.put(Key.of(1), Value.of(1));
+                    await("synchronization before the standby goes")
+                            .atMost(WAITING_DURATION)
+                            .untilAsserted(() -> assertThat(cacheB.getIfPresent(Key.of(1))).isEqualTo(Value.of(1)));
+
+                    String standby = postgresServers.get(standbyIndex()).getContainerId();
+                    dockerClient.stopContainerCmd(standby).exec();
+                    try {
+                        for (int attempt = 2; attempt <= 4; attempt++) {
+                            Value value = Value.of(attempt);
+                            assertThatThrownBy(() -> cacheA.put(Key.of(1), value))
+                                    .satisfies(thrown -> assertThat(Stream.iterate(thrown, Objects::nonNull,
+                                            Throwable::getCause)).anyMatch(SQLException.class::isInstance));
+                        }
+                        assertThat(cacheA.distributedPolicy().getSynchronizationState())
+                                .isEqualTo(SynchronizationState.DEGRADED);
+                    } finally {
+                        dockerClient.startContainerCmd(standby).exec();
+                        awaitReplicating();
+                    }
+
+                    await("writing again")
+                            .atMost(EXTENDED_WAITING_DURATION)
+                            .ignoreExceptions()
+                            .until(() -> {
+                                cacheA.put(Key.of(2), Value.of(2));
+                                return true;
+                            });
+                    await("convergence on what the failed writes left in the store")
+                            .atMost(EXTENDED_WAITING_DURATION)
+                            .untilAsserted(() -> {
+                                assertThat(cacheA.getIfPresent(Key.of(1))).isEqualTo(Value.of(2));
+                                assertThat(cacheB.getIfPresent(Key.of(1))).isEqualTo(Value.of(2));
+                            });
+                    reports.assertExplained();
+                } finally {
+                    // torn down here rather than after the test, because their data source is closed on the way out
+                    created.forEach(cache -> {
+                        cache.distributedPolicy().stopSynchronization();
+                        distributedCacheInstances.remove(cache);
+                    });
+                }
+            }
+        }
+
         // Statements against this test's own table that are reading in a transaction, counted from another
         // connection
         private long countReadingInTransaction() throws SQLException {
@@ -11588,20 +12322,20 @@ final class DistributedCaffeineIntegrationTests {
             String tableName = getDatasetName();
             // still bounded, and still ending in the counter that makes it unique
             String otherTableName = "b_" + tableName.substring(2);
-            try (HikariDataSource listenerDataSource = createDataSource(postgresContainer.getDatabaseName())) {
+            try (HikariDataSource listenerPool = createDataSource(DATABASE_NAME)) {
                 List<DistributedCache<Key, Value>> listening = new ArrayList<>();
                 List<DistributedCache<Key, Value>> writing = new ArrayList<>();
                 List<List<String>> scopes = List.of(List.of(tableName, "a"), List.of(tableName, "b"),
                         List.of(otherTableName, "a"));
                 try {
                     for (List<String> scope : scopes) {
-                        listening.add(createCache(PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, scope.get(0))
+                        listening.add(createCache(newAdapterBuilder(scope.get(0))
                                         .withDiscriminator(scope.get(1))
-                                        .withListenerDataSource(listenerDataSource)
+                                        .withListenerDataSource(listenerPool)
                                         .withListenerSharingMode(sharing)
                                         .build(),
                                 CacheBuilder.identity(), DistributedCaffeine::build));
-                        writing.add(createCache(PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, scope.get(0))
+                        writing.add(createCache(newAdapterBuilder(scope.get(0))
                                         .withDiscriminator(scope.get(1))
                                         .build(),
                                 CacheBuilder.identity(), DistributedCaffeine::build));
@@ -11609,7 +12343,7 @@ final class DistributedCaffeineIntegrationTests {
 
                     // a session is held from the moment its first cache instance is activated, and only sessions are
                     // taken from this pool - reading and writing go through the shared data source
-                    assertThat(listenerDataSource.getHikariPoolMXBean().getActiveConnections())
+                    assertThat(listenerPool.getHikariPoolMXBean().getActiveConnections())
                             .isEqualTo(expectedSessions);
 
                     for (int index = 0; index < scopes.size(); index++) {
@@ -11636,12 +12370,12 @@ final class DistributedCaffeineIntegrationTests {
                 // and a session is given up once its last cache instance stops
                 await("sessions given up")
                         .atMost(WAITING_DURATION)
-                        .until(() -> listenerDataSource.getHikariPoolMXBean().getActiveConnections() == 0);
+                        .until(() -> listenerPool.getHikariPoolMXBean().getActiveConnections() == 0);
             }
         }
 
         private Adapter<Key, Value> listeningAdapter(DataSource listenerDataSource) {
-            return PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, getDatasetName())
+            return newAdapterBuilder(getDatasetName())
                     .withListenerDataSource(listenerDataSource)
                     .build();
         }
@@ -11777,7 +12511,7 @@ final class DistributedCaffeineIntegrationTests {
         }
 
         private void publish(String discriminator, Serializer<Value, ?> valueSerializer) throws Exception {
-            PostgresAdapter<Key, Value> adapter = PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, getDatasetName())
+            PostgresAdapter<Key, Value> adapter = newAdapterBuilder(getDatasetName())
                     .withDiscriminator(discriminator)
                     .build();
             adapter.setKeySerializer(new JavaObjectSerializer<>());
@@ -11888,8 +12622,7 @@ final class DistributedCaffeineIntegrationTests {
         }
 
         HikariDataSource createProxiedDataSource(SilencingProxy proxy) {
-            HikariConfig hikariConfig = createHikariConfig("localhost", proxy.getPort(),
-                    postgresContainer.getDatabaseName());
+            HikariConfig hikariConfig = createHikariConfig(proxy.getPort(), DATABASE_NAME);
             hikariConfig.setMinimumIdle(5);
             // the pooled connections go silent along with the listening one, and are told apart from live ones by
             // validating them on the way out of the pool - quickly, so that doing so is not the test
@@ -11903,51 +12636,299 @@ final class DistributedCaffeineIntegrationTests {
             return proxiedDataSource;
         }
 
-        // a pool of its own on the test's server, for a test that needs a data source next to the shared one
+        // a pool of its own on the test's servers, for a test that needs a data source next to the shared one
         HikariDataSource createDataSource(String databaseName) {
-            return new HikariDataSource(createHikariConfig(postgresContainer.getHost(),
-                    postgresContainer.getMappedPort(PostgreSQLContainer.POSTGRESQL_PORT), databaseName));
+            return new HikariDataSource(createHikariConfig(databaseName));
         }
 
-        // a small pool on the test's server, reached at the given address - directly or through a proxy
-        private HikariConfig createHikariConfig(String host, int port, String databaseName) {
+        // a small pool on whichever of the test's servers is primary
+        HikariConfig createHikariConfig(String databaseName) {
+            HikariConfig hikariConfig = createHikariConfig(primaryPort(), databaseName);
+            hikariConfig.setJdbcUrl(jdbcUrl(databaseName));
+            return hikariConfig;
+        }
+
+        // a small pool on one server, reached on this host at the given port - directly or through a proxy
+        private HikariConfig createHikariConfig(int port, String databaseName) {
             HikariConfig hikariConfig = new HikariConfig();
-            hikariConfig.setJdbcUrl(format("jdbc:postgresql://%s:%d/%s", host, port, databaseName));
-            hikariConfig.setUsername(postgresContainer.getUsername());
-            hikariConfig.setPassword(postgresContainer.getPassword());
+            hikariConfig.setJdbcUrl(format("jdbc:postgresql://localhost:%d/%s", port, databaseName));
+            hikariConfig.setUsername(USERNAME);
+            hikariConfig.setPassword(PASSWORD);
             hikariConfig.setMaximumPoolSize(5);
             return hikariConfig;
         }
 
+        // every server of the topology, so that the driver connects to whichever of them is primary
+        String jdbcUrl(String databaseName) {
+            return format("jdbc:postgresql://%s/%s?targetServerType=primary", postgresPorts.stream()
+                    .map(port -> "localhost:" + port)
+                    .collect(joining(",")), databaseName);
+        }
+
+        // where the primary is reached directly
+        int primaryPort() {
+            return postgresPorts.get(primaryIndex);
+        }
+
+        // the server that is not primary, of a topology with a standby
+        int standbyIndex() {
+            return 1 - primaryIndex;
+        }
+
         @Override
         void startStore(DockerImageName dockerImageName, String displayName) {
-            this.postgresContainer = new PostgreSQLContainer(dockerImageName)
-                    .withCreateContainerCmdModifier(cmd -> cmd.withName(displayName));
-            this.postgresContainer.start();
-            HikariConfig hikariConfig = new HikariConfig();
-            hikariConfig.setJdbcUrl(postgresContainer.getJdbcUrl());
-            hikariConfig.setUsername(postgresContainer.getUsername());
-            hikariConfig.setPassword(postgresContainer.getPassword());
+            this.postgresImage = dockerImageName;
+            this.postgresDisplayName = displayName;
+            this.postgresNetwork = Network.newNetwork();
+            int servers = topology() == SINGLE_SERVER || topology() == SINGLE_SERVER_BEHIND_TRANSACTION_POOLER
+                    ? 1
+                    : 2;
+            this.postgresPorts = freePorts(servers);
+            this.postgresServers = new ArrayList<>();
+            this.primaryIndex = 0;
+            postgresServers.add(startServer(0, null));
+            if (topology() == PRIMARY_WITH_SYNCHRONOUS_STANDBY) {
+                // Waiting for any standby, which there is one of. Set only now rather than at startup, because the
+                // image initializes the database on a server started with the same settings, which would wait for a
+                // standby there cannot be yet - and set before the standby is copied, so that the copy carries it
+                // along and a standby promoted waits for a standby of its own in turn
+                runFailable(() -> {
+                    executeOnServer(0, "ALTER SYSTEM SET synchronous_standby_names = '*'");
+                    executeOnServer(0, "SELECT pg_reload_conf()");
+                });
+            }
+            if (servers > 1) {
+                postgresServers.add(startServer(1, 0));
+                awaitReplicating();
+            }
+            HikariConfig hikariConfig = createHikariConfig(DATABASE_NAME);
             // every cache instance holds one of these for as long as it listens, so the pool has to carry the
             // caches of a test as well as the connections their operations borrow
             hikariConfig.setMaximumPoolSize(30);
-            this.dataSource = new HikariDataSource(hikariConfig);
+            if (topology() == SINGLE_SERVER_BEHIND_TRANSACTION_POOLER) {
+                startPooler();
+                hikariConfig.setJdbcUrl(format("jdbc:postgresql://localhost:%d/%s",
+                        postgresPooler.getMappedPort(POOLER_PORT), DATABASE_NAME));
+                this.dataSource = new HikariDataSource(hikariConfig);
+                // listening holds a session of its own for as long as it listens, so this pool carries listening
+                // alone - few sessions, since cache instances of the same data source share one
+                HikariConfig listenerConfig = createHikariConfig(DATABASE_NAME);
+                listenerConfig.setMaximumPoolSize(10);
+                this.listenerDataSource = new HikariDataSource(listenerConfig);
+            } else {
+                this.dataSource = new HikariDataSource(hikariConfig);
+                this.listenerDataSource = dataSource;
+            }
+        }
+
+        // PgBouncer in transaction mode in front of the server, which lends a server session for one transaction
+        // at a time - logging in as the image's superuser on behalf of whoever connects, and with a pool of server
+        // sessions small enough for the server to carry it next to the direct connections of a test. The test's
+        // database is lent in statement mode as well, under another name, one statement at a time
+        private void startPooler() {
+            String server = format("host=%s port=%d user=%s password=%s", SERVER_ALIAS + 0,
+                    PostgreSQLContainer.POSTGRESQL_PORT, USERNAME, PASSWORD);
+            // stopped with the store rather than here, like every server
+            // noinspection resource
+            GenericContainer<?> pooler = new GenericContainer<>(DockerImageName.parse(POOLER_IMAGE))
+                    .withNetwork(postgresNetwork)
+                    .withEnv("DATABASES", format("%s = %s dbname=%s pool_mode=statement,* = %s",
+                            STATEMENT_POOLED_DATABASE_NAME, server, DATABASE_NAME, server))
+                    .withEnv("PGBOUNCER_POOL_MODE", "transaction")
+                    .withEnv("PGBOUNCER_MAX_CLIENT_CONN", "1000")
+                    .withEnv("PGBOUNCER_DEFAULT_POOL_SIZE", "20")
+                    .withExposedPorts(POOLER_PORT)
+                    .withCreateContainerCmdModifier(cmd -> cmd.withName(postgresDisplayName + "-pooler"))
+                    .waitingFor(Wait.forLogMessage("(?s).*process up.*", 1));
+            pooler.start();
+            this.postgresPooler = pooler;
         }
 
         @Override
         void stopStore() {
-            ((HikariDataSource) this.dataSource).close();
-            this.postgresContainer.stop();
+            // a pool of its own only behind the pooler, the shared one otherwise
+            if (topology() == SINGLE_SERVER_BEHIND_TRANSACTION_POOLER && nonNull(this.listenerDataSource)) {
+                ((HikariDataSource) this.listenerDataSource).close();
+            }
+            if (nonNull(this.dataSource)) {
+                ((HikariDataSource) this.dataSource).close();
+            }
+            if (nonNull(this.postgresPooler)) {
+                this.postgresPooler.stop();
+            }
+            this.postgresServers.forEach(GenericContainer::stop);
+            this.postgresNetwork.close();
+        }
+
+        // the server of the given index, primary or a standby of the server of the other index
+        private GenericContainer<?> startServer(int index, @Nullable Integer replicatedIndex) {
+            GenericContainer<?> server = postgresServer(SERVER_ALIAS + index, postgresPorts.get(index),
+                    isNull(replicatedIndex) ? null : SERVER_ALIAS + replicatedIndex);
+            server.start();
+            return server;
+        }
+
+        // A standby of the primary next to the servers of the topology, for a test that needs one of its own
+        GenericContainer<?> startStandby(int port) {
+            GenericContainer<?> standby = postgresServer("standby", port, SERVER_ALIAS + primaryIndex);
+            standby.start();
+            return standby;
+        }
+
+        // A server from the image of the test, published on this host on the given port.
+        // As a primary it is ready to be replicated from: the level of what is logged and the senders for it are
+        // the default only from PostgreSQL 10 on, the level called hot_standby before, and replicating has to be
+        // granted, which the image grants only from within the container.
+        // As a standby it is a copy of the given server, taken over the replication protocol after a checkpoint
+        // asked for right away - rather than one spread out over the interval of the server, which after the tests
+        // before has written a lot takes minutes - and replaying what that server goes on writing while answering
+        // reads. The copy carries the configuration of the server along, the access it grants included, so that a
+        // standby promoted is replicated from in turn. Started again, it goes on from the copy it has
+        private GenericContainer<?> postgresServer(String alias, int port, @Nullable String replicatedAlias) {
+            List<String> settings = new ArrayList<>(List.of("fsync=off", "wal_level=hot_standby",
+                    "max_wal_senders=4"));
+            // stopped with the store rather than here, like every other server
+            // noinspection resource
+            GenericContainer<?> server = new GenericContainer<>(postgresImage)
+                    .withNetwork(postgresNetwork)
+                    .withNetworkAliases(alias)
+                    .withCreateContainerCmdModifier(cmd -> cmd
+                            .withName(postgresDisplayName + "-" + alias)
+                            .withExposedPorts(ExposedPort.tcp(PostgreSQLContainer.POSTGRESQL_PORT))
+                            .withHostConfig(requireNonNull(cmd.getHostConfig()).withPortBindings(new PortBinding(
+                                    Ports.Binding.bindPort(port),
+                                    ExposedPort.tcp(PostgreSQLContainer.POSTGRESQL_PORT)))));
+            if (isNull(replicatedAlias)) {
+                return server
+                        .withEnv("POSTGRES_USER", USERNAME)
+                        .withEnv("POSTGRES_PASSWORD", PASSWORD)
+                        .withEnv("POSTGRES_DB", DATABASE_NAME)
+                        .withCommand(Stream.concat(Stream.of("postgres"), settings.stream()
+                                        .flatMap(setting -> Stream.of("-c", setting)))
+                                .toArray(String[]::new))
+                        .withCopyToContainer(Transferable.of(
+                                        "echo 'host replication all all trust' >> \"$PGDATA/pg_hba.conf\""),
+                                "/docker-entrypoint-initdb.d/replication.sh")
+                        // once for the server initializing the database, once for the one started afterwards
+                        .waitingFor(Wait.forLogMessage(".*database system is ready to accept connections.*\\s", 2));
+            }
+            settings.add("hot_standby=on");
+            return server
+                    .withCreateContainerCmdModifier(cmd -> cmd
+                            .withUser("postgres")
+                            .withEntrypoint("bash", "-c", format("[ -d %s ] || pg_basebackup -h %s -U %s -D %s -R "
+                                            + "-c fast -X stream && exec postgres -D %s %s", STANDBY_DIRECTORY,
+                                    replicatedAlias, USERNAME, STANDBY_DIRECTORY, STANDBY_DIRECTORY, settings.stream()
+                                            .map(setting -> format("-c '%s'", setting))
+                                            .collect(joining(" ")))))
+                    // spelled with a hyphen from PostgreSQL 14 on
+                    .waitingFor(Wait.forLogMessage("(?is).*ready to accept read.only connections.*", 1));
+        }
+
+        // Until the primary streams to a standby - and with a synchronous one until it counts that one as the
+        // standby its commits wait for, which every commit until then waits for anyway
+        private void awaitReplicating() {
+            await("standby replicating")
+                    .atMost(Duration.ofMinutes(2))
+                    .ignoreExceptions()
+                    .until(() -> queryServer(primaryIndex, format(
+                                    "SELECT count(*) FROM pg_stat_replication WHERE state = 'streaming'%s",
+                                    topology() == PRIMARY_WITH_SYNCHRONOUS_STANDBY ? " AND sync_state = 'sync'" : ""),
+                            Long.class) > 0);
+        }
+
+        // The standby taking over from the primary, which the disruption has done away with one way or another,
+        // and the former primary rebuilt as a standby of it - so that the tests after this one find a primary with
+        // a standby again, the other way round. Nothing in PostgreSQL hands the primary back
+        private void failOver() throws Exception {
+            int formerIndex = primaryIndex;
+            int promotedIndex = standbyIndex();
+            executeInServer(promotedIndex, "pg_ctl", "promote", "-D", STANDBY_DIRECTORY);
+            await("standby promoted")
+                    .atMost(EXTENDED_WAITING_DURATION)
+                    .ignoreExceptions()
+                    .until(() -> queryServer(promotedIndex, "SELECT NOT pg_is_in_recovery()", Boolean.class));
+            this.primaryIndex = promotedIndex;
+            postgresServers.get(formerIndex).stop();
+            postgresServers.set(formerIndex, startServer(formerIndex, promotedIndex));
+            awaitReplicating();
+            // The shared pool still holds connections to the former primary, which it only finds out about when a
+            // test borrows one - a later test, reporting what this one did. Evicted here instead, which closes the
+            // idle ones right away and the others once they are returned, without a word
+            ((HikariDataSource) dataSource).getHikariPoolMXBean().softEvictConnections();
+        }
+
+        // a command run in the container of one server, as the owner of its files, which whatever runs the server
+        // is - the image starts it as another user, a standby is started as that one
+        private void executeInServer(int index, String... command) throws Exception {
+            ExecResult result = postgresServers.get(index).execInContainer(ExecConfig.builder()
+                    .user("postgres")
+                    .command(command)
+                    .build());
+            assertThat(result.getExitCode()).describedAs(result.getStderr()).isZero();
+        }
+
+        // a statement run on one server, connected to it directly
+        private void executeOnServer(int index, String sql) throws SQLException {
+            try (Connection connection = DriverManager.getConnection(format("jdbc:postgresql://localhost:%d/%s",
+                    postgresPorts.get(index), DATABASE_NAME), USERNAME, PASSWORD);
+                 Statement statement = connection.createStatement()) {
+                statement.execute(sql);
+            }
+        }
+
+        // a method invoked on behalf of a proxy, failing as the method itself fails rather than as reflection does
+        private static Object invokeUnwrapped(Method method, Object target, Object[] arguments) throws Throwable {
+            try {
+                return method.invoke(target, arguments);
+            } catch (InvocationTargetException e) {
+                throw e.getCause();
+            }
+        }
+
+        // what one server answers, connected to it directly
+        private <T> T queryServer(int index, String sql, Class<T> type) throws SQLException {
+            try (Connection connection = DriverManager.getConnection(format("jdbc:postgresql://localhost:%d/%s",
+                    postgresPorts.get(index), DATABASE_NAME), USERNAME, PASSWORD);
+                 Statement statement = connection.createStatement();
+                 ResultSet resultSet = statement.executeQuery(sql)) {
+                resultSet.next();
+                return resultSet.getObject(1, type);
+            }
+        }
+
+        // The standby kept from replicating the primary any further: no longer granted to, which is edited as the
+        // owner of the file so that the server goes on reading it, and its connection ended
+        private void cutReplication() throws Exception {
+            String hbaFile = queryServer(primaryIndex, "SHOW hba_file", String.class);
+            executeInServer(primaryIndex, "sed", "-i", "/^host replication/d", hbaFile);
+            executeOnServer(primaryIndex, "SELECT pg_reload_conf()");
+            await("replication ended")
+                    .atMost(WAITING_DURATION)
+                    .ignoreExceptions()
+                    .until(() -> {
+                        queryServer(primaryIndex, "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_replication",
+                                Long.class);
+                        return queryServer(primaryIndex, "SELECT count(*) FROM pg_stat_replication", Long.class) == 0;
+                    });
         }
 
         @Override
         <K, V> Adapter<K, V> createAdapter() {
-            return PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, getDatasetName()).build();
+            return newAdapterBuilder(getDatasetName()).build();
+        }
+
+        // an adapter on the shared data source and the given table, listening through what the topology listens
+        // through - set here rather than left to the default, which is the shared data source and cannot be
+        // listened through behind a pooler in transaction mode
+        PostgresAdapter.Builder newAdapterBuilder(String tableName) {
+            return PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, tableName)
+                    .withListenerDataSource(listenerDataSource);
         }
 
         @Override
         <K, V> Adapter<K, V> createAdapter(String discriminator) {
-            return PostgresAdapter.newBuilder(dataSource, SCHEMA_NAME, getDatasetName())
+            return newAdapterBuilder(getDatasetName())
                     .withDiscriminator(discriminator)
                     .build();
         }
@@ -11971,6 +12952,9 @@ final class DistributedCaffeineIntegrationTests {
         static final Duration EXTENDED_POLL_INTERVAL = Duration.ofSeconds(1);
 
         SecureRandom secureRandom;
+        // what stops, kills and starts servers behind the back of Testcontainers - its own client, which it closes
+        // by itself, so not one to close here
+        final DockerClient dockerClient = DockerClientFactory.instance().client();
 
         // What a store brings: a container of its own, whatever a cache instance needs to reach it, and the
         // adapter built on that. Everything else a test does goes through the SPI and reads the same either way,
@@ -12306,6 +13290,31 @@ final class DistributedCaffeineIntegrationTests {
                     : no;
         }
 
+        StoreTopology topology() {
+            return Optional.ofNullable(getClass().getAnnotation(Topology.class))
+                    .map(Topology::value)
+                    .orElseThrow(() -> new IllegalStateException(
+                            format("%s declares no topology", getClass().getSimpleName())));
+        }
+
+        // held open together while they are picked, so that no two of them are the same
+        static List<Integer> freePorts(int count) {
+            return freePorts(count, new ArrayList<>());
+        }
+
+        // each one held open until those picked after it are, which is what picking them one level deeper each does
+        private static List<Integer> freePorts(int count, List<Integer> ports) {
+            if (ports.size() == count) {
+                return List.copyOf(ports);
+            }
+            try (ServerSocket serverSocket = new ServerSocket(0)) {
+                ports.add(serverSocket.getLocalPort());
+                return freePorts(count, ports);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
+
         record DistributedCaffeineConfiguration<K, V>(String displayName, CacheBuilder<K, V> cacheBuilder) {
         }
 
@@ -12406,6 +13415,102 @@ final class DistributedCaffeineIntegrationTests {
             static CountGrouped of(Set<Status> statuses,
                                    Function<AbstractLongAssert<?>, AbstractLongAssert<?>> assertion) {
                 return new CountGrouped(statuses, assertion);
+            }
+        }
+
+        // The shape of the deployment a class runs the tests against, declared by every class next to its image,
+        // because what holds during a failover depends on it
+        enum StoreTopology {
+            // MongoDB: a replica set of a single member
+            SINGLE_NODE_REPLICA_SET,
+            // MongoDB: three data-bearing members
+            THREE_NODE_REPLICA_SET,
+            // MongoDB: a primary, a secondary and an arbiter
+            THREE_NODE_REPLICA_SET_WITH_ARBITER,
+            // MongoDB: a config server, two shards and a router, with the collections of the tests left unsharded
+            SHARDED_CLUSTER,
+            // PostgreSQL: a server of its own
+            SINGLE_SERVER,
+            // PostgreSQL: a primary and a standby it streams to without waiting for it, as replication is by default
+            PRIMARY_WITH_ASYNCHRONOUS_STANDBY,
+            // PostgreSQL: a primary and a standby whose confirmation every commit waits for
+            PRIMARY_WITH_SYNCHRONOUS_STANDBY,
+            // PostgreSQL: a server of its own, read from and written to through PgBouncer in transaction mode, as
+            // managed databases commonly offer it, and listened to directly
+            SINGLE_SERVER_BEHIND_TRANSACTION_POOLER
+        }
+
+        @Target(ElementType.TYPE)
+        @Retention(RetentionPolicy.RUNTIME)
+        @Inherited
+        @interface Topology {
+
+            StoreTopology value();
+        }
+
+        // Enables a test on the given topology only, repeated for every topology it is enabled on - where the class
+        // declares one, that is: a class without a topology is never affected
+        @Target(ElementType.METHOD)
+        @Retention(RetentionPolicy.RUNTIME)
+        @Repeatable(EnabledOnTopologies.class)
+        @ExtendWith(TopologyCondition.class)
+        @interface EnabledOnTopology {
+
+            StoreTopology value();
+        }
+
+        @Target(ElementType.METHOD)
+        @Retention(RetentionPolicy.RUNTIME)
+        @ExtendWith(TopologyCondition.class)
+        @interface EnabledOnTopologies {
+
+            // filled by the compiler when the annotation is repeated and read by reflection, never called directly
+            @SuppressWarnings("UnusedReturnValue")
+            EnabledOnTopology[] value();
+        }
+
+        // and disables it on the given topology, for a test meant for every topology but some
+        @Target(ElementType.METHOD)
+        @Retention(RetentionPolicy.RUNTIME)
+        @Repeatable(DisabledOnTopologies.class)
+        @ExtendWith(TopologyCondition.class)
+        @interface DisabledOnTopology {
+
+            StoreTopology value();
+        }
+
+        @Target(ElementType.METHOD)
+        @Retention(RetentionPolicy.RUNTIME)
+        @ExtendWith(TopologyCondition.class)
+        @interface DisabledOnTopologies {
+
+            // filled by the compiler when the annotation is repeated and read by reflection, never called directly
+            @SuppressWarnings("UnusedReturnValue")
+            DisabledOnTopology[] value();
+        }
+
+        static final class TopologyCondition implements ExecutionCondition {
+
+            @Override
+            public @NonNull ConditionEvaluationResult evaluateExecutionCondition(@NonNull ExtensionContext context) {
+                Optional<StoreTopology> topology = context.getTestClass()
+                        .map(testClass -> testClass.getAnnotation(Topology.class))
+                        .map(Topology::value);
+                Optional<AnnotatedElement> element = context.getElement();
+                if (topology.isEmpty() || element.isEmpty()) {
+                    return ConditionEvaluationResult.enabled("no topology");
+                }
+                Set<StoreTopology> enabledOn = AnnotationSupport
+                        .findRepeatableAnnotations(element.get(), EnabledOnTopology.class).stream()
+                        .map(EnabledOnTopology::value)
+                        .collect(toSet());
+                Set<StoreTopology> disabledOn = AnnotationSupport
+                        .findRepeatableAnnotations(element.get(), DisabledOnTopology.class).stream()
+                        .map(DisabledOnTopology::value)
+                        .collect(toSet());
+                return disabledOn.contains(topology.get()) || !(enabledOn.isEmpty() || enabledOn.contains(topology.get()))
+                        ? ConditionEvaluationResult.disabled("not on " + topology.get())
+                        : ConditionEvaluationResult.enabled("on " + topology.get());
             }
         }
 
