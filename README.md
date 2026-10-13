@@ -64,29 +64,10 @@ parameters refer to the MongoDB client, database name and collection name used f
 persistence. Optionally, a discriminator can be specified (using the `withDiscriminator(...)` method) to distinguish
 between cache entries from different caches that share a collection.
 
-<details>
-<summary>Connection setup</summary>
-
-Synchronization uses MongoDB's change streams, which keep a connection open for watching.
-
-* Watcher sharing: How cache instances (using the same client) share connections for watching is specified using
-  `withWatcherSharingMode(...)`: `DATABASE` for one connection per database (default), `COLLECTION` for one per
-  collection or `INSTANCE` for one per cache instance. With `DATABASE`, a cache instance whose collection is not watched
-  yet takes a moment longer to start, because watching is restarted to include it.
-* Read concern: Change streams do not support every read concern. If the client is configured with one they do not
-  support, such as `local`, starting synchronization fails right away.
-* Broken connections: A watching connection that dies silently, for example during a failover, is detected and
-  replaced automatically. Operations for reading and writing on such a connection fail once TCP keepalive gives up on
-  it, after several minutes by default. If that is too long, `socketTimeoutMS` or `timeoutMS` can be set on the client
-  to fail them sooner.
-  * Failovers: Cache instances stay consistent with the client's defaults. A write may occasionally fail with an
-    exception while the primary changes, because the driver retries it only once. Setting `timeoutMS` on the client
-    above the duration of an election (for example 30 seconds) makes the driver retry until the timeout instead, and
-    also bounds writes that would otherwise wait forever while no majority of data-bearing members is available.
-* Sharded clusters: The collection may live in a sharded cluster, but must not be sharded itself. Building an adapter
-  for a sharded collection fails.
-
-</details>
+The adapter works with any MongoDB client connected to a replica set or a sharded cluster and relies on the client's
+defaults. Starting synchronization fails right away with an explanation if the setup cannot support it, for example a
+sharded collection. Watcher sharing, failovers and sharded clusters are described in the
+[MongoDB adapter details](src/main/java/io/github/oberhoff/distributedcaffeine/adapter/mongodb/README.md).
 
 ```java
 MongoAdapter<Key, Value> adapter = MongoAdapter.newBuilder(mongoClient, databaseName, collectionName)
@@ -104,26 +85,11 @@ to the data source, schema name and table name used for distributed synchronizat
 discriminator can be specified (using the `withDiscriminator(...)` method) to distinguish between cache entries from
 different caches that share a table.
 
-<details>
-<summary>Connection setup</summary>
-
-Synchronization uses PostgreSQL's `LISTEN`/`NOTIFY`, which keeps a connection open for listening.
-
-* Listener sharing: How cache instances (using the same data source) share connections for listening is specified using
-  `withListenerSharingMode(...)`: `DATABASE` for one connection per database (default), `TABLE` for one per table or
-  `INSTANCE` for one per cache instance. A single connection delivers notifications promptly up to the order of a
-  thousand per second, so write-heavy cache instances are better spread over several connections.
-* Connection poolers: Listening needs a session of its own. A pooler in transaction mode lends a connection for a
-  single transaction only, so it cannot be listened on. Such poolers are common in front of managed cloud databases
-  and database clusters, often as their default endpoint. In that case, keep the pooler for reading and writing and
-  specify a direct or session-mode connection for listening using `withListenerDataSource(...)`. If listening does not
-  work, starting synchronization fails right away.
-* Broken connections: A listening connection that dies silently, for example during a failover, is detected and
-  replaced automatically. Operations for reading and writing on such a connection have no time limit by default, so
-  they only fail once the operating system gives up on the connection. If that is too long, `socketTimeout` can be set
-  on the data source to fail them sooner, and `loginTimeout` to do the same for opening new connections.
-
-</details>
+The adapter works with any data source that reaches the primary. Behind a pooler in transaction mode, the default
+endpoint of many managed databases, listening needs a direct or session-mode connection, specified using
+`withListenerDataSource(...)`. Starting synchronization checks both and fails right away with an explanation if either
+is not met. Poolers, replicas, failovers, timeouts and managed databases are described in the
+[PostgreSQL adapter details](src/main/java/io/github/oberhoff/distributedcaffeine/adapter/postgresql/README.md).
 
 ```java
 PostgresAdapter<Key, Value> adapter = PostgresAdapter.newBuilder(dataSource, schemaName, tableName)
