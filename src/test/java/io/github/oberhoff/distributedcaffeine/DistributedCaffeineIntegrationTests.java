@@ -73,7 +73,7 @@ import io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoAdapter;
 import io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoAdapter.WatcherSharingMode;
 import io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresAdapter;
 import io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresAdapter.ListenerSharingMode;
-import io.github.oberhoff.distributedcaffeine.common.DistributedCaffeineCommonTestInstance;
+import io.github.oberhoff.distributedcaffeine.common.CommonTestInstance;
 import io.github.oberhoff.distributedcaffeine.common.Key;
 import io.github.oberhoff.distributedcaffeine.common.Value;
 import io.github.oberhoff.distributedcaffeine.common.logging.CaptureLogger;
@@ -193,17 +193,17 @@ import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer.LoadingStrategy.CACHE_LOADER;
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer.LoadingStrategy.MAPPING_FUNCTION;
-import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.DockerImage;
-import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.RUNS_ON_GITHUB;
-import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.StoreTopology.PRIMARY_WITH_ASYNCHRONOUS_STANDBY;
-import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.StoreTopology.PRIMARY_WITH_SYNCHRONOUS_STANDBY;
-import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.StoreTopology.SHARDED_CLUSTER;
-import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.StoreTopology.SINGLE_NODE_REPLICA_SET;
-import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.StoreTopology.SINGLE_SERVER;
-import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.StoreTopology.SINGLE_SERVER_BEHIND_TRANSACTION_POOLER;
-import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.StoreTopology.THREE_NODE_REPLICA_SET;
-import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.StoreTopology.THREE_NODE_REPLICA_SET_WITH_ARBITER;
-import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.DistributedCaffeineIntegrationTestInstance.Topology;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.IntegrationTestInstance.DockerImage;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.IntegrationTestInstance.RUNS_ON_GITHUB;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.IntegrationTestInstance.StoreTopology.PRIMARY_WITH_ASYNCHRONOUS_STANDBY;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.IntegrationTestInstance.StoreTopology.PRIMARY_WITH_SYNCHRONOUS_STANDBY;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.IntegrationTestInstance.StoreTopology.SHARDED_CLUSTER;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.IntegrationTestInstance.StoreTopology.SINGLE_NODE_REPLICA_SET;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.IntegrationTestInstance.StoreTopology.SINGLE_SERVER;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.IntegrationTestInstance.StoreTopology.SINGLE_SERVER_BEHIND_TRANSACTION_POOLER;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.IntegrationTestInstance.StoreTopology.THREE_NODE_REPLICA_SET;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.IntegrationTestInstance.StoreTopology.THREE_NODE_REPLICA_SET_WITH_ARBITER;
+import static io.github.oberhoff.distributedcaffeine.DistributedCaffeineIntegrationTests.IntegrationTestInstance.Topology;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION_AND_EVICTION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION;
@@ -267,6 +267,7 @@ import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -367,14 +368,6 @@ final class DistributedCaffeineIntegrationTests {
     }
 
     @Nested
-    @DisplayName("MongoDB 5.0.0 (Sharded Cluster with Two Shards)")
-    @DockerImage("mongo:5.0.0")
-    @Topology(SHARDED_CLUSTER)
-    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_5_0_0__Sharded_Cluster_with_Two_Shards extends MongoIntegration {
-    }
-
-    @Nested
     @DisplayName("MongoDB 5.latest (Single-Node Replica Set)")
     @DockerImage("mongo:5")
     @Topology(SINGLE_NODE_REPLICA_SET)
@@ -428,14 +421,6 @@ final class DistributedCaffeineIntegrationTests {
     @Topology(THREE_NODE_REPLICA_SET_WITH_ARBITER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
     final class Mongo_6_0_1__Three_Node_Replica_Set_with_Arbiter extends MongoIntegration {
-    }
-
-    @Nested
-    @DisplayName("MongoDB 6.0.1 (Sharded Cluster with Two Shards)")
-    @DockerImage("mongo:6.0.1")
-    @Topology(SHARDED_CLUSTER)
-    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_6_0_1__Sharded_Cluster_with_Two_Shards extends MongoIntegration {
     }
 
     @Nested
@@ -495,14 +480,6 @@ final class DistributedCaffeineIntegrationTests {
     }
 
     @Nested
-    @DisplayName("MongoDB 7.0.0 (Sharded Cluster with Two Shards)")
-    @DockerImage("mongo:7.0.0")
-    @Topology(SHARDED_CLUSTER)
-    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_7_0_0__Sharded_Cluster_with_Two_Shards extends MongoIntegration {
-    }
-
-    @Nested
     @DisplayName("MongoDB 7.latest (Single-Node Replica Set)")
     @DockerImage("mongo:7")
     @Topology(SINGLE_NODE_REPLICA_SET)
@@ -559,14 +536,6 @@ final class DistributedCaffeineIntegrationTests {
     }
 
     @Nested
-    @DisplayName("MongoDB 8.0.0 (Sharded Cluster with Two Shards)")
-    @DockerImage("mongo:8.0.0")
-    @Topology(SHARDED_CLUSTER)
-    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_8_0_0__Sharded_Cluster_with_Two_Shards extends MongoIntegration {
-    }
-
-    @Nested
     @DisplayName("MongoDB 8.latest (Single-Node Replica Set)")
     @DockerImage("mongo:8")
     @Topology(SINGLE_NODE_REPLICA_SET)
@@ -620,14 +589,6 @@ final class DistributedCaffeineIntegrationTests {
     @Topology(THREE_NODE_REPLICA_SET_WITH_ARBITER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
     final class Mongo_9_0_2__Three_Node_Replica_Set_with_Arbiter extends MongoIntegration {
-    }
-
-    @Nested
-    @DisplayName("MongoDB 9.0.2 (Sharded Cluster with Two Shards)")
-    @DockerImage("mongo:9.0.2")
-    @Topology(SHARDED_CLUSTER)
-    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    final class Mongo_9_0_2__Sharded_Cluster_with_Two_Shards extends MongoIntegration {
     }
 
     @Nested
@@ -1159,7 +1120,7 @@ final class DistributedCaffeineIntegrationTests {
     }
 
     @SuppressWarnings({"java:S5838", "java:S5778", "java:S5961", "ResultOfMethodCallIgnored", "DataFlowIssue"})
-    abstract static class CommonIntegration extends DistributedCaffeineIntegrationTestInstance {
+    abstract static class CommonIntegration extends IntegrationTestInstance {
 
         @DisplayName("Test put() and getIfPresent()")
         @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
@@ -8098,15 +8059,10 @@ final class DistributedCaffeineIntegrationTests {
                                     CountGrouped.of(DISTRIBUTION_ONLY_GROUP, assertion -> assertion.isEqualTo(0)),
                                     CountGrouped.of(EVICTED_RETAINED_GROUP, assertion -> assertion.isEqualTo(retainedMaximumSize))));
 
-            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPLICIT));
-            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.REPLACED));
-            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.SIZE));
-            verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPIRED));
-            verifyNoMoreInteractions(removalListener);
+            assertThatRemovalCausesAreOnly(removalListener, RemovalCause.EXPLICIT, RemovalCause.REPLACED,
+                    RemovalCause.SIZE, RemovalCause.EXPIRED);
 
-            verify(evictionListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.SIZE));
-            verify(evictionListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPIRED));
-            verifyNoMoreInteractions(evictionListener);
+            assertThatRemovalCausesAreOnly(evictionListener, RemovalCause.SIZE, RemovalCause.EXPIRED);
 
             verify(cacheLoader, atLeastOnce()).load(any(Key.class));
             verify(cacheLoader, atLeastOnce()).loadAll(anySet());
@@ -8434,15 +8390,10 @@ final class DistributedCaffeineIntegrationTests {
                                         CountGrouped.of(DISTRIBUTION_ONLY_GROUP, assertion -> assertion.isEqualTo(0)),
                                         CountGrouped.of(EVICTED_RETAINED_GROUP, assertion -> assertion.isEqualTo(0))));
 
-                verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPLICIT));
-                verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.REPLACED));
-                verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.SIZE));
-                verify(removalListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPIRED));
-                verifyNoMoreInteractions(removalListener);
+                assertThatRemovalCausesAreOnly(removalListener, RemovalCause.EXPLICIT, RemovalCause.REPLACED,
+                        RemovalCause.SIZE, RemovalCause.EXPIRED);
 
-                verify(evictionListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.SIZE));
-                verify(evictionListener, atLeastOnce()).onRemoval(nullable(Key.class), nullable(Value.class), eq(RemovalCause.EXPIRED));
-                verifyNoMoreInteractions(evictionListener);
+                assertThatRemovalCausesAreOnly(evictionListener, RemovalCause.SIZE, RemovalCause.EXPIRED);
 
                 verify(cacheLoader, atLeastOnce()).load(any(Key.class));
                 verify(cacheLoader, atLeastOnce()).loadAll(anySet());
@@ -9159,12 +9110,7 @@ final class DistributedCaffeineIntegrationTests {
 
             // and it did not just carry on: restarting reconciled the cache against the data store, which is what
             // makes an entry missed while receiving was down good again
-            assertThat(loggerDistributedCaffeine.getLoggingEvents())
-                    .anySatisfy(loggingEvent -> {
-                        assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
-                        assertThat(loggingEvent.getMessage())
-                                .startsWith("Synchronization was interrupted for cache at");
-                    });
+            awaitReconciliationReported(loggerDistributedCaffeine);
             loggerDistributedCaffeine.stopCapturing();
 
             // reading an inbound cache entry fails and is skipped (without failing the watcher)
@@ -9318,12 +9264,7 @@ final class DistributedCaffeineIntegrationTests {
 
                     // and the invalidation above survived because resuming reconciled the cache against the data
                     // store - the only step that can drop a cache entry whose removal was never delivered
-                    assertThat(loggerDistributedCaffeine.getLoggingEvents())
-                            .anySatisfy(loggingEvent -> {
-                                assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
-                                assertThat(loggingEvent.getMessage())
-                                        .startsWith("Synchronization was interrupted for cache at");
-                            });
+                    awaitReconciliationReported(loggerDistributedCaffeine);
                     loggerDistributedCaffeine.stopCapturing();
                 } finally {
                     // torn down here rather than after the test, because its client is closed on the way out
@@ -9390,12 +9331,7 @@ final class DistributedCaffeineIntegrationTests {
                             });
                     loggerMongoWatcher.stopCapturing();
 
-                    assertThat(loggerDistributedCaffeine.getLoggingEvents())
-                            .anySatisfy(loggingEvent -> {
-                                assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
-                                assertThat(loggingEvent.getMessage())
-                                        .startsWith("Synchronization was interrupted for cache at");
-                            });
+                    awaitReconciliationReported(loggerDistributedCaffeine);
                     loggerDistributedCaffeine.stopCapturing();
                 } finally {
                     // torn down here rather than after the test, because its client is closed on the way out
@@ -9978,11 +9914,7 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(cacheB.getIfPresent(key)).isEqualTo(Value.of(key.getId()))));
 
             // and it got there by reconciling, rather than by applying everything that piled up
-            assertThat(loggerDistributedCaffeine.getLoggingEvents())
-                    .anySatisfy(loggingEvent -> {
-                        assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
-                        assertThat(loggingEvent.getMessage()).startsWith("Synchronization was interrupted for cache at");
-                    });
+            awaitReconciliationReported(loggerDistributedCaffeine);
             loggerDistributedCaffeine.stopCapturing();
         }
 
@@ -11339,12 +11271,7 @@ final class DistributedCaffeineIntegrationTests {
             loggerPostgresSynchronizer.stopCapturing();
 
             // and what brought the value back is the reconcile that restarting performs, which says so itself
-            assertThat(loggerDistributedCaffeine.getLoggingEvents())
-                    .anySatisfy(loggingEvent -> {
-                        assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
-                        assertThat(loggingEvent.getMessage())
-                                .startsWith("Synchronization was interrupted for cache at");
-                    });
+            awaitReconciliationReported(loggerDistributedCaffeine);
             loggerDistributedCaffeine.stopCapturing();
 
             failing.set(false);
@@ -11421,12 +11348,7 @@ final class DistributedCaffeineIntegrationTests {
                                 });
                         loggerPostgresSynchronizer.stopCapturing();
 
-                        assertThat(loggerDistributedCaffeine.getLoggingEvents())
-                                .anySatisfy(loggingEvent -> {
-                                    assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
-                                    assertThat(loggingEvent.getMessage())
-                                            .startsWith("Synchronization was interrupted for cache at");
-                                });
+                        awaitReconciliationReported(loggerDistributedCaffeine);
                         loggerDistributedCaffeine.stopCapturing();
                     } finally {
                         // torn down here rather than after the test, because the data source it uses is closed
@@ -11507,12 +11429,7 @@ final class DistributedCaffeineIntegrationTests {
                                 });
                         loggerPostgresSynchronizer.stopCapturing();
 
-                        assertThat(loggerDistributedCaffeine.getLoggingEvents())
-                                .anySatisfy(loggingEvent -> {
-                                    assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
-                                    assertThat(loggingEvent.getMessage())
-                                            .startsWith("Synchronization was interrupted for cache at");
-                                });
+                        awaitReconciliationReported(loggerDistributedCaffeine);
                         loggerDistributedCaffeine.stopCapturing();
                     } finally {
                         cacheB.distributedPolicy().stopSynchronization();
@@ -12079,11 +11996,7 @@ final class DistributedCaffeineIntegrationTests {
                             assertThat(cacheB.getIfPresent(key)).isEqualTo(Value.of(key.getId()))));
 
             // and it got there by reconciling, rather than by reading back everything that piled up
-            assertThat(loggerDistributedCaffeine.getLoggingEvents())
-                    .anySatisfy(loggingEvent -> {
-                        assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
-                        assertThat(loggingEvent.getMessage()).startsWith("Synchronization was interrupted for cache at");
-                    });
+            awaitReconciliationReported(loggerDistributedCaffeine);
             loggerDistributedCaffeine.stopCapturing();
         }
 
@@ -12943,7 +12856,7 @@ final class DistributedCaffeineIntegrationTests {
 
     }
 
-    abstract static class DistributedCaffeineIntegrationTestInstance extends DistributedCaffeineCommonTestInstance {
+    abstract static class IntegrationTestInstance extends CommonTestInstance {
 
         static final String RUNS_ON_GITHUB = "runsOnGitHub";
         static final String LOGGER_RESOURCE_LOCK = "logger";
@@ -13120,6 +13033,28 @@ final class DistributedCaffeineIntegrationTests {
 
         void cleanUp() {
             distributedCacheInstances.forEach(DistributedCache::cleanUp);
+        }
+
+        // Instead of verifying each cause and then that nothing else came: Caffeine notifies its listeners on the
+        // executor, so a notification can still arrive after the cache instances converged and after its cause was
+        // verified - which leaves it unverified although nothing about it is unexpected
+        static void assertThatRemovalCausesAreOnly(RemovalListener<Key, Value> listener, RemovalCause... causes) {
+            assertThat(mockingDetails(listener).getInvocations())
+                    .extracting(invocation -> invocation.getArgument(2, RemovalCause.class))
+                    .containsOnly(causes);
+        }
+
+        // Awaited rather than asserted: reconciling reports itself once it is done, which is after what it restores
+        // is already in the cache - so whoever has just seen that may still be ahead of the report
+        static void awaitReconciliationReported(CaptureLogger logger) {
+            await("reconciliation reported")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(logger.getLoggingEvents())
+                            .anySatisfy(loggingEvent -> {
+                                assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                                assertThat(loggingEvent.getMessage())
+                                        .startsWith("Synchronization was interrupted for cache at");
+                            }));
         }
 
         void assertThatDataStoreIsEmpty() {

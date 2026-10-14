@@ -49,7 +49,7 @@ import static org.mockito.Mockito.spy;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(MethodOrderer.MethodName.class)
-public abstract class DistributedCaffeineCommonTestInstance {
+public abstract class CommonTestInstance {
 
     protected AtomicInteger testCounter;
     protected TestInfo testInfo;

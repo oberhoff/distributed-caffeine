@@ -59,7 +59,7 @@ import io.github.oberhoff.distributedcaffeine.adapter.Repository.Order;
 import io.github.oberhoff.distributedcaffeine.adapter.SerializerAware;
 import io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoAdapter;
 import io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresAdapter;
-import io.github.oberhoff.distributedcaffeine.common.DistributedCaffeineCommonTestInstance;
+import io.github.oberhoff.distributedcaffeine.common.CommonTestInstance;
 import io.github.oberhoff.distributedcaffeine.common.Key;
 import io.github.oberhoff.distributedcaffeine.common.Value;
 import io.github.oberhoff.distributedcaffeine.hasher.Hasher;
@@ -170,7 +170,7 @@ final class DistributedCaffeineUnitTests {
     @Nested
     @DisplayName("Test Caffeine")
     @SuppressWarnings("java:S5838")
-    final class CaffeineUnit extends DistributedCaffeineUnitTestInstance {
+    final class CaffeineUnit extends UnitTestInstance {
 
         @DisplayName("that every key is either still held or was reported as removed, under the full operation mix")
         @Test
@@ -437,7 +437,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test Policy")
-    final class PolicyUnit extends DistributedCaffeineUnitTestInstance {
+    final class PolicyUnit extends UnitTestInstance {
 
         private static final Key RESIDENT = Key.of(1);
         private static final Key ABSENT = Key.of(99);
@@ -550,7 +550,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test SerializerAware")
-    final class SerializerAwareUnit extends DistributedCaffeineUnitTestInstance {
+    final class SerializerAwareUnit extends UnitTestInstance {
 
         @DisplayName("that nothing is serialized or deserialized for a null, either way")
         @Test
@@ -608,7 +608,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test Weigher")
-    final class WeigherUnit extends DistributedCaffeineUnitTestInstance {
+    final class WeigherUnit extends UnitTestInstance {
 
         // A weigher is not handed to Caffeine through its builder: the library reaches into the private field by
         // reflection and replaces the application's weigher with a wrapper, because Caffeine weighs InternalKey
@@ -694,7 +694,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test Scheduler")
-    final class SchedulerUnit extends DistributedCaffeineUnitTestInstance {
+    final class SchedulerUnit extends UnitTestInstance {
 
         private static final Duration EXPIRY = Duration.ofMillis(200);
         // comfortably under the maintenance interval of one minute, so the library's own cleanUp cannot be what
@@ -768,7 +768,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test Expiry")
-    final class ExpiryUnit extends DistributedCaffeineUnitTestInstance {
+    final class ExpiryUnit extends UnitTestInstance {
 
         // Three durations far enough apart to tell which callback produced the one in force
         private static final long AFTER_CREATE_SECONDS = 600;
@@ -842,7 +842,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test builder and configurers")
-    final class BuilderUnit extends DistributedCaffeineUnitTestInstance {
+    final class BuilderUnit extends UnitTestInstance {
 
         @DisplayName("that arguments and states are checked")
         @Test
@@ -1229,7 +1229,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test Hasher")
-    final class HasherUnit extends DistributedCaffeineUnitTestInstance {
+    final class HasherUnit extends UnitTestInstance {
 
         // Each case names a put method and performs the SAME call twice: once on the Hasher, once on the stream
         // it is supposed to delegate to. The duplication is the test - a put wired to the wrong underlying method
@@ -1411,7 +1411,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test CacheEntry and CacheEntryMetadata")
-    final class CacheEntryUnit extends DistributedCaffeineUnitTestInstance {
+    final class CacheEntryUnit extends UnitTestInstance {
 
         // the same instant twice, once with a nanosecond an underlying store cannot be expected to keep
         private static final Instant TIMESTAMP = Instant.ofEpochMilli(1_700_000_000_000L);
@@ -1526,7 +1526,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test MongoAdapter")
-    final class MongoAdapterUnit extends DistributedCaffeineUnitTestInstance {
+    final class MongoAdapterUnit extends UnitTestInstance {
 
         @DisplayName("that a discriminator is checked where it is configured")
         @Test
@@ -1552,7 +1552,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test MongoRepository")
-    final class MongoRepositoryUnit extends DistributedCaffeineUnitTestInstance {
+    final class MongoRepositoryUnit extends UnitTestInstance {
 
         private static final String DATABASE_NAME = "database";
         private static final String COLLECTION_NAME = "collection";
@@ -1715,7 +1715,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test MongoWatcher")
-    final class MongoWatcherUnit extends DistributedCaffeineUnitTestInstance {
+    final class MongoWatcherUnit extends UnitTestInstance {
 
         private static final String DATABASE_NAME = "database";
         private static final String COLLECTION_NAME = "collection";
@@ -1797,7 +1797,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test PostgresAdapter")
-    final class PostgresAdapterUnit extends DistributedCaffeineUnitTestInstance {
+    final class PostgresAdapterUnit extends UnitTestInstance {
 
         @DisplayName("that a schema and a table name are taken as they are, and only an empty one is refused")
         @Test
@@ -1856,7 +1856,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test PostgresChannel")
-    final class PostgresChannelUnit extends DistributedCaffeineUnitTestInstance {
+    final class PostgresChannelUnit extends UnitTestInstance {
 
         // package-private in another package, so it is reached reflectively (via the inherited invokeMethod
         // helper) - which is what keeps a test of what are pure functions out of the integration suite and away
@@ -1939,7 +1939,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test PostgresIdentifier")
-    final class PostgresIdentifierUnit extends DistributedCaffeineUnitTestInstance {
+    final class PostgresIdentifierUnit extends UnitTestInstance {
 
         private static final Class<?> IDENTIFIER =
                 classOf("io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresIdentifier");
@@ -1977,7 +1977,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test PostgresRepository")
-    final class PostgresRepositoryUnit extends DistributedCaffeineUnitTestInstance {
+    final class PostgresRepositoryUnit extends UnitTestInstance {
 
         // package-private in another package, and so is the enum naming the columns, so both are reached by name
         private static final Class<?> REPOSITORY =
@@ -2079,7 +2079,7 @@ final class DistributedCaffeineUnitTests {
     @Nested
     @DisplayName("Test PostgresListener")
     @SuppressWarnings("SqlNoDataSourceInspection")
-    final class PostgresListenerUnit extends DistributedCaffeineUnitTestInstance {
+    final class PostgresListenerUnit extends UnitTestInstance {
 
         private static final String CHANNEL = "distributed_caffeine_test";
         private static final String SESSION_CHANNEL_PREFIX = "distributed_caffeine_session_";
@@ -2240,7 +2240,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test Aware getters")
-    final class AwareUnit extends DistributedCaffeineUnitTestInstance {
+    final class AwareUnit extends UnitTestInstance {
 
         @DisplayName("that what an adapter was given is what it, and the parts it is made of, answer with")
         @Test
@@ -2277,7 +2277,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test asynchronous publishing")
-    final class AsynchronousPublishingUnit extends DistributedCaffeineUnitTestInstance {
+    final class AsynchronousPublishingUnit extends UnitTestInstance {
 
         // What is published asynchronously - evictions and what refreshing after a write comes to - is written by a
         // single drain rather than by a task of its own each: in the order handed over, one write at a time, without
@@ -2336,7 +2336,7 @@ final class DistributedCaffeineUnitTests {
 
     @Nested
     @DisplayName("Test Echo")
-    final class EchoUnit extends DistributedCaffeineUnitTestInstance {
+    final class EchoUnit extends UnitTestInstance {
 
         // A write may fail although the store took it - a connection lost while the commit is under way - and then
         // its echo is the only way the cache instance that wrote it learns of it. A later write of the same key that
@@ -2385,7 +2385,7 @@ final class DistributedCaffeineUnitTests {
     @Nested
     @DisplayName("Test StoreGuard")
     @SuppressWarnings("java:S5778")
-    final class StoreGuardUnit extends DistributedCaffeineUnitTestInstance {
+    final class StoreGuardUnit extends UnitTestInstance {
 
         private static final String IDENTIFIER = "store:scope:default";
         // what the guard is built with, restated here so that a change to either is a failing test rather than a
@@ -2504,6 +2504,6 @@ final class DistributedCaffeineUnitTests {
         }
     }
 
-    abstract static class DistributedCaffeineUnitTestInstance extends DistributedCaffeineCommonTestInstance {
+    abstract static class UnitTestInstance extends CommonTestInstance {
     }
 }
