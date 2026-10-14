@@ -73,12 +73,12 @@ final class MongoSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
     // at which point they are dropped and the cache instance is reconciled instead, so that falling behind costs a
     // reconcile rather than memory without bound. A field rather than a constant only so that a test can lower it
     // before activation instead of producing ten thousand writes
-    @SuppressWarnings({"FieldMayBeFinal", "CanBeFinal", "FieldCanBeLocal"})
+    @SuppressWarnings({"FieldMayBeFinal", "CanBeFinal"})
     private int pendingLimit = 10_000;
     // How long a single operation of watching may take - polls included - before its connection is considered dead
     // and replaced: far above what a poll takes, which is the time the server waits for something to arrive. Taken
     // over by the watcher only from the cache instance that creates it. A field for the same reason as the one above
-    @SuppressWarnings({"FieldMayBeFinal", "CanBeFinal", "FieldCanBeLocal"})
+    @SuppressWarnings({"FieldMayBeFinal", "CanBeFinal"})
     private Duration watcherTimeout = Duration.ofSeconds(10);
     // How long activating waits for watching to take this cache instance in - which, while a shared cursor is being
     // replaced, includes waiting for it to come back. The client's own timeout if it has one, MongoDB's default of 30

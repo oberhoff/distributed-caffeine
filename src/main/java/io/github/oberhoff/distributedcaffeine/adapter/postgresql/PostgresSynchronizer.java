@@ -91,7 +91,7 @@ final class PostgresSynchronizer<K, V> extends AbstractSynchronizer<K, V> {
     private int pendingLimit = 10_000;
     // How long activating waits for the listening session to take this cache instance in - which, while a shared
     // session is being replaced, includes waiting for it to come back. A field for the same reason as the ones above
-    @SuppressWarnings({"FieldMayBeFinal", "CanBeFinal", "FieldCanBeLocal"})
+    @SuppressWarnings({"FieldMayBeFinal", "CanBeFinal"})
     private Duration activationTimeout = Duration.ofSeconds(30);
 
     private final AtomicReference<@Nullable Subscription> subscription = new AtomicReference<>();
