@@ -185,6 +185,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiPredicate;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
@@ -2046,6 +2047,678 @@ final class DistributedCaffeineIntegrationTests {
             ConcurrentMap<?, ?> refreshOperations = readFieldValue(distributedLoadingCache,
                     InternalDistributedLoadingCache.class, "refreshOperations", ConcurrentMap.class);
             assertThat(refreshOperations).isEmpty();
+        }
+
+        // a loader and mapping functions that block until released, so the entry can be changed while loading
+        static final class GatedLoader implements CacheLoader<Key, Value> {
+            final AtomicReference<CountDownLatch> loadStarted = new AtomicReference<>(new CountDownLatch(0));
+            final AtomicReference<CountDownLatch> releaseLoad = new AtomicReference<>(new CountDownLatch(0));
+            final AtomicInteger loads = new AtomicInteger();
+            final AtomicReference<Set<Key>> extraKeys = new AtomicReference<>(Set.of());
+
+            void gate() {
+                loadStarted.set(new CountDownLatch(1));
+                releaseLoad.set(new CountDownLatch(1));
+            }
+
+            void awaitLoadStarted() throws InterruptedException {
+                assertThat(loadStarted.get().await(WAITING_DURATION.toMillis(), TimeUnit.MILLISECONDS)).isTrue();
+            }
+
+            void release() {
+                releaseLoad.get().countDown();
+            }
+
+            void pass() {
+                loads.incrementAndGet();
+                loadStarted.get().countDown();
+                try {
+                    assertThat(releaseLoad.get().await(EXTENDED_WAITING_DURATION.toMillis(), TimeUnit.MILLISECONDS))
+                            .isTrue();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new CompletionException(e);
+                }
+            }
+
+            @Override
+            public Value load(Key key) {
+                pass();
+                return Value.of(key.getId(), "loaded");
+            }
+
+            @Override
+            public Map<Key, Value> loadAll(Set<? extends Key> keys) {
+                pass();
+                Map<Key, Value> loaded = new HashMap<>();
+                keys.forEach(key -> loaded.put(key, Value.of(key.getId(), "loaded")));
+                extraKeys.get().forEach(key -> loaded.put(key, Value.of(key.getId(), "extra")));
+                return loaded;
+            }
+
+            Value map(Key key) {
+                return load(key);
+            }
+
+            Map<Key, Value> mapAll(Set<? extends Key> keys) {
+                return loadAll(keys);
+            }
+        }
+
+        @DisplayName("Test get() discards and getAll() overwrites like Caffeine if the entry changes while loading")
+        @Test
+        void test_DistributedLoadingCache_get_discards_load_if_entry_changes_meanwhile() throws Exception {
+            Key key1 = Key.of(1);
+            GatedLoader gatedLoader = new GatedLoader();
+            DistributedLoadingCache<Key, Value> distributedLoadingCache =
+                    (DistributedLoadingCache<Key, Value>) this.<Key, Value>createCache(
+                            CacheBuilder.identity(),
+                            dc -> dc.build(gatedLoader));
+
+            // the four ways into a load, each handing back what it returned for the key, and whether it is a bulk load
+            Map<String, Function<LoadingCache<Key, Value>, @Nullable Value>> loads = new java.util.LinkedHashMap<>();
+            loads.put("get(key)", cache -> cache.get(key1));
+            loads.put("getAll(keys)", cache -> cache.getAll(Set.of(key1)).get(key1));
+            loads.put("get(key, mappingFunction)", cache -> cache.get(key1, gatedLoader::map));
+            loads.put("getAll(keys, mappingFunction)", cache -> cache.getAll(Set.of(key1), gatedLoader::mapAll).get(key1));
+
+            // what is cached afterwards: a single-key load ends up where Caffeine ends up, whose change waits for the
+            // load and then replaces or removes it, and a bulk load replaces what was written meanwhile, just like
+            // Caffeine's bulk load does
+            record Scenario(String name, Consumer<LoadingCache<Key, Value>> changeMeanwhile,
+                            @Nullable Value expectedValue, @Nullable Value expectedBulkValue) {
+            }
+
+            Value loadedValue1 = Value.of(1, "loaded");
+            Value putValue1 = Value.of(1, "put");
+            List<Scenario> scenarios = List.of(
+                    // the control: nothing in between, so what was loaded is cached
+                    new Scenario("untouched", cache -> {
+                    }, loadedValue1, loadedValue1),
+                    new Scenario("put", cache -> cache.put(key1, putValue1), putValue1, loadedValue1),
+                    // an invalidation of the key, which was not cached when the load started
+                    new Scenario("invalidate", cache -> cache.invalidate(key1), null, loadedValue1),
+                    new Scenario("invalidateAll()", Cache::invalidateAll, null, loadedValue1));
+
+            for (Map.Entry<String, Function<LoadingCache<Key, Value>, @Nullable Value>> load : loads.entrySet()) {
+                for (Scenario scenario : scenarios) {
+                    String description = format("%s, %s", load.getKey(), scenario.name());
+                    distributedLoadingCache.invalidateAll();
+                    gatedLoader.gate();
+
+                    CompletableFuture<@Nullable Value> loading = CompletableFuture.supplyAsync(() ->
+                            load.getValue().apply(distributedLoadingCache));
+                    gatedLoader.awaitLoadStarted();
+                    // made from another thread, since Caffeine's single-key load blocks such changes until it is
+                    // done - which this cache instance no longer needs to, see the test below
+                    assertThat(CompletableFuture.runAsync(() ->
+                            scenario.changeMeanwhile().accept(distributedLoadingCache)))
+                            .as(description)
+                            .succeedsWithin(WAITING_DURATION);
+                    gatedLoader.release();
+
+                    // the load hands back what it loaded either way, just like Caffeine
+                    assertThat(loading).as(description).succeedsWithin(WAITING_DURATION).isEqualTo(loadedValue1);
+                    // held for a while rather than checked once: the store marking the previous scenario's cache
+                    // entry invalidated (invalidating all at the start of this one) is delivered without an
+                    // operation, so where it arrives after the write above it removes that write until its own
+                    // echo puts it back
+                    await(description)
+                            .atMost(WAITING_DURATION.multipliedBy(2))
+                            .during(Duration.ofMillis(500))
+                            .untilAsserted(() -> assertThat(distributedLoadingCache.getIfPresent(key1))
+                                    .isEqualTo(load.getKey().startsWith("getAll")
+                                            ? scenario.expectedBulkValue()
+                                            : scenario.expectedValue()));
+                }
+            }
+        }
+
+        @DisplayName("Test get() and getAll() share and repeat loads like Caffeine")
+        @Test
+        void test_DistributedLoadingCache_get_shares_loads_like_caffeine() throws Exception {
+            Key key1 = Key.of(1);
+            Key key2 = Key.of(2);
+            GatedLoader gatedLoader = new GatedLoader();
+            DistributedLoadingCache<Key, Value> distributedLoadingCache =
+                    (DistributedLoadingCache<Key, Value>) this.<Key, Value>createCache(
+                            CacheBuilder.identity(),
+                            dc -> dc.build(gatedLoader));
+
+            // concurrent misses of a key wait for the one load
+            gatedLoader.gate();
+            CompletableFuture<Value> first = CompletableFuture.supplyAsync(() -> distributedLoadingCache.get(key1));
+            gatedLoader.awaitLoadStarted();
+            CompletableFuture<Value> second = CompletableFuture.supplyAsync(() -> distributedLoadingCache.get(key1));
+            CompletableFuture<Value> third = CompletableFuture.supplyAsync(() -> distributedLoadingCache.get(key1));
+            // while a load is in flight, the rest of the cache does not wait for it - which is the point of
+            // loading outside the synchronization lock: before, this write waited for the whole load
+            assertThat(CompletableFuture.runAsync(() -> distributedLoadingCache.put(key2, Value.of(2))))
+                    .succeedsWithin(WAITING_DURATION);
+            gatedLoader.release();
+            assertThat(List.of(first, second, third)).allSatisfy(future ->
+                    assertThat(future).succeedsWithin(WAITING_DURATION).isEqualTo(Value.of(1, "loaded")));
+            assertThat(gatedLoader.loads).hasValue(1);
+
+            // a load that fails leaves the ones waiting for it to load themselves, just like the ones Caffeine
+            // blocks in computeIfAbsent, which run their own computation once the failed one is gone
+            distributedLoadingCache.invalidateAll();
+            gatedLoader.loads.set(0);
+            AtomicInteger failures = new AtomicInteger(1);
+            Function<Key, Value> failingOnce = key -> {
+                gatedLoader.pass();
+                if (failures.getAndDecrement() > 0) {
+                    throw new IllegalStateException("unchecked");
+                }
+                return Value.of(key.getId(), "mapped");
+            };
+            gatedLoader.gate();
+            CompletableFuture<Value> failing = CompletableFuture.supplyAsync(() ->
+                    distributedLoadingCache.get(key1, failingOnce));
+            gatedLoader.awaitLoadStarted();
+            CompletableFuture<Value> waiting = CompletableFuture.supplyAsync(() ->
+                    distributedLoadingCache.get(key1, failingOnce));
+            gatedLoader.release();
+            assertThat(failing).failsWithin(WAITING_DURATION)
+                    .withThrowableThat().havingCause().isExactlyInstanceOf(IllegalStateException.class);
+            assertThat(waiting).succeedsWithin(WAITING_DURATION).isEqualTo(Value.of(1, "mapped"));
+            assertThat(gatedLoader.loads).hasValue(2);
+
+            // a load of a key that asks for the very same key would wait for itself forever
+            distributedLoadingCache.invalidateAll();
+            assertThatThrownBy(() -> distributedLoadingCache.get(key2, key -> distributedLoadingCache.get(key2)))
+                    .isExactlyInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Recursive load");
+
+            // and nothing is left behind by any of it
+            ConcurrentMap<?, ?> loadOperations = readFieldValue(distributedLoadingCache, InternalDistributedCache.class,
+                    "loadOperations", ConcurrentMap.class);
+            ConcurrentMap<?, ?> inFlight = readFieldValue(getInstanceRegistry(distributedLoadingCache).getCacheManager(),
+                    InternalCacheManager.class, "inFlight", ConcurrentMap.class);
+            assertThat(loadOperations).isEmpty();
+            assertThat(inFlight).isEmpty();
+        }
+
+        @DisplayName("Test get() resolves loads waiting for each other across threads instead of hanging")
+        @Test
+        void test_DistributedCache_get_resolves_a_cycle_of_loads_across_threads() {
+            Key key1 = Key.of(1);
+            Key key2 = Key.of(2);
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+
+            // each load asks for the other key once both loads are under way - which the synchronization lock used to
+            // rule out by letting a single thread load at a time
+            CountDownLatch bothLoading = new CountDownLatch(2);
+            Function<Key, Value> askingForTheOther = key -> {
+                bothLoading.countDown();
+                try {
+                    assertThat(bothLoading.await(WAITING_DURATION.toMillis(), TimeUnit.MILLISECONDS)).isTrue();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new CompletionException(e);
+                }
+                Key otherKey = key.equals(key1) ? key2 : key1;
+                return Value.of(distributedCache.get(otherKey, other -> Value.of(other.getId(), "inner")).getId(),
+                        "outer");
+            };
+            CompletableFuture<Value> loading1 = CompletableFuture.supplyAsync(() ->
+                    distributedCache.get(key1, askingForTheOther));
+            CompletableFuture<Value> loading2 = CompletableFuture.supplyAsync(() ->
+                    distributedCache.get(key2, askingForTheOther));
+
+            // whichever waits second would close the cycle, so it loads the other key by itself instead of waiting,
+            // and both finish - just like when the synchronization lock let a single thread load at a time
+            // (which of the two waits and which loads by itself decides what each one gets back from the other key)
+            assertThat(List.of(loading1, loading2)).allSatisfy(loading ->
+                    assertThat(loading).succeedsWithin(WAITING_DURATION.multipliedBy(2))
+                            .satisfies(value -> assertThat(value.getName()).isEqualTo("outer")));
+            assertThat(distributedCache.getIfPresent(key1)).isNotNull();
+            assertThat(distributedCache.getIfPresent(key2)).isNotNull();
+        }
+
+        @DisplayName("Test that a load or refresh overtaken by a write reaches the removal listener like with Caffeine")
+        @Test
+        void test_DistributedLoadingCache_reports_discarded_loads_like_caffeine() throws Exception {
+            Key key1 = Key.of(1);
+            GatedLoader gatedLoader = new GatedLoader();
+            List<String> distributedRemovals = new java.util.concurrent.CopyOnWriteArrayList<>();
+            List<String> caffeineRemovals = new java.util.concurrent.CopyOnWriteArrayList<>();
+            DistributedLoadingCache<Key, Value> distributedLoadingCache =
+                    (DistributedLoadingCache<Key, Value>) this.<Key, Value>createCache(
+                            dc -> dc.withCaffeine(Caffeine.newBuilder()
+                                    .removalListener((Key key, Value value, RemovalCause cause) ->
+                                            distributedRemovals.add(format("%s %s", value, cause)))),
+                            dc -> dc.build(gatedLoader));
+            LoadingCache<Key, Value> caffeineLoadingCache = Caffeine.newBuilder()
+                    .removalListener((Key key, Value value, RemovalCause cause) ->
+                            caffeineRemovals.add(format("%s %s", value, cause)))
+                    .build(gatedLoader);
+
+            // blocking: whether Caffeine makes the change wait for the load - its single-key load does, its refresh
+            // does not
+            record Scenario(String name, @Nullable Value initialValue, Function<LoadingCache<Key, Value>, Object> load,
+                            Consumer<LoadingCache<Key, Value>> changeMeanwhile, boolean blocking) {
+            }
+
+            Value value1 = Value.of(1);
+            Value putValue1 = Value.of(1, "put");
+            List<Scenario> scenarios = List.of(
+                    new Scenario("get, put", null, cache -> cache.get(key1), cache -> cache.put(key1, putValue1),
+                            true),
+                    new Scenario("get, invalidate", null, cache -> cache.get(key1), cache -> cache.invalidate(key1),
+                            true),
+                    new Scenario("refresh, put", value1, cache -> cache.refresh(key1).join(),
+                            cache -> cache.put(key1, putValue1), false),
+                    new Scenario("refresh, invalidate", value1, cache -> cache.refresh(key1).join(),
+                            cache -> cache.invalidate(key1), false),
+                    new Scenario("refresh, untouched", value1, cache -> cache.refresh(key1).join(), cache -> {
+                    }, false),
+                    // a bulk load replaces what was written meanwhile, which is reported for what it replaced
+                    new Scenario("getAll, put", null, cache -> cache.getAll(Set.of(key1)),
+                            cache -> cache.put(key1, putValue1), false),
+                    new Scenario("getAll, invalidate", null, cache -> cache.getAll(Set.of(key1)),
+                            cache -> cache.invalidate(key1), false));
+
+            for (Scenario scenario : scenarios) {
+                Map<LoadingCache<Key, Value>, List<String>> removals = Map.of(
+                        distributedLoadingCache, distributedRemovals, caffeineLoadingCache, caffeineRemovals);
+                for (Map.Entry<LoadingCache<Key, Value>, List<String>> entry : removals.entrySet()) {
+                    LoadingCache<Key, Value> loadingCache = entry.getKey();
+                    loadingCache.invalidateAll();
+                    if (nonNull(scenario.initialValue())) {
+                        loadingCache.put(key1, scenario.initialValue());
+                    }
+                    // what the reset itself removed is reported asynchronously, and is no part of the comparison
+                    await("reset reported")
+                            .atMost(WAITING_DURATION)
+                            .during(Duration.ofMillis(200))
+                            .until(() -> true);
+                    entry.getValue().clear();
+
+                    gatedLoader.gate();
+                    CompletableFuture<Object> loading = CompletableFuture.supplyAsync(() ->
+                            scenario.load().apply(loadingCache));
+                    gatedLoader.awaitLoadStarted();
+                    // from another thread, since Caffeine's single-key load blocks it until it is done
+                    CompletableFuture<Void> change = CompletableFuture.runAsync(() ->
+                            scenario.changeMeanwhile().accept(loadingCache));
+                    // done before the load is released, so that it is the change overtaking the load and not the other way
+                    // round - except where Caffeine makes it wait for the load, which fixes that order on its own. This
+                    // cache instance never does
+                    if (loadingCache instanceof DistributedLoadingCache || !scenario.blocking()) {
+                        assertThat(change).as(scenario.name()).succeedsWithin(WAITING_DURATION);
+                    }
+                    gatedLoader.release();
+                    assertThat(loading).as(scenario.name()).succeedsWithin(WAITING_DURATION);
+                    assertThat(change).as(scenario.name()).succeedsWithin(WAITING_DURATION);
+                }
+                await(scenario.name())
+                        .atMost(WAITING_DURATION)
+                        .during(Duration.ofMillis(500))
+                        .untilAsserted(() -> assertThat(distributedRemovals)
+                                .as(scenario.name())
+                                .containsExactlyInAnyOrderElementsOf(caffeineRemovals));
+            }
+        }
+
+        @DisplayName("Test get() counts hits and misses of loads shared between threads like Caffeine")
+        @Test
+        void test_DistributedLoadingCache_get_counts_shared_loads_like_caffeine() throws Exception {
+            Key key1 = Key.of(1);
+            GatedLoader gatedLoader = new GatedLoader();
+            DistributedLoadingCache<Key, Value> distributedLoadingCache =
+                    (DistributedLoadingCache<Key, Value>) this.<Key, Value>createCache(
+                            dc -> dc.withCaffeine(Caffeine.newBuilder()
+                                    .recordStats()),
+                            dc -> dc.build(gatedLoader));
+            LoadingCache<Key, Value> caffeineLoadingCache = Caffeine.newBuilder()
+                    .recordStats()
+                    .build(gatedLoader);
+
+            for (LoadingCache<Key, Value> loadingCache : List.of(distributedLoadingCache, caffeineLoadingCache)) {
+                gatedLoader.gate();
+                CompletableFuture<Value> loading = CompletableFuture.supplyAsync(() -> loadingCache.get(key1));
+                gatedLoader.awaitLoadStarted();
+                // waiting for the load in flight, or finding its value if they come too late for that - a hit
+                // either way
+                CompletableFuture<Value> waiting1 = CompletableFuture.supplyAsync(() -> loadingCache.get(key1));
+                CompletableFuture<Value> waiting2 = CompletableFuture.supplyAsync(() -> loadingCache.get(key1));
+                gatedLoader.release();
+                assertThat(List.of(loading, waiting1, waiting2)).allSatisfy(future ->
+                        assertThat(future).succeedsWithin(WAITING_DURATION).isEqualTo(Value.of(1, "loaded")));
+                // and a plain hit afterwards
+                assertThat(loadingCache.get(key1)).isEqualTo(Value.of(1, "loaded"));
+            }
+
+            CacheStats distributedStats = distributedLoadingCache.stats();
+            CacheStats caffeineStats = caffeineLoadingCache.stats();
+            assertThat(distributedStats.missCount()).isEqualTo(caffeineStats.missCount()).isEqualTo(1);
+            assertThat(distributedStats.hitCount()).isEqualTo(caffeineStats.hitCount()).isEqualTo(3);
+            assertThat(distributedStats.loadSuccessCount()).isEqualTo(caffeineStats.loadSuccessCount()).isEqualTo(1);
+            assertThat(distributedStats.loadFailureCount()).isEqualTo(caffeineStats.loadFailureCount()).isZero();
+        }
+
+        @DisplayName("Test get() does not cache a load that started before synchronization was restarted")
+        @Test
+        void test_DistributedLoadingCache_get_discards_load_spanning_a_restart() throws Exception {
+            Key key1 = Key.of(1);
+            GatedLoader gatedLoader = new GatedLoader();
+            DistributedLoadingCache<Key, Value> distributedLoadingCache =
+                    (DistributedLoadingCache<Key, Value>) this.<Key, Value>createCache(
+                            CacheBuilder.identity(),
+                            dc -> dc.build(gatedLoader));
+
+            gatedLoader.gate();
+            CompletableFuture<Value> loading = CompletableFuture.supplyAsync(() -> distributedLoadingCache.get(key1));
+            gatedLoader.awaitLoadStarted();
+            // what the load rests on was read before synchronizing settles the content anew
+            distributedLoadingCache.distributedPolicy().stopSynchronization();
+            distributedLoadingCache.distributedPolicy().startSynchronization();
+            gatedLoader.release();
+
+            assertThat(loading).succeedsWithin(WAITING_DURATION).isEqualTo(Value.of(1, "loaded"));
+            assertThat(distributedLoadingCache.getIfPresent(key1)).isNull();
+            // while a load starting afterwards is cached as usual
+            assertThat(distributedLoadingCache.get(key1)).isEqualTo(Value.of(1, "loaded"));
+            assertThat(distributedLoadingCache.getIfPresent(key1)).isEqualTo(Value.of(1, "loaded"));
+        }
+
+        @DisplayName("Test getAll() caches and distributes the keys a bulk load returns beyond the ones asked for like Caffeine")
+        @Test
+        void test_DistributedLoadingCache_getAll_caches_extra_keys_like_caffeine() throws Exception {
+            Key key1 = Key.of(1);
+            Key extraKey = Key.of(2);
+            Key sentinelKey = Key.of(4);
+            GatedLoader gatedLoader = new GatedLoader();
+            gatedLoader.extraKeys.set(Set.of(extraKey));
+            DistributedLoadingCache<Key, Value> distributedLoadingCache =
+                    (DistributedLoadingCache<Key, Value>) this.<Key, Value>createCache(
+                            CacheBuilder.identity(),
+                            dc -> dc.build(gatedLoader));
+            DistributedCache<Key, Value> peerDistributedCache = createCache(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+
+            record Scenario(String name, Consumer<DistributedCache<Key, Value>> peerWritesMeanwhile) {
+            }
+
+            List<Scenario> scenarios = List.of(
+                    new Scenario("untouched", cache -> {
+                    }),
+                    // what was written meanwhile is replaced, as Caffeine's bulk load replaces it
+                    new Scenario("extra key written", cache -> cache.put(extraKey, Value.of(2, "peer"))),
+                    new Scenario("extra key invalidated", cache -> cache.invalidate(extraKey)));
+
+            for (Scenario scenario : scenarios) {
+                peerDistributedCache.invalidateAll();
+                await("reset")
+                        .atMost(WAITING_DURATION)
+                        .untilAsserted(() -> assertThat(distributedLoadingCache.estimatedSize()).isZero());
+                gatedLoader.gate();
+                CompletableFuture<Map<Key, Value>> loading = CompletableFuture.supplyAsync(() ->
+                        distributedLoadingCache.getAll(Set.of(key1)));
+                gatedLoader.awaitLoadStarted();
+                scenario.peerWritesMeanwhile().accept(peerDistributedCache);
+                // a write of the sentinel after it, which arrives after whatever was written before it
+                peerDistributedCache.put(sentinelKey, Value.of(4));
+                await(format("%s arrived", scenario.name()))
+                        .atMost(WAITING_DURATION)
+                        .untilAsserted(() -> assertThat(distributedLoadingCache.getIfPresent(sentinelKey))
+                                .isEqualTo(Value.of(4)));
+                gatedLoader.release();
+
+                // only the keys asked for are handed back, while the extra key is cached as well - here and, being
+                // distributed, at the other cache instance too
+                assertThat(loading).succeedsWithin(WAITING_DURATION).isEqualTo(Map.of(key1, Value.of(1, "loaded")));
+                await(scenario.name())
+                        .atMost(WAITING_DURATION)
+                        .untilAsserted(() -> assertThat(List.of(distributedLoadingCache, peerDistributedCache))
+                                .allSatisfy(cache -> {
+                                    assertThat(cache.getIfPresent(key1)).isEqualTo(Value.of(1, "loaded"));
+                                    assertThat(cache.getIfPresent(extraKey)).isEqualTo(Value.of(2, "extra"));
+                                }));
+            }
+        }
+
+        @DisplayName("Test refresh() discards its result if the entry changes while in flight")
+        @Test
+        void test_DistributedLoadingCache_refresh_discards_result_if_entry_changes_in_flight() throws Exception {
+            Key key1 = Key.of(1);
+            AtomicReference<CountDownLatch> reloadStarted = new AtomicReference<>();
+            AtomicReference<CountDownLatch> releaseReload = new AtomicReference<>();
+            AtomicReference<@Nullable Value> reloadResult = new AtomicReference<>();
+
+            // load (refreshing an absent key) and reload both block until released, so the entry can be changed
+            // while the refresh is in flight
+            CacheLoader<Key, Value> cacheLoader = new CacheLoader<>() {
+                @Override
+                public @Nullable Value load(Key key) throws InterruptedException {
+                    reloadStarted.get().countDown();
+                    releaseReload.get().await();
+                    return reloadResult.get();
+                }
+
+                @Override
+                public @NonNull CompletableFuture<? extends Value> asyncReload(@NonNull Key key, @NonNull Value oldValue, @NonNull Executor executor) {
+                    return CompletableFuture.supplyAsync(() -> {
+                        try {
+                            return load(key);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new CompletionException(e);
+                        }
+                    }, executor);
+                }
+            };
+
+            DistributedLoadingCache<Key, Value> distributedLoadingCache =
+                    (DistributedLoadingCache<Key, Value>) this.<Key, Value>createCache(
+                            CacheBuilder.identity(),
+                            dc -> dc.build(cacheLoader));
+            LoadingCache<Key, Value> caffeineLoadingCache = Caffeine.newBuilder()
+                    .build(cacheLoader);
+
+            Set<LoadingCache<Key, Value>> featureParityCaches = Set.of(distributedLoadingCache, caffeineLoadingCache);
+
+            record Scenario(String name, @Nullable Value initialValue, @Nullable Value reloadedValue,
+                            Consumer<LoadingCache<Key, Value>> changeInFlight, @Nullable Value expectedValue) {
+            }
+
+            Value value1 = Value.of(1);
+            Value reloadedValue1 = Value.of(1, "reloaded");
+            Value putValue1 = Value.of(1, "put");
+            List<Scenario> scenarios = List.of(
+                    // the controls: an untouched entry takes the refreshed value (or loses it to a null reload)
+                    new Scenario("untouched", value1, reloadedValue1, cache -> {
+                    }, reloadedValue1),
+                    new Scenario("untouched, absent", null, reloadedValue1, cache -> {
+                    }, reloadedValue1),
+                    new Scenario("untouched, null reload", value1, null, cache -> {
+                    }, null),
+                    // a write while in flight is newer than whatever the reload read, so it has to survive it
+                    new Scenario("put", value1, reloadedValue1, cache ->
+                            cache.put(key1, putValue1), putValue1),
+                    new Scenario("put, null reload", value1, null, cache ->
+                            cache.put(key1, putValue1), putValue1),
+                    new Scenario("put, absent", null, reloadedValue1, cache ->
+                            cache.put(key1, putValue1), putValue1),
+                    // and so does an invalidation, even of a key that was not cached when the refresh started
+                    new Scenario("invalidate", value1, reloadedValue1, cache ->
+                            cache.invalidate(key1), null),
+                    new Scenario("invalidate, absent", null, reloadedValue1, cache ->
+                            cache.invalidate(key1), null),
+                    new Scenario("invalidateAll", value1, reloadedValue1, cache ->
+                            cache.invalidateAll(Set.of(key1)), null),
+                    new Scenario("invalidateAll()", value1, reloadedValue1, Cache::invalidateAll, null));
+
+            for (Scenario scenario : scenarios) {
+                for (LoadingCache<Key, Value> loadingCache : featureParityCaches) {
+                    loadingCache.invalidateAll();
+                    if (nonNull(scenario.initialValue())) {
+                        loadingCache.put(key1, scenario.initialValue());
+                    }
+                    reloadStarted.set(new CountDownLatch(1));
+                    releaseReload.set(new CountDownLatch(1));
+                    reloadResult.set(scenario.reloadedValue());
+
+                    CompletableFuture<Value> refresh = loadingCache.refresh(key1);
+                    reloadStarted.get().await();
+                    scenario.changeInFlight().accept(loadingCache);
+                    releaseReload.get().countDown();
+                    refresh.join();
+
+                    // held for a while rather than checked once, because plain Caffeine applies the refresh in a
+                    // callback of the very future joined above, which may still be running
+                    await(format("%s (%s)", scenario.name(), loadingCache.getClass().getSimpleName()))
+                            .atMost(WAITING_DURATION.multipliedBy(2))
+                            .during(Duration.ofMillis(500))
+                            .untilAsserted(() -> assertThat(loadingCache.getIfPresent(key1))
+                                    .isEqualTo(scenario.expectedValue()));
+                }
+            }
+        }
+
+        @DisplayName("Test refresh() discards its result if another cache instance changes the entry while in flight")
+        @Test
+        void test_DistributedLoadingCache_refresh_discards_result_if_a_peer_changes_entry() throws Exception {
+            Key key1 = Key.of(1);
+            AtomicReference<CountDownLatch> reloadStarted = new AtomicReference<>();
+            AtomicReference<CountDownLatch> releaseReload = new AtomicReference<>();
+
+            // the same gate as above, for the refreshing cache instance only
+            CacheLoader<Key, Value> cacheLoader = new CacheLoader<>() {
+                @Override
+                public Value load(Key key) throws InterruptedException {
+                    reloadStarted.get().countDown();
+                    releaseReload.get().await();
+                    return Value.of(key.getId(), "reloaded");
+                }
+
+                @Override
+                public @NonNull CompletableFuture<? extends Value> asyncReload(@NonNull Key key, @NonNull Value oldValue, @NonNull Executor executor) {
+                    return CompletableFuture.supplyAsync(() -> {
+                        try {
+                            return load(key);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new CompletionException(e);
+                        }
+                    }, executor);
+                }
+            };
+
+            DistributedLoadingCache<Key, Value> distributedLoadingCache =
+                    (DistributedLoadingCache<Key, Value>) this.<Key, Value>createCache(
+                            CacheBuilder.identity(),
+                            dc -> dc.build(cacheLoader));
+            DistributedCache<Key, Value> peerDistributedCache = createCache(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+            ConcurrentMap<?, ?> inFlight = readFieldValue(getInstanceRegistry(distributedLoadingCache).getCacheManager(),
+                    InternalCacheManager.class, "inFlight", ConcurrentMap.class);
+
+            record Scenario(String name, @Nullable Value initialValue, Consumer<Cache<Key, Value>> changeInFlight,
+                            @Nullable Value expectedValue) {
+            }
+
+            Value value1 = Value.of(1);
+            Value putValue1 = Value.of(1, "put");
+            List<Scenario> scenarios = List.of(
+                    new Scenario("put", value1, cache -> cache.put(key1, putValue1), putValue1),
+                    new Scenario("put, absent", null, cache -> cache.put(key1, putValue1), putValue1),
+                    new Scenario("invalidate", value1, cache -> cache.invalidate(key1), null),
+                    // what no comparison of values can tell: the key was not held when the refresh started, so the
+                    // invalidation arriving removes nothing and leaves nothing behind but the refresh's lost token
+                    new Scenario("invalidate, absent", null, cache -> cache.invalidate(key1), null),
+                    new Scenario("invalidateAll(), absent", null, Cache::invalidateAll, null));
+
+            for (Scenario scenario : scenarios) {
+                peerDistributedCache.invalidateAll();
+                await("reset")
+                        .atMost(WAITING_DURATION)
+                        .untilAsserted(() -> assertThat(distributedLoadingCache.getIfPresent(key1)).isNull());
+                if (nonNull(scenario.initialValue())) {
+                    distributedLoadingCache.put(key1, scenario.initialValue());
+                    await("initial value")
+                            .atMost(WAITING_DURATION)
+                            .untilAsserted(() -> assertThat(peerDistributedCache.getIfPresent(key1))
+                                    .isEqualTo(scenario.initialValue()));
+                }
+                reloadStarted.set(new CountDownLatch(1));
+                releaseReload.set(new CountDownLatch(1));
+
+                CompletableFuture<Value> refresh = distributedLoadingCache.refresh(key1);
+                reloadStarted.get().await();
+                assertThat(inFlight).isNotEmpty();
+                scenario.changeInFlight().accept(peerDistributedCache);
+                // released only once the change has arrived, which is when it takes the refresh's token away
+                await(format("%s arrived", scenario.name()))
+                        .atMost(WAITING_DURATION)
+                        .untilAsserted(() -> assertThat(inFlight).isEmpty());
+                releaseReload.get().countDown();
+                refresh.join();
+
+                assertThat(distributedLoadingCache.getIfPresent(key1))
+                        .as(scenario.name())
+                        .isEqualTo(scenario.expectedValue());
+            }
+        }
+
+        @DisplayName("Test refresh() discards its result if the entry expires while in flight, like Caffeine")
+        @Test
+        void test_DistributedLoadingCache_refresh_discards_result_if_entry_expires_meanwhile() throws Exception {
+            Key key1 = Key.of(1);
+            GatedLoader gatedLoader = new GatedLoader();
+            AtomicLong ticker = new AtomicLong();
+            // in a mode not distributing evictions, because otherwise the expiry, which is reported when the refresh
+            // overwrites the expired entry, would come back and remove a wrongly applied refresh after the fact -
+            // hiding whether the refresh discarded it
+            CacheBuilder<Key, Value> cacheBuilder = dc -> dc.withDistributionMode(POPULATION_AND_INVALIDATION)
+                    .withCaffeine(Caffeine.newBuilder()
+                            .ticker(ticker::get)
+                            .expireAfterWrite(Duration.ofMinutes(1)));
+            DistributedLoadingCache<Key, Value> distributedLoadingCache =
+                    (DistributedLoadingCache<Key, Value>) this.<Key, Value>createCache(
+                            cacheBuilder,
+                            dc -> dc.build(gatedLoader));
+            // which writes the value refreshed below, so that no echo of a write of the refreshing cache instance is
+            // still on its way when the value expires - it would put the expired value back, which is how a key the
+            // store still backs returns once Caffeine dropped it, and has nothing to do with the refresh
+            DistributedCache<Key, Value> peerDistributedCache = createCache(
+                    cacheBuilder,
+                    DistributedCaffeine::build);
+            LoadingCache<Key, Value> caffeineLoadingCache = Caffeine.newBuilder()
+                    .ticker(ticker::get)
+                    .expireAfterWrite(Duration.ofMinutes(1))
+                    .build(gatedLoader);
+
+            for (LoadingCache<Key, Value> loadingCache : List.of(distributedLoadingCache, caffeineLoadingCache)) {
+                String description = loadingCache.getClass().getSimpleName();
+                if (loadingCache instanceof DistributedLoadingCache) {
+                    peerDistributedCache.put(key1, Value.of(1));
+                    await("value arrived")
+                            .atMost(WAITING_DURATION)
+                            .untilAsserted(() -> assertThat(loadingCache.getIfPresent(key1)).isEqualTo(Value.of(1)));
+                } else {
+                    loadingCache.put(key1, Value.of(1));
+                }
+                gatedLoader.gate();
+                CompletableFuture<Value> refresh = loadingCache.refresh(key1);
+                gatedLoader.awaitLoadStarted();
+                // gone without a write, which takes no ownership away - only that the value held is no longer the
+                // one the refresh reloaded from tells it was overtaken
+                ticker.addAndGet(Duration.ofMinutes(2).toNanos());
+                gatedLoader.release();
+
+                // the refresh hands back what it reloaded either way, but neither cache keeps it
+                assertThat(refresh).as(description).succeedsWithin(WAITING_DURATION).isEqualTo(Value.of(1, "loaded"));
+                await(description)
+                        .atMost(WAITING_DURATION)
+                        .during(Duration.ofMillis(500))
+                        .untilAsserted(() -> assertThat(loadingCache.getIfPresent(key1)).isNull());
+            }
         }
 
         @DisplayName("Test refreshAll() with cache loader")

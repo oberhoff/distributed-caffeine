@@ -40,6 +40,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -107,6 +109,14 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     // the same for the command written by invalidating all: it belongs to no key, so what it says covers every one
     // of them and a single counter is all it needs
     private final AtomicLong commandOperation;
+    // The loads and refreshes in flight for a key, as a token of each one that started. They read outside the
+    // synchronization lock, so whatever happens to the key meanwhile is newer than what they read, and their result
+    // may only be applied where nothing did. Every write to the key - of this cache instance or of another one -
+    // therefore takes the tokens away, the same way Caffeine discards its own refreshes on every write, and one that
+    // no longer holds its token applies nothing. Kept here because this is where every one of those writes passes,
+    // including an invalidation of a key that is not held, which leaves nothing else behind to tell from.
+    // Several per key, because a load and a refresh of the same key do not wait for each other
+    private final ConcurrentMap<InternalKey<K>, Set<Object>> inFlight;
 
     @SuppressWarnings("NotNullFieldNotInitialized")
     private Logger logger;
@@ -147,6 +157,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                 .expireAfterWrite(DISTRIBUTION_DURATION)
                 .build();
         this.commandOperation = new AtomicLong();
+        this.inFlight = new ConcurrentHashMap<>();
         this.pendingPublishes = new ArrayDeque<>();
         // see also initialize()
     }
@@ -187,6 +198,10 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         // cache entry back any more
         operations.invalidateAll();
         commandOperation.set(0);
+        // nor may a load or refresh still in flight from before apply what it read: what it rests on was read before
+        // synchronizing settles the content anew, and with the cache loader strategy that is the store's content
+        // from before reconciling
+        overtakeAll();
     }
 
     void deactivate() {
@@ -216,7 +231,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
 
     Map<K, V> loadAllFromStore(Set<? extends InternalKey<K>> keys) {
         // the memoizing overload caches each hash on its key instance, so a subsequent publish that reuses the same
-        // instance (putDistributedLoaded / refreshAfterWrite on the single-key load path) does not recompute it
+        // instance (the publish of what was loaded, or refreshAfterWrite) does not recompute it
         Set<String> hashes = keys.stream()
                 .map(hasher::getHash)
                 .collect(toSet());
@@ -246,11 +261,6 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
             Map<? extends InternalKey<K>, ? extends InternalValue<V>> map) {
         publishCacheEntries(map, CACHED);
         return map;
-    }
-
-    InternalValue<V> putDistributedLoaded(InternalKey<K> key, InternalValue<V> value) {
-        putAllDistributedLoaded(Map.of(key, value));
-        return value;
     }
 
     Map<? extends InternalKey<K>, ? extends InternalValue<V>> putAllDistributedLoaded(
@@ -301,6 +311,8 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     // keeps a record of what is cached, which has to go as well - otherwise a reactivation reads it back and a
     // retained evicted cache entry is reloaded from it, undoing what was just invalidated
     void invalidateAllDistributed() {
+        // whether or not anything is distributed for it, every key is written by it
+        overtakeAll();
         if (isActivated() && COMMAND.isConsideredBy(distributionMode)) {
             synchronizationLock.ensureLock();
             Repository<K, V> retaining = repository;
@@ -415,6 +427,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         map.forEach((key, value) -> {
             long counter = operationCounter.incrementAndGet();
             operations.put(key, counter);
+            overtake(key);
             if (nonNull(value)) {
                 value.setOperation(activationId.get() + ":" + counter)
                         .setActivationId(currentActivationId);
@@ -493,6 +506,11 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
             return;
         }
         long floor = nonNull(ownCounter) ? ownCounter : Long.MAX_VALUE;
+        // a command of this cache instance took the tokens away when it was issued already, and anything
+        // started since is newer than it
+        if (isNull(ownCounter)) {
+            overtakeAll();
+        }
         Set<InternalKey<K>> toRemove = new HashSet<>();
         cache.asMap().keySet().forEach(presentKey -> {
             Long lastOperation = operations.getIfPresent(presentKey);
@@ -748,6 +766,15 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         if (!isApplicable(key, ownCounter)) {
             return;
         }
+        // only a write of another cache instance is news here: one of this cache instance took the tokens away
+        // when it was issued, and taking away one started since would discard a load nothing overtook. Nor is a
+        // cache entry without any operation, which only the store writes itself - transitioning statuses for
+        // invalidating all, which the command following it takes care of, or pruning, which is no write of the
+        // value at all. Taking the tokens away for those discarded a refresh started right after invalidating all,
+        // whenever the transition arrived while it was reloading
+        if (isNull(ownCounter) && nonNull(cacheEntry.getOperation())) {
+            overtake(key);
+        }
         if (cacheEntry.isCached()) {
             InternalValue<V> present = policy.getIfPresentQuietly(key);
             String operation = cacheEntry.getOperation();
@@ -801,6 +828,42 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
             cache.asMap().values()
                     .removeIf(this::isOutsideCurrentActivation);
         }
+    }
+
+    // registers a load or refresh now in flight for the key, see inFlight
+    void registerInFlight(InternalKey<K> key, Object token) {
+        // in one atomic step with creating the set, for the reason given below
+        inFlight.compute(key, (k, tokens) -> {
+            Set<Object> held = isNull(tokens) ? ConcurrentHashMap.newKeySet() : tokens;
+            held.add(token);
+            return held;
+        });
+    }
+
+    // whether the load or refresh still held its token, which it gives up either way. Only one that still did may
+    // apply its result. Removing the emptied set happens in the same atomic step as the check, so that a token
+    // registered concurrently never ends up in a set that is no longer mapped
+    boolean releaseInFlight(InternalKey<K> key, Object token) {
+        boolean[] held = new boolean[1];
+        inFlight.computeIfPresent(key, (k, tokens) -> {
+            held[0] = tokens.remove(token);
+            return tokens.isEmpty() ? null : tokens;
+        });
+        return held[0];
+    }
+
+    // the activation in effect, to tell whether synchronization started anew while something read outside the
+    // synchronization lock (see renewActivation)
+    @Nullable String getActivationId() {
+        return activationId.get();
+    }
+
+    private void overtake(InternalKey<K> key) {
+        inFlight.remove(key);
+    }
+
+    private void overtakeAll() {
+        inFlight.clear();
     }
 
     void cleanup() {

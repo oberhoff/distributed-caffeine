@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import com.github.benmanes.caffeine.cache.CacheLoader;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
@@ -54,6 +55,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
+import static io.github.oberhoff.distributedcaffeine.DistributionMode.INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION;
 import static io.github.oberhoff.distributedcaffeine.DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION;
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_RETAINED_GROUP;
@@ -61,6 +63,7 @@ import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.E
 import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_TIME_RETAINED;
 import static java.lang.String.format;
 import static java.util.Objects.isNull;
+import static java.util.Objects.nonNull;
 import static java.util.stream.Collectors.toCollection;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -126,6 +129,256 @@ final class DistributedCaffeineConvergenceTests {
             }
         } finally {
             caches.forEach(cache -> cache.distributedPolicy().stopSynchronization());
+        }
+    }
+
+    @DisplayName("Test that cache instances converge when writes and deliveries happen while loading or refreshing")
+    @ParameterizedTest(name = "with seed {0}")
+    @ValueSource(longs = {1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L, 19L, 20L,
+            21L, 22L, 23L, 24L, 25L, 26L, 27L, 28L, 29L, 30L, 31L, 32L})
+    void test_convergence_with_writes_and_deliveries_during_loads(long seed) {
+        // Loading and refreshing read outside the synchronization lock, so anything may happen to a key while they
+        // do (see LoadingRun). With population distributed the log stays the oracle - a discarded load publishes
+        // nothing, an applied one publishes like any write - so every cache instance still has to end up with what
+        // the published log adds up to. Which is all this can tell: a stale value that is applied is published as
+        // well and becomes what everyone agrees on, so whether loads discard what they have to is the next test's
+        LoadingRun run = new LoadingRun(seed, POPULATION_AND_INVALIDATION);
+        try {
+            run.run();
+            Map<Key, Value> expected = replay(run.broker.getLog());
+            for (int instance = 0; instance < INSTANCES; instance++) {
+                assertThat(run.caches.get(instance).asMap())
+                        .describedAs("cache instance %d after%n  %s", instance, String.join("%n  ", run.history))
+                        .containsExactlyInAnyOrderEntriesOf(expected);
+            }
+        } finally {
+            run.stop();
+        }
+    }
+
+    @DisplayName("Test that no value survives an invalidation published after it was read, while loading or refreshing")
+    @ParameterizedTest(name = "with seed {0}")
+    @ValueSource(longs = {1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L, 19L, 20L,
+            21L, 22L, 23L, 24L, 25L, 26L, 27L, 28L, 29L, 30L, 31L, 32L})
+    void test_freshness_with_writes_and_deliveries_during_loads(long seed) {
+        // What a load or refresh discards when a write overtook it is invisible to convergence (see above), but not
+        // where population is not distributed: nothing loaded is published then, so a value applied although an
+        // invalidation of its key came after it was read is never replaced and stays for good - the very case the
+        // invalidation was published to prevent. So the oracle here is freshness: once everything is delivered, a
+        // value held anywhere has to have been read or written after the last invalidation of its key in the log.
+        // Bulk loads are left out on purpose: they overwrite like Caffeine's, which is exactly this case
+        LoadingRun run = new LoadingRun(seed, INVALIDATION);
+        try {
+            run.run();
+            Map<Key, Integer> lastInvalidation = new HashMap<>();
+            List<CacheEntry<Key, Value>> log = run.broker.getLog();
+            for (int position = 0; position < log.size(); position++) {
+                if (!log.get(position).isCached()) {
+                    lastInvalidation.put(log.get(position).getKey(), position);
+                }
+            }
+            for (int instance = 0; instance < INSTANCES; instance++) {
+                int checkedInstance = instance;
+                run.caches.get(instance).asMap().forEach((key, value) -> {
+                    if (!value.getName().startsWith("bulk") && !value.getName().startsWith("extra")) {
+                        Integer invalidatedAt = lastInvalidation.get(key);
+                        Integer producedAt = run.producedAt.get(value);
+                        assertThat(producedAt).describedAs("where %s was produced", value).isNotNull();
+                        if (nonNull(invalidatedAt)) {
+                            assertThat(producedAt)
+                                    .describedAs("cache instance %d holds %s=%s, produced at %d although invalidated "
+                                                    + "at %d, after%n  %s", checkedInstance, key, value, producedAt,
+                                            invalidatedAt, String.join("%n  ", run.history))
+                                    .isGreaterThan(invalidatedAt);
+                        }
+                    }
+                });
+            }
+        } finally {
+            run.stop();
+        }
+    }
+
+    /**
+     * A run of random steps over cache instances that load, for the two tests above. Loading and refreshing read
+     * outside the synchronization lock, so anything may happen to a key while they do - a write of this cache
+     * instance, a cache entry of another one arriving. That "meanwhile" is made deterministic here: the cache loader
+     * and the mapping functions carry out a random step of the same kind as the ones around them before they return.
+     * The same-thread executor makes a refresh reload right away, which puts its reload inside the step that asked
+     * for it as well. Every value is unique and remembered with the log position it was produced at - when its load
+     * started reading, or when it was written - which is what the freshness test measures invalidations against
+     */
+    private static final class LoadingRun {
+        private final Random random;
+        private final InMemoryBroker<Key, Value> broker = new InMemoryBroker<>();
+        private final List<AbstractAdapter<Key, Value>> adapters = new ArrayList<>();
+        private final List<DistributedLoadingCache<Key, Value>> caches = new ArrayList<>();
+        private final List<String> history = new ArrayList<>();
+        private final Map<Value, Integer> producedAt = new HashMap<>();
+        private int counter;
+        // whether the cache loader is called by a bulk load, whose values overwrite rather than fill a gap
+        private boolean bulk;
+
+        private LoadingRun(long seed, DistributionMode distributionMode) {
+            this.random = new Random(seed);
+            for (int instance = 0; instance < INSTANCES; instance++) {
+                int loadingInstance = instance;
+                AbstractAdapter<Key, Value> adapter = broker.newAdapter("in-memory-loading-" + instance);
+                adapters.add(adapter);
+                // a load now and then comes back empty, which caches nothing and, for a refresh, removes the key
+                CacheLoader<Key, Value> cacheLoader = key -> {
+                    int position = broker.getLog().size();
+                    meanwhile(loadingInstance, key);
+                    return random.nextInt(10) == 0
+                            ? null
+                            : produce(key, bulk ? "bulk" : "loaded", loadingInstance, position);
+                };
+                caches.add((DistributedLoadingCache<Key, Value>) DistributedCaffeine.newBuilder(adapter)
+                        .withDistributionMode(distributionMode)
+                        .withCaffeine(Caffeine.newBuilder()
+                                .executor(Runnable::run))
+                        .build(cacheLoader));
+            }
+        }
+
+        private void run() {
+            for (int step = 0; step < STEPS; step++) {
+                int instance = random.nextInt(INSTANCES);
+                if (random.nextInt(100) < 55) {
+                    if (random.nextBoolean()) {
+                        operate(instance);
+                    } else {
+                        load(instance);
+                    }
+                } else {
+                    int delivered = broker.deliver(adapters.get(instance), 1 + random.nextInt(3));
+                    history.add(format("deliver %d to %d", delivered, instance));
+                }
+            }
+            broker.deliverAll();
+            assertThat(broker.hasUndelivered()).isFalse();
+        }
+
+        private void stop() {
+            caches.forEach(cache -> cache.distributedPolicy().stopSynchronization());
+        }
+
+        private Value produce(Key key, String kind, int instance, int position) {
+            Value value = Value.of(key.getId(), kind + "-" + instance + "-" + counter++);
+            producedAt.put(value, position);
+            return value;
+        }
+
+        private void operate(int instance) {
+            DistributedLoadingCache<Key, Value> cache = caches.get(instance);
+            Key key = Key.of(random.nextInt(KEYS));
+            switch (random.nextInt(3)) {
+                case 0 -> {
+                    Value value = produce(key, "put", instance, broker.getLog().size());
+                    cache.put(key, value);
+                    history.add(format("%d put %s=%s", instance, key, value));
+                }
+                case 1 -> {
+                    cache.invalidate(key);
+                    history.add(format("%d invalidate %s", instance, key));
+                }
+                default -> {
+                    cache.asMap().remove(key);
+                    history.add(format("%d remove %s", instance, key));
+                }
+            }
+        }
+
+        // one of the ways into a load or refresh, whose history entry goes in ahead of what happens meanwhile
+        private void load(int instance) {
+            DistributedLoadingCache<Key, Value> cache = caches.get(instance);
+            Key key = Key.of(random.nextInt(KEYS));
+            Key otherKey = Key.of(random.nextInt(KEYS));
+            int entry = history.size();
+            String description = switch (random.nextInt(5)) {
+                case 0 -> {
+                    cache.get(key);
+                    yield format("%d get %s", instance, key);
+                }
+                case 1 -> {
+                    cache.get(key, mappingKey -> {
+                        int position = broker.getLog().size();
+                        meanwhile(instance, mappingKey);
+                        return produce(mappingKey, "mapped", instance, position);
+                    });
+                    yield format("%d get %s with a mapping function", instance, key);
+                }
+                case 2 -> {
+                    // the same key twice now and then, which a set of keys simply folds into one
+                    Set<Key> keys = new LinkedHashSet<>(List.of(key, otherKey));
+                    bulk = true;
+                    try {
+                        cache.getAll(keys);
+                    } finally {
+                        bulk = false;
+                    }
+                    yield format("%d getAll %s", instance, keys);
+                }
+                case 3 -> {
+                    // returning a key beyond the ones asked for now and then, which a bulk load caches as well
+                    cache.getAll(Set.of(key), mappingKeys -> {
+                        int position = broker.getLog().size();
+                        meanwhile(instance, key);
+                        Map<Key, Value> mapped = new HashMap<>();
+                        mappingKeys.forEach(mappingKey -> mapped.put(mappingKey,
+                                produce(mappingKey, "bulk", instance, position)));
+                        if (random.nextBoolean()) {
+                            mapped.put(otherKey, produce(otherKey, "extra", instance, position));
+                        }
+                        return mapped;
+                    });
+                    yield format("%d getAll %s with a mapping function", instance, Set.of(key));
+                }
+                default -> {
+                    cache.refresh(key).join();
+                    yield format("%d refresh %s", instance, key);
+                }
+            };
+            history.add(entry, description);
+        }
+
+        // What happens while a load or refresh reads, at the cache instance doing so: a write of its own, a write of
+        // another cache instance arriving right away, cache entries published before arriving, or nothing at all - of
+        // the very key being loaded half the time, since that is where it matters. A write of another cache instance
+        // is what only a delivery can tell this one about, which is why it is published and delivered within the step
+        private void meanwhile(int instance, Key loadingKey) {
+            DistributedLoadingCache<Key, Value> cache = caches.get(instance);
+            Key key = random.nextBoolean() ? loadingKey : Key.of(random.nextInt(KEYS));
+            switch (random.nextInt(5)) {
+                case 0 -> {
+                    Value value = produce(key, "meanwhile", instance, broker.getLog().size());
+                    cache.put(key, value);
+                    history.add(format("  meanwhile %d put %s=%s", instance, key, value));
+                }
+                case 1 -> {
+                    cache.invalidate(key);
+                    history.add(format("  meanwhile %d invalidate %s", instance, key));
+                }
+                case 2 -> {
+                    int otherInstance = (instance + 1 + random.nextInt(INSTANCES - 1)) % INSTANCES;
+                    DistributedLoadingCache<Key, Value> otherCache = caches.get(otherInstance);
+                    if (random.nextBoolean()) {
+                        Value value = produce(key, "meanwhile", otherInstance, broker.getLog().size());
+                        otherCache.put(key, value);
+                        history.add(format("  meanwhile %d put %s=%s", otherInstance, key, value));
+                    } else {
+                        otherCache.invalidate(key);
+                        history.add(format("  meanwhile %d invalidate %s", otherInstance, key));
+                    }
+                    int delivered = broker.deliver(adapters.get(instance), Integer.MAX_VALUE);
+                    history.add(format("  meanwhile deliver %d to %d", delivered, instance));
+                }
+                case 3 -> {
+                    int delivered = broker.deliver(adapters.get(instance), 1 + random.nextInt(3));
+                    history.add(format("  meanwhile deliver %d to %d", delivered, instance));
+                }
+                default -> history.add("  meanwhile nothing");
+            }
         }
     }
 

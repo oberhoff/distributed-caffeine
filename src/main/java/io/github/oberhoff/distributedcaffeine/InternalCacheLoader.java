@@ -31,12 +31,11 @@ import java.util.concurrent.Executor;
 import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
 import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
-import static io.github.oberhoff.distributedcaffeine.InternalUtils.im;
+import static io.github.oberhoff.distributedcaffeine.InternalUtils.iks;
 import static io.github.oberhoff.distributedcaffeine.InternalUtils.nullable;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
 import static java.util.Objects.nonNull;
-import static java.util.stream.Collectors.toCollection;
 
 @SuppressWarnings("java:S1450")
 class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable InternalValue<V>>,
@@ -65,38 +64,45 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
         this.hasLoadAll = hasLoadAll();
     }
 
+    // should never be invoked due to custom implementation (see InternalDistributedCache.getOrLoad)
     @Override
     @SuppressWarnings("java:S2638")
     public @Nullable InternalValue<V> load(InternalKey<K> key) throws Exception {
-        V value = evictedEntryPersistenceConfigurer.hasCacheLoaderStrategy()
-                ? loadFromStore(key)
-                : null;
-        value = nonNull(value)
-                ? value
-                : nullable(cacheLoader.load(k(key)));
-        return nonNull(value)
-                ? cacheManager.putDistributedLoaded(key, iv(value))
-                : null;
+        throw new IllegalAccessException();
     }
 
+    // should never be invoked due to custom implementation (see InternalDistributedCache.getAllOrLoad)
     @Override
     public Map<? extends InternalKey<K>, ? extends InternalValue<V>> loadAll(Set<? extends InternalKey<K>> keys)
             throws Exception {
+        throw new IllegalAccessException();
+    }
+
+    // invoked by custom implementation, which applies and publishes what comes back itself
+    @Nullable V loadDelegated(InternalKey<K> key) throws Exception {
+        V value = evictedEntryPersistenceConfigurer.hasCacheLoaderStrategy()
+                ? loadFromStore(key)
+                : null;
+        return nonNull(value)
+                ? value
+                : nullable(cacheLoader.load(k(key)));
+    }
+
+    // invoked by custom implementation, which applies and publishes what comes back itself
+    Map<K, V> loadAllDelegated(Set<K> keys) throws Exception {
         HashMap<K, V> keyToValue = new HashMap<>();
-        Set<K> keysToLoad = keys.stream()
-                .map(InternalKey::k)
-                .collect(toCollection(HashSet::new));
+        Set<K> keysToLoad = new HashSet<>(keys);
         if (evictedEntryPersistenceConfigurer.hasCacheLoaderStrategy()) {
-            keyToValue.putAll(loadAllFromStore(keys));
+            keyToValue.putAll(loadAllFromStore(iks(keys)));
             keysToLoad.removeAll(keyToValue.keySet());
         }
         if (!keysToLoad.isEmpty()) {
             // retain the original 'use loadAll() if overridden' semantics
             // accepted drawback: Caffeine loads the keys one by one when loadAll() is not overridden
             // (LocalLoadingCache.loadSequentially), which this cache instance cannot do without turning the single
-            // store write below into one per key. Loading them here instead means the batch counts as one load in the
-            // statistics rather than one per key, and that a loader failing partway through discards the values
-            // loaded before it, which Caffeine would have cached by then
+            // store write that follows into one per key. Loading them here instead means the batch counts as one load
+            // in the statistics rather than one per key, and that a loader failing partway through discards the
+            // values loaded before it, which Caffeine would have cached by then
             if (hasLoadAll) {
                 keyToValue.putAll(cacheLoader.loadAll(keysToLoad));
             } else {
@@ -108,7 +114,7 @@ class InternalCacheLoader<K, V> implements CacheLoader<InternalKey<K>, @Nullable
                 }
             }
         }
-        return cacheManager.putAllDistributedLoaded(im(keyToValue));
+        return keyToValue;
     }
 
     // should never be invoked due to custom implementation

@@ -19,6 +19,10 @@ import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
 import org.jspecify.annotations.Nullable;
 
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
+import java.util.concurrent.Executor;
+
 import static io.github.oberhoff.distributedcaffeine.InternalKey.kn;
 import static io.github.oberhoff.distributedcaffeine.InternalValue.vn;
 import static java.util.Objects.requireNonNull;
@@ -28,6 +32,12 @@ class InternalRemovalListener<K, V> implements RemovalListener<InternalKey<K>, I
 
     private final RemovalListener<K, V> removalListener;
 
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    private Logger logger;
+    @SuppressWarnings("NotNullFieldNotInitialized")
+    private Executor executor;
+
+    @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalRemovalListener(RemovalListener<K, V> removalListener) {
         this.removalListener = requireNonNull(removalListener);
         // see also initialize()
@@ -35,11 +45,37 @@ class InternalRemovalListener<K, V> implements RemovalListener<InternalKey<K>, I
 
     @Override
     public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
-        // noop
+        this.logger = instanceRegistry.getLogger();
+        this.executor = instanceRegistry.getExecutor();
     }
 
     @Override
     public void onRemoval(@Nullable InternalKey<K> key, @Nullable InternalValue<V> value, RemovalCause removalCause) {
         removalListener.onRemoval(kn(key), vn(value), removalCause);
+    }
+
+    // Reports a value that never made it into the cache - loaded or refreshed, and discarded because a write overtook
+    // it - the way Caffeine reports it. Caffeine does not discard a load: the overtaking write waits for it and then
+    // replaces or removes what it inserted, which reaches this listener as REPLACED or EXPLICIT. Its refresh, which
+    // it does discard, is reported the same way. So every value a loader returned reaches this listener with Caffeine,
+    // and whoever relies on that - to release what a value holds, for instance - would otherwise never hear of it.
+    // Asynchronously on the executor of the cache, exactly as Caffeine notifies (BoundedLocalCache.notifyRemoval),
+    // which catches whatever the listener or the executor throws as well (java:S1181): a listener failing must not
+    // fail the load or refresh it is told about
+    @SuppressWarnings("java:S1181")
+    void notifyDiscarded(K key, V value, RemovalCause removalCause) {
+        Runnable notification = () -> {
+            try {
+                removalListener.onRemoval(key, value, removalCause);
+            } catch (Throwable t) {
+                logger.log(Level.WARNING, "Exception thrown by removal listener", t);
+            }
+        };
+        try {
+            executor.execute(notification);
+        } catch (Throwable t) {
+            logger.log(Level.ERROR, "Exception thrown when submitting removal listener", t);
+            notification.run();
+        }
     }
 }
