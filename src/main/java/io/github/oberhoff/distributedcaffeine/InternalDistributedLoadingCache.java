@@ -235,8 +235,11 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
         InternalUtils.FailableSupplier<CompletableFuture<@Nullable V>> refreshSupplier = isNull(reloadFrom)
                 ? () -> cacheLoader.asyncLoadDelegated(key, executor)
                 : () -> cacheLoader.asyncReloadDelegated(key, reloadFrom, executor);
+        // taken right before reloading, as in Caffeine, so that the load time recorded covers the reload alone
+        long startTime = System.nanoTime();
         try {
-            return new RefreshOperation<>(token, getFailable(refreshSupplier, CompletionException::new), oldValue);
+            return new RefreshOperation<>(token, getFailable(refreshSupplier, CompletionException::new), oldValue,
+                    startTime);
         } catch (RuntimeException e) {
             cacheManager.releaseInFlight(ik(key), token);
             throw e;
@@ -246,10 +249,14 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
     @SuppressWarnings("FutureReturnValueIgnored") // the callback is attached for its side effects only
     private void attachCompletion(K key, RefreshOperation<V> refreshOperation) {
         refreshOperation.future().whenCompleteAsync((v, e) -> {
-            if (isNull(e)) {
-                statsCounter.recordLoadSuccess(1);
+            long loadTime = System.nanoTime() - refreshOperation.startTime();
+            // a reload that came back empty counts as a failed load, as in Caffeine
+            if (isNull(e) && nonNull(v)) {
+                statsCounter.recordLoadSuccess(loadTime);
             } else {
-                statsCounter.recordLoadFailure(1);
+                statsCounter.recordLoadFailure(loadTime);
+            }
+            if (nonNull(e)) {
                 logger.log(Level.WARNING,
                         format("Exception thrown during refresh for %s", key), e);
                 // nothing is applied for a failed refresh, so nothing else gives up the key for it
@@ -259,8 +266,9 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
         }, executor);
     }
 
-    // a refresh in flight: the token it owns the key by while reloading, and the value it reloads from
+    // a refresh in flight: the token it owns the key by while reloading, the value it reloads from, and when it
+    // started reloading
     private record RefreshOperation<V>(Object token, CompletableFuture<@Nullable V> future,
-                                       @Nullable InternalValue<V> oldValue) {
+                                       @Nullable InternalValue<V> oldValue, long startTime) {
     }
 }

@@ -2049,6 +2049,39 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(refreshOperations).isEmpty();
         }
 
+        @DisplayName("Test refresh() records its load time and an empty reload as a failure, as Caffeine does")
+        @Test
+        void test_DistributedLoadingCache_refresh_records_load_time_and_empty_reload() {
+            Duration reloadDuration = Duration.ofMillis(50);
+            Key key1 = Key.of(1);
+            Key key2 = Key.of(2);
+            CacheLoader<Key, Value> cacheLoader = key -> {
+                sleep(reloadDuration);
+                return key.equals(key1) ? Value.of(1, "reloaded") : null;
+            };
+            // a same-thread executor records the stats before refresh returns, so no waiting for them is needed
+            Caffeine<Object, Object> caffeine = Caffeine.newBuilder()
+                    .executor(Runnable::run)
+                    .recordStats();
+
+            DistributedLoadingCache<Key, Value> distributedLoadingCache = (DistributedLoadingCache<Key, Value>) this.<Key, Value>createCache(
+                    dc -> dc.withCaffeine(caffeine),
+                    dc -> dc.build(cacheLoader));
+            LoadingCache<Key, Value> caffeineLoadingCache = caffeine.build(cacheLoader);
+
+            Set.of(distributedLoadingCache, caffeineLoadingCache).forEach(loadingCache -> {
+                loadingCache.put(key1, Value.of(1));
+                loadingCache.refresh(key1).join();
+                loadingCache.refresh(key2).join();
+
+                CacheStats stats = loadingCache.stats();
+                assertThat(stats.loadSuccessCount()).isEqualTo(1);
+                assertThat(stats.loadFailureCount()).isEqualTo(1);
+                // both reloads, not a nanosecond each
+                assertThat(stats.totalLoadTime()).isGreaterThanOrEqualTo(reloadDuration.multipliedBy(2).toNanos());
+            });
+        }
+
         // The tests' own threads for what they run alongside a load, rather than the common pool: on a machine with
         // few cores that pool has only a few workers, a load blocked on its gate (below) takes one of them, and the
         // very calls a test expects to go on meanwhile would then wait for a worker instead - failing for want of a
