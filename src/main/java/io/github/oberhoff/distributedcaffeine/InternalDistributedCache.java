@@ -418,8 +418,8 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
     // java:S112 - declared to throw what Caffeine's CacheLoader is declared to throw, since that is what it passes on
     // and Caffeine.toUnchecked is what it is converted by (see toUnchecked)
     @SuppressWarnings("java:S112")
-    // Handed the key instance what is loaded is applied with, which caches its hash, so that reading the store and
-    // publishing compute it once
+            // Handed the key instance what is loaded is applied with, which caches its hash, so that reading the store and
+            // publishing compute it once
     interface Load<K, V> {
         @Nullable V load(InternalKey<K> key) throws Exception;
     }

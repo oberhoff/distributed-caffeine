@@ -99,21 +99,22 @@ public interface Repository<K, V> extends Publisher<K, V> {
                                                         Order order) throws Exception;
 
     /**
-     * Updates status of cache entries from the underlying store that match the specified parameters. The operation
-     * field must be set to {@code null} and the timestamp field must be set to a current value for updated cache
-     * entries.
+     * Updates the operation and status of cache entries from the underlying store that match the specified
+     * parameters, and sets their timestamp to the current time.
      * <p>
      * <b>Note:</b> Parameters expect conditional handling, see details below (filtering by discriminator must be
      * implicit).
      *
-     * @param hashes    the hashes to filter by ({@code null} means to omit this filter)
-     * @param statuses  the statuses to filter by ({@code null} means to omit this filter)
-     * @param olderThan the timestamp to filter (older cache entries) by ({@code null} means to omit this filter)
-     * @param newStatus the new status to update
+     * @param hashes       the hashes to filter by ({@code null} means to omit this filter)
+     * @param statuses     the statuses to filter by ({@code null} means to omit this filter)
+     * @param olderThan    the timestamp to filter (older cache entries) by ({@code null} means to omit this filter)
+     * @param newOperation the new operation (can be {@code null})
+     * @param newStatus    the new status
      * @throws Exception if updating fails
      */
     void updateStatusOfCacheEntries(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
-                                    @Nullable Instant olderThan, Status newStatus) throws Exception;
+                                    @Nullable Instant olderThan, @Nullable String newOperation, Status newStatus)
+            throws Exception;
 
     /**
      * Deletes cache entries from the underlying store that match the specified parameters.

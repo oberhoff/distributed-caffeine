@@ -51,6 +51,7 @@ class InternalUtils {
                 .collect(toUnmodifiableSet());
     }
 
+    @SuppressWarnings("unused")
     static <K> Set<K> s(Collection<? extends InternalKey<K>> keys) {
         return keys.stream().map(InternalKey::k)
                 .collect(toUnmodifiableSet());

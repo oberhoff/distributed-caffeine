@@ -64,10 +64,10 @@ parameters refer to the MongoDB client, database name and collection name used f
 persistence. Optionally, a discriminator can be specified (using the `withDiscriminator(...)` method) to distinguish
 between cache entries from different caches that share a collection.
 
-The adapter works with any MongoDB client connected to a replica set or a sharded cluster and relies on the client's
-defaults. Starting synchronization fails right away with an explanation if the setup cannot support it, for example a
-sharded collection. Watcher sharing, failovers and sharded clusters are described in the
-[MongoDB adapter details](src/main/java/io/github/oberhoff/distributedcaffeine/adapter/mongodb/README.md).
+The adapter works with any MongoDB client connected to a replica set (directly or through a sharded cluster) and relies
+on the client's defaults. Starting synchronization fails right away with an explanation if the setup cannot support it.
+The [MongoDB adapter details](src/main/java/io/github/oberhoff/distributedcaffeine/adapter/mongodb/README.md) cover
+watcher sharing, read concern, broken connections, failovers and sharded clusters.
 
 ```java
 MongoAdapter<Key, Value> adapter = MongoAdapter.newBuilder(mongoClient, databaseName, collectionName)
@@ -85,11 +85,13 @@ to the data source, schema name and table name used for distributed synchronizat
 discriminator can be specified (using the `withDiscriminator(...)` method) to distinguish between cache entries from
 different caches that share a table.
 
-The adapter works with any data source that reaches the primary. Behind a pooler in transaction mode, the default
-endpoint of many managed databases, listening needs a direct or session-mode connection, specified using
-`withListenerDataSource(...)`. Starting synchronization checks both and fails right away with an explanation if either
-is not met. Poolers, replicas, failovers, timeouts and managed databases are described in the
-[PostgreSQL adapter details](src/main/java/io/github/oberhoff/distributedcaffeine/adapter/postgresql/README.md).
+The adapter works with any data source that reaches the primary (directly or through a server-side connection pooler).
+Starting synchronization fails right away with an explanation if the setup cannot support it, for example listening
+through a pooler in transaction mode, which needs a direct or session-mode connection specified using
+`withListenerDataSource(...)`. The
+[PostgreSQL adapter details](src/main/java/io/github/oberhoff/distributedcaffeine/adapter/postgresql/README.md) cover
+listener sharing, server-side connection poolers, standby servers, broken connections, failovers, server timeouts and
+managed and cloud databases.
 
 ```java
 PostgresAdapter<Key, Value> adapter = PostgresAdapter.newBuilder(dataSource, schemaName, tableName)
@@ -287,7 +289,8 @@ DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(a
 * Java 17 or newer.
 * MongoDB 4.2 or newer if `MongoAdapter` is used, configured to run as a replica set (a single node replica set is
   sufficient; more members might slow down writes, and a sharded cluster delays synchronization).
-* PostgreSQL 9.5 or newer if `PostgresAdapter` is used, accessed through a data source that pools its connections.
+* PostgreSQL 9.5 or newer if `PostgresAdapter` is used, accessed through a data source, preferably with a connection
+  pool (and an additional direct data source if listening behind a server-side pooler in transaction mode).
 
 ## Installation
 

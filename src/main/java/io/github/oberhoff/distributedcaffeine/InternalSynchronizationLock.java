@@ -57,6 +57,7 @@ class InternalSynchronizationLock {
         }
     }
 
+    @SuppressWarnings("unused")
     <T> T getLocked(Supplier<T> supplier) {
         lock();
         try {

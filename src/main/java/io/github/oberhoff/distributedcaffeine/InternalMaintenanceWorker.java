@@ -329,10 +329,10 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
                 cutOf(retaining, EVICTED_RETAINED_GROUP, maximumSize, count).ifPresent(cut -> {
                     // transition the status (instead of hard delete)
                     runFailable(() -> retaining.updateStatusOfCacheEntries(null,
-                            EVICTED_RETAINED_GROUP, cut.timestamp(), pruningStatus()));
+                            EVICTED_RETAINED_GROUP, cut.timestamp(), null, pruningStatus()));
                     if (!cut.tiedBeyond().isEmpty()) {
                         runFailable(() -> retaining.updateStatusOfCacheEntries(cut.tiedBeyond(),
-                                EVICTED_RETAINED_GROUP, null, pruningStatus()));
+                                EVICTED_RETAINED_GROUP, null, null, pruningStatus()));
                     }
                 });
             }
@@ -345,7 +345,7 @@ class InternalMaintenanceWorker<K, V> implements InternalInitializable<K, V> {
             Instant deadline = deadlineOf(maximumTime, distributionDuration);
             // transition the status (instead of hard delete)
             runFailable(() -> retaining.updateStatusOfCacheEntries(null,
-                    EVICTED_RETAINED_GROUP, deadline, pruningStatus()));
+                    EVICTED_RETAINED_GROUP, deadline, null, pruningStatus()));
         });
     }
 

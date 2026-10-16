@@ -403,12 +403,13 @@ final class PostgresRepository<K, V> extends AbstractRepository<K, V> {
 
     @Override
     public void updateStatusOfCacheEntries(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
-                                           @Nullable Instant olderThan, Status newStatus) throws Exception {
+                                           @Nullable Instant olderThan, @Nullable String newOperation,
+                                           Status newStatus) throws Exception {
         requireNonNull(newStatus, "newStatus cannot be null");
         // Returning what it touched, because the filter says which records to change and not which ones there
         // were: a transition is what maintenance does instead of deleting precisely so that it reaches every
         // cache instance, so the hashes have to come back to be announced
-        String sql = format("UPDATE %s SET %s = ?, %s = NULL, %s = ? %s RETURNING %s", qualifiedTableName,
+        String sql = format("UPDATE %s SET %s = ?, %s = ?, %s = ? %s RETURNING %s", qualifiedTableName,
                 quoted(STATUS.toString()), quoted(OPERATION.toString()), quoted(TIMESTAMP.toString()),
                 where(hashes, statuses, olderThan), quoted(HASH.toString()));
         retryingRollback(() -> {
@@ -419,9 +420,10 @@ final class PostgresRepository<K, V> extends AbstractRepository<K, V> {
                     List<String> updated = new ArrayList<>();
                     try (PreparedStatement statement = connection.prepareStatement(sql)) {
                         statement.setString(1, newStatus.toString());
-                        // clearing the operation lets every cache instance apply it, as in the MongoDB adapter
-                        statement.setObject(2, toOffsetDateTime(Instant.now()), Types.TIMESTAMP_WITH_TIMEZONE);
-                        bind(connection, statement, 3, hashes, statuses, olderThan);
+                        // without an operation every cache instance applies it, as in the MongoDB adapter
+                        statement.setString(2, newOperation);
+                        statement.setObject(3, toOffsetDateTime(Instant.now()), Types.TIMESTAMP_WITH_TIMEZONE);
+                        bind(connection, statement, 4, hashes, statuses, olderThan);
                         try (ResultSet resultSet = statement.executeQuery()) {
                             while (resultSet.next()) {
                                 updated.add(resultSet.getString(1));

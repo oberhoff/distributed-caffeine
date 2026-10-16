@@ -109,8 +109,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -2359,9 +2359,9 @@ final class DistributedCaffeineUnitTests {
                 published.addAll(invocation.getArgument(0));
                 return null;
             }).doAnswer(invocation -> {
-                published.addAll(invocation.getArgument(0));
-                throw new IllegalStateException("taken by the store, but the confirmation was lost");
-            }).doThrow(new IllegalStateException("never reached the store"))
+                        published.addAll(invocation.getArgument(0));
+                        throw new IllegalStateException("taken by the store, but the confirmation was lost");
+                    }).doThrow(new IllegalStateException("never reached the store"))
                     .when(repository).publishCacheEntries(any());
 
             DistributedCache<Key, Value> cache = createCache(adapter, dc -> dc, DistributedCaffeine::build);

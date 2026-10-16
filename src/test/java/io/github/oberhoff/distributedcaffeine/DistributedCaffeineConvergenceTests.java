@@ -233,7 +233,7 @@ final class DistributedCaffeineConvergenceTests {
                             ? null
                             : produce(key, bulk ? "bulk" : "loaded", loadingInstance, position);
                 };
-                caches.add((DistributedLoadingCache<Key, Value>) DistributedCaffeine.newBuilder(adapter)
+                caches.add(DistributedCaffeine.newBuilder(adapter)
                         .withDistributionMode(distributionMode)
                         .withCaffeine(Caffeine.newBuilder()
                                 .executor(Runnable::run))
@@ -943,11 +943,12 @@ final class DistributedCaffeineConvergenceTests {
 
             @Override
             public void updateStatusOfCacheEntries(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
-                                                   @Nullable Instant olderThan, Status newStatus) {
+                                                   @Nullable Instant olderThan, @Nullable String newOperation,
+                                                   Status newStatus) {
                 matching(hashes, statuses, olderThan, Order.UNORDERED)
                         .toList()
                         .forEach(cacheEntry -> broker.retained.put(cacheEntry.getHash(), CacheEntry.of(
-                                cacheEntry.getHash(), null, cacheEntry.getKey(), cacheEntry.getValue(),
+                                cacheEntry.getHash(), newOperation, cacheEntry.getKey(), cacheEntry.getValue(),
                                 newStatus, Instant.now())));
             }
 

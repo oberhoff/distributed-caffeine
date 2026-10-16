@@ -189,11 +189,13 @@ final class MongoRepository<K, V> extends AbstractRepository<K, V> {
 
     @Override
     public void updateStatusOfCacheEntries(@Nullable Set<String> hashes, @Nullable Set<Status> statuses,
-                                           @Nullable Instant olderThan, Status newStatus) {
+                                           @Nullable Instant olderThan, @Nullable String newOperation,
+                                           Status newStatus) {
         Bson filter = getFilter(hashes, statuses, olderThan);
         Bson update = Updates.combine(
                 Updates.set(STATUS.toString(), newStatus.toString()),
-                Updates.set(OPERATION.toString(), null), // clearing the operation lets every instance apply it
+                // without an operation every instance applies it
+                Updates.set(OPERATION.toString(), newOperation),
                 Updates.set(TIMESTAMP.toString(), Instant.now()));
         mongoCollection.updateMany(filter, update);
     }

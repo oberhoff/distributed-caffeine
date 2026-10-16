@@ -2049,7 +2049,30 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(refreshOperations).isEmpty();
         }
 
-        // a loader and mapping functions that block until released, so the entry can be changed while loading
+        // The tests' own threads for what they run alongside a load, rather than the common pool: on a machine with
+        // few cores that pool has only a few workers, a load blocked on its gate (below) takes one of them, and the
+        // very calls a test expects to go on meanwhile would then wait for a worker instead - failing for want of a
+        // thread rather than for anything the cache did
+        static final ExecutorService TEST_THREADS = Executors.newCachedThreadPool(runnable -> {
+            Thread thread = new Thread(runnable, "test-thread");
+            thread.setDaemon(true);
+            return thread;
+        });
+
+        static <T> CompletableFuture<T> supplyOnTestThread(Supplier<T> supplier) {
+            return CompletableFuture.supplyAsync(supplier, TEST_THREADS);
+        }
+
+        static CompletableFuture<Void> runOnTestThread(Runnable runnable) {
+            return CompletableFuture.runAsync(runnable, TEST_THREADS);
+        }
+
+        // The tests below reset by invalidating their keys rather than by invalidating all: invalidating all also marks
+        // the records already in the store invalidated, and what the store marks itself is delivered without an
+        // operation, so it arrives - late, on a slow store - as an invalidation of another cache instance, removing
+        // what a test has written meanwhile until its own echo puts it back. Which changes the very entry a test is
+        // about, and a load or refresh in flight then rightly discards what it read.
+        // A loader and mapping functions that block until released, so the entry can be changed while loading
         static final class GatedLoader implements CacheLoader<Key, Value> {
             final AtomicReference<CountDownLatch> loadStarted = new AtomicReference<>(new CountDownLatch(0));
             final AtomicReference<CountDownLatch> releaseLoad = new AtomicReference<>(new CountDownLatch(0));
@@ -2073,7 +2096,10 @@ final class DistributedCaffeineIntegrationTests {
                 loads.incrementAndGet();
                 loadStarted.get().countDown();
                 try {
-                    assertThat(releaseLoad.get().await(EXTENDED_WAITING_DURATION.toMillis(), TimeUnit.MILLISECONDS))
+                    // bounded well below what lingering would cost: a test failing before it releases the gate leaves
+                    // the load blocked, and with it a thread of whichever executor runs it - for the tests after it
+                    assertThat(releaseLoad.get().await(WAITING_DURATION.multipliedBy(4).toMillis(),
+                            TimeUnit.MILLISECONDS))
                             .isTrue();
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
@@ -2088,7 +2114,7 @@ final class DistributedCaffeineIntegrationTests {
             }
 
             @Override
-            public Map<Key, Value> loadAll(Set<? extends Key> keys) {
+            public @NonNull Map<Key, Value> loadAll(@NonNull Set<? extends Key> keys) {
                 pass();
                 Map<Key, Value> loaded = new HashMap<>();
                 keys.forEach(key -> loaded.put(key, Value.of(key.getId(), "loaded")));
@@ -2143,15 +2169,15 @@ final class DistributedCaffeineIntegrationTests {
             for (Map.Entry<String, Function<LoadingCache<Key, Value>, @Nullable Value>> load : loads.entrySet()) {
                 for (Scenario scenario : scenarios) {
                     String description = format("%s, %s", load.getKey(), scenario.name());
-                    distributedLoadingCache.invalidateAll();
+                    distributedLoadingCache.invalidate(key1);
                     gatedLoader.gate();
 
-                    CompletableFuture<@Nullable Value> loading = CompletableFuture.supplyAsync(() ->
+                    CompletableFuture<@Nullable Value> loading = supplyOnTestThread(() ->
                             load.getValue().apply(distributedLoadingCache));
                     gatedLoader.awaitLoadStarted();
                     // made from another thread, since Caffeine's single-key load blocks such changes until it is
                     // done - which this cache instance no longer needs to, see the test below
-                    assertThat(CompletableFuture.runAsync(() ->
+                    assertThat(runOnTestThread(() ->
                             scenario.changeMeanwhile().accept(distributedLoadingCache)))
                             .as(description)
                             .succeedsWithin(WAITING_DURATION);
@@ -2187,13 +2213,13 @@ final class DistributedCaffeineIntegrationTests {
 
             // concurrent misses of a key wait for the one load
             gatedLoader.gate();
-            CompletableFuture<Value> first = CompletableFuture.supplyAsync(() -> distributedLoadingCache.get(key1));
+            CompletableFuture<Value> first = supplyOnTestThread(() -> distributedLoadingCache.get(key1));
             gatedLoader.awaitLoadStarted();
-            CompletableFuture<Value> second = CompletableFuture.supplyAsync(() -> distributedLoadingCache.get(key1));
-            CompletableFuture<Value> third = CompletableFuture.supplyAsync(() -> distributedLoadingCache.get(key1));
+            CompletableFuture<Value> second = supplyOnTestThread(() -> distributedLoadingCache.get(key1));
+            CompletableFuture<Value> third = supplyOnTestThread(() -> distributedLoadingCache.get(key1));
             // while a load is in flight, the rest of the cache does not wait for it - which is the point of
             // loading outside the synchronization lock: before, this write waited for the whole load
-            assertThat(CompletableFuture.runAsync(() -> distributedLoadingCache.put(key2, Value.of(2))))
+            assertThat(runOnTestThread(() -> distributedLoadingCache.put(key2, Value.of(2))))
                     .succeedsWithin(WAITING_DURATION);
             gatedLoader.release();
             assertThat(List.of(first, second, third)).allSatisfy(future ->
@@ -2202,7 +2228,7 @@ final class DistributedCaffeineIntegrationTests {
 
             // a load that fails leaves the ones waiting for it to load themselves, just like the ones Caffeine
             // blocks in computeIfAbsent, which run their own computation once the failed one is gone
-            distributedLoadingCache.invalidateAll();
+            distributedLoadingCache.invalidateAll(Set.of(key1, key2));
             gatedLoader.loads.set(0);
             AtomicInteger failures = new AtomicInteger(1);
             Function<Key, Value> failingOnce = key -> {
@@ -2213,10 +2239,10 @@ final class DistributedCaffeineIntegrationTests {
                 return Value.of(key.getId(), "mapped");
             };
             gatedLoader.gate();
-            CompletableFuture<Value> failing = CompletableFuture.supplyAsync(() ->
+            CompletableFuture<Value> failing = supplyOnTestThread(() ->
                     distributedLoadingCache.get(key1, failingOnce));
             gatedLoader.awaitLoadStarted();
-            CompletableFuture<Value> waiting = CompletableFuture.supplyAsync(() ->
+            CompletableFuture<Value> waiting = supplyOnTestThread(() ->
                     distributedLoadingCache.get(key1, failingOnce));
             gatedLoader.release();
             assertThat(failing).failsWithin(WAITING_DURATION)
@@ -2225,7 +2251,7 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(gatedLoader.loads).hasValue(2);
 
             // a load of a key that asks for the very same key would wait for itself forever
-            distributedLoadingCache.invalidateAll();
+            distributedLoadingCache.invalidateAll(Set.of(key1, key2));
             assertThatThrownBy(() -> distributedLoadingCache.get(key2, key -> distributedLoadingCache.get(key2)))
                     .isExactlyInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("Recursive load");
@@ -2263,9 +2289,9 @@ final class DistributedCaffeineIntegrationTests {
                 return Value.of(distributedCache.get(otherKey, other -> Value.of(other.getId(), "inner")).getId(),
                         "outer");
             };
-            CompletableFuture<Value> loading1 = CompletableFuture.supplyAsync(() ->
+            CompletableFuture<Value> loading1 = supplyOnTestThread(() ->
                     distributedCache.get(key1, askingForTheOther));
-            CompletableFuture<Value> loading2 = CompletableFuture.supplyAsync(() ->
+            CompletableFuture<Value> loading2 = supplyOnTestThread(() ->
                     distributedCache.get(key2, askingForTheOther));
 
             // whichever waits second would close the cycle, so it loads the other key by itself instead of waiting,
@@ -2326,7 +2352,7 @@ final class DistributedCaffeineIntegrationTests {
                         distributedLoadingCache, distributedRemovals, caffeineLoadingCache, caffeineRemovals);
                 for (Map.Entry<LoadingCache<Key, Value>, List<String>> entry : removals.entrySet()) {
                     LoadingCache<Key, Value> loadingCache = entry.getKey();
-                    loadingCache.invalidateAll();
+                    loadingCache.invalidate(key1);
                     if (nonNull(scenario.initialValue())) {
                         loadingCache.put(key1, scenario.initialValue());
                     }
@@ -2338,11 +2364,11 @@ final class DistributedCaffeineIntegrationTests {
                     entry.getValue().clear();
 
                     gatedLoader.gate();
-                    CompletableFuture<Object> loading = CompletableFuture.supplyAsync(() ->
+                    CompletableFuture<Object> loading = supplyOnTestThread(() ->
                             scenario.load().apply(loadingCache));
                     gatedLoader.awaitLoadStarted();
                     // from another thread, since Caffeine's single-key load blocks it until it is done
-                    CompletableFuture<Void> change = CompletableFuture.runAsync(() ->
+                    CompletableFuture<Void> change = runOnTestThread(() ->
                             scenario.changeMeanwhile().accept(loadingCache));
                     // done before the load is released, so that it is the change overtaking the load and not the other way
                     // round - except where Caffeine makes it wait for the load, which fixes that order on its own. This
@@ -2379,12 +2405,12 @@ final class DistributedCaffeineIntegrationTests {
 
             for (LoadingCache<Key, Value> loadingCache : List.of(distributedLoadingCache, caffeineLoadingCache)) {
                 gatedLoader.gate();
-                CompletableFuture<Value> loading = CompletableFuture.supplyAsync(() -> loadingCache.get(key1));
+                CompletableFuture<Value> loading = supplyOnTestThread(() -> loadingCache.get(key1));
                 gatedLoader.awaitLoadStarted();
                 // waiting for the load in flight, or finding its value if they come too late for that - a hit
                 // either way
-                CompletableFuture<Value> waiting1 = CompletableFuture.supplyAsync(() -> loadingCache.get(key1));
-                CompletableFuture<Value> waiting2 = CompletableFuture.supplyAsync(() -> loadingCache.get(key1));
+                CompletableFuture<Value> waiting1 = supplyOnTestThread(() -> loadingCache.get(key1));
+                CompletableFuture<Value> waiting2 = supplyOnTestThread(() -> loadingCache.get(key1));
                 gatedLoader.release();
                 assertThat(List.of(loading, waiting1, waiting2)).allSatisfy(future ->
                         assertThat(future).succeedsWithin(WAITING_DURATION).isEqualTo(Value.of(1, "loaded")));
@@ -2411,7 +2437,7 @@ final class DistributedCaffeineIntegrationTests {
                             dc -> dc.build(gatedLoader));
 
             gatedLoader.gate();
-            CompletableFuture<Value> loading = CompletableFuture.supplyAsync(() -> distributedLoadingCache.get(key1));
+            CompletableFuture<Value> loading = supplyOnTestThread(() -> distributedLoadingCache.get(key1));
             gatedLoader.awaitLoadStarted();
             // what the load rests on was read before synchronizing settles the content anew
             distributedLoadingCache.distributedPolicy().stopSynchronization();
@@ -2452,12 +2478,12 @@ final class DistributedCaffeineIntegrationTests {
                     new Scenario("extra key invalidated", cache -> cache.invalidate(extraKey)));
 
             for (Scenario scenario : scenarios) {
-                peerDistributedCache.invalidateAll();
+                peerDistributedCache.invalidateAll(Set.of(key1, extraKey, sentinelKey));
                 await("reset")
                         .atMost(WAITING_DURATION)
                         .untilAsserted(() -> assertThat(distributedLoadingCache.estimatedSize()).isZero());
                 gatedLoader.gate();
-                CompletableFuture<Map<Key, Value>> loading = CompletableFuture.supplyAsync(() ->
+                CompletableFuture<Map<Key, Value>> loading = supplyOnTestThread(() ->
                         distributedLoadingCache.getAll(Set.of(key1)));
                 gatedLoader.awaitLoadStarted();
                 scenario.peerWritesMeanwhile().accept(peerDistributedCache);
@@ -2494,7 +2520,7 @@ final class DistributedCaffeineIntegrationTests {
             // while the refresh is in flight
             CacheLoader<Key, Value> cacheLoader = new CacheLoader<>() {
                 @Override
-                public @Nullable Value load(Key key) throws InterruptedException {
+                public @Nullable Value load(@NonNull Key key) throws InterruptedException {
                     reloadStarted.get().countDown();
                     releaseReload.get().await();
                     return reloadResult.get();
@@ -2555,7 +2581,7 @@ final class DistributedCaffeineIntegrationTests {
 
             for (Scenario scenario : scenarios) {
                 for (LoadingCache<Key, Value> loadingCache : featureParityCaches) {
-                    loadingCache.invalidateAll();
+                    loadingCache.invalidate(key1);
                     if (nonNull(scenario.initialValue())) {
                         loadingCache.put(key1, scenario.initialValue());
                     }
@@ -2635,7 +2661,7 @@ final class DistributedCaffeineIntegrationTests {
                     new Scenario("invalidateAll(), absent", null, Cache::invalidateAll, null));
 
             for (Scenario scenario : scenarios) {
-                peerDistributedCache.invalidateAll();
+                peerDistributedCache.invalidate(key1);
                 await("reset")
                         .atMost(WAITING_DURATION)
                         .untilAsserted(() -> assertThat(distributedLoadingCache.getIfPresent(key1)).isNull());
@@ -2680,7 +2706,7 @@ final class DistributedCaffeineIntegrationTests {
                             .ticker(ticker::get)
                             .expireAfterWrite(Duration.ofMinutes(1)));
             DistributedLoadingCache<Key, Value> distributedLoadingCache =
-                    (DistributedLoadingCache<Key, Value>) this.<Key, Value>createCache(
+                    (DistributedLoadingCache<Key, Value>) createCache(
                             cacheBuilder,
                             dc -> dc.build(gatedLoader));
             // which writes the value refreshed below, so that no echo of a write of the refreshing cache instance is
@@ -4653,6 +4679,41 @@ final class DistributedCaffeineIntegrationTests {
                     .receiveCacheEntries(List.of(population));
 
             assertThat(distributedCache.getIfPresent(key)).isNull();
+        }
+
+        @DisplayName("Test that the store marking entries invalidated for invalidateAll() does not undo a later write")
+        @Test
+        void test_DistributedCache_invalidateAll_does_not_undo_a_later_write_when_delivered_late() {
+            // Invalidating all marks what the store holds invalidated, and that is delivered like any other change.
+            // Delivered late - on a slow store, after this cache instance wrote the key again - it must not remove
+            // the later write: it is a consequence of this very cache instance's command, which has done all it was
+            // to do here already. Handed over rather than awaited, as above, because what has to be reproduced is a
+            // matter of when it is delivered
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    CacheBuilder.identity(),
+                    DistributedCaffeine::build);
+
+            Key key = Key.of(1);
+            distributedCache.put(key, Value.of(1));
+            distributedCache.invalidateAll();
+
+            // what the store marked invalidated for it, exactly as a cache instance is handed it
+            CacheEntry<Key, Value> invalidated;
+            try (Stream<CacheEntry<Key, Value>> cacheEntries = getFailable(() ->
+                    repositoryOf(distributedCache).streamCacheEntries(null, Set.of(INVALIDATED), UNORDERED))) {
+                invalidated = cacheEntries
+                        .filter(cacheEntry -> key.equals(cacheEntry.getKey()))
+                        .findFirst()
+                        .orElseThrow();
+            }
+
+            Value laterValue = Value.of(1, "later");
+            distributedCache.put(key, laterValue);
+
+            getInstanceRegistry(distributedCache).getCacheManager()
+                    .receiveCacheEntries(List.of(invalidated));
+
+            assertThat(distributedCache.getIfPresent(key)).isEqualTo(laterValue);
         }
 
         @DisplayName("Test that a population is not reverted by a delayed cache entry of another cache instance")
@@ -7886,7 +7947,7 @@ final class DistributedCaffeineIntegrationTests {
             doAnswer(invocation -> {
                 sleep(storeTimeout);
                 throw new IllegalStateException("provoked");
-            }).when(repository).updateStatusOfCacheEntries(any(), anySet(), any(), any());
+            }).when(repository).updateStatusOfCacheEntries(any(), anySet(), any(), any(), any());
 
             // The sweep runs before anything is published, so this is the only place its failure can be counted -
             // exactly as on the loading path. Left unguarded it would pay the timeout on every call, forever
@@ -7903,7 +7964,7 @@ final class DistributedCaffeineIntegrationTests {
                     .as("invalidating all must not wait for a store the cache has stopped contacting")
                     .isLessThan(storeTimeout);
 
-            verify(repository, times(3)).updateStatusOfCacheEntries(any(), anySet(), any(), any());
+            verify(repository, times(3)).updateStatusOfCacheEntries(any(), anySet(), any(), any(), any());
         }
 
         @DisplayName("Test that reads of the store on the loading path also stop waiting for a store that fails")
@@ -8121,7 +8182,6 @@ final class DistributedCaffeineIntegrationTests {
 
             // fix failure
             doCallRealMethod().when(cacheManager).cleanup();
-            loggerDistributedCaffeine.stopCapturing();
 
             // with the failure fixed, the background maintenance recovers on its own (no explicit trigger) and prunes
             // retained-by-size entries down to the retained maximum size; this distribution mode distributes
@@ -8133,6 +8193,13 @@ final class DistributedCaffeineIntegrationTests {
                             Count.of(CACHED, assertion -> assertion.isEqualTo(maximumSize)),
                             Count.of(EVICTED_SIZE_RETAINED, assertion -> assertion.isEqualTo(retainedMaximumSize)),
                             Count.of(INVALIDATED, assertion -> assertion.isEqualTo(2))));
+
+            // captured until recovery rather than until the failure was fixed: a maintenance run that called the
+            // failing method just before reports it only afterwards - all the later on a sharded cluster, where every
+            // run takes longer - and only once a run has succeeded is every failed one reported
+            assertThat(loggerDistributedCaffeine.getLoggingEvents()).allMatch(loggingEvent ->
+                    loggingEvent.getMessage().startsWith("Maintenance failed"));
+            loggerDistributedCaffeine.stopCapturing();
         }
 
         @DisplayName("Test Adapter")
@@ -8330,8 +8397,8 @@ final class DistributedCaffeineIntegrationTests {
                         .containsExactly("h1", "h2");
             }
 
-            // updateStatusOfCacheEntries updates the status, clears the operation and refreshes the timestamp
-            repository.updateStatusOfCacheEntries(Set.of("h1"), Set.of(CACHED), null, INVALIDATED);
+            // updateStatusOfCacheEntries updates the status, sets the given operation and refreshes the timestamp
+            repository.updateStatusOfCacheEntries(Set.of("h1"), Set.of(CACHED), null, "op-update", INVALIDATED);
 
             List<CacheEntry<Key, Value>> updatedEntries;
             try (Stream<CacheEntry<Key, Value>> stream =
@@ -8341,7 +8408,7 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(updatedEntries).hasSize(1);
             CacheEntry<Key, Value> updatedEntry = updatedEntries.get(0);
             assertThat(updatedEntry.getStatus()).isEqualTo(INVALIDATED);
-            assertThat(updatedEntry.getOperation()).isNull();          // operation cleared
+            assertThat(updatedEntry.getOperation()).isEqualTo("op-update"); // operation set
             assertThat(updatedEntry.getKey()).isEqualTo(Key.of(1));    // key and value preserved
             assertThat(updatedEntry.getValue()).isEqualTo(Value.of(1));
             assertThat(updatedEntry.getTimestamp()).isAfter(timestamp3); // timestamp refreshed to (a recent) now
@@ -8351,7 +8418,7 @@ final class DistributedCaffeineIntegrationTests {
             // updateStatusOfCacheEntries filtered by olderThan updates only entries older than the given timestamp,
             // cachedEntry2 (timestamp2) is updated, invalidatedEntry3 (timestamp3, not older) and the just-refreshed
             // 'h1' entry (recent) are not
-            repository.updateStatusOfCacheEntries(null, null, timestamp3, EVICTED_SIZE);
+            repository.updateStatusOfCacheEntries(null, null, timestamp3, null, EVICTED_SIZE);
             assertThat(repository.countCacheEntries(Set.of(EVICTED_SIZE), null)).isEqualTo(1);
 
             // deleteCacheEntries filtered by hashes
@@ -8517,14 +8584,14 @@ final class DistributedCaffeineIntegrationTests {
                     CacheEntry.of("h1", "op1", Key.of(1), Value.of(1), CACHED, timestamp1),
                     CacheEntry.of("h3", "op3", Key.of(3), Value.of(3), CACHED, timestamp3)));
 
-            repository.updateStatusOfCacheEntries(Set.of("h1"), Set.of(CACHED), null, INVALIDATED);
+            repository.updateStatusOfCacheEntries(Set.of("h1"), Set.of(CACHED), null, "op-update", INVALIDATED);
 
             try (Stream<CacheEntry<Key, Value>> stream = repository.streamCacheEntries(Set.of("h1"), null, UNORDERED)) {
                 assertThat(stream.toList())
                         .singleElement()
                         .satisfies(cacheEntry -> {
                             assertThat(cacheEntry.getStatus()).isEqualTo(INVALIDATED);
-                            assertThat(cacheEntry.getOperation()).isNull();
+                            assertThat(cacheEntry.getOperation()).isEqualTo("op-update");
                             assertThat(cacheEntry.getKey()).isEqualTo(Key.of(1));
                             assertThat(cacheEntry.getValue()).isEqualTo(Value.of(1));
                             assertThat(cacheEntry.getTimestamp()).isAfter(timestamp3);
@@ -8532,7 +8599,7 @@ final class DistributedCaffeineIntegrationTests {
             }
 
             // filtered by olderThan, so the entry just refreshed is not caught by it while the older one is
-            repository.updateStatusOfCacheEntries(null, null, now, EVICTED_SIZE);
+            repository.updateStatusOfCacheEntries(null, null, now, null, EVICTED_SIZE);
             assertThat(repository.countCacheEntries(Set.of(EVICTED_SIZE), null)).isEqualTo(1);
             assertThat(repository.countCacheEntries(Set.of(INVALIDATED), null)).isEqualTo(1);
         }
@@ -11841,7 +11908,7 @@ final class DistributedCaffeineIntegrationTests {
             // deleted, and unlike a delete that has to reach every cache instance - which on a store that
             // distributes only what a writer announces means the transition has to announce itself
             cacheA.distributedPolicy().getAdapter().getRepository().orElseThrow()
-                    .updateStatusOfCacheEntries(null, Set.of(CACHED), null, INVALIDATED);
+                    .updateStatusOfCacheEntries(null, Set.of(CACHED), null, null, INVALIDATED);
 
             await("synchronization of the status transition")
                     .atMost(WAITING_DURATION)

@@ -315,6 +315,16 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         overtakeAll();
         if (isActivated() && COMMAND.isConsideredBy(distributionMode)) {
             synchronizationLock.ensureLock();
+            // Minted and remembered like any other publish of this cache instance, only for all keys at once
+            // rather than for one: what it does covers every one of them, which is what keeps whatever this cache
+            // instance writes after it from being undone once this arrives back here.
+            // Minted ahead of marking what the store holds invalidated, so that the marks carry it as well: they are
+            // delivered like any other change, and late - after this cache instance wrote a key again - they would
+            // otherwise arrive as an invalidation of another cache instance and undo that write. Carrying the
+            // operation, they are the echo of this command instead, which a later write is never undone by.
+            // Remembered only once the store took them, as before, so that a failing store leaves nothing behind
+            long counter = operationCounter.incrementAndGet();
+            String operation = activationId.get() + ":" + counter;
             Repository<K, V> retaining = repository;
             if (distributionMode.isPopulationConsidered() && nonNull(retaining)) {
                 Set<Status> statuses = new HashSet<>(CACHED_GROUP);
@@ -328,14 +338,9 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                 // so a store that is down fails on this one and the publish that would have reported it is never
                 // reached - leaving the sweep paying the driver's timeout under the lock, every time, forever
                 runFailable(() -> storeGuard.runGuarded(identifier,
-                        () -> retaining.updateStatusOfCacheEntries(null, statuses, null, INVALIDATED)));
+                        () -> retaining.updateStatusOfCacheEntries(null, statuses, null, operation, INVALIDATED)));
             }
-            // Minted and remembered like any other publish of this cache instance, only for all keys at once
-            // rather than for one: what it does covers every one of them, which is what keeps whatever this cache
-            // instance writes after it from being undone once this arrives back here
-            long counter = operationCounter.incrementAndGet();
             commandOperation.set(counter);
-            String operation = activationId.get() + ":" + counter;
             publishGuarded(List.of(CacheEntry.of(
                     INVALIDATE_ALL.toString(),
                     operation,
