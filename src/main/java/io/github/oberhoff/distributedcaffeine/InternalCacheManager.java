@@ -21,6 +21,7 @@ import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer;
+import io.github.oberhoff.distributedcaffeine.InternalUtils.FailableRunnable;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
 import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
 import io.github.oberhoff.distributedcaffeine.adapter.Publisher;
@@ -140,6 +141,8 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalStoreGuard storeGuard;
     @SuppressWarnings("NotNullFieldNotInitialized")
+    private InternalDistributedStatsCounter distributedStatsCounter;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     private InternalHasher<K> hasher;
     @SuppressWarnings("NotNullFieldNotInitialized")
     private Executor executor;
@@ -175,6 +178,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         this.evictedEntryPersistenceConfigurer = instanceRegistry.getEvictedEntryPersistenceConfigurer();
         this.synchronizationLock = instanceRegistry.getSynchronizationLock();
         this.storeGuard = instanceRegistry.getStoreGuard();
+        this.distributedStatsCounter = instanceRegistry.getDistributedStatsCounter();
         this.hasher = instanceRegistry.getHasher();
         this.executor = instanceRegistry.getExecutor();
     }
@@ -240,16 +244,23 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         // published, so a store that is down fails here and the publish that would have reported it is never
         // reached. Left unguarded, a cache that reads the store on every miss would pay the driver's timeout for
         // every one of them, for as long as the outage lasts, while holding the synchronization lock
+        Map<K, V> found;
         try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> storeGuard.getGuarded(identifier,
                 () -> retaining.streamCacheEntries(
                         hashes,
                         EVICTED_RETAINED_GROUP,
                         UNORDERED)))) {
             //noinspection NullableProblems
-            return cacheEntryStream
+            found = cacheEntryStream
                     .filter(cacheEntry -> nonNull(cacheEntry.getValue()))
                     .collect(toMap(CacheEntry::getKey, CacheEntry::getValue));
+        } catch (RuntimeException e) {
+            // per key like a hit or a miss, so that the three of them add up to what was looked up
+            distributedStatsCounter.recordStoreLookupFailure(keys.size());
+            throw e;
         }
+        distributedStatsCounter.recordStoreLookup(found.size(), keys.size() - found.size());
+        return found;
     }
 
     InternalValue<V> putDistributed(InternalKey<K> key, InternalValue<V> value) {
@@ -337,11 +348,11 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                 // Guarded like the publish it precedes, and for a reason that only shows from here: it runs first,
                 // so a store that is down fails on this one and the publish that would have reported it is never
                 // reached - leaving the sweep paying the driver's timeout under the lock, every time, forever
-                runFailable(() -> storeGuard.runGuarded(identifier,
-                        () -> retaining.updateStatusOfCacheEntries(null, statuses, null, operation, INVALIDATED)));
+                writeGuarded(() -> retaining.updateStatusOfCacheEntries(null, statuses, null, operation,
+                        INVALIDATED), true);
             }
             commandOperation.set(counter);
-            publishGuarded(List.of(CacheEntry.of(
+            publishGuarded(true, List.of(CacheEntry.of(
                     INVALIDATE_ALL.toString(),
                     operation,
                     null,
@@ -524,6 +535,12 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
             }
         });
         cache.invalidateAll(toRemove);
+        // what is removed rather than the command itself, so that it adds up with the transitions of the same
+        // command arriving for single keys (see invalidateAllDistributed): whichever comes first removes a value,
+        // and the other one finds nothing left to count
+        if (isNull(ownCounter)) {
+            distributedStatsCounter.recordRemoteRemovals(toRemove.size());
+        }
     }
 
     // The three callers of this method publish outside the synchronization lock because they run where taking it
@@ -617,7 +634,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                         vn(pending.value()), pending.status(), Instant.now()))
                 .toList();
         try {
-            publishGuarded(cacheEntries);
+            publishGuarded(false, cacheEntries);
         } catch (RuntimeException e) {
             logger.log(Level.WARNING, format("Distributing %s for %s failed for cache at '%s'",
                     batch.stream().map(PendingPublish::status).collect(toCollection(LinkedHashSet::new)),
@@ -658,7 +675,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                     .toList();
             if (!cacheEntries.isEmpty()) {
                 try {
-                    publishGuarded(cacheEntries);
+                    publishGuarded(true, cacheEntries);
                 } catch (RuntimeException e) {
                     // A write that failed may have reached the data store or not, so what was remembered for it
                     // says nothing any more about which of the writes of this cache instance comes back last - and
@@ -679,8 +696,31 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     // of its own that every caller would have to learn about
     // Through runFailable like the plain publish it replaces, so that a caller sees a store failure wrapped
     // exactly as it was wrapped before anything stood in front of it
-    private void publishGuarded(List<CacheEntry<K, V>> cacheEntries) {
-        runFailable(() -> storeGuard.runGuarded(identifier, () -> publisher.publishCacheEntries(cacheEntries)));
+    private void publishGuarded(boolean synchronous, List<CacheEntry<K, V>> cacheEntries) {
+        writeGuarded(() -> publisher.publishCacheEntries(cacheEntries), synchronous);
+    }
+
+    // Every write of this cache instance to the store comes through here, which is what makes it the one place to
+    // count them. Only a synchronous one is timed: a caller waits for it, under the synchronization lock, so its
+    // time is both what a write costs whoever made it and how long the lock was taken up by it - neither of which
+    // holds for one of the drain, which nobody waits for and which runs alongside them. Timed including a refusal,
+    // which costs next to nothing, as a load failing fast does in Caffeine
+    private void writeGuarded(FailableRunnable write, boolean synchronous) {
+        long startTime = System.nanoTime();
+        boolean success = false;
+        try {
+            runFailable(() -> storeGuard.runGuarded(identifier, write));
+            success = true;
+        } finally {
+            if (success) {
+                distributedStatsCounter.recordStoreWriteSuccess();
+            } else {
+                distributedStatsCounter.recordStoreWriteFailure(synchronous);
+            }
+            if (synchronous) {
+                distributedStatsCounter.recordSynchronousStoreWrite(System.nanoTime() - startTime);
+            }
+        }
     }
 
     // Where arriving cache entries come from, which is what decides whether one that is already held may be left
@@ -720,6 +760,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                 long retainedBefore = cache.estimatedSize();
                 renewActivation();
                 synchronizeCacheEntries();
+                distributedStatsCounter.recordReconciliation();
                 // Reported because what it costs is visible to whoever uses this cache and explains nothing about
                 // itself: without persistence of cached entries the data store confirms none of them, so the cache
                 // is left empty and every read misses until it fills again. Logged after the fact so that the
@@ -749,6 +790,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         }
     }
 
+    @SuppressWarnings("java:S3776")
     private void receiveCacheEntry(CacheEntry<K, V> cacheEntry, Arrival arrival) {
         // A command belongs to no key, so it is handled ahead of everything below, which all works with one.
         // Dispatched by the name it carries as its hash, and one that is not known here is skipped rather than
@@ -777,9 +819,13 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         // invalidating all, which the command following it takes care of, or pruning, which is no write of the
         // value at all. Taking the tokens away for those discarded a refresh started right after invalidating all,
         // whenever the transition arrived while it was reloading
-        if (isNull(ownCounter) && nonNull(cacheEntry.getOperation())) {
+        boolean isOfAnother = isNull(ownCounter) && nonNull(cacheEntry.getOperation());
+        if (isOfAnother) {
             overtake(key);
         }
+        // what another cache instance did, as it arrives - not what reading the data store back restores, which
+        // is this cache instance catching up rather than another one changing anything
+        boolean isRemote = isOfAnother && arrival == Arrival.DELIVERED;
         if (cacheEntry.isCached()) {
             InternalValue<V> present = policy.getIfPresentQuietly(key);
             String operation = cacheEntry.getOperation();
@@ -795,8 +841,16 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                 cache.put(key, iv(requireNonNull(cacheEntry.getValue()))
                         .setOperation(operation)
                         .setActivationId(activationId.get()));
+                if (isRemote) {
+                    distributedStatsCounter.recordRemoteUpdate();
+                }
             }
         } else {
+            // counted only where something is removed: every cache instance receives every invalidation, and one
+            // of a key not held here changes nothing here
+            if (isRemote && nonNull(policy.getIfPresentQuietly(key))) {
+                distributedStatsCounter.recordRemoteRemovals(1);
+            }
             // a no-op where the key is not held, which is the ordinary case for an invalidation of this cache
             // instance coming back: it removed the value when it was issued
             cache.invalidate(key);

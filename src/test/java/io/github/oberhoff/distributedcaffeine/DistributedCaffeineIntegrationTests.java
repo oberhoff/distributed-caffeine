@@ -2082,6 +2082,264 @@ final class DistributedCaffeineIntegrationTests {
             });
         }
 
+        @DisplayName("Test that distributed stats are empty unless Caffeine records stats")
+        @Test
+        void test_DistributedStats_are_empty_without_recording_stats() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    CacheBuilder.identity(), DistributedCaffeine::build);
+
+            distributedCache.put(Key.of(1), Value.of(1));
+            distributedCache.invalidate(Key.of(1));
+
+            assertThat(distributedCache.distributedPolicy().stats()).isEqualTo(DistributedStats.empty());
+        }
+
+        @DisplayName("Test that distributed stats count writes to the store, one per write however many keys it carries")
+        @Test
+        void test_DistributedStats_count_store_writes() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withCaffeine(Caffeine.newBuilder().recordStats()), DistributedCaffeine::build);
+
+            distributedCache.put(Key.of(1), Value.of(1));
+            distributedCache.putAll(Map.of(Key.of(2), Value.of(2), Key.of(3), Value.of(3)));
+            distributedCache.invalidate(Key.of(1));
+
+            DistributedStats distributedStats = distributedCache.distributedPolicy().stats();
+            assertThat(distributedStats.storeWriteSuccessCount()).isEqualTo(3);
+            assertThat(distributedStats.storeWriteFailureCount()).isZero();
+            assertThat(distributedStats.storeRejectionCount()).isZero();
+            // all three were waited for, so all three are timed
+            assertThat(distributedStats.synchronousStoreWriteCount()).isEqualTo(3);
+            assertThat(distributedStats.totalSynchronousStoreWriteTime()).isPositive();
+            assertThat(distributedStats.averageSynchronousStoreWriteTime())
+                    .isEqualTo((double) distributedStats.totalSynchronousStoreWriteTime() / 3);
+        }
+
+        @DisplayName("Test that distributed stats time only the writes to the store a caller waits for")
+        @Test
+            // An eviction is distributed by a write nobody waits for, which runs alongside the synchronous ones and
+            // outside the synchronization lock, so it is counted as a write but not timed
+        void test_DistributedStats_time_only_synchronous_store_writes() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withCaffeine(Caffeine.newBuilder().maximumSize(10).recordStats()),
+                    DistributedCaffeine::build);
+
+            distributedCache.put(Key.of(1), Value.of(1));
+            distributedCache.policy().eviction().orElseThrow().setMaximum(0);
+            distributedCache.cleanUp();
+
+            await("the eviction being written")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(distributedCache.distributedPolicy().stats()
+                            .storeWriteSuccessCount()).isGreaterThan(1));
+            assertThat(distributedCache.distributedPolicy().stats().synchronousStoreWriteCount()).isEqualTo(1);
+        }
+
+        @DisplayName("Test that distributed stats count a failed asynchronous write apart from the synchronous ones")
+        @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+            // A failed synchronous write is thrown to whoever made it, while one nobody waits for is only logged, and
+            // its change is lost for the other cache instances - which is what this count exists to reveal
+        void test_DistributedStats_count_failed_asynchronous_store_writes() throws Exception {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withCaffeine(Caffeine.newBuilder().maximumSize(10).recordStats()),
+                    DistributedCaffeine::build);
+
+            // only the write distributing the eviction fails, so the put before it goes through
+            Publisher<Key, Value> publisher = injectSpy(getInstanceRegistry(distributedCache).getCacheManager(),
+                    InternalCacheManager.class, "publisher", Publisher.class);
+            doAnswer(invocation -> {
+                List<CacheEntry<Key, Value>> cacheEntries = invocation.getArgument(0);
+                if (cacheEntries.stream().anyMatch(cacheEntry -> cacheEntry.getStatus().isEvicted())) {
+                    throw new IllegalStateException("provoked");
+                }
+                return invocation.callRealMethod();
+            }).when(publisher).publishCacheEntries(anyList());
+
+            CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
+                    .getCaptureLogger(DistributedCaffeine.class);
+            loggerDistributedCaffeine.startCapturing();
+
+            distributedCache.put(Key.of(1), Value.of(1));
+            distributedCache.policy().eviction().orElseThrow().setMaximum(0);
+            distributedCache.cleanUp();
+
+            // held, because the echo of the put can restore the key once more, whose eviction then fails as well
+            await("the eviction failing to be written")
+                    .during(Duration.ofMillis(500))
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(distributedCache.distributedPolicy().stats()
+                            .asynchronousStoreWriteFailureCount())
+                            .isPositive()
+                            .isEqualTo(loggerDistributedCaffeine.getLoggingEvents().size()));
+            DistributedStats distributedStats = distributedCache.distributedPolicy().stats();
+            assertThat(distributedStats.storeWriteFailureCount())
+                    .as("every failure was an asynchronous one")
+                    .isEqualTo(distributedStats.asynchronousStoreWriteFailureCount());
+            assertThat(distributedStats.synchronousStoreWriteCount()).isEqualTo(1);
+            // which is all that is otherwise reported of it, once per failed write
+            assertThat(loggerDistributedCaffeine.getLoggingEvents())
+                    .allSatisfy(loggingEvent -> {
+                        assertThat(loggingEvent.getLevel()).isEqualTo(Level.WARN);
+                        assertThat(loggingEvent.getMessage()).startsWith("Distributing [evicted_size]");
+                    });
+
+            loggerDistributedCaffeine.stopCapturing();
+        }
+
+        @DisplayName("Test that distributed stats count what other cache instances change, and only that")
+        @Test
+            // Every cache instance receives every change, its own included, so what is counted here is decided by
+            // who made it - and a removal by whether there was anything to remove. Invalidating all arrives twice
+            // over where population is distributed (the command, and the transitions of what the store held), which
+            // must not count a value twice
+        void test_DistributedStats_count_changes_of_other_cache_instances() {
+            CacheBuilder<Key, Value> cacheBuilder = dc -> dc.withCaffeine(Caffeine.newBuilder().recordStats());
+            DistributedCache<Key, Value> writingCache = createCache(cacheBuilder, DistributedCaffeine::build);
+            DistributedCache<Key, Value> receivingCache = createCache(cacheBuilder, DistributedCaffeine::build);
+
+            writingCache.put(Key.of(1), Value.of(1));
+
+            await("synchronization of the put")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(receivingCache.getIfPresent(Key.of(1))).isEqualTo(Value.of(1)));
+            assertThat(receivingCache.distributedPolicy().stats().remoteUpdateCount()).isEqualTo(1);
+
+            // a key the receiving cache instance never held is invalidated there as well, and changes nothing
+            writingCache.invalidate(Key.of(99));
+            writingCache.invalidate(Key.of(1));
+
+            await("synchronization of the invalidation")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(receivingCache.getIfPresent(Key.of(1))).isNull());
+            assertThat(receivingCache.distributedPolicy().stats().remoteRemovalCount()).isEqualTo(1);
+
+            writingCache.putAll(Map.of(Key.of(2), Value.of(2), Key.of(3), Value.of(3)));
+
+            await("synchronization of the bulk put")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(receivingCache.asMap()).containsOnlyKeys(Key.of(2), Key.of(3)));
+            assertThat(receivingCache.distributedPolicy().stats().remoteUpdateCount()).isEqualTo(3);
+
+            writingCache.invalidateAll();
+
+            await("synchronization of invalidating all")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(receivingCache.asMap()).isEmpty());
+            // and held there, because the transitions of the same command may still be on their way
+            await("removals counted once")
+                    .during(Duration.ofMillis(500))
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> {
+                        assertThat(receivingCache.distributedPolicy().stats().remoteRemovalCount()).isEqualTo(3);
+                        assertThat(receivingCache.distributedPolicy().stats().remoteUpdateCount()).isEqualTo(3);
+                        // the writing cache instance received all of it back, and none of it was another's
+                        assertThat(writingCache.distributedPolicy().stats().remoteUpdateCount()).isZero();
+                        assertThat(writingCache.distributedPolicy().stats().remoteRemovalCount()).isZero();
+                    });
+        }
+
+        @DisplayName("Test that distributed stats do not count what comes back of this cache instance's own changes")
+        @Test
+            // The echo of a write of this cache instance is applied where Caffeine evicted the key meanwhile - that
+            // is how an evicted key comes back - and a transition the store makes by itself (as pruning does) carries
+            // no operation at all. Neither is a change of another cache instance, so neither is counted as one.
+            // The echo is held back rather than raced against, so that the eviction is certain to come first
+        void test_DistributedStats_do_not_count_own_echoes_as_remote_changes() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withDistributionMode(POPULATION_AND_INVALIDATION)
+                            .withCaffeine(Caffeine.newBuilder().maximumSize(10).recordStats()),
+                    DistributedCaffeine::build);
+            InternalCacheManager<Key, Value> cacheManager = getInstanceRegistry(distributedCache).getCacheManager();
+
+            Adapter<Key, Value> adapter = getInstanceRegistry(distributedCache).getAdapter();
+            Synchronizer<Key, Value> synchronizer = readFieldValue(adapter, AbstractAdapter.class,
+                    "synchronizer", Synchronizer.class);
+            Receiver<Key, Value> receiver = injectSpy(synchronizer, AbstractSynchronizer.class,
+                    "receiver", Receiver.class);
+            doNothing().when(receiver).receiveCacheEntries(anyList());
+
+            Key key = Key.of(1);
+            Value value = Value.of(1);
+            distributedCache.put(key, value);
+
+            CacheEntry<Key, Value> population;
+            try (Stream<CacheEntry<Key, Value>> cacheEntries = getFailable(() ->
+                    repositoryOf(distributedCache).streamCacheEntries(null, CACHED_GROUP, UNORDERED))) {
+                population = cacheEntries.findFirst().orElseThrow();
+            }
+
+            Policy.Eviction<Key, Value> eviction = distributedCache.policy().eviction().orElseThrow();
+            eviction.setMaximum(0);
+            distributedCache.cleanUp();
+            eviction.setMaximum(10);
+            assertThat(distributedCache.getIfPresent(key)).isNull();
+
+            cacheManager.receiveCacheEntries(List.of(population));
+
+            assertThat(distributedCache.getIfPresent(key))
+                    .as("restored by its own echo, which is the case this is about")
+                    .isEqualTo(value);
+
+            cacheManager.receiveCacheEntries(List.of(
+                    CacheEntry.of(population.getHash(), null, key, null, INVALIDATED, Instant.now())));
+
+            assertThat(distributedCache.getIfPresent(key))
+                    .as("removed by the transition of the store, which is the other case")
+                    .isNull();
+            DistributedStats distributedStats = distributedCache.distributedPolicy().stats();
+            assertThat(distributedStats.remoteUpdateCount()).isZero();
+            assertThat(distributedStats.remoteRemovalCount()).isZero();
+        }
+
+        @DisplayName("Test that distributed stats count a load discarded because its key was written meanwhile")
+        @Test
+        void test_DistributedStats_count_discarded_loads() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withCaffeine(Caffeine.newBuilder().recordStats()), DistributedCaffeine::build);
+            Key key1 = Key.of(1);
+
+            // the write lands while the mapping function is still running, from a thread of its own as it would
+            distributedCache.get(key1, key -> {
+                CompletableFuture.runAsync(() -> distributedCache.put(key1, Value.of(1, "put"))).join();
+                return Value.of(1, "loaded");
+            });
+
+            assertThat(distributedCache.getIfPresent(key1)).isEqualTo(Value.of(1, "put"));
+            assertThat(distributedCache.distributedPolicy().stats().discardedLoadCount()).isEqualTo(1);
+        }
+
+        @DisplayName("Test that distributed stats count reconciliations and survive restarting synchronization")
+        @Test
+        @ResourceLock(LOGGER_RESOURCE_LOCK)
+        void test_DistributedStats_count_reconciliations_and_survive_restarts() {
+            DistributedCache<Key, Value> distributedCache = createCache(
+                    dc -> dc.withCaffeine(Caffeine.newBuilder().recordStats()), DistributedCaffeine::build);
+            DistributedPolicy<Key, Value> distributedPolicy = distributedCache.distributedPolicy();
+
+            CaptureLogger loggerDistributedCaffeine = CaptureLoggerFactory
+                    .getCaptureLogger(DistributedCaffeine.class);
+            loggerDistributedCaffeine.startCapturing();
+
+            distributedCache.put(Key.of(1), Value.of(1));
+            // what an adapter reports once receiving restarted after an interruption
+            getInstanceRegistry(distributedCache).getCacheManager().receiveSynchronizationRestart();
+            awaitReconciliationReported(loggerDistributedCaffeine);
+
+            DistributedStats beforeRestart = distributedPolicy.stats();
+            assertThat(beforeRestart.reconciliationCount()).isEqualTo(1);
+            assertThat(beforeRestart.storeWriteSuccessCount()).isEqualTo(1);
+
+            // activating synchronizes as well, but nothing was interrupted, so it is no reconciliation
+            distributedPolicy.stopSynchronization();
+            distributedPolicy.startSynchronization();
+
+            assertThat(distributedPolicy.stats()).isEqualTo(beforeRestart);
+            assertThat(loggerDistributedCaffeine.getLoggingEvents()).hasSize(1);
+
+            loggerDistributedCaffeine.stopCapturing();
+        }
+
         // The tests' own threads for what they run alongside a load, rather than the common pool: on a machine with
         // few cores that pool has only a few workers, a load blocked on its gate (below) takes one of them, and the
         // very calls a test expects to go on meanwhile would then wait for a worker instead - failing for want of a
@@ -6923,7 +7181,7 @@ final class DistributedCaffeineIntegrationTests {
             });
 
             DistributedCache<Key, Value> distributedCache = createCache(
-                    dc -> dc.withCaffeine(Caffeine.newBuilder().maximumSize(1))
+                    dc -> dc.withCaffeine(Caffeine.newBuilder().maximumSize(1).recordStats())
                             .withPersistence(configurer -> configurer
                                     .withEvictedEntries(evictedEntries -> evictedEntries
                                             .withMaximumSize(10)
@@ -6954,6 +7212,13 @@ final class DistributedCaffeineIntegrationTests {
             Key unknown = Key.of(99);
             assertThat(distributedCache.get(unknown, mappingFunction)).isEqualTo(Value.of(99, "mapped"));
             verify(mappingFunction, times(1)).apply(unknown);
+
+            // one lookup the store answered and one it could not, which is what the mapping function was called for
+            DistributedStats distributedStats = distributedCache.distributedPolicy().stats();
+            assertThat(distributedStats.storeHitCount()).isEqualTo(1);
+            assertThat(distributedStats.storeMissCount()).isEqualTo(1);
+            assertThat(distributedStats.storeFailureCount()).isZero();
+            assertThat(distributedStats.storeHitRate()).isEqualTo(0.5);
         }
 
         @DisplayName("Test that the mapping function strategy applies a bulk mapping function to the remainder only")
@@ -7909,7 +8174,7 @@ final class DistributedCaffeineIntegrationTests {
         @Test
         void test_CacheManager_stops_writing_to_a_store_that_keeps_failing() throws Exception {
             DistributedCache<Key, Value> distributedCache = createCache(
-                    CacheBuilder.identity(), DistributedCaffeine::build);
+                    dc -> dc.withCaffeine(Caffeine.newBuilder().recordStats()), DistributedCaffeine::build);
 
             // A store that is gone is a store whose writes take the driver's timeout before they fail, and that is
             // what this stands in for: the delay is what the breaker exists to stop paying, and a real outage
@@ -7948,6 +8213,16 @@ final class DistributedCaffeineIntegrationTests {
             verify(publisher, times(3)).publishCacheEntries(anyList());
             assertThat(distributedCache.getIfPresent(Key.of(4))).isNull();
 
+            // all four failed, and the one refused is counted as that as well - timed with what the three cost
+            DistributedStats failedStats = distributedCache.distributedPolicy().stats();
+            assertThat(failedStats.storeWriteSuccessCount()).isZero();
+            assertThat(failedStats.storeWriteFailureCount()).isEqualTo(4);
+            assertThat(failedStats.asynchronousStoreWriteFailureCount()).isZero();
+            assertThat(failedStats.storeRejectionCount()).isEqualTo(1);
+            assertThat(failedStats.synchronousStoreWriteCount()).isEqualTo(4);
+            assertThat(failedStats.totalSynchronousStoreWriteTime())
+                    .isGreaterThanOrEqualTo(storeTimeout.multipliedBy(3).toNanos());
+
             // the store answers again, and the write after the suspension is what finds out - no probe of its own
             failing.set(false);
 
@@ -7969,8 +8244,9 @@ final class DistributedCaffeineIntegrationTests {
             // the sweep runs only where population is distributed and there is a store keeping a record of it,
             // which is what makes invalidating all reach more than the keys this cache instance happens to hold
             DistributedCache<Key, Value> distributedCache = createCache(
-                    dc -> dc.withPersistence(configurer -> configurer
-                            .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency)),
+                    dc -> dc.withCaffeine(Caffeine.newBuilder().recordStats())
+                            .withPersistence(configurer -> configurer
+                                    .withCachedEntries(CachedEntryPersistenceConfigurer::withCacheResidency)),
                     DistributedCaffeine::build);
 
             Duration storeTimeout = Duration.ofMillis(500);
@@ -7998,6 +8274,11 @@ final class DistributedCaffeineIntegrationTests {
                     .isLessThan(storeTimeout);
 
             verify(repository, times(3)).updateStatusOfCacheEntries(any(), anySet(), any(), any(), any());
+
+            // the sweep is a write of its own, counted like a publish
+            DistributedStats distributedStats = distributedCache.distributedPolicy().stats();
+            assertThat(distributedStats.storeWriteFailureCount()).isEqualTo(4);
+            assertThat(distributedStats.storeRejectionCount()).isEqualTo(1);
         }
 
         @DisplayName("Test that reads of the store on the loading path also stop waiting for a store that fails")
@@ -8008,7 +8289,7 @@ final class DistributedCaffeineIntegrationTests {
             CacheLoader<Key, Value> cacheLoader = key -> Value.of(key.getId(), "loaded");
             DistributedLoadingCache<Key, Value> loadingCache =
                     (DistributedLoadingCache<Key, Value>) this.<Key, Value>createCache(
-                            dc -> dc.withCaffeine(Caffeine.newBuilder().maximumSize(1))
+                            dc -> dc.withCaffeine(Caffeine.newBuilder().maximumSize(1).recordStats())
                                     .withPersistence(configurer -> configurer
                                             .withEvictedEntries(evictedEntries -> evictedEntries
                                                     .withMaximumSize(10)
@@ -8041,6 +8322,13 @@ final class DistributedCaffeineIntegrationTests {
                     .isLessThan(storeTimeout);
 
             verify(repository, times(3)).streamCacheEntries(anySet(), anySet(), any(Order.class));
+
+            // a failed lookup is neither a hit nor a miss, and the refused one is a failure as well
+            DistributedStats distributedStats = loadingCache.distributedPolicy().stats();
+            assertThat(distributedStats.storeHitCount()).isZero();
+            assertThat(distributedStats.storeMissCount()).isZero();
+            assertThat(distributedStats.storeFailureCount()).isEqualTo(4);
+            assertThat(distributedStats.storeRejectionCount()).isEqualTo(1);
         }
 
         @DisplayName("Test that synchronization reports being degraded while the store does not answer")

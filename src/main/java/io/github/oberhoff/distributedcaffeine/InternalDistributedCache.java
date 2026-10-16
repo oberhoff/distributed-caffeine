@@ -71,6 +71,8 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
     @SuppressWarnings("NotNullFieldNotInitialized")
     protected StatsCounter statsCounter;
     @SuppressWarnings("NotNullFieldNotInitialized")
+    protected InternalDistributedStatsCounter distributedStatsCounter;
+    @SuppressWarnings("NotNullFieldNotInitialized")
     protected InternalRemovalListener<K, V> removalListener;
 
     // which load each thread is waiting for, across all cache instances, to tell a cycle of loads waiting for each
@@ -95,6 +97,7 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
         this.synchronizationLock = instanceRegistry.getSynchronizationLock();
         this.evictedEntryPersistenceConfigurer = instanceRegistry.getEvictedEntryPersistenceConfigurer();
         this.statsCounter = instanceRegistry.getStatsCounter();
+        this.distributedStatsCounter = instanceRegistry.getDistributedStatsCounter();
         this.removalListener = instanceRegistry.getRemovalListener();
     }
 
@@ -396,8 +399,10 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
     protected void notifyDiscarded(InternalKey<K> key, V value) {
         InternalValue<V> present = policy.getIfPresentQuietly(key);
         if (isNull(present)) {
+            distributedStatsCounter.recordDiscardedLoad();
             removalListener.notifyDiscarded(k(key), value, RemovalCause.EXPLICIT);
         } else if (v(present) != value) {
+            distributedStatsCounter.recordDiscardedLoad();
             removalListener.notifyDiscarded(k(key), value, RemovalCause.REPLACED);
         }
     }

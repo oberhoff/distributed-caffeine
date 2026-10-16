@@ -2395,7 +2395,9 @@ final class DistributedCaffeineUnitTests {
         @DisplayName("that the store is left alone after a run of failures, and asked again once it answers")
         @Test
         void test_StoreGuard_stops_asking_a_store_that_keeps_failing() {
-            InternalStoreGuard storeGuard = new InternalStoreGuard();
+            InternalDistributedStatsCounter distributedStatsCounter = new InternalDistributedStatsCounter();
+            distributedStatsCounter.enable();
+            InternalStoreGuard storeGuard = new InternalStoreGuard(distributedStatsCounter);
 
             // short of the threshold the store is still asked, and what comes back is what it raised
             for (int attempt = 1; attempt < FAILURE_THRESHOLD; attempt++) {
@@ -2408,6 +2410,8 @@ final class DistributedCaffeineUnitTests {
 
             assertThatThrownBy(() -> storeGuard.runGuarded(IDENTIFIER, failing()))
                     .hasMessage("provoked");
+            // a store that was asked and failed is no rejection, however often it fails
+            assertThat(distributedStatsCounter.snapshot().storeRejectionCount()).isZero();
 
             // and from here it is not asked at all, which is said in terms of the store rather than of Failsafe
             assertThat(storeGuard.isStoreUnreachable()).isTrue();
@@ -2417,6 +2421,7 @@ final class DistributedCaffeineUnitTests {
                     .hasMessageContaining(IDENTIFIER)
                     .hasMessageContaining("because the last 3 attempts to contact it failed");
             assertThat(asked).isFalse();
+            assertThat(distributedStatsCounter.snapshot().storeRejectionCount()).isEqualTo(1);
 
             // being told it answers is enough, which is what the maintenance worker reports once a minute
             storeGuard.reportReachable();
@@ -2430,7 +2435,9 @@ final class DistributedCaffeineUnitTests {
         @DisplayName("that a caller asking the store itself is never refused, while its answer still counts")
         @Test
         void test_StoreGuard_observes_without_refusing() throws Throwable {
-            InternalStoreGuard storeGuard = new InternalStoreGuard();
+            InternalDistributedStatsCounter distributedStatsCounter = new InternalDistributedStatsCounter();
+            distributedStatsCounter.enable();
+            InternalStoreGuard storeGuard = new InternalStoreGuard(distributedStatsCounter);
 
             // an observed failure counts like any other: what a caller reached the store for is theirs to be
             // told, and the outcome is evidence all the same
@@ -2451,6 +2458,8 @@ final class DistributedCaffeineUnitTests {
                 return "answered";
             })).isEqualTo("answered");
             assertThat(asked).isTrue();
+            // the guarded call above was refused, the observed one never is
+            assertThat(distributedStatsCounter.snapshot().storeRejectionCount()).isEqualTo(1);
 
             // and an answer is better evidence than anything the guard could gather on its own, so it ends there
             assertThat(storeGuard.isStoreUnreachable()).isFalse();
@@ -2459,7 +2468,7 @@ final class DistributedCaffeineUnitTests {
         @DisplayName("that a caller is told what the store raised, whether or not it had to be carried")
         @Test
         void test_StoreGuard_hands_back_what_the_store_raised() {
-            InternalStoreGuard storeGuard = new InternalStoreGuard();
+            InternalStoreGuard storeGuard = new InternalStoreGuard(new InternalDistributedStatsCounter());
 
             // Failsafe carries a checked exception out wrapped and an unchecked one as it is, and a caller is
             // owed the difference: what wraps a store failure is decided where it is caught, not here
@@ -2501,6 +2510,75 @@ final class DistributedCaffeineUnitTests {
             return Class.forName(name);
         } catch (ClassNotFoundException e) {
             throw new IllegalStateException(e);
+        }
+    }
+
+    @Nested
+    @DisplayName("Test DistributedStats")
+    final class DistributedStatsUnit extends UnitTestInstance {
+
+        @DisplayName("that the derived values add up and divide as documented, including when nothing happened")
+        @Test
+        void test_DistributedStats_derived_values() {
+            // four writes, of which two were synchronous and timed
+            DistributedStats distributedStats = new DistributedStats(3, 1, 0, 2, 2, 0, 2, 400, 1, 0, 0, 0, 0);
+
+            assertThat(distributedStats.storeRequestCount()).isEqualTo(4);
+            assertThat(distributedStats.storeHitRate()).isEqualTo(0.75);
+            assertThat(distributedStats.storeWriteCount()).isEqualTo(4);
+            assertThat(distributedStats.averageSynchronousStoreWriteTime()).isEqualTo(200.0);
+
+            // as Caffeine does: nothing asked is no miss, and nothing written took no time
+            assertThat(DistributedStats.empty().storeHitRate()).isEqualTo(1.0);
+            assertThat(DistributedStats.empty().averageSynchronousStoreWriteTime()).isZero();
+        }
+
+        @DisplayName("that differences stop at zero and sums at the maximum, for every count")
+        @Test
+        void test_DistributedStats_minus_and_plus() {
+            DistributedStats ones = new DistributedStats(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1);
+            DistributedStats twos = new DistributedStats(2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2);
+            long max = Long.MAX_VALUE;
+            DistributedStats maximums = new DistributedStats(max, max, max, max, max, max, max, max, max, max, max,
+                    max, max);
+
+            assertThat(twos.minus(ones)).isEqualTo(ones);
+            assertThat(ones.minus(twos)).isEqualTo(DistributedStats.empty());
+            assertThat(ones.plus(ones)).isEqualTo(twos);
+            assertThat(maximums.plus(ones)).isEqualTo(maximums);
+        }
+
+        @DisplayName("that a snapshot is a value, and a count cannot be negative")
+        @Test
+        void test_DistributedStats_value_semantics() {
+            DistributedStats distributedStats = new DistributedStats(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13);
+
+            assertThat(distributedStats)
+                    .isEqualTo(new DistributedStats(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13))
+                    .hasSameHashCodeAs(new DistributedStats(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13))
+                    .isNotEqualTo(new DistributedStats(1, 2, 3, 4, 5, 0, 7, 8, 9, 10, 11, 12, 13));
+            assertThat(distributedStats.toString())
+                    .contains("storeHitCount=1", "asynchronousStoreWriteFailureCount=6", "reconciliationCount=13");
+            assertThatThrownBy(() -> new DistributedStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+
+        @DisplayName("that nothing is recorded unless enabled")
+        @Test
+        void test_DistributedStatsCounter_records_only_when_enabled() {
+            InternalDistributedStatsCounter distributedStatsCounter = new InternalDistributedStatsCounter();
+
+            distributedStatsCounter.recordStoreLookup(1, 1);
+            distributedStatsCounter.recordReconciliation();
+            assertThat(distributedStatsCounter.snapshot()).isEqualTo(DistributedStats.empty());
+
+            distributedStatsCounter.enable();
+            distributedStatsCounter.recordStoreLookup(1, 2);
+            distributedStatsCounter.recordReconciliation();
+            DistributedStats distributedStats = distributedStatsCounter.snapshot();
+            assertThat(distributedStats.storeHitCount()).isEqualTo(1);
+            assertThat(distributedStats.storeMissCount()).isEqualTo(2);
+            assertThat(distributedStats.reconciliationCount()).isEqualTo(1);
         }
     }
 

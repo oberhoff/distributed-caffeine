@@ -86,6 +86,11 @@ class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, Intern
     }
 
     @Override
+    public DistributedStats stats() {
+        return instanceRegistry.getDistributedStatsCounter().snapshot();
+    }
+
+    @Override
     public SynchronizationState getSynchronizationState() {
         // Read in this order on purpose: a cache instance that was stopped is stopped whatever the store is doing,
         // and the guard goes on holding what it learned while it was running

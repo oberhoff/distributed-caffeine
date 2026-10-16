@@ -108,6 +108,17 @@ public interface DistributedPolicy<K, V> {
     SynchronizationState getSynchronizationState();
 
     /**
+     * Returns a snapshot of the statistics about the distribution of this cache instance, complementing
+     * {@link com.github.benmanes.caffeine.cache.Cache#stats()}.
+     * <p>
+     * <b>Note:</b> They are recorded only if recording of statistics is enabled using
+     * {@link com.github.benmanes.caffeine.cache.Caffeine#recordStats()}, otherwise every count is zero.
+     *
+     * @return a snapshot of the statistics about the distribution of this cache instance
+     */
+    DistributedStats stats();
+
+    /**
      * Returns the retained cache entry mapped to the specified key directly from the underlying store bypassing this
      * cache instance.
      * <p>

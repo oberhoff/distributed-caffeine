@@ -64,8 +64,10 @@ class InternalStoreGuard {
     // narrower would admit only that type. Nothing here decides on a result anyway - what counts as a failure is
     // a throwable and nothing else
     private final CircuitBreaker<Object> circuitBreaker;
+    private final InternalDistributedStatsCounter distributedStatsCounter;
 
-    InternalStoreGuard() {
+    InternalStoreGuard(InternalDistributedStatsCounter distributedStatsCounter) {
+        this.distributedStatsCounter = distributedStatsCounter;
         this.circuitBreaker = CircuitBreaker.builder()
                 .handle(Throwable.class)
                 .withFailureThreshold(FAILURE_THRESHOLD)
@@ -78,6 +80,7 @@ class InternalStoreGuard {
         try {
             Failsafe.with(circuitBreaker).run(runnable::run);
         } catch (CircuitBreakerOpenException e) {
+            distributedStatsCounter.recordStoreRejection();
             throw suspended(identifier, e);
         } catch (FailsafeException e) {
             throw unwrapped(e);
@@ -88,6 +91,7 @@ class InternalStoreGuard {
         try {
             return Failsafe.with(circuitBreaker).get(supplier::get);
         } catch (CircuitBreakerOpenException e) {
+            distributedStatsCounter.recordStoreRejection();
             throw suspended(identifier, e);
         } catch (FailsafeException e) {
             throw unwrapped(e);

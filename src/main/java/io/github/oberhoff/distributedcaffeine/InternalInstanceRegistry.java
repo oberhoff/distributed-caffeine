@@ -34,6 +34,7 @@ class InternalInstanceRegistry<K, V> {
     private final Logger logger = System.getLogger(DistributedCaffeine.class.getName());
 
     private final InternalSynchronizationLock synchronizationLock;
+    private final InternalDistributedStatsCounter distributedStatsCounter;
     private final InternalStoreGuard storeGuard;
     private final InternalCacheManager<K, V> cacheManager;
     private final InternalMaintenanceWorker<K, V> maintenanceWorker;
@@ -65,7 +66,8 @@ class InternalInstanceRegistry<K, V> {
     @SuppressWarnings({"java:S2637", "NullAway.Init"})
     InternalInstanceRegistry() {
         this.synchronizationLock = new InternalSynchronizationLock();
-        this.storeGuard = new InternalStoreGuard();
+        this.distributedStatsCounter = new InternalDistributedStatsCounter();
+        this.storeGuard = new InternalStoreGuard(distributedStatsCounter);
         this.cacheManager = new InternalCacheManager<>();
         this.maintenanceWorker = new InternalMaintenanceWorker<>();
     }
@@ -152,6 +154,10 @@ class InternalInstanceRegistry<K, V> {
 
     public InternalSynchronizationLock getSynchronizationLock() {
         return synchronizationLock;
+    }
+
+    public InternalDistributedStatsCounter getDistributedStatsCounter() {
+        return distributedStatsCounter;
     }
 
     public InternalStoreGuard getStoreGuard() {

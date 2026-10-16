@@ -419,6 +419,8 @@ public final class DistributedCaffeine<K, V> {
         Supplier<StatsCounter> caffeineStatsCounterSupplier = getFailableOrNull(() ->
                 (Supplier<StatsCounter>) STATS_COUNTER_SUPPLIER_FIELD.get(caffeine));
         if (nonNull(caffeineStatsCounterSupplier)) {
+            // recording what only distributing does follows the switch for what Caffeine records itself
+            instanceRegistry.getDistributedStatsCounter().enable();
             Supplier<StatsCounter> statsCounterSupplier = () -> {
                 StatsCounter caffeineStatsCounter = caffeineStatsCounterSupplier.get();
                 instanceRegistry.setStatsCounter(caffeineStatsCounter);
