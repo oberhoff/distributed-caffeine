@@ -198,8 +198,9 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalInitializable<K, V> 
             requireNonNull(key);
             requireNonNull(value);
             requireNonNull(unit);
-            return synchronizationLock.getLockedOrNull(() ->
-                    vn(varExpiration.put(ik(key), cacheManager.putDistributed(ik(key), iv(value)), duration, unit)));
+            InternalKey<K> internalKey = ik(key);
+            return synchronizationLock.getLockedOrNull(internalKey, () ->
+                    vn(varExpiration.put(internalKey, cacheManager.putDistributed(internalKey, iv(value)), duration, unit)));
         }
 
         @Override
@@ -207,8 +208,9 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalInitializable<K, V> 
             requireNonNull(key);
             requireNonNull(value);
             requireNonNull(unit);
-            return synchronizationLock.getLockedOrNull(() -> {
-                V oldValue = vn(policy.getIfPresentQuietly(ik(key)));
+            InternalKey<K> internalKey = ik(key);
+            return synchronizationLock.getLockedOrNull(internalKey, () -> {
+                V oldValue = vn(policy.getIfPresentQuietly(internalKey));
                 return isNull(oldValue)
                         ? put(key, value, duration, unit) // implicit distribution
                         : oldValue;
@@ -232,8 +234,9 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalInitializable<K, V> 
                         }
                         return value;
                     };
-            return synchronizationLock.getLockedOrNull(() ->
-                    vn(varExpiration.compute(ik(key), distributedRemapping, duration)));
+            InternalKey<K> internalKey = ik(key);
+            return synchronizationLock.getLockedOrNull(internalKey, () ->
+                    vn(varExpiration.compute(internalKey, distributedRemapping, duration)));
         }
 
         @Override

@@ -94,7 +94,9 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashSet;
@@ -115,6 +117,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -124,6 +127,7 @@ import java.util.function.Consumer;
 import java.util.function.ToLongFunction;
 import java.util.function.UnaryOperator;
 import java.util.stream.IntStream;
+import java.util.stream.LongStream;
 import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer.LoadingStrategy.CACHE_LOADER;
@@ -138,6 +142,7 @@ import static java.time.temporal.ChronoUnit.FOREVER;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static java.util.stream.Collectors.toCollection;
+import static java.util.stream.Collectors.toSet;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatException;
@@ -2496,23 +2501,6 @@ final class DistributedCaffeineUnitTests {
         }
     }
 
-    // the adapter classes under test are package-private in their own package, so the tests above reach them
-    // by name rather than by reference
-    // how often a mock of a type that cannot be named here was called by the given method
-    private static long invocationsOf(Object mock, String methodName) {
-        return mockingDetails(mock).getInvocations().stream()
-                .filter(invocation -> invocation.getMethod().getName().equals(methodName))
-                .count();
-    }
-
-    private static Class<?> classOf(String name) {
-        try {
-            return Class.forName(name);
-        } catch (ClassNotFoundException e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
     @Nested
     @DisplayName("Test DistributedStats")
     final class DistributedStatsUnit extends UnitTestInstance {
@@ -2579,6 +2567,289 @@ final class DistributedCaffeineUnitTests {
             assertThat(distributedStats.storeHitCount()).isEqualTo(1);
             assertThat(distributedStats.storeMissCount()).isEqualTo(2);
             assertThat(distributedStats.reconciliationCount()).isEqualTo(1);
+        }
+    }
+
+    @Nested
+    @DisplayName("Test SynchronizationLock")
+    final class SynchronizationLockUnit extends UnitTestInstance {
+
+        @DisplayName("that a whole-cache operation is refused from within a key operation rather than waiting forever")
+        @Test
+        void test_SynchronizationLock_refuses_whole_cache_within_key() {
+            InternalSynchronizationLock lock = new InternalSynchronizationLock();
+
+            // in a thread of its own, so that a regression to waiting fails this test instead of hanging the suite
+            Future<?> nested = Executors.newSingleThreadExecutor(daemon()).submit(() ->
+                    lock.runLocked(InternalKey.ik("a"), () -> lock.runLocked(() -> {
+                    })));
+
+            assertThatThrownBy(() -> nested.get(5, SECONDS))
+                    .hasCauseInstanceOf(IllegalStateException.class);
+            // and nothing was left held by the refusal
+            assertNothingHeld(lock);
+            assertThatCode(() -> lock.runLocked(() -> {
+            })).doesNotThrowAnyException();
+        }
+
+        @DisplayName("that another key is refused from within a key operation, while its own key and the whole cache "
+                + "nest")
+        @Test
+        void test_SynchronizationLock_nesting() {
+            InternalSynchronizationLock lock = new InternalSynchronizationLock();
+            InternalKey<Integer> key = InternalKey.ik(0);
+            InternalKey<Integer> otherKey = IntStream.range(1, 1_000)
+                    .mapToObj(InternalKey::ik)
+                    .filter(candidate -> InternalSynchronizationLock.stripeIndexOf(candidate)
+                            != InternalSynchronizationLock.stripeIndexOf(key))
+                    .findFirst()
+                    .orElseThrow();
+            List<InternalKey<Integer>> bothKeys = List.of(key, otherKey);
+
+            assertThatThrownBy(() -> lock.runLocked(key, () -> lock.runLocked(otherKey, () -> {
+            }))).isInstanceOf(IllegalStateException.class);
+            assertThatThrownBy(() -> lock.runLocked(key, () -> lock.runLocked(bothKeys, () -> {
+            }))).isInstanceOf(IllegalStateException.class);
+            assertNothingHeld(lock);
+
+            AtomicInteger reached = new AtomicInteger();
+            // the same key again, as the facade nests put into putIfAbsent and compute
+            lock.runLocked(key, () -> lock.runLocked(key, reached::incrementAndGet));
+            lock.runLocked(bothKeys, () -> lock.runLocked(otherKey, reached::incrementAndGet));
+            // anything from within the whole cache, which no other thread can hold a stripe against
+            lock.runLocked(() -> lock.runLocked(bothKeys, () -> lock.runLocked(key,
+                    () -> lock.runLocked(reached::incrementAndGet))));
+            assertThat(reached).hasValue(3);
+        }
+
+        @DisplayName("that a whole-cache operation waits for the key operations under way and they wait for it")
+        @Test
+        void test_SynchronizationLock_whole_cache_excludes_keys() throws Exception {
+            InternalSynchronizationLock lock = new InternalSynchronizationLock();
+            ExecutorService executor = Executors.newCachedThreadPool(daemon());
+            CountDownLatch keyHeld = new CountDownLatch(1);
+            CountDownLatch releaseKey = new CountDownLatch(1);
+            AtomicBoolean wholeCacheRan = new AtomicBoolean();
+
+            Future<?> keyOperation = executor.submit(() -> lock.runLocked(InternalKey.ik("a"), () -> {
+                keyHeld.countDown();
+                awaitUninterruptibly(releaseKey);
+            }));
+            assertThat(keyHeld.await(5, SECONDS)).isTrue();
+            Future<?> wholeCacheOperation = executor.submit(() -> lock.runLocked(() -> wholeCacheRan.set(true)));
+
+            sleep(Duration.ofMillis(200));
+            assertThat(wholeCacheRan).isFalse();
+            releaseKey.countDown();
+            keyOperation.get(5, SECONDS);
+            wholeCacheOperation.get(5, SECONDS);
+            assertThat(wholeCacheRan).isTrue();
+            executor.shutdownNow();
+        }
+
+        @DisplayName("that overlapping operations on many keys exclude each other per key and never deadlock")
+        @Test
+        void test_SynchronizationLock_overlapping_keys() throws Exception {
+            InternalSynchronizationLock lock = new InternalSynchronizationLock();
+            int keys = 200;
+            int workers = 8;
+            int operationsPerWorker = 5_000;
+            // deliberately not atomic: a lost increment is what two operations on one key overlapping looks like
+            int[] counts = new int[keys];
+            int[] expected = new int[keys];
+            int[][] expectedPerWorker = new int[workers][keys];
+            ExecutorService executor = Executors.newFixedThreadPool(workers, daemon());
+
+            List<? extends Future<?>> running = IntStream.range(0, workers)
+                    .mapToObj(worker -> executor.submit(() -> {
+                        Random random = new Random(worker);
+                        for (int operation = 0; operation < operationsPerWorker; operation++) {
+                            Set<InternalKey<Integer>> operationKeys = new LinkedHashSet<>();
+                            int size = 1 + random.nextInt(random.nextInt(10) == 0 ? 20 : 3);
+                            while (operationKeys.size() < size) {
+                                operationKeys.add(InternalKey.ik(random.nextInt(keys)));
+                            }
+                            Runnable increment = () -> operationKeys.forEach(key -> counts[key.hashCode()]++);
+                            switch (random.nextInt(20)) {
+                                // a whole-cache operation now and then, nesting the key operation as reconciling does
+                                case 0 -> lock.runLocked(() -> lock.runLocked(operationKeys, increment));
+                                // a single key, nesting itself as the facade does
+                                case 1, 2, 3, 4, 5 -> {
+                                    InternalKey<Integer> key = operationKeys.iterator().next();
+                                    lock.runLocked(key, () -> lock.runLocked(key, () -> counts[key.hashCode()]++));
+                                    operationKeys.retainAll(Set.of(key));
+                                }
+                                default -> lock.runLocked(operationKeys, increment);
+                            }
+                            operationKeys.forEach(key -> expectedPerWorker[worker][key.hashCode()]++);
+                        }
+                    }))
+                    .toList();
+            for (Future<?> future : running) {
+                // bounded, so that a deadlock fails the test instead of hanging the suite
+                future.get(60, SECONDS);
+            }
+            executor.shutdownNow();
+
+            for (int[] perWorker : expectedPerWorker) {
+                for (int key = 0; key < keys; key++) {
+                    expected[key] += perWorker[key];
+                }
+            }
+            assertThat(counts).isEqualTo(expected);
+            assertNothingHeld(lock);
+        }
+
+        @DisplayName("that items are applied in their order per key, and a busy stripe holds up only its own items")
+        @Test
+        void test_SynchronizationLock_run_locked_per_stripe() throws Exception {
+            InternalSynchronizationLock lock = new InternalSynchronizationLock();
+            InternalKey<Integer> busyKey = InternalKey.ik(0);
+            // the busy key's items first, so that waiting for it in turn would hold up everything after it
+            List<Map.Entry<InternalKey<Integer>, Integer>> items = new ArrayList<>();
+            for (int sequence = 0; sequence < 300; sequence++) {
+                items.add(Map.entry(sequence < 3 ? busyKey : InternalKey.ik(sequence % 50), sequence));
+            }
+            ExecutorService executor = Executors.newCachedThreadPool(daemon());
+            CountDownLatch busyHeld = new CountDownLatch(1);
+            CountDownLatch releaseBusy = new CountDownLatch(1);
+            Future<?> writer = executor.submit(() -> lock.runLocked(busyKey, () -> {
+                busyHeld.countDown();
+                awaitUninterruptibly(releaseBusy);
+            }));
+            assertThat(busyHeld.await(5, SECONDS)).isTrue();
+
+            List<Map.Entry<InternalKey<Integer>, Integer>> applied = new CopyOnWriteArrayList<>();
+            Future<?> receiver = executor.submit(() ->
+                    lock.runLockedPerStripe(items, Map.Entry::getKey, applied::add));
+
+            int busyStripe = InternalSynchronizationLock.stripeIndexOf(busyKey);
+            long otherStripeItems = items.stream()
+                    .filter(item -> InternalSynchronizationLock.stripeIndexOf(item.getKey()) != busyStripe)
+                    .count();
+            await("the items of the stripes that are free")
+                    .atMost(Duration.ofSeconds(5))
+                    .until(() -> applied.size() == otherStripeItems);
+            assertThat(applied).noneMatch(item -> InternalSynchronizationLock.stripeIndexOf(item.getKey()) == busyStripe);
+
+            releaseBusy.countDown();
+            writer.get(5, SECONDS);
+            receiver.get(5, SECONDS);
+            assertThat(applied).hasSameSizeAs(items);
+            Map<InternalKey<Integer>, List<Integer>> appliedPerKey = new HashMap<>();
+            Map<InternalKey<Integer>, List<Integer>> givenPerKey = new HashMap<>();
+            applied.forEach(item -> appliedPerKey.computeIfAbsent(item.getKey(), key -> new ArrayList<>())
+                    .add(item.getValue()));
+            items.forEach(item -> givenPerKey.computeIfAbsent(item.getKey(), key -> new ArrayList<>())
+                    .add(item.getValue()));
+            assertThat(appliedPerKey).isEqualTo(givenPerKey);
+            executor.shutdownNow();
+        }
+
+        @DisplayName("that keys whose hash codes differ only in their high bits still spread over every stripe")
+        @Test
+        void test_SynchronizationLock_stripe_spread() {
+            assertThat(LongStream.range(0, 1_000)
+                    .mapToObj(value -> InternalSynchronizationLock.stripeIndexOf(InternalKey.ik(value * 64)))
+                    .collect(toSet()))
+                    .hasSize(InternalSynchronizationLock.STRIPE_COUNT);
+            assertThat(IntStream.range(0, 1_000)
+                    .mapToObj(value -> InternalSynchronizationLock.stripeIndexOf(InternalKey.ik(value * 1024)))
+                    .collect(toSet()))
+                    .hasSize(InternalSynchronizationLock.STRIPE_COUNT);
+        }
+
+        @DisplayName("that the assertions require the lock covering what they assert, whichever thread holds it")
+        @Test
+        void test_SynchronizationLock_ensure() throws Exception {
+            InternalSynchronizationLock lock = new InternalSynchronizationLock();
+            InternalKey<Integer> key = InternalKey.ik(0);
+            InternalKey<Integer> otherKey = IntStream.range(1, 1_000)
+                    .mapToObj(InternalKey::ik)
+                    .filter(candidate -> InternalSynchronizationLock.stripeIndexOf(candidate)
+                            != InternalSynchronizationLock.stripeIndexOf(key))
+                    .findFirst()
+                    .orElseThrow();
+            List<InternalKey<Integer>> onlyKey = List.of(key);
+            List<InternalKey<Integer>> bothKeys = List.of(key, otherKey);
+
+            assertThatThrownBy(() -> lock.ensureLock(onlyKey)).isInstanceOf(IllegalStateException.class);
+            assertThatThrownBy(lock::ensureExclusiveLock).isInstanceOf(IllegalStateException.class);
+
+            // a key's stripe covers that key alone, and the shared side it comes with covers nothing whole-cache
+            lock.runLocked(key, () -> {
+                assertThatCode(() -> lock.ensureLock(onlyKey)).doesNotThrowAnyException();
+                assertThatThrownBy(() -> lock.ensureLock(bothKeys))
+                        .isInstanceOf(IllegalStateException.class);
+                assertThatThrownBy(lock::ensureExclusiveLock).isInstanceOf(IllegalStateException.class);
+            });
+            lock.runLocked(bothKeys, () ->
+                    assertThatCode(() -> lock.ensureLock(bothKeys)).doesNotThrowAnyException());
+            // the whole cache covers every key, though it takes no stripe
+            lock.runLocked(() -> {
+                assertThatCode(() -> lock.ensureLock(bothKeys)).doesNotThrowAnyException();
+                assertThatCode(lock::ensureExclusiveLock).doesNotThrowAnyException();
+            });
+
+            // whichever thread holds it, by design
+            ExecutorService executor = Executors.newSingleThreadExecutor(daemon());
+            CountDownLatch held = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            Future<?> holder = executor.submit(() -> lock.runLocked(key, () -> {
+                held.countDown();
+                awaitUninterruptibly(release);
+            }));
+            assertThat(held.await(5, SECONDS)).isTrue();
+            assertThatCode(() -> lock.ensureLock(onlyKey)).doesNotThrowAnyException();
+            release.countDown();
+            holder.get(5, SECONDS);
+            executor.shutdownNow();
+        }
+
+        // that nothing is left held, on either side: another thread can take the whole cache, which waits for every
+        // key operation and every whole-cache one alike - bounded, so that something left held fails instead of hangs
+        private void assertNothingHeld(InternalSynchronizationLock lock) {
+            ExecutorService executor = Executors.newSingleThreadExecutor(daemon());
+            try {
+                assertThatCode(() -> executor.submit(() -> lock.runLocked(() -> {
+                })).get(5, SECONDS)).doesNotThrowAnyException();
+            } finally {
+                executor.shutdownNow();
+            }
+        }
+
+        private ThreadFactory daemon() {
+            return runnable -> {
+                Thread thread = new Thread(runnable);
+                thread.setDaemon(true);
+                return thread;
+            };
+        }
+
+        private void awaitUninterruptibly(CountDownLatch latch) {
+            try {
+                assertThat(latch.await(30, SECONDS)).isTrue();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+        }
+    }
+
+    // the adapter classes under test are package-private in their own package, so the tests above reach them
+    // by name rather than by reference
+    // how often a mock of a type that cannot be named here was called by the given method
+    private static long invocationsOf(Object mock, String methodName) {
+        return mockingDetails(mock).getInvocations().stream()
+                .filter(invocation -> invocation.getMethod().getName().equals(methodName))
+                .count();
+    }
+
+    private static Class<?> classOf(String name) {
+        try {
+            return Class.forName(name);
+        } catch (ClassNotFoundException e) {
+            throw new IllegalStateException(e);
         }
     }
 

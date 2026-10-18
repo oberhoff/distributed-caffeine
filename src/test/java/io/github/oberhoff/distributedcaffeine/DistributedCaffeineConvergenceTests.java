@@ -132,6 +132,88 @@ final class DistributedCaffeineConvergenceTests {
         }
     }
 
+    // The test above takes one step at a time, so it never has two writes of one cache instance under way at once,
+    // nor a delivery applied while a write is - which is all the synchronization lock is there for. This one has
+    // several writers per cache instance and a delivery of its own alongside them, handing cache entries over in
+    // batches as an adapter does. What it cannot do is reproduce a seed: the threads interleave as they will, so
+    // a failure is reported with the log it diverged on rather than with a history to replay.
+    // Invalidating all is part of it, because it is the one operation that has to exclude every other one: the
+    // log still decides what it removes, since every write is published in this mode and every cache instance
+    // applies the command at the same position of it
+    @DisplayName("Test that cache instances converge with concurrent writers and deliveries")
+    @ParameterizedTest(name = "repetition {0}")
+    @ValueSource(longs = {1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L})
+    void test_convergence_with_concurrent_writers_and_deliveries(long seed) throws Exception {
+        int writersPerInstance = 3;
+        int phases = 10;
+        int operationsPerWriterAndPhase = 20;
+        InMemoryBroker<Key, Value> broker = new InMemoryBroker<>();
+        broker.withMaximumPublishLatency(java.time.Duration.ofNanos(200_000));
+        List<AbstractAdapter<Key, Value>> adapters = new ArrayList<>();
+        List<DistributedCache<Key, Value>> caches = new ArrayList<>();
+        for (int instance = 0; instance < INSTANCES; instance++) {
+            AbstractAdapter<Key, Value> adapter = broker.newAdapter("in-memory-" + instance);
+            adapters.add(adapter);
+            caches.add(DistributedCaffeine.newBuilder(adapter)
+                    .withDistributionMode(POPULATION_AND_INVALIDATION)
+                    .build());
+        }
+
+        ExecutorService executor = Executors.newCachedThreadPool();
+        try {
+            // In phases, each ending with everything delivered and compared, rather than once at the very end: with
+            // a handful of keys almost every one of them is written again later, and a later write - or the next
+            // invalidation of all - heals whatever diverged before it. A divergence only has to outlast its own
+            // phase to be seen this way, instead of the whole run
+            for (int phase = 0; phase < phases; phase++) {
+                AtomicBoolean writing = new AtomicBoolean(true);
+                List<Future<?>> writers = new ArrayList<>();
+                List<Future<?>> deliveries = new ArrayList<>();
+                for (int instance = 0; instance < INSTANCES; instance++) {
+                    int currentInstance = instance;
+                    for (int writer = 0; writer < writersPerInstance; writer++) {
+                        Random random = new Random(seed * 100_000 + phase * 100L + instance * 10L + writer);
+                        writers.add(executor.submit(() -> {
+                            for (int operation = 0; operation < operationsPerWriterAndPhase; operation++) {
+                                operateConcurrently(caches.get(currentInstance), currentInstance, random);
+                            }
+                        }));
+                    }
+                    Random random = new Random(seed * 100_000 + phase * 100L + instance * 10L + 9);
+                    deliveries.add(executor.submit(() -> {
+                        while (writing.get()) {
+                            broker.deliverBatch(adapters.get(currentInstance), 1 + random.nextInt(20));
+                        }
+                    }));
+                }
+                // bounded, so that a deadlock fails the test instead of hanging the suite
+                for (Future<?> writer : writers) {
+                    writer.get(60, java.util.concurrent.TimeUnit.SECONDS);
+                }
+                writing.set(false);
+                for (Future<?> delivery : deliveries) {
+                    delivery.get(60, java.util.concurrent.TimeUnit.SECONDS);
+                }
+
+                // everything published reaches everyone, which is where they have to agree
+                broker.deliverAll();
+                assertThat(broker.hasUndelivered()).isFalse();
+
+                List<CacheEntry<Key, Value>> log = broker.getLog();
+                Map<Key, Value> expected = replay(log);
+                for (int instance = 0; instance < INSTANCES; instance++) {
+                    assertThat(caches.get(instance).asMap())
+                            .describedAs("cache instance %d after phase %d, a log of %d cache entries (%d commands)",
+                                    instance, phase, log.size(), log.stream().filter(CacheEntry::isCommand).count())
+                            .containsExactlyInAnyOrderEntriesOf(expected);
+                }
+            }
+        } finally {
+            executor.shutdownNow();
+            caches.forEach(cache -> cache.distributedPolicy().stopSynchronization());
+        }
+    }
+
     @DisplayName("Test that cache instances converge when writes and deliveries happen while loading or refreshing")
     @ParameterizedTest(name = "with seed {0}")
     @ValueSource(longs = {1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L, 12L, 13L, 14L, 15L, 16L, 17L, 18L, 19L, 20L,
@@ -196,6 +278,226 @@ final class DistributedCaffeineConvergenceTests {
             }
         } finally {
             run.stop();
+        }
+    }
+
+    @DisplayName("Test that cache instances converge with concurrent loads, refreshes, writers and deliveries")
+    @ParameterizedTest(name = "repetition {0}")
+    @ValueSource(longs = {1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L})
+    void test_convergence_with_concurrent_loads(long seed) throws Exception {
+        // The loading counterpart of test_convergence_with_concurrent_writers_and_deliveries: loads, bulk loads with
+        // extra keys and refreshes apply what they read under the synchronization lock of the keys they apply, and
+        // with population distributed what they apply is published like any write - so the log stays the oracle
+        ConcurrentLoadingRun run = new ConcurrentLoadingRun(seed, POPULATION_AND_INVALIDATION);
+        try {
+            run.run(() -> {
+                Map<Key, Value> expected = replay(run.broker.getLog());
+                for (int instance = 0; instance < INSTANCES; instance++) {
+                    assertThat(run.caches.get(instance).asMap())
+                            .describedAs("cache instance %d after phase %d", instance, run.phase)
+                            .containsExactlyInAnyOrderEntriesOf(expected);
+                }
+            });
+        } finally {
+            run.stop();
+        }
+    }
+
+    @DisplayName("Test that no loaded value outlives a later change of its source, with concurrent loads and writers")
+    @ParameterizedTest(name = "repetition {0}")
+    @ValueSource(longs = {1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L})
+    void test_freshness_with_concurrent_loads(long seed) throws Exception {
+        // The concurrent counterpart of test_freshness_with_writes_and_deliveries_during_loads, with an oracle of its
+        // own: the log position a value was read at stops saying anything once writes run alongside, because a write
+        // takes the tokens of a key away before it reaches the log - a load starting in between reads fresh data and
+        // still looks as if it read before the invalidation. So the source is modelled instead, as a version per key
+        // that every writer raises before invalidating, the way an application changes what a cache loader reads
+        // before telling the cache about it. Once everything is delivered, a loaded value held anywhere has to carry
+        // the version its key has now. Bulk loads are left out, as in the single-threaded test, since they overwrite
+        // like Caffeine's by decision
+        ConcurrentLoadingRun run = new ConcurrentLoadingRun(seed, INVALIDATION);
+        try {
+            run.run(() -> {
+                for (int instance = 0; instance < INSTANCES; instance++) {
+                    int checkedInstance = instance;
+                    run.caches.get(instance).asMap().forEach((key, value) -> {
+                        if (!value.getName().startsWith("bulk") && !value.getName().startsWith("extra")) {
+                            assertThat(run.versionOf)
+                                    .describedAs("cache instance %d holds %s=%s after phase %d, read at a version "
+                                            + "its key has left since", checkedInstance, key, value, run.phase)
+                                    .containsEntry(value, run.versions.get(key.getId()));
+                        }
+                    });
+                }
+            });
+        } finally {
+            run.stop();
+        }
+    }
+
+    /**
+     * The concurrent counterpart of {@link LoadingRun}, for the two tests above: per cache instance, writers and
+     * loaders on threads of their own and a delivery handing cache entries over in batches, with a latency on every
+     * publish (see {@link InMemoryBroker#withMaximumPublishLatency}) and on every read of a cache loader, so that
+     * writes overtake loads as they do against a real store and a real source. In many short phases, each joined,
+     * delivered in full and checked, so that a divergence only has to outlast its own phase to be seen: with a handful
+     * of keys, every one of them is loaded or written again within a few operations, which heals what diverged
+     */
+    private static final class ConcurrentLoadingRun {
+        private static final int PHASES = 40;
+        private static final int WRITERS = 2;
+        private static final int LOADERS = 2;
+        private static final int OPERATIONS = 5;
+        private static final long MAXIMUM_READ_NANOS = 500_000;
+
+        private final long seed;
+        private final DistributionMode distributionMode;
+        private final InMemoryBroker<Key, Value> broker = new InMemoryBroker<>();
+        private final List<AbstractAdapter<Key, Value>> adapters = new ArrayList<>();
+        private final List<DistributedLoadingCache<Key, Value>> caches = new ArrayList<>();
+        // the source a cache loader reads, as a version per key, and the version every value was read or written at
+        private final java.util.concurrent.atomic.AtomicLongArray versions =
+                new java.util.concurrent.atomic.AtomicLongArray(KEYS);
+        private final Map<Value, Long> versionOf = new ConcurrentHashMap<>();
+        private final java.util.concurrent.atomic.AtomicInteger counter = new java.util.concurrent.atomic.AtomicInteger();
+        // whether the cache loader is called by a bulk load on this thread, whose values overwrite rather than fill
+        private final ThreadLocal<Boolean> bulk = ThreadLocal.withInitial(() -> false);
+        private final ExecutorService executor = Executors.newCachedThreadPool();
+        private volatile int phase;
+
+        private ConcurrentLoadingRun(long seed, DistributionMode distributionMode) {
+            this.seed = seed;
+            this.distributionMode = distributionMode;
+            broker.withMaximumPublishLatency(java.time.Duration.ofNanos(200_000));
+            for (int instance = 0; instance < INSTANCES; instance++) {
+                int loadingInstance = instance;
+                AbstractAdapter<Key, Value> adapter = broker.newAdapter("in-memory-concurrent-loading-" + instance);
+                adapters.add(adapter);
+                // a load now and then comes back empty, which caches nothing and, for a refresh, removes the key
+                CacheLoader<Key, Value> cacheLoader = key -> {
+                    Value value = read(key, bulk.get() ? "bulk" : "loaded", loadingInstance);
+                    return java.util.concurrent.ThreadLocalRandom.current().nextInt(10) == 0 ? null : value;
+                };
+                caches.add(DistributedCaffeine.newBuilder(adapter)
+                        .withDistributionMode(distributionMode)
+                        .withCaffeine(Caffeine.newBuilder()
+                                .executor(Runnable::run))
+                        .build(cacheLoader));
+            }
+        }
+
+        private void run(Runnable check) throws Exception {
+            for (int currentPhase = 0; currentPhase < PHASES; currentPhase++) {
+                phase = currentPhase;
+                AtomicBoolean working = new AtomicBoolean(true);
+                List<Future<?>> workers = new ArrayList<>();
+                List<Future<?>> deliveries = new ArrayList<>();
+                for (int instance = 0; instance < INSTANCES; instance++) {
+                    int currentInstance = instance;
+                    for (int worker = 0; worker < WRITERS + LOADERS; worker++) {
+                        Random random = new Random(seed * 100_000 + currentPhase * 100L + instance * 10L + worker);
+                        boolean writer = worker < WRITERS;
+                        workers.add(executor.submit(() -> {
+                            for (int operation = 0; operation < OPERATIONS; operation++) {
+                                if (writer) {
+                                    write(currentInstance, random);
+                                } else {
+                                    load(currentInstance, random);
+                                }
+                            }
+                        }));
+                    }
+                    Random random = new Random(seed * 100_000 + currentPhase * 100L + instance * 10L + 9);
+                    deliveries.add(executor.submit(() -> {
+                        while (working.get()) {
+                            broker.deliverBatch(adapters.get(currentInstance), 1 + random.nextInt(20));
+                        }
+                    }));
+                }
+                // bounded, so that a deadlock fails the test instead of hanging the suite
+                for (Future<?> worker : workers) {
+                    worker.get(60, java.util.concurrent.TimeUnit.SECONDS);
+                }
+                working.set(false);
+                for (Future<?> delivery : deliveries) {
+                    delivery.get(60, java.util.concurrent.TimeUnit.SECONDS);
+                }
+                broker.deliverAll();
+                assertThat(broker.hasUndelivered()).isFalse();
+                check.run();
+            }
+        }
+
+        private void stop() {
+            executor.shutdownNow();
+            caches.forEach(cache -> cache.distributedPolicy().stopSynchronization());
+        }
+
+        // reads the source: the version the key has right now, and then as long as reading takes
+        private Value read(Key key, String kind, int instance) {
+            long version = versions.get(key.getId());
+            java.util.concurrent.locks.LockSupport.parkNanos(
+                    java.util.concurrent.ThreadLocalRandom.current().nextLong(MAXIMUM_READ_NANOS));
+            return produce(key, kind, instance, version);
+        }
+
+        private Value produce(Key key, String kind, int instance, long version) {
+            Value value = Value.of(key.getId(), kind + "-" + instance + "-" + counter.incrementAndGet());
+            versionOf.put(value, version);
+            return value;
+        }
+
+        // A change of the source followed by telling the cache about it, as an application does. Where population is
+        // not distributed, the cache is told by invalidating only - an overwriting put is not distributed there by
+        // design, so it would leave other cache instances serving what the source has left behind
+        private void write(int instance, Random random) {
+            DistributedLoadingCache<Key, Value> cache = caches.get(instance);
+            Key key = Key.of(random.nextInt(KEYS));
+            int choice = random.nextInt(100);
+            if (choice < 3) {
+                for (int id = 0; id < KEYS; id++) {
+                    versions.incrementAndGet(id);
+                }
+                cache.invalidateAll();
+            } else if (choice < 40 && distributionMode.isPopulationConsidered()) {
+                long version = versions.incrementAndGet(key.getId());
+                cache.put(key, produce(key, "put", instance, version));
+            } else if (choice < 70) {
+                versions.incrementAndGet(key.getId());
+                cache.invalidate(key);
+            } else {
+                versions.incrementAndGet(key.getId());
+                cache.asMap().remove(key);
+            }
+        }
+
+        // one of the ways into a load or refresh
+        private void load(int instance, Random random) {
+            DistributedLoadingCache<Key, Value> cache = caches.get(instance);
+            Key key = Key.of(random.nextInt(KEYS));
+            Key otherKey = Key.of(random.nextInt(KEYS));
+            switch (random.nextInt(5)) {
+                case 0 -> cache.get(key);
+                case 1 -> cache.get(key, mappingKey -> read(mappingKey, "mapped", instance));
+                case 2 -> {
+                    bulk.set(true);
+                    try {
+                        cache.getAll(new LinkedHashSet<>(List.of(key, otherKey)));
+                    } finally {
+                        bulk.set(false);
+                    }
+                }
+                case 3 -> cache.getAll(Set.of(key), mappingKeys -> {
+                    // returning a key beyond the ones asked for now and then, which a bulk load caches as well
+                    Map<Key, Value> mapped = new HashMap<>();
+                    mappingKeys.forEach(mappingKey -> mapped.put(mappingKey, read(mappingKey, "bulk", instance)));
+                    if (random.nextBoolean()) {
+                        mapped.put(otherKey, read(otherKey, "extra", instance));
+                    }
+                    return mapped;
+                });
+                default -> cache.refresh(key).join();
+            }
         }
     }
 
@@ -766,12 +1068,16 @@ final class DistributedCaffeineConvergenceTests {
     }
 
     // the content the published cache entries add up to: the last one written for a key decides, which is what the
-    // underlying store ends up holding and therefore what every cache instance has to end up holding as well
+    // underlying store ends up holding and therefore what every cache instance has to end up holding as well.
+    // Invalidating all removes everything written before it, since every cache instance applies it at the same
+    // position of the log - which holds only where every write is published, as in the modes tested with it
     private Map<Key, Value> replay(List<CacheEntry<Key, Value>> log) {
         Map<Key, Value> replayed = new LinkedHashMap<>();
         log.forEach(cacheEntry -> {
             Key key = cacheEntry.getKey();
-            if (cacheEntry.isCached()) {
+            if (cacheEntry.isCommand()) {
+                replayed.clear();
+            } else if (cacheEntry.isCached()) {
                 replayed.put(key, cacheEntry.getValue());
             } else {
                 replayed.remove(key);
@@ -807,6 +1113,22 @@ final class DistributedCaffeineConvergenceTests {
         };
     }
 
+    // the operations above, plus the two that nest calls under the synchronization lock and the one that has to
+    // exclude all others - kept apart from them so that the single-threaded test keeps its seeds
+    private void operateConcurrently(DistributedCache<Key, Value> cache, int instance, Random random) {
+        int choice = random.nextInt(100);
+        if (choice < 5) {
+            cache.invalidateAll();
+        } else if (choice < 20) {
+            Key key = Key.of(random.nextInt(KEYS));
+            String tag = "compute-" + instance + "-" + random.nextInt(1_000);
+            boolean remove = random.nextInt(3) == 0;
+            cache.asMap().compute(key, (k, value) -> remove ? null : Value.of(k.getId(), tag));
+        } else {
+            operate(cache, instance, random);
+        }
+    }
+
     /**
      * A publisher and synchronizer pair standing in for an underlying store, for tests that need to decide when a
      * published cache entry reaches which cache instance.
@@ -825,6 +1147,12 @@ final class DistributedCaffeineConvergenceTests {
         // what the store keeps, one record per key, which is exactly what a reactivation reads back
         private final Map<String, CacheEntry<K, V>> retained;
         private final List<InMemorySynchronizer<K, V>> synchronizers;
+        // How long a publish may take at most, on either side of reaching the log. Nothing by default, which keeps
+        // the single-threaded tests exact - while a test with concurrent writers needs it, because a store write
+        // takes a round-trip and an in-memory one does not: without it, the windows a missing lock leaves open - a
+        // write stamped but not yet in the log, in the log but not yet applied locally - are nanoseconds wide, and
+        // no interleaving lands in them
+        private volatile long maximumPublishLatencyNanos;
 
         private InMemoryBroker() {
             // both are written by whichever thread publishes and read by whichever thread delivers, and a test
@@ -851,6 +1179,14 @@ final class DistributedCaffeineConvergenceTests {
          */
         private int deliver(AbstractAdapter<K, V> adapter, int count) {
             return synchronizerOf(adapter).deliverNext(count);
+        }
+
+        /**
+         * Hands the next {@code count} cache entries of the log that this adapter has not seen yet to it in a single
+         * batch, the way an adapter hands over what arrived together.
+         */
+        private void deliverBatch(AbstractAdapter<K, V> adapter, int count) {
+            synchronizerOf(adapter).deliverNextBatch(count);
         }
 
         /**
@@ -893,7 +1229,21 @@ final class DistributedCaffeineConvergenceTests {
         }
 
         private void publish(Collection<CacheEntry<K, V>> cacheEntries) {
+            delayPublish();
             log.addAll(cacheEntries);
+            delayPublish();
+        }
+
+        private void withMaximumPublishLatency(java.time.Duration maximumPublishLatency) {
+            this.maximumPublishLatencyNanos = maximumPublishLatency.toNanos();
+        }
+
+        private void delayPublish() {
+            long maximum = maximumPublishLatencyNanos;
+            if (maximum > 0) {
+                java.util.concurrent.locks.LockSupport.parkNanos(
+                        java.util.concurrent.ThreadLocalRandom.current().nextLong(maximum));
+            }
         }
 
         private static final class InMemoryAdapter<K, V> extends AbstractAdapter<K, V> {
@@ -1024,6 +1374,17 @@ final class DistributedCaffeineConvergenceTests {
                     }
                 }
                 return delivered;
+            }
+
+            private void deliverNextBatch(int count) {
+                List<CacheEntry<K, V>> batch = new ArrayList<>();
+                while (batch.size() < count && position < broker.log.size()) {
+                    batch.add(broker.log.get(position));
+                    position++;
+                }
+                if (activated && !batch.isEmpty()) {
+                    receiver.receiveCacheEntries(batch);
+                }
             }
         }
     }

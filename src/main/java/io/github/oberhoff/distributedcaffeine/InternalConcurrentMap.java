@@ -77,15 +77,16 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalInitia
         requireNonNull(key);
         requireNonNull(value);
         InternalKey<K> internalKey = ik(key);
-        return synchronizationLock.getLockedOrNull(() ->
+        return synchronizationLock.getLockedOrNull(internalKey, () ->
                 vn(concurrentMap.put(internalKey, cacheManager.putDistributed(internalKey, iv(value)))));
     }
 
     @Override
     public void putAll(Map<? extends K, ? extends V> map) {
         requireNonNullMap(map);
-        synchronizationLock.runLocked(() ->
-                concurrentMap.putAll(cacheManager.putAllDistributed(im(map))));
+        Map<InternalKey<K>, InternalValue<V>> internalMap = im(map);
+        synchronizationLock.runLocked(internalMap.keySet(), () ->
+                concurrentMap.putAll(cacheManager.putAllDistributed(internalMap)));
     }
 
     @Override
@@ -94,7 +95,8 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalInitia
         requireNonNull(value);
         // atomic check-then-act under the (reentrant) synchronization lock; map values are never null, so a
         // non-null get() already proves presence (no separate containsKey needed)
-        return synchronizationLock.getLockedOrNull(() -> {
+        InternalKey<K> internalKey = ik(key);
+        return synchronizationLock.getLockedOrNull(internalKey, () -> {
             V oldValue = get(key);
             return isNull(oldValue)
                     ? put(key, value) // implicit distribution
@@ -106,7 +108,8 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalInitia
     public @Nullable V replace(K key, V value) {
         requireNonNull(key);
         requireNonNull(value);
-        return synchronizationLock.getLockedOrNull(() ->
+        InternalKey<K> internalKey = ik(key);
+        return synchronizationLock.getLockedOrNull(internalKey, () ->
                 isNull(get(key))
                         ? null
                         : put(key, value)); // implicit distribution
@@ -118,7 +121,8 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalInitia
         requireNonNull(oldValue);
         requireNonNull(newValue);
         // implicit distribution
-        return TRUE.equals(synchronizationLock.getLockedOrNull(() -> {
+        InternalKey<K> internalKey = ik(key);
+        return TRUE.equals(synchronizationLock.getLockedOrNull(internalKey, () -> {
             if (Objects.equals(get(key), oldValue)) {
                 put(key, newValue); // implicit distribution
                 return true;
@@ -131,16 +135,19 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalInitia
     @SuppressWarnings("unchecked")
     public @Nullable V remove(Object key) {
         requireNonNull(key);
-        return synchronizationLock.getLockedOrNull(() ->
-                vn(concurrentMap.remove(cacheManager.invalidateDistributed(ik((K) key)))));
+        InternalKey<K> internalKey = ik((K) key);
+        return synchronizationLock.getLockedOrNull(internalKey, () ->
+                vn(concurrentMap.remove(cacheManager.invalidateDistributed(internalKey))));
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public boolean remove(Object key, Object value) {
         requireNonNull(key);
         // atomic check-then-act; a null value never matches (map values are never null), so no exception is thrown
         // implicit distribution
-        return TRUE.equals(synchronizationLock.getLockedOrNull(() -> {
+        InternalKey<K> internalKey = ik((K) key);
+        return TRUE.equals(synchronizationLock.getLockedOrNull(internalKey, () -> {
             V oldValue = get(key);
             if (nonNull(oldValue) && Objects.equals(oldValue, value)) {
                 remove(key); // implicit distribution
@@ -157,7 +164,8 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalInitia
         // atomic under the (reentrant) synchronization lock; the mapping function is applied at most once, and the
         // resulting change is distributed via put() - the inherited default is a non-atomic CAS-retry that may apply
         // the function multiple times
-        return synchronizationLock.getLockedOrNull(() -> {
+        InternalKey<K> internalKey = ik(key);
+        return synchronizationLock.getLockedOrNull(internalKey, () -> {
             V oldValue = get(key);
             if (nonNull(oldValue)) {
                 return oldValue;
@@ -175,7 +183,8 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalInitia
             ? extends @Nullable V> remappingFunction) {
         requireNonNull(key);
         requireNonNull(remappingFunction);
-        return synchronizationLock.getLockedOrNull(() -> {
+        InternalKey<K> internalKey = ik(key);
+        return synchronizationLock.getLockedOrNull(internalKey, () -> {
             V oldValue = get(key);
             if (isNull(oldValue)) {
                 return null;
@@ -195,7 +204,8 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalInitia
             ? extends @Nullable V> remappingFunction) {
         requireNonNull(key);
         requireNonNull(remappingFunction);
-        return synchronizationLock.getLockedOrNull(() -> {
+        InternalKey<K> internalKey = ik(key);
+        return synchronizationLock.getLockedOrNull(internalKey, () -> {
             V oldValue = get(key);
             V newValue = remappingFunction.apply(key, oldValue);
             if (nonNull(newValue)) {
@@ -215,7 +225,8 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalInitia
         requireNonNull(key);
         requireNonNull(value);
         requireNonNull(remappingFunction);
-        return synchronizationLock.getLockedOrNull(() -> {
+        InternalKey<K> internalKey = ik(key);
+        return synchronizationLock.getLockedOrNull(internalKey, () -> {
             V oldValue = get(key);
             V newValue = isNull(oldValue)
                     ? value
@@ -291,7 +302,7 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalInitia
                         if (isNull(current)) {
                             throw new IllegalStateException();
                         }
-                        synchronizationLock.runLocked(() -> {
+                        synchronizationLock.runLocked(current, () -> {
                             cacheManager.invalidateDistributed(current);
                             iterator.remove();
                         });
@@ -308,11 +319,13 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalInitia
             }
 
             @Override
+            @SuppressWarnings("unchecked")
             public boolean remove(Object key) {
                 // atomic check-then-act under the (reentrant) synchronization lock; map values are never null, so a
                 // non-null result already proves the key was there. Checking first keeps a key that is not there
                 // from being distributed as invalidated, which is what scanning through the iterator did as well
-                return TRUE.equals(synchronizationLock.getLockedOrNull(() ->
+                InternalKey<K> internalKey = ik((K) key);
+                return TRUE.equals(synchronizationLock.getLockedOrNull(internalKey, () ->
                         containsKey(key) && nonNull(InternalConcurrentMap.this.remove(key)))); // implicit distribution
             }
 
@@ -381,7 +394,7 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalInitia
                         if (isNull(current)) {
                             throw new IllegalStateException();
                         }
-                        synchronizationLock.runLocked(() -> {
+                        synchronizationLock.runLocked(current.getKey(), () -> {
                             cacheManager.invalidateDistributed(current.getKey());
                             iterator.remove();
                         });
@@ -458,7 +471,7 @@ class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalInitia
                         if (isNull(current)) {
                             throw new IllegalStateException();
                         }
-                        synchronizationLock.runLocked(() -> {
+                        synchronizationLock.runLocked(current.getKey(), () -> {
                             cacheManager.invalidateDistributed(current.getKey());
                             iterator.remove();
                         });
