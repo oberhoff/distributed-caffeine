@@ -52,8 +52,11 @@ import static java.util.Objects.nonNull;
 class InternalStoreGuard {
 
     // How many calls in a row have to fail before the store is left alone. Three, because the point is to stop
-    // paying the driver's timeout once per operation: at 30 seconds apiece that is already a minute and a half,
-    // and fewer would let one unlucky call stand for a store that is gone
+    // paying the driver's timeout once per operation, and fewer would let one unlucky call stand for a store that is
+    // gone. Calls are counted whichever thread makes them, and writes to different keys are under way at the same
+    // time: where several are waiting when the store goes, they time out together and the breaker opens after a
+    // single timeout of 30 seconds, and only a lone caller pays three of them in a row. Everything arriving once it
+    // is open is refused outright
     private static final int FAILURE_THRESHOLD = 3;
     // How long it is left alone for. Short, because this is exactly the window in which an operation is refused
     // although it would have worked - and nothing is spent on finding out, since the next operation is the probe

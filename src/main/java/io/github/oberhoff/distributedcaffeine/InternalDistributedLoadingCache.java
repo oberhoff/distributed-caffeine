@@ -141,7 +141,8 @@ class InternalDistributedLoadingCache<K, V> extends InternalDistributedCache<K, 
                         : failure;
             }
         }
-        synchronizationLock.runLocked(() ->
+        Set<InternalKey<K>> refreshKeys = iks(keyToRefreshOperations.keySet());
+        synchronizationLock.runLocked(refreshKeys, () ->
                 applyRefreshesLocked(keyToRefreshOperations, keysWithNewValues, keysWithNullValues));
         if (nonNull(failure)) {
             // propagate as before, but only after the successful subset has been applied and distributed

@@ -292,7 +292,7 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
             }
             if (nonNull(value)) {
                 InternalValue<V> internalValue = iv(value);
-                synchronizationLock.runLocked(() -> {
+                synchronizationLock.runLocked(key, () -> {
                     if (isApplicable(key, token)) {
                         cache.putAll(publish.publish(Map.of(key, internalValue)));
                     } else {
@@ -344,7 +344,8 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
             }
             Map<InternalKey<K>, InternalValue<V>> loadedValues = new HashMap<>();
             loaded.forEach((key, value) -> loadedValues.put(ik(requireNonNull(key)), iv(requireNonNull(value))));
-            synchronizationLock.runLocked(() -> applyBulk(loadedValues, activationId, publish));
+            synchronizationLock.runLocked(loadedValues.keySet(),
+                    () -> applyBulk(loadedValues, activationId, publish));
             success = !loadedValues.isEmpty();
             return resultOf(keys, found, loadedValues);
         } finally {
@@ -451,29 +452,33 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V>, Internal
     public void put(K key, V value) {
         requireNonNull(key);
         requireNonNull(value);
-        synchronizationLock.runLocked(() ->
-                cache.put(ik(key), cacheManager.putDistributed(ik(key), iv(value))));
+        InternalKey<K> internalKey = ik(key);
+        synchronizationLock.runLocked(internalKey, () ->
+                cache.put(internalKey, cacheManager.putDistributed(internalKey, iv(value))));
     }
 
     @Override
     public void putAll(Map<? extends K, ? extends V> map) {
         requireNonNullMap(map);
-        synchronizationLock.runLocked(() ->
-                cache.putAll(cacheManager.putAllDistributed(im(map))));
+        Map<InternalKey<K>, InternalValue<V>> internalMap = im(map);
+        synchronizationLock.runLocked(internalMap.keySet(), () ->
+                cache.putAll(cacheManager.putAllDistributed(internalMap)));
     }
 
     @Override
     public void invalidate(K key) {
         requireNonNull(key);
-        synchronizationLock.runLocked(() ->
-                cache.invalidate(cacheManager.invalidateDistributed(ik(key))));
+        InternalKey<K> internalKey = ik(key);
+        synchronizationLock.runLocked(internalKey, () ->
+                cache.invalidate(cacheManager.invalidateDistributed(internalKey)));
     }
 
     @Override
     public void invalidateAll(Iterable<? extends K> keys) {
         Set<K> keySet = requireNonNullIterable(keys);
-        synchronizationLock.runLocked(() ->
-                cache.invalidateAll(cacheManager.invalidateAllDistributed(iks(keySet))));
+        Set<InternalKey<K>> internalKeys = iks(keySet);
+        synchronizationLock.runLocked(internalKeys, () ->
+                cache.invalidateAll(cacheManager.invalidateAllDistributed(internalKeys)));
     }
 
     @Override

@@ -204,9 +204,9 @@ public final class DistributedStats {
     /**
      * Returns the total number of nanoseconds spent on synchronous writes to the underlying store, meant to be
      * compared between two snapshots (see {@link #minus(DistributedStats)}): its difference divided by that of
-     * {@link #synchronousStoreWriteCount()} is the average time a caller waited for a write in between, and divided
-     * by the time in between it is the share of that time spent writing. Synchronous writes of a cache instance are
-     * made one at a time, so a share approaching {@code 1.0} means that the underlying store limits them.
+     * {@link #synchronousStoreWriteCount()} is the average time a caller waited for a write in between. Where that
+     * average rises while the number of writes per unit of time does not, writes are waiting for the underlying store
+     * rather than being made any faster, which means that the store limits them.
      *
      * @return the total number of nanoseconds spent on synchronous writes to the underlying store
      */

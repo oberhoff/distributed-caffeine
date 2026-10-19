@@ -325,7 +325,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         // whether or not anything is distributed for it, every key is written by it
         overtakeAll();
         if (isActivated() && COMMAND.isConsideredBy(distributionMode)) {
-            synchronizationLock.ensureLock();
+            synchronizationLock.ensureExclusiveLock();
             // Minted and remembered like any other publish of this cache instance, only for all keys at once
             // rather than for one: what it does covers every one of them, which is what keeps whatever this cache
             // instance writes after it from being undone once this arrives back here.
@@ -652,7 +652,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         stampOperations(map);
         // persistence of evicted entries should work regardless of the distribution mode
         if (isActivated() && (status.isConsideredBy(distributionMode) || status.isEvictedRetained())) {
-            synchronizationLock.ensureLock();
+            synchronizationLock.ensureLock(map.keySet());
             // deliberately without a check of whether this cache instance holds the key: whether it does says
             // nothing about the other ones, which may well be serving it, so skipping the write here would leave
             // them doing so indefinitely. Filtering by what is held belongs on the receiving side (see
@@ -701,10 +701,12 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     }
 
     // Every write of this cache instance to the store comes through here, which is what makes it the one place to
-    // count them. Only a synchronous one is timed: a caller waits for it, under the synchronization lock, so its
-    // time is both what a write costs whoever made it and how long the lock was taken up by it - neither of which
-    // holds for one of the drain, which nobody waits for and which runs alongside them. Timed including a refusal,
-    // which costs next to nothing, as a load failing fast does in Caffeine
+    // count them. Only a synchronous one is timed: a caller waits for it, under the stripes of its keys, so its time
+    // is both what a write costs whoever made it and how long those stripes were taken up by it - neither of which
+    // holds for one of the drain, which nobody waits for and which runs alongside them. Synchronous writes to
+    // different keys overlap, so their times add up to something meaningful per write only, not per unit of time -
+    // which is why DistributedStats offers them as an average per write and nothing else. Timed including a refusal, which costs next to nothing, as a load
+    // failing fast does in Caffeine
     private void writeGuarded(FailableRunnable write, boolean synchronous) {
         long startTime = System.nanoTime();
         boolean success = false;
@@ -741,7 +743,38 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     public void receiveCacheEntries(List<CacheEntry<K, V>> cacheEntries) {
         // no filtering by discriminator here: a receiver belongs to exactly one cache, and the adapter handing over
         // these cache entries is scoped to that cache's discriminator - so whatever arrives is already its own
-        receiveCacheEntries(cacheEntries.stream(), Arrival.DELIVERED);
+        if (!isActivated()) {
+            return;
+        }
+        // Applied under the scope of what they concern: an entry is a key operation, a command is a whole-cache one.
+        // A command therefore splits what is handed over into runs of entries, applied in turn with the command
+        // between them, and a run is applied one stripe at a time rather than one entry at a time: taking a fair
+        // stripe once per entry would hand over one entry per store round-trip of a writer waiting on it (see
+        // InternalSynchronizationLock). Within a stripe the entries keep their order, which is what the order of
+        // the entries of one key rests on - entries of different keys do not depend on each other's order, while a
+        // command does on everything around it, which is why it is never part of a run
+        List<Map.Entry<InternalKey<K>, CacheEntry<K, V>>> run = new ArrayList<>();
+        for (CacheEntry<K, V> cacheEntry : cacheEntries) {
+            if (cacheEntry.getStatus().isConsideredBy(distributionMode)) {
+                if (cacheEntry.isCommand()) {
+                    applyRun(run);
+                    run.clear();
+                    synchronizationLock.runLocked(() -> receiveCacheEntry(cacheEntry, Arrival.DELIVERED));
+                } else {
+                    InternalKey<K> key = ik(requireNonNull(cacheEntry.getKey()))
+                            .setHash(cacheEntry.getHash());
+                    run.add(Map.entry(key, cacheEntry));
+                }
+            }
+        }
+        applyRun(run);
+    }
+
+    private void applyRun(List<Map.Entry<InternalKey<K>, CacheEntry<K, V>>> run) {
+        if (!run.isEmpty()) {
+            synchronizationLock.runLockedPerStripe(run, Map.Entry::getKey,
+                    entry -> applyCacheEntry(entry.getValue(), entry.getKey(), Arrival.DELIVERED));
+        }
     }
 
     @Override
@@ -776,21 +809,6 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         });
     }
 
-    private void receiveCacheEntries(Stream<CacheEntry<K, V>> cacheEntries, Arrival arrival) {
-        if (isActivated()) {
-            // Applied one at a time rather than collected and applied afterwards, so that every cache entry is
-            // decided against what the ones handed over before it have already done. Collecting decides all of them
-            // against the content held before any of them was applied, which for two changes of one key means the
-            // outcome is picked by which of the two of them a separate insertion and removal ends up in rather than
-            // by which of them came last. Caffeine applies its own bulk operations one entry at a time as well, so
-            // there is nothing to be gained by collecting either
-            synchronizationLock.runLocked(() -> cacheEntries
-                    .filter(cacheEntry -> cacheEntry.getStatus().isConsideredBy(distributionMode))
-                    .forEach(cacheEntry -> receiveCacheEntry(cacheEntry, arrival)));
-        }
-    }
-
-    @SuppressWarnings("java:S3776")
     private void receiveCacheEntry(CacheEntry<K, V> cacheEntry, Arrival arrival) {
         // A command belongs to no key, so it is handled ahead of everything below, which all works with one.
         // Dispatched by the name it carries as its hash, and one that is not known here is skipped rather than
@@ -808,6 +826,11 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
         // contradicts its own status, which no annotation can express here
         InternalKey<K> key = ik(requireNonNull(cacheEntry.getKey()))
                 .setHash(cacheEntry.getHash());
+        applyCacheEntry(cacheEntry, key, arrival);
+    }
+
+    @SuppressWarnings("java:S3776")
+    private void applyCacheEntry(CacheEntry<K, V> cacheEntry, InternalKey<K> key, Arrival arrival) {
         // whether this is one of the publishes of this cache instance coming back, and which of them
         Long ownCounter = ownCounterOf(cacheEntry.getOperation());
         if (!isApplicable(key, ownCounter)) {
@@ -867,7 +890,7 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     // replacing it with an empty one that answers every read with a miss
     void synchronizeCacheEntries() {
         if (isActivated()) {
-            synchronizationLock.ensureLock();
+            synchronizationLock.ensureExclusiveLock();
             // without a synchronization strategy nothing is read back, which is also why nothing was retained: the
             // marks below are then left in place for everything, so the cache is emptied rather than reconciled
             if (cachedEntryPersistenceConfigurer.hasInitialSynchronizationStrategy()
@@ -879,7 +902,11 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
                         null,
                         CACHED_GROUP,
                         ASCENDING))) {
-                    receiveCacheEntries(cacheEntryStream, Arrival.READ_BACK);
+                    // the exclusive side of the scope is held (activation and reconciliation take it), so applying
+                    // the entries directly is what keeps this one whole-cache operation rather than one per key
+                    cacheEntryStream
+                            .filter(cacheEntry -> cacheEntry.getStatus().isConsideredBy(distributionMode))
+                            .forEach(cacheEntry -> receiveCacheEntry(cacheEntry, Arrival.READ_BACK));
                 }
             }
             // without population being considered nothing clears the marks, so everything present is dropped - the
