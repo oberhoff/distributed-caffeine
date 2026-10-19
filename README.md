@@ -30,10 +30,10 @@ synchronization between multiple cache instances by distributing cache operation
 [eviction](https://github.com/ben-manes/caffeine/wiki/Eviction) (size- or time-based removal), optionally combined with
 persistence of cache entries in an underlying store.
 
-Without configured persistence (the default), an adapter only distributes cache operations between cache instances; no
-cache entries are retained in an underlying store. A fresh cache instance therefore starts empty, but takes part in
-synchronization immediately. Which cache operations are distributed, and which are deliberately not, is decided by the
-configured distribution mode.
+Without configured persistence (the default), an adapter only distributes cache operations between cache instances for
+synchronization; no cache entries are retained in an underlying store. A fresh cache instance therefore starts empty,
+but takes part in synchronization immediately. Which cache operations are distributed, and which are deliberately not,
+is decided by the configured distribution mode.
 
 With configured persistence, cache entries are retained in an underlying store, separately configurable for cached and
 evicted entries: cached entries can warm up a fresh cache instance, and evicted entries remain available after eviction
