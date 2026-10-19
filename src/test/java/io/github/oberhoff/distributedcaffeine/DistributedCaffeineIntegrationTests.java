@@ -12079,13 +12079,62 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(connections.get() - before).isEqualTo(1);
         }
 
-        @DisplayName("Test that a write whose announcement failed leaves neither a record nor a notification")
+        @DisplayName("Test that a single record whose announcement the server refused leaves neither the record nor "
+                + "a notification")
+        @Test
+        void test_Repository_rolls_back_a_single_record_it_could_not_announce() throws Exception {
+            // A single record is written and announced in one statement, which is its own transaction - so nothing
+            // on the client side can fail in between, and what has to be shown is that the server takes back the
+            // record when it refuses the announcement after writing it. It refuses a payload beyond its limit, and a
+            // hash longer than that is announced as one payload, so the upsert has written the record by the time
+            // pg_notify fails - in the same statement
+            Repository<Key, Value> reading = repositoryFor(null);
+            PostgresAdapter<Key, Value> adapter = adapterUsing(dataSource);
+            Repository<Key, Value> repository = adapter.getRepository().orElseThrow();
+            String channel = invokeMethod(null,
+                    Class.forName("io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresChannel"),
+                    "channelOf", List.of(String.class), List.of(adapter.getIdentifier()));
+
+            try (Connection listener = listenerDataSource.getConnection()) {
+                // see the test below for why the session is cleared first
+                execute(listener, "UNLISTEN *");
+                execute(listener, "LISTEN " + channel);
+                drain(listener);
+                try {
+                    String overlongHash = "h".repeat(9_000);
+                    assertThatThrownBy(() -> repository.publishCacheEntries(List.of(CacheEntry.of(overlongHash,
+                            "op1", Key.of(1), Value.of(1), CACHED, Instant.now().truncatedTo(MICROS)))))
+                            .isInstanceOf(SQLException.class)
+                            .hasMessageContaining("payload string too long");
+
+                    assertThat(reading.countCacheEntries(null, null)).isEqualTo(0);
+                    assertThat(notificationsOf(listener, 1)).isEmpty();
+
+                    // and with nothing refused both arrive, which is what makes the assertions above say that
+                    // nothing was delivered rather than that nothing was listening
+                    repository.publishCacheEntries(List.of(CacheEntry.of("h2", "op2", Key.of(2), Value.of(2),
+                            CACHED, Instant.now().truncatedTo(MICROS))));
+
+                    assertThat(reading.countCacheEntries(null, null)).isEqualTo(1);
+                    assertThat(notificationsOf(listener, 1))
+                            .singleElement()
+                            .satisfies(payload -> assertThat(payload).contains("h2"));
+                } finally {
+                    execute(listener, "UNLISTEN " + channel);
+                }
+            }
+        }
+
+        @DisplayName("Test that a write of several records whose announcement failed leaves neither a record nor a "
+                + "notification")
         @Test
         void test_Repository_rolls_back_a_write_it_could_not_announce() throws Exception {
             // A notification carries only what its writer announces, so a record kept while its announcement was
             // lost is one no other cache instance ever learns of - which is why the write and the notification of
             // it share a transaction. Failing inside that transaction is what shows it: before the notification
-            // was sent, and after it was sent but before the commit that would make it deliverable
+            // was sent, and after it was sent but before the commit that would make it deliverable.
+            // Several records at a time, because only those are written in a transaction of statements: a single
+            // record is written and announced in one statement (see the test below)
             Repository<Key, Value> reading = repositoryFor(null);
             AtomicBoolean refuseNext = new AtomicBoolean();
             PostgresAdapter<Key, Value> adapter = adapterUsing(refusing(refuseNext,
@@ -12107,8 +12156,11 @@ final class DistributedCaffeineIntegrationTests {
                 try {
                     // the announcement cannot be sent at all
                     refuseNext.set(true);
-                    assertThatThrownBy(() -> repository.publishCacheEntries(List.of(CacheEntry.of("h1", "op1",
-                            Key.of(1), Value.of(1), CACHED, Instant.now().truncatedTo(MICROS)))))
+                    assertThatThrownBy(() -> repository.publishCacheEntries(List.of(
+                            CacheEntry.of("h1", "op1", Key.of(1), Value.of(1), CACHED,
+                                    Instant.now().truncatedTo(MICROS)),
+                            CacheEntry.of("h11", "op11", Key.of(11), Value.of(11), CACHED,
+                                    Instant.now().truncatedTo(MICROS)))))
                             .isInstanceOf(SQLException.class)
                             .hasMessageContaining("provoked");
 
@@ -12122,8 +12174,11 @@ final class DistributedCaffeineIntegrationTests {
                             (method, arguments) -> "commit".equals(method)));
                     refuseNext.set(true);
                     assertThatThrownBy(() -> uncommitting.getRepository().orElseThrow()
-                            .publishCacheEntries(List.of(CacheEntry.of("h2", "op2", Key.of(2), Value.of(2),
-                                    CACHED, Instant.now().truncatedTo(MICROS)))))
+                            .publishCacheEntries(List.of(
+                                    CacheEntry.of("h2", "op2", Key.of(2), Value.of(2), CACHED,
+                                            Instant.now().truncatedTo(MICROS)),
+                                    CacheEntry.of("h12", "op12", Key.of(12), Value.of(12), CACHED,
+                                            Instant.now().truncatedTo(MICROS)))))
                             .isInstanceOf(SQLException.class)
                             .hasMessageContaining("provoked");
 
@@ -13212,9 +13267,12 @@ final class DistributedCaffeineIntegrationTests {
             // it is gone. Bounded by a socket timeout of the data source, writing fails instead, and failing three
             // times in a row has the cache instance report being degraded. The first of these writes was committed
             // by the primary nonetheless and only waits to be confirmed, holding on to its row until it is - so the
-            // ones after it wait for that row, and once their connections are gone they are rolled back rather than
-            // committed. Once the standby is back the first one is confirmed and notified, and both cache instances
-            // hold it - the one whose write it was included, although its later writes failed as well
+            // ones after it wait for that row. A single record is written in one statement, which commits on its
+            // own, so these do not need the connection that timed out to commit: once the standby is back they are
+            // carried out in the order they queued for the row, each confirmed and notified like any write. Which
+            // of them the store ends up with is therefore not for the writer to know - a write that failed may have
+            // landed, as one whose answer is lost may have as well - and what has to hold is that both cache
+            // instances hold what the store does, the one whose writes failed included
             HikariConfig hikariConfig = createHikariConfig(DATABASE_NAME);
             hikariConfig.addDataSourceProperty("socketTimeout", "3");
             // what the timed out writes have the pool report, see assertWritingRidesOut
@@ -13258,11 +13316,24 @@ final class DistributedCaffeineIntegrationTests {
                                 cacheA.put(Key.of(2), Value.of(2));
                                 return true;
                             });
+                    Repository<Key, Value> store = cacheA.distributedPolicy().getAdapter().getRepository()
+                            .orElseThrow();
                     await("convergence on what the failed writes left in the store")
                             .atMost(EXTENDED_WAITING_DURATION)
                             .untilAsserted(() -> {
-                                assertThat(cacheA.getIfPresent(Key.of(1))).isEqualTo(Value.of(2));
-                                assertThat(cacheB.getIfPresent(Key.of(1))).isEqualTo(Value.of(2));
+                                Value stored;
+                                try (Stream<CacheEntry<Key, Value>> cacheEntries = store.streamCacheEntries(null,
+                                        CACHED_GROUP, Order.UNORDERED)) {
+                                    stored = cacheEntries
+                                            .filter(cacheEntry -> Key.of(1).equals(cacheEntry.getKey()))
+                                            // a cached entry always carries its value
+                                            .map(cacheEntry -> requireNonNull(cacheEntry.getValue()))
+                                            .findFirst()
+                                            .orElseThrow();
+                                }
+                                assertThat(stored).isIn(Value.of(2), Value.of(3), Value.of(4));
+                                assertThat(cacheA.getIfPresent(Key.of(1))).isEqualTo(stored);
+                                assertThat(cacheB.getIfPresent(Key.of(1))).isEqualTo(stored);
                             });
                     reports.assertExplained();
                 } finally {

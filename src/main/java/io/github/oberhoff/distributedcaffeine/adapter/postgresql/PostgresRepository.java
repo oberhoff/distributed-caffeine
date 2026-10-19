@@ -284,6 +284,10 @@ final class PostgresRepository<K, V> extends AbstractRepository<K, V> {
         String sql = format("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (%s, %s) DO UPDATE SET %s",
                 qualifiedTableName, columns, placeholders,
                 quoted(DISCRIMINATOR_FIELD), quoted(HASH.toString()), assignments);
+        if (cacheEntries.size() == 1) {
+            publishCacheEntry(cacheEntries.iterator().next(), sql);
+            return;
+        }
         retryingRollback(() -> {
             try (Connection connection = dataSource.getConnection()) {
                 // the write and the notification of it commit together, so no cache instance is ever told about a
@@ -299,17 +303,7 @@ final class PostgresRepository<K, V> extends AbstractRepository<K, V> {
                     }
                     try (PreparedStatement statement = connection.prepareStatement(sql)) {
                         for (CacheEntry<K, V> cacheEntry : cacheEntries) {
-                            // walked rather than numbered, so that a storage added to the enum widens the columns
-                            // and what follows them together instead of silently binding into the wrong ones
-                            int index = 1;
-                            statement.setString(index++, discriminator);
-                            statement.setString(index++, cacheEntry.getHash());
-                            statement.setString(index++, cacheEntry.getOperation());
-                            index = setField(statement, index, cacheEntry.getKey(), keySerializer);
-                            index = setField(statement, index, cacheEntry.getValue(), valueSerializer);
-                            statement.setString(index++, cacheEntry.getStatus().toString());
-                            statement.setObject(index, toOffsetDateTime(cacheEntry.getTimestamp()),
-                                    Types.TIMESTAMP_WITH_TIMEZONE);
+                            bindCacheEntry(statement, cacheEntry);
                             statement.addBatch();
                         }
                         statement.executeBatch();
@@ -327,6 +321,43 @@ final class PostgresRepository<K, V> extends AbstractRepository<K, V> {
                 }
             }
         });
+    }
+
+    // A single record in a single statement, the notification of it included, which is what a publish of one key
+    // mostly is: a statement on its own runs in a transaction of its own, so the write and the notification still
+    // commit together - one round trip instead of three, which the upsert, the notification and the commit took
+    // separately in the transaction above. The notification is drawn from what the upsert returns, so that it is
+    // issued for the record actually written and nothing else
+    private void publishCacheEntry(CacheEntry<K, V> cacheEntry, String upsert) throws Exception {
+        String sql = format("WITH upserted AS (%s RETURNING 1) SELECT pg_notify(?, ?) FROM upserted", upsert);
+        // validated the way every notification is, which a single hash can only fail on its separator
+        String payload = PostgresChannel.payloadsOf(List.of(cacheEntry.getHash())).get(0);
+        retryingRollback(() -> {
+            try (Connection connection = dataSource.getConnection()) {
+                // whatever the data source hands out, so that the statement commits on its own
+                connection.setAutoCommit(true);
+                try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                    int index = bindCacheEntry(statement, cacheEntry);
+                    statement.setString(index++, PostgresChannel.channelOf(identifier));
+                    statement.setString(index, payload);
+                    statement.execute();
+                }
+            }
+        });
+    }
+
+    // walked rather than numbered, so that a storage added to the enum widens the columns and what follows them
+    // together instead of silently binding into the wrong ones; returns the index of the next parameter
+    private int bindCacheEntry(PreparedStatement statement, CacheEntry<K, V> cacheEntry) throws Exception {
+        int index = 1;
+        statement.setString(index++, discriminator);
+        statement.setString(index++, cacheEntry.getHash());
+        statement.setString(index++, cacheEntry.getOperation());
+        index = setField(statement, index, cacheEntry.getKey(), keySerializer);
+        index = setField(statement, index, cacheEntry.getValue(), valueSerializer);
+        statement.setString(index++, cacheEntry.getStatus().toString());
+        statement.setObject(index++, toOffsetDateTime(cacheEntry.getTimestamp()), Types.TIMESTAMP_WITH_TIMEZONE);
+        return index;
     }
 
     private static Stream<String> fieldColumns() {
