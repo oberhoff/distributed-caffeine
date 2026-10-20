@@ -734,11 +734,14 @@ public final class DistributedCaffeine<K, V> {
          * {@link DistributedPolicy#getAllFromStore(Iterable, boolean)} can be used to load those cache entries directly
          * from the underlying store bypassing this cache instance.
          * <p>
-         * <b>Note:</b> This is mutually exclusive with {@link #withCacheResidency()} and can be combined with
-         * {@link #withMaximumTime(Duration)}.
-         * <p>
          * <b>Note:</b> If persistence of cached entries is configured, the configured {@link DistributionMode} must
          * include population.
+         * <p>
+         * <b>Note:</b> The maximum size is enforced periodically (about once per minute) rather than on every write, so
+         * the underlying store may temporarily retain more cache entries until the next pruning.
+         * <p>
+         * <b>Note:</b> This is mutually exclusive with {@link #withCacheResidency()} and can be combined with
+         * {@link #withMaximumTime(Duration)}.
          *
          * @param maximumSize the maximum size for the persistence of cached entries (must be positive)
          * @return a configurer instance for chaining additional methods
@@ -762,11 +765,14 @@ public final class DistributedCaffeine<K, V> {
          * {@link DistributedPolicy#getAllFromStore(Iterable, boolean)} can be used to load those cache entries directly
          * from the underlying store bypassing this cache instance.
          * <p>
-         * <b>Note:</b> This is mutually exclusive with {@link #withCacheResidency()} and can be combined with
-         * {@link #withMaximumSize(int)}.
-         * <p>
          * <b>Note:</b> If persistence of cached entries is configured, the configured {@link DistributionMode} must
          * include population.
+         * <p>
+         * <b>Note:</b> The maximum amount of time is enforced periodically (about once per minute) rather than on every
+         * write, so cache entries may remain in the underlying store slightly longer until the next pruning.
+         * <p>
+         * <b>Note:</b> This is mutually exclusive with {@link #withCacheResidency()} and can be combined with
+         * {@link #withMaximumSize(int)}.
          *
          * @param maximumTime the maximum amount of time for the persistence of cached entries (must be positive)
          * @return a configurer instance for chaining additional methods
@@ -906,6 +912,9 @@ public final class DistributedCaffeine<K, V> {
          * <p>
          * <b>Note:</b> If persistence of evicted entries is configured, at least one eviction policy must be
          * configured.
+         * <p>
+         * <b>Note:</b> The maximum size is enforced periodically (about once per minute) rather than on every eviction,
+         * so the underlying store may temporarily retain more evicted cache entries until the next pruning.
          *
          * @param maximumSize the maximum size for the persistence of evicted entries (must be positive)
          * @return a configurer instance for chaining additional methods
@@ -931,6 +940,9 @@ public final class DistributedCaffeine<K, V> {
          * <p>
          * <b>Note:</b> If persistence of evicted entries is configured, at least one eviction policy must be
          * configured.
+         * <p>
+         * <b>Note:</b> The maximum amount of time is enforced periodically (about once per minute) rather than on every
+         * eviction, so evicted cache entries may remain in the underlying store slightly longer until the next pruning.
          *
          * @param maximumTime the maximum amount of time for the persistence of evicted entries (must be positive)
          * @return a configurer instance for chaining additional methods

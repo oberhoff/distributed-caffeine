@@ -123,7 +123,8 @@ public interface DistributedPolicy<K, V> {
      * cache instance.
      * <p>
      * Retention depends on the persistence configured using {@link DistributedCaffeine#withPersistence(Configurer)}
-     * (separately for cached and evicted entries).
+     * (separately for cached and evicted entries). A maximum size or amount of time is enforced periodically (about
+     * once per minute), so cache entries beyond it may still be returned until the next pruning.
      *
      * @param key            the key whose associated cache entry is to be returned
      * @param includeEvicted {@code true} if retained evicted cache entries should also be included, otherwise
@@ -138,7 +139,8 @@ public interface DistributedPolicy<K, V> {
      * cache instance.
      * <p>
      * Retention depends on the persistence configured using {@link DistributedCaffeine#withPersistence(Configurer)}
-     * (separately for cached and evicted entries).
+     * (separately for cached and evicted entries). A maximum size or amount of time is enforced periodically (about
+     * once per minute), so cache entries beyond it may still be returned until the next pruning.
      *
      * @param keys           the keys whose associated cache entries are to be returned
      * @param includeEvicted {@code true} if retained evicted cache entries should also be included, otherwise
