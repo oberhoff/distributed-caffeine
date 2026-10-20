@@ -913,6 +913,10 @@ public final class DistributedCaffeine<K, V> {
          * <b>Note:</b> If persistence of evicted entries is configured, at least one eviction policy must be
          * configured.
          * <p>
+         * <b>Note:</b> Persistence of evicted entries works with any {@link DistributionMode}. If it excludes eviction,
+         * however, a cache entry evicted by one cache instance is no longer synchronized back as warm-up, even if other
+         * cache instances still hold it.
+         * <p>
          * <b>Note:</b> The maximum size is enforced periodically (about once per minute) rather than on every eviction,
          * so the underlying store may temporarily retain more evicted cache entries until the next pruning.
          *
@@ -940,6 +944,10 @@ public final class DistributedCaffeine<K, V> {
          * <p>
          * <b>Note:</b> If persistence of evicted entries is configured, at least one eviction policy must be
          * configured.
+         * <p>
+         * <b>Note:</b> Persistence of evicted entries works with any {@link DistributionMode}. If it excludes eviction,
+         * however, a cache entry evicted by one cache instance is no longer synchronized back as warm-up, even if other
+         * cache instances still hold it.
          * <p>
          * <b>Note:</b> The maximum amount of time is enforced periodically (about once per minute) rather than on every
          * eviction, so evicted cache entries may remain in the underlying store slightly longer until the next pruning.
