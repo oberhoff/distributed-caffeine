@@ -318,9 +318,11 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
     // Invalidating all cache entries cannot be expressed as a set of keys: the calling cache instance can only
     // enumerate what it holds itself, and without population being distributed nothing else knows what the others
     // hold. So instead of one cache entry per key, a command is written, and every cache instance decides from its own
-    // content what it removes when that arrives (see receiveCacheEntries). Where population is distributed the store
-    // keeps a record of what is cached, which has to go as well - otherwise a reactivation reads it back and a
-    // retained evicted cache entry is reloaded from it, undoing what was just invalidated
+    // content what it removes when that arrives (see receiveCacheEntries). What the store retains has to go as well:
+    // where population is distributed it keeps a record of what is cached, which a reactivation would read back,
+    // and where evicted cache entries are retained - in every distribution mode, because an eviction carries the
+    // value of the cache instance handing it over rather than one population distributed - the next miss would
+    // reload one of them. Either way, what was just invalidated would come back
     void invalidateAllDistributed() {
         // whether or not anything is distributed for it, every key is written by it
         overtakeAll();
@@ -337,11 +339,14 @@ class InternalCacheManager<K, V> implements InternalInitializable<K, V>, Receive
             long counter = operationCounter.incrementAndGet();
             String operation = activationId.get() + ":" + counter;
             Repository<K, V> retaining = repository;
-            if (distributionMode.isPopulationConsidered() && nonNull(retaining)) {
-                Set<Status> statuses = new HashSet<>(CACHED_GROUP);
-                if (evictedEntryPersistenceConfigurer.isConfigured()) {
-                    statuses.addAll(EVICTED_RETAINED_GROUP);
-                }
+            Set<Status> statuses = new HashSet<>();
+            if (distributionMode.isPopulationConsidered()) {
+                statuses.addAll(CACHED_GROUP);
+            }
+            if (evictedEntryPersistenceConfigurer.isConfigured()) {
+                statuses.addAll(EVICTED_RETAINED_GROUP);
+            }
+            if (!statuses.isEmpty() && nonNull(retaining)) {
                 // transitions what is there and writes nothing for what is not, which also means it cannot resurrect
                 // a key as invalidated that no longer exists. Ahead of the cache entry below, so that a population
                 // following this operation cannot be overwritten by it afterwards.

@@ -5007,6 +5007,57 @@ final class DistributedCaffeineIntegrationTests {
             assertThat(distributedCache.getIfPresent(key)).isEqualTo(laterValue);
         }
 
+        @DisplayName("Test that invalidateAll() invalidates retained evicted entries in every distribution mode")
+        @ParameterizedTest(name = ARGUMENTS_WITH_NAMES_PLACEHOLDER)
+        @MethodSource("provideCacheFactoriesWithDifferentDistributionModes")
+        void test_DistributedCache_invalidateAll_invalidates_retained_evicted_entries(
+                CacheFactory<Key, Value> cacheFactory) {
+            // An evicted cache entry is retained whatever the distribution mode, because it carries the value the
+            // evicting cache instance handed over rather than one population distributed. So invalidating all has
+            // to reach it in every mode as well - otherwise the next miss reloads, from the store, a value that
+            // predates the invalidation
+            @SuppressWarnings({"Convert2Lambda", "java:S9357"})
+            Function<Key, Value> mappingFunction = spy(new Function<Key, Value>() {
+                @Override
+                public Value apply(Key key) {
+                    return Value.of(key.getId(), "mapped");
+                }
+            });
+
+            DistributedCache<Key, Value> distributedCache = cacheFactory.create(
+                    dc -> dc.withCaffeine(Caffeine.newBuilder().maximumSize(1))
+                            .withPersistence(configurer -> configurer
+                                    .withEvictedEntries(evictedEntries -> evictedEntries
+                                            .withMaximumSize(10)
+                                            .withLoadingStrategies(MAPPING_FUNCTION))),
+                    DistributedCaffeine::build);
+            Key key = Key.of(1);
+
+            // evicted by taking the room away rather than by writing until something gives, so which entry goes
+            // is not Caffeine's admission decision to make
+            distributedCache.put(key, Value.of(1, "written"));
+            distributedCache.policy().eviction().orElseThrow().setMaximum(0);
+            distributedCache.cleanUp();
+
+            await("the eviction being retained in the store")
+                    .atMost(WAITING_DURATION)
+                    .untilAsserted(() -> assertThat(distributedCache.distributedPolicy()
+                            .getFromStore(key, true))
+                            .isNotNull()
+                            .extracting(CacheEntry::getStatus)
+                            .isEqualTo(EVICTED_SIZE_RETAINED));
+
+            distributedCache.invalidateAll();
+
+            assertThat(distributedCache.distributedPolicy().getFromStore(key, true))
+                    .as("the retained evicted cache entry no longer being retained")
+                    .isNull();
+            assertThat(distributedCache.get(key, mappingFunction))
+                    .as("the mapped value, so the one written before invalidating all did not come back")
+                    .isEqualTo(Value.of(1, "mapped"));
+            verify(mappingFunction, times(1)).apply(key);
+        }
+
         @DisplayName("Test that a population is not reverted by a delayed cache entry of another cache instance")
         @Test
         void test_DistributionMode_population_is_not_reverted_by_delayed_foreign_cache_entry() {
