@@ -1,0 +1,39 @@
+/*
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.oberhoff.distributedcaffeine.hasher;
+
+import java.util.UUID;
+import java.util.function.Supplier;
+
+/**
+ * Interface representing an object that provides a hash.
+ * <p>
+ * <b>Note:</b> Keys of type {@link String}, {@link Long}, {@link Integer} or {@link UUID} are hashed out of the box, so
+ * only keys of other types have to implement this interface, unless a {@link HashProvider} is specified.
+ *
+ * @author Andreas Oberhoff
+ */
+@FunctionalInterface
+public interface Hashable {
+
+    /**
+     * Returns a hash for the implementing object using the supplied hasher for computing.
+     *
+     * @param hasher the supplier for a hasher to compute the hash
+     * @return the hash
+     */
+    String getHash(Supplier<Hasher> hasher);
+}

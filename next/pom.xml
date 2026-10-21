@@ -1,0 +1,385 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+    <!-- Standalone on purpose: not referenced by the root build and not released (see VISION.md) -->
+
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>io.github.oberhoff.distributed-caffeine</groupId>
+    <artifactId>distributed-caffeine-next</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <name>Distributed Caffeine (next generation)</name>
+
+    <description>Next generation of Distributed Caffeine: a local Caffeine cache read through a shared store
+        (MongoDB, PostgreSQL), with invalidation and optional population distribution.
+    </description>
+
+    <properties>
+        <maven.compiler.release>17</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.deploy.skip>true</maven.deploy.skip>
+        <maven.install.skip>true</maven.install.skip>
+        <jspecify.version>1.0.1</jspecify.version>
+        <caffeine.version>3.3.1</caffeine.version>
+        <hash4j.version>0.31.0</hash4j.version>
+        <fory.version>1.7.7</fory.version>
+        <jackson.version>3.2.3</jackson.version>
+        <jmh.version>1.37</jmh.version>
+        <junit.version>6.1.3</junit.version>
+        <assertj.version>3.27.7</assertj.version>
+        <mongodb.version>5.13.0</mongodb.version>
+        <postgresql.version>42.7.14</postgresql.version>
+        <r2dbc-postgresql.version>1.1.3.RELEASE</r2dbc-postgresql.version>
+        <reactor-bom.version>2025.0.8</reactor-bom.version>
+        <netty-bom.version>4.2.19.Final</netty-bom.version>
+        <scram.version>3.4</scram.version>
+        <r2dbc-pool.version>1.0.2.RELEASE</r2dbc-pool.version>
+        <hikaricp.version>7.1.0</hikaricp.version>
+        <testcontainers.version>2.0.5</testcontainers.version>
+        <slf4j.version>2.0.20</slf4j.version>
+    </properties>
+
+    <!-- r2dbc-postgresql pins Reactor, Netty and SCRAM versions with known vulnerabilities: newer ones, aligned -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>io.projectreactor</groupId>
+                <artifactId>reactor-bom</artifactId>
+                <version>${reactor-bom.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-bom</artifactId>
+                <version>${netty-bom.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.ongres.scram</groupId>
+                <artifactId>scram-client</artifactId>
+                <version>${scram.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.ongres.scram</groupId>
+                <artifactId>scram-common</artifactId>
+                <version>${scram.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.jspecify</groupId>
+            <artifactId>jspecify</artifactId>
+            <version>${jspecify.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+            <version>${caffeine.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.dynatrace.hash4j</groupId>
+            <artifactId>hash4j</artifactId>
+            <version>${hash4j.version}</version>
+        </dependency>
+        <!-- the default serializer, so a cache runs with no configuration (VISION.md, Serialization) -->
+        <dependency>
+            <groupId>org.apache.fory</groupId>
+            <artifactId>fory-core</artifactId>
+            <version>${fory.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>tools.jackson.core</groupId>
+            <artifactId>jackson-core</artifactId>
+            <version>${jackson.version}</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>tools.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.mongodb</groupId>
+            <artifactId>mongodb-driver-sync</artifactId>
+            <version>${mongodb.version}</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>${postgresql.version}</version>
+            <optional>true</optional>
+        </dependency>
+        <!-- the PostgreSQL listener (VISION.md, "PostgreSQL listening: R2DBC"); reads and writes stay on JDBC -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>r2dbc-postgresql</artifactId>
+            <version>${r2dbc-postgresql.version}</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>${assertj.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-mongodb</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-postgresql</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- experiment only (PostgresJdbcVersusR2dbcExperimentTest): pools for the driver comparison -->
+        <dependency>
+            <groupId>io.r2dbc</groupId>
+            <artifactId>r2dbc-pool</artifactId>
+            <version>${r2dbc-pool.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>${hikaricp.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.openjdk.jmh</groupId>
+            <artifactId>jmh-core</artifactId>
+            <version>${jmh.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-jdk-platform-logging</artifactId>
+            <version>${slf4j.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- prints what the library and Testcontainers log (src/test/resources/simplelogger.properties) -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>${slf4j.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.16.0</version>
+                <executions>
+                    <!-- JMH generates its benchmark classes with an annotation processor, which compilers since
+                         JDK 23 only run when asked to -->
+                    <execution>
+                        <id>default-testCompile</id>
+                        <configuration>
+                            <annotationProcessorPaths>
+                                <path>
+                                    <groupId>org.openjdk.jmh</groupId>
+                                    <artifactId>jmh-generator-annprocess</artifactId>
+                                    <version>${jmh.version}</version>
+                                </path>
+                            </annotationProcessorPaths>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.6.0</version>
+                <configuration>
+                    <!-- a plain class path, so that forked JMH benchmark JVMs find the test classes -->
+                    <useManifestOnlyJar>false</useManifestOnlyJar>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <profile>
+            <id>errorprone</id>
+            <activation>
+                <property>
+                    <name>!skipErrorProne</name>
+                </property>
+            </activation>
+            <properties>
+                <errorprone.args>${nullaway.args} ${errorprone.checks}</errorprone.args>
+                <errorprone.testargs>${nullaway.testargs} ${errorprone.checks} ${errorprone.generated}</errorprone.testargs>
+                <!-- JMH's generated benchmark classes are not ours to fix -->
+                <errorprone.generated>-XepExcludedPaths:.*/generated-test-sources/.*</errorprone.generated>
+                <errorprone.checks>${errorprone.nullness} ${errorprone.hygiene}</errorprone.checks>
+                <errorprone.nullness>-Xep:EqualsMissingNullable:ERROR</errorprone.nullness>
+                <errorprone.hygiene>${errorprone.catching} ${errorprone.utility}</errorprone.hygiene>
+                <errorprone.catching>-Xep:CatchingUnchecked:ERROR</errorprone.catching>
+                <errorprone.utility>-Xep:PrivateConstructorForUtilityClass:ERROR</errorprone.utility>
+                <nullaway.args>${nullaway.severity} ${nullaway.mode} ${nullaway.checks}</nullaway.args>
+                <!-- NullAway is scoped to the main sources, as test code deliberately passes and dereferences
+                     nulls to exercise rejection paths. Its options have to stay set even with the check switched
+                     off, because Error Prone instantiates every plugin regardless of severity. -->
+                <nullaway.testargs>-Xep:NullAway:OFF ${nullaway.mode}</nullaway.testargs>
+                <nullaway.severity>-Xep:NullAway:ERROR</nullaway.severity>
+                <nullaway.mode>-XepOpt:NullAway:OnlyNullMarked=true -XepOpt:NullAway:JSpecifyMode=true</nullaway.mode>
+                <nullaway.checks>${nullaway.optional} ${nullaway.flow} ${nullaway.overrides}</nullaway.checks>
+                <nullaway.optional>-XepOpt:NullAway:CheckOptionalEmptiness=true</nullaway.optional>
+                <nullaway.flow>${nullaway.contracts} ${nullaway.asserts}</nullaway.flow>
+                <nullaway.contracts>-XepOpt:NullAway:CheckContracts=true</nullaway.contracts>
+                <nullaway.asserts>-XepOpt:NullAway:AssertsEnabled=true</nullaway.asserts>
+                <nullaway.overrides>${nullaway.restrictive} ${nullaway.exhaustive}</nullaway.overrides>
+                <nullaway.restrictive>-XepOpt:NullAway:AcknowledgeRestrictiveAnnotations=true</nullaway.restrictive>
+                <nullaway.exhaustive>-XepOpt:NullAway:ExhaustiveOverride=true</nullaway.exhaustive>
+                <j.api>-J--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED</j.api>
+                <j.file>-J--add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED</j.file>
+                <j.main>-J--add-exports=jdk.compiler/com.sun.tools.javac.main=ALL-UNNAMED</j.main>
+                <j.model>-J--add-exports=jdk.compiler/com.sun.tools.javac.model=ALL-UNNAMED</j.model>
+                <j.parser>-J--add-exports=jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED</j.parser>
+                <j.processing>-J--add-exports=jdk.compiler/com.sun.tools.javac.processing=ALL-UNNAMED</j.processing>
+                <j.tree>-J--add-exports=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED</j.tree>
+                <j.util>-J--add-exports=jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED</j.util>
+                <j.code>-J--add-opens=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED</j.code>
+                <j.comp>-J--add-opens=jdk.compiler/com.sun.tools.javac.comp=ALL-UNNAMED</j.comp>
+            </properties>
+            <dependencies>
+                <dependency>
+                    <groupId>com.google.code.findbugs</groupId>
+                    <artifactId>jsr305</artifactId>
+                    <version>3.0.2</version>
+                    <scope>provided</scope>
+                </dependency>
+            </dependencies>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-enforcer-plugin</artifactId>
+                        <version>3.6.3</version>
+                        <executions>
+                            <execution>
+                                <id>enforce-java-version</id>
+                                <goals>
+                                    <goal>enforce</goal>
+                                </goals>
+                                <configuration>
+                                    <rules>
+                                        <requireJavaVersion>
+                                            <version>[21,)</version>
+                                            <message>Error Prone (and therefore NullAway) requires JDK 21 or newer to
+                                                run, either build with such a JDK or skip this profile using
+                                                -DskipErrorProne
+                                            </message>
+                                        </requireJavaVersion>
+                                    </rules>
+                                    <fail>true</fail>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <version>3.16.0</version>
+                        <executions>
+                            <execution>
+                                <id>default-compile</id>
+                                <configuration>
+                                    <fork>true</fork>
+                                    <compilerArgs>
+                                        <arg>-XDcompilePolicy=simple</arg>
+                                        <arg>-Xplugin:ErrorProne ${errorprone.args}</arg>
+                                        <arg>-XDaddTypeAnnotationsToSymbol=true</arg>
+                                        <arg>-Werror</arg>
+                                        <arg>--should-stop=ifError=FLOW</arg>
+                                        <arg>${j.api}</arg>
+                                        <arg>${j.file}</arg>
+                                        <arg>${j.main}</arg>
+                                        <arg>${j.model}</arg>
+                                        <arg>${j.parser}</arg>
+                                        <arg>${j.processing}</arg>
+                                        <arg>${j.tree}</arg>
+                                        <arg>${j.util}</arg>
+                                        <arg>${j.code}</arg>
+                                        <arg>${j.comp}</arg>
+                                    </compilerArgs>
+                                    <annotationProcessorPaths>
+                                        <path>
+                                            <groupId>com.google.errorprone</groupId>
+                                            <artifactId>error_prone_core</artifactId>
+                                            <version>2.50.0</version>
+                                        </path>
+                                        <path>
+                                            <groupId>com.uber.nullaway</groupId>
+                                            <artifactId>nullaway</artifactId>
+                                            <version>0.14.2</version>
+                                        </path>
+                                    </annotationProcessorPaths>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>default-testCompile</id>
+                                <configuration>
+                                    <fork>true</fork>
+                                    <compilerArgs>
+                                        <arg>-XDcompilePolicy=simple</arg>
+                                        <arg>-Xplugin:ErrorProne ${errorprone.testargs}</arg>
+                                        <arg>-XDaddTypeAnnotationsToSymbol=true</arg>
+                                        <arg>-Werror</arg>
+                                        <arg>--should-stop=ifError=FLOW</arg>
+                                        <arg>${j.api}</arg>
+                                        <arg>${j.file}</arg>
+                                        <arg>${j.main}</arg>
+                                        <arg>${j.model}</arg>
+                                        <arg>${j.parser}</arg>
+                                        <arg>${j.processing}</arg>
+                                        <arg>${j.tree}</arg>
+                                        <arg>${j.util}</arg>
+                                        <arg>${j.code}</arg>
+                                        <arg>${j.comp}</arg>
+                                    </compilerArgs>
+                                    <annotationProcessorPaths>
+                                        <path>
+                                            <groupId>com.google.errorprone</groupId>
+                                            <artifactId>error_prone_core</artifactId>
+                                            <version>2.50.0</version>
+                                        </path>
+                                        <path>
+                                            <groupId>com.uber.nullaway</groupId>
+                                            <artifactId>nullaway</artifactId>
+                                            <version>0.14.2</version>
+                                        </path>
+                                        <path>
+                                            <groupId>org.openjdk.jmh</groupId>
+                                            <artifactId>jmh-generator-annprocess</artifactId>
+                                            <version>${jmh.version}</version>
+                                        </path>
+                                    </annotationProcessorPaths>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+</project>
