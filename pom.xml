@@ -291,10 +291,10 @@
                             <header>com/mycila/maven/plugin/license/templates/APACHE-2.txt</header>
                             <useDefaultExcludes>true</useDefaultExcludes>
                             <excludes>
-                                <exclude>*.txt</exclude>
-                                <exclude>*.xml</exclude>
-                                <exclude>*.yml</exclude>
-                                <exclude>*.yaml</exclude>
+                                <exclude>**/*.txt</exclude>
+                                <exclude>**/*.xml</exclude>
+                                <exclude>**/*.yml</exclude>
+                                <exclude>**/*.yaml</exclude>
                             </excludes>
                         </licenseSet>
                     </licenseSets>

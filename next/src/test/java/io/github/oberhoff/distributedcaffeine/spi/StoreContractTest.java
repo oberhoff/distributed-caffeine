@@ -1,0 +1,598 @@
+/*
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.oberhoff.distributedcaffeine.spi;
+
+import org.junit.jupiter.api.Test;
+
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+
+import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.pause;
+import static java.util.Objects.requireNonNull;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+/**
+ * The storage contract ({@link Store}), run against every store implementation, with or without a change feed: the
+ * reference store, a store offering only storage, and each adapter.
+ */
+@SuppressWarnings("resource") // every store a test opens is closed after it (@AfterEach)
+public abstract class StoreContractTest extends AbstractContractTest {
+
+    // contract point 1: versions come from the store, increase strictly, and are returned to the writer
+
+    @Test
+    void contract1_versions_increase_strictly_per_hash() {
+        Store writer = open();
+        long previous = 0;
+        for (int i = 0; i < 200; i++) {
+            long version = i % 3 == 2
+                    ? writer.invalidate(List.of("h1")).get("h1")
+                    : writer.put(List.of(entry("h1", "v" + i))).get("h1");
+            assertThat(version).isGreaterThan(previous);
+            previous = version;
+        }
+    }
+
+    @Test
+    void contract1_versions_are_shared_by_all_instances() {
+        Store first = open();
+        Store second = open();
+        long v1 = first.put(List.of(entry("h1", "a"))).get("h1");
+        long v2 = second.put(List.of(entry("h1", "b"))).get("h1");
+        long v3 = first.put(List.of(entry("h1", "c"))).get("h1");
+
+        assertThat(v2).isGreaterThan(v1);
+        assertThat(v3).isGreaterThan(v2);
+        assertThat(second.read(List.of("h1"), LONG).rows().get("h1").version()).isEqualTo(v3);
+    }
+
+    @Test
+    void contract1_a_key_written_again_after_its_row_was_deleted_gets_a_higher_version() {
+        Store writer = open();
+        writer.put(List.of(entry("h1", "v1")));
+        long tombstone = writer.invalidate(List.of("h1")).get("h1");
+        pause(5);
+        assertThat(writer.pruneTombstones(Duration.ZERO)).isEqualTo(1);
+
+        long recreated = writer.put(List.of(entry("h1", "v2"))).get("h1");
+
+        assertThat(recreated).isGreaterThan(tombstone);
+    }
+
+    @Test
+    void contract1_a_key_created_conditionally_after_its_row_was_deleted_gets_a_higher_version() {
+        Store writer = open();
+        writer.put(List.of(entry("h1", "v1")));
+        long tombstone = writer.invalidate(List.of("h1")).get("h1");
+        pause(5);
+        assertThat(writer.pruneTombstones(Duration.ZERO)).isEqualTo(1);
+
+        WriteResult created = writer.putIfUnchanged(List.of(ifMissing(entry("h1", "v2"))), LONG)
+                .get("h1");
+
+        assertThat(created.written()).isTrue();
+        assertThat(created.version()).as("as a load on a miss or putIfAbsent creates it").isGreaterThan(tombstone);
+    }
+
+    @Test
+    void contract1_a_key_written_again_after_size_pruning_removed_it_gets_a_higher_version() {
+        Store writer = open();
+        long pruned = writer.put(List.of(entry("h1", "v1"))).get("h1");
+        pause(2);
+        writer.put(List.of(entry("h2", "v")));
+        assertThat(writer.pruneToSize(1)).isEqualTo(1);
+
+        long recreated = writer.put(List.of(entry("h1", "v2"))).get("h1");
+
+        assertThat(recreated).as("silently pruned, a holder may still hold the old version").isGreaterThan(pruned);
+    }
+
+    // contract point 2: the age of a row and the stamp of a write come from the store
+
+    @Test
+    void contract2_the_age_grows_with_the_store_clock() {
+        Store writer = open();
+        writer.put(List.of(entry("h1", "v1")));
+
+        Duration first = writer.read(List.of("h1"), LONG).rows().get("h1").age();
+        pause(250);
+        Duration second = writer.read(List.of("h1"), LONG).rows().get("h1").age();
+
+        assertThat(first).isBetween(Duration.ZERO, Duration.ofSeconds(5));
+        assertThat(second.minus(first)).isBetween(Duration.ofMillis(200), Duration.ofSeconds(5));
+    }
+
+    @Test
+    void contract2_stamps_order_writes_across_rows_and_against_invalidate_all() {
+        Store writer = open();
+        Store reader = open();
+        writer.put(List.of(entry("a", "1")));
+        long a = reader.read(List.of("a"), LONG).rows().get("a").stamp();
+        writer.put(List.of(entry("b", "2")));
+        long b = reader.read(List.of("b"), LONG).rows().get("b").stamp();
+
+        long cutoff = writer.invalidateAll();
+        writer.put(List.of(entry("c", "3")));
+        long c = reader.read(List.of("c"), LONG).rows().get("c").stamp();
+
+        assertThat(b).as("a write after another, on another row").isGreaterThan(a);
+        assertThat(cutoff).as("invalidateAll after both").isGreaterThan(b);
+        assertThat(c).as("a write after invalidateAll").isGreaterThan(cutoff);
+        assertThat(reader.read(List.of("a"), LONG).cutoff()).as("reported by a read").isEqualTo(cutoff);
+        assertThat(reader.read(List.of(), LONG).cutoff()).as("also of no keys").isEqualTo(cutoff);
+        assertThat(reader.readVersions(List.of("a"), LONG).cutoff()).as("and of versions").isEqualTo(cutoff);
+        assertThat(reader.readVersions(List.of("a", "c"), LONG).stamps())
+                .containsEntry("a", a).containsEntry("c", c);
+    }
+
+    @Test
+    void contract2_the_basis_is_stored_as_written() {
+        Store writer = open();
+        Store reader = open();
+        writer.put(List.of(entry("p", "1")));
+        writer.putIfUnchanged(List.of(ExpectedEntry.ifMissing(entry("c", "1"), 7)), LONG);
+
+        assertThat(reader.read(List.of("p"), LONG).rows().get("p").basis()).as("an unconditional put")
+                .isEqualTo(Row.NO_BASIS);
+        assertThat(reader.read(List.of("c"), LONG).rows().get("c").basis()).as("a conditional write").isEqualTo(7);
+        assertThat(reader.readVersions(List.of("p", "c"), LONG).bases())
+                .containsEntry("p", Row.NO_BASIS).containsEntry("c", 7L);
+        writer.invalidate(List.of("c"));
+        assertThat(reader.read(List.of("c"), LONG).rows().get("c").basis()).as("a tombstone")
+                .isEqualTo(Row.NO_BASIS);
+    }
+
+    @Test
+    void contract4_a_store_checking_the_basis_refuses_a_write_decided_under_an_older_cutoff() {
+        Store writer = open();
+        assumeTrue(writer.checksBasis(), "the store does not check the basis");
+        long version = requireNonNull(writer.put(List.of(entry("v", "1"))).get("v"));
+        long before = writer.read(List.of(), LONG).cutoff();
+        long cutoff = writer.invalidateAll();
+
+        Map<String, WriteResult> refused = writer.putIfUnchanged(List.of(
+                ExpectedEntry.ifVersion(entry("v", "2"), version, before),
+                ExpectedEntry.ifMissing(entry("m", "2"), before)), LONG);
+        assertThat(refused.get("v").written()).isFalse();
+        assertThat(refused.get("v").version()).as("a conflict at the version decided on").isEqualTo(version);
+        assertThat(refused.get("m").written()).isFalse();
+
+        Map<String, WriteResult> accepted = writer.putIfUnchanged(List.of(
+                ExpectedEntry.ifVersion(entry("v", "3"), version, cutoff),
+                ExpectedEntry.ifMissing(entry("m", "3"), cutoff)), LONG);
+        assertThat(accepted.get("v").written()).as("decided under the cut-off").isTrue();
+        assertThat(accepted.get("m").written()).isTrue();
+    }
+
+    @Test
+    void contract4_a_store_not_checking_the_basis_stores_a_write_decided_under_an_older_cutoff() {
+        Store writer = open();
+        assumeTrue(!writer.checksBasis(), "the store checks the basis");
+        long version = requireNonNull(writer.put(List.of(entry("v", "1"))).get("v"));
+        long before = writer.read(List.of(), LONG).cutoff();
+        writer.invalidateAll();
+
+        assertThat(writer.putIfUnchanged(List.of(ExpectedEntry.ifVersion(entry("v", "2"), version, before)), LONG)
+                .get("v").written()).as("written, hidden by its basis for every reader").isTrue();
+        assertThat(writer.read(List.of("v"), LONG).rows().get("v").basis()).isEqualTo(before);
+    }
+
+    // contract point 5: maintenance is idempotent when run on several instances concurrently
+
+    @Test
+    void contract5_concurrent_expiry_expires_every_row_once() throws Exception {
+        Store writer = open();
+        Set<String> all = IntStream.range(0, 50).mapToObj(i -> "h" + i).collect(Collectors.toSet());
+        for (String hash : all) {
+            writer.put(List.of(entry(hash, "v")));
+        }
+        pause(100);
+
+        int expired = race(4, store -> store.expire(Duration.ofMillis(50)));
+
+        assertThat(expired).isEqualTo(50);
+        assertThat(writer.read(all, LONG).rows().values()).hasSize(50).allMatch(row -> row.state() == State.EXPIRED);
+    }
+
+    @Test
+    void contract5_concurrent_size_pruning_keeps_exactly_the_maximum() throws Exception {
+        Store writer = open();
+        for (int i = 0; i < 40; i++) {
+            writer.put(List.of(entry("h" + i, "v")));
+        }
+
+        int pruned = race(4, store -> store.pruneToSize(10));
+
+        assertThat(pruned).isEqualTo(30);
+        Set<String> all = IntStream.range(0, 40).mapToObj(i -> "h" + i).collect(Collectors.toSet());
+        assertThat(writer.read(all, LONG).rows()).hasSize(10);
+    }
+
+    // contract point 3: a read reflects every write confirmed before it began, on any instance
+
+    @Test
+    void contract3_a_read_on_another_instance_reflects_every_confirmed_write() {
+        Store writer = open();
+        Store reader = open();
+        for (int round = 0; round < 20; round++) {
+            long put = writer.put(List.of(entry("p", "v" + round))).get("p");
+            assertThat(reader.read(List.of("p"), LONG).rows().get("p").version()).as("put").isGreaterThanOrEqualTo(put);
+            assertThat(reader.readVersions(List.of("p"), LONG).versions().get("p")).as("versions")
+                    .isGreaterThanOrEqualTo(put);
+
+            long conditional = writer.putIfUnchanged(List.of(ifVersion(entry("p", "c" + round), put)),
+                    LONG).get("p").version();
+            assertThat(reader.read(List.of("p"), LONG).rows().get("p").version()).as("conditional")
+                    .isGreaterThanOrEqualTo(conditional);
+
+            long tombstone = writer.invalidate(List.of("p")).get("p");
+            Row row = reader.read(List.of("p"), LONG).rows().get("p");
+            assertThat(row.version()).as("invalidate").isGreaterThanOrEqualTo(tombstone);
+            assertThat(row.state()).isEqualTo(State.TOMBSTONE);
+        }
+    }
+
+    @Test
+    void contract3_a_read_on_another_instance_reflects_a_confirmed_invalidate_all() {
+        Store writer = open();
+        Store reader = open();
+        writer.put(List.of(entry("a", "1"), entry("b", "2")));
+
+        long cutoff = writer.invalidateAll();
+
+        ReadResult read = reader.read(List.of("a", "b"), LONG);
+        assertThat(read.cutoff()).isEqualTo(cutoff);
+        assertThat(read.rows().values()).hasSize(2).allMatch(row -> row.stamp() < cutoff);
+    }
+
+    // contract point 4: conditional writes are atomic per key
+
+    @Test
+    void contract4_concurrent_conditional_writes_on_one_version_have_one_winner() throws Exception {
+        Store writer = open();
+        long version = writer.put(List.of(entry("h1", "base"))).get("h1");
+
+        int winners = race(8, store -> store.putIfUnchanged(
+                List.of(ifVersion(entry("h1", "racer"), version)), LONG).get("h1").written() ? 1 : 0);
+
+        assertThat(winners).isEqualTo(1);
+    }
+
+    @Test
+    void contract4_concurrent_creations_of_a_missing_row_have_one_winner() throws Exception {
+        int winners = race(8, store -> store.putIfUnchanged(
+                List.of(ifMissing(entry("h1", "creator"))), LONG).get("h1").written() ? 1 : 0);
+
+        assertThat(winners).isEqualTo(1);
+    }
+
+    @Test
+    void contract4_concurrent_conditional_invalidations_of_one_version_have_one_winner() throws Exception {
+        Store writer = open();
+        long version = writer.put(List.of(entry("h1", "base"))).get("h1");
+
+        int winners = race(8, store -> store.invalidateIfUnchanged(List.of(Expected.ifVersion("h1", version))).size());
+
+        assertThat(winners).isEqualTo(1);
+    }
+
+    // contract point 6: keys and values byte for byte; only the store's own cache
+
+    private static byte[] allBytes(int offset) {
+        byte[] bytes = new byte[256];
+        for (int index = 0; index < bytes.length; index++) {
+            bytes[index] = (byte) (index + offset);
+        }
+        return bytes;
+    }
+
+    @Test
+    void contract6_keys_and_values_come_back_byte_for_byte() {
+        Store writer = open();
+        byte[] key = allBytes(0);
+        byte[] value = allBytes(7);
+
+        writer.put(List.of(new Entry("h1", key, value)));
+
+        Row row = open().read(List.of("h1"), LONG).rows().get("h1");
+        assertThat(row.key()).isEqualTo(key);
+        assertThat(row.value()).isEqualTo(value);
+        WriteResult conflict = writer.putIfUnchanged(List.of(ifMissing(entry("h1", "other"))), LONG)
+                .get("h1");
+        assertThat(requireNonNull(conflict.current()).value()).as("the row of a conflict too").isEqualTo(value);
+    }
+
+    @Test
+    void contract6_a_store_touches_only_its_own_caches_rows() {
+        Store ours = open();
+        Store theirs = openOther();
+        long version = ours.put(List.of(entry("h1", "ours"))).get("h1");
+        theirs.put(List.of(entry("h1", "theirs"), entry("h2", "theirs")));
+        pause(60);
+
+        theirs.invalidateAll();
+        theirs.expire(Duration.ofMillis(50));
+        theirs.pruneToSize(0);
+        theirs.pruneTombstones(Duration.ZERO);
+        assertThat(theirs.invalidateIfUnchanged(List.of(Expected.ifVersion("h1", version)))).as("not our row")
+                .isEmpty();
+
+        Map<String, Row> rows = ours.read(List.of("h1", "h2"), LONG).rows();
+        assertThat(rows).containsOnlyKeys("h1");
+        assertThat(value(rows.get("h1"))).isEqualTo("ours");
+        assertThat(rows.get("h1").state()).as("not expired, not invalidated").isEqualTo(State.VALUE);
+        assertThat(rows.get("h1").version()).isEqualTo(version);
+    }
+
+    // contract point 7: the semantics of every method
+
+    @Test
+    void contract7_read_returns_values_tombstones_and_expired_rows_and_omits_the_rest() {
+        Store writer = open();
+        writer.put(List.of(entry("value", "v"), entry("expired", "v")));
+        writer.invalidate(List.of("tombstone"));
+        pause(60);
+        writer.expire(Duration.ofMillis(50));
+        writer.put(List.of(entry("fresh", "f")));
+
+        Map<String, Row> rows = writer.read(List.of("value", "expired", "tombstone", "fresh", "missing"), LONG).rows();
+
+        // "value" was expired together with "expired"; "fresh" was written after
+        assertThat(rows.keySet()).containsExactlyInAnyOrder("value", "expired", "tombstone", "fresh");
+        assertThat(rows.get("fresh").state()).isEqualTo(State.VALUE);
+        assertThat(value(rows.get("fresh"))).isEqualTo("f");
+        assertThat(rows.get("expired").state()).isEqualTo(State.EXPIRED);
+        assertThat(rows.get("expired").value()).isNull();
+        assertThat(rows.get("tombstone").state()).isEqualTo(State.TOMBSTONE);
+        assertThat(rows.get("tombstone").value()).isNull();
+    }
+
+    @Test
+    void contract7_read_omits_value_rows_older_than_the_maximum_age() {
+        Store writer = open();
+        writer.put(List.of(entry("old", "o")));
+        pause(100);
+        writer.put(List.of(entry("young", "y")));
+
+        Duration maxAge = Duration.ofMillis(60);
+        assertThat(writer.read(List.of("old", "young"), maxAge).rows().keySet()).containsExactly("young");
+        assertThat(writer.readVersions(List.of("old", "young"), maxAge).versions().keySet()).containsExactly("young");
+        assertThat(writer.read(List.of("old", "young"), LONG).rows()).hasSize(2);
+    }
+
+    @Test
+    void contract7_readVersions_returns_value_rows_only() {
+        Store writer = open();
+        long version = writer.put(List.of(entry("value", "v"))).get("value");
+        writer.invalidate(List.of("tombstone"));
+
+        assertThat(writer.readVersions(List.of("value", "tombstone", "missing"), LONG).versions())
+                .containsExactly(Map.entry("value", version));
+    }
+
+    @Test
+    void contract7_putIfUnchanged_if_missing_writes_only_where_no_row_exists() {
+        Store writer = open();
+        long tombstone = writer.invalidate(List.of("tombstone")).get("tombstone");
+        long value = writer.put(List.of(entry("value", "v"))).get("value");
+
+        Map<String, WriteResult> results = writer.putIfUnchanged(List.of(
+                ifMissing(entry("missing", "1")),
+                ifMissing(entry("tombstone", "2")),
+                ifMissing(entry("value", "3"))), LONG);
+
+        assertThat(results.get("missing").written()).isTrue();
+        assertThat(results.get("tombstone").written()).isFalse();
+        assertThat(results.get("tombstone").version()).isEqualTo(tombstone);
+        assertThat(requireNonNull(results.get("tombstone").current()).state()).isEqualTo(State.TOMBSTONE);
+        assertThat(results.get("value").written()).isFalse();
+        assertThat(results.get("value").version()).isEqualTo(value);
+    }
+
+    @Test
+    void contract7_a_conflict_reports_the_version_of_a_row_too_old_to_count_as_present() {
+        Store writer = open();
+        long version = writer.put(List.of(entry("old", "o"))).get("old");
+        pause(100);
+
+        WriteResult result = writer.putIfUnchanged(List.of(ifMissing(entry("old", "n"))),
+                Duration.ofMillis(50)).get("old");
+
+        assertThat(result.written()).isFalse();
+        assertThat(result.current()).isNull();
+        assertThat(result.version()).isEqualTo(version);
+        assertThat(writer.putIfUnchanged(List.of(ifVersion(entry("old", "n"), version)),
+                Duration.ofMillis(50)).get("old").written()).isTrue();
+    }
+
+    @Test
+    void contract7_putIfUnchanged_if_missing_conflicts_with_a_young_value_and_returns_it() {
+        Store writer = open();
+        long version = writer.put(List.of(entry("h1", "existing"))).get("h1");
+
+        WriteResult result = writer.putIfUnchanged(List.of(ifMissing(entry("h1", "new"))), LONG).get("h1");
+
+        assertThat(result.written()).isFalse();
+        assertThat(requireNonNull(result.current()).version()).isEqualTo(version);
+        assertThat(result.version()).isEqualTo(version);
+        assertThat(value(result.current())).isEqualTo("existing");
+    }
+
+    @Test
+    void contract7_putIfUnchanged_with_a_version_writes_only_over_that_version() {
+        Store writer = open();
+        long first = writer.put(List.of(entry("h1", "a"))).get("h1");
+        long second = writer.put(List.of(entry("h1", "b"))).get("h1");
+
+        WriteResult stale = writer.putIfUnchanged(List.of(ifVersion(entry("h1", "x"), first)), LONG).get("h1");
+        WriteResult current = writer.putIfUnchanged(List.of(ifVersion(entry("h1", "y"), second)), LONG).get("h1");
+
+        assertThat(stale.written()).isFalse();
+        assertThat(requireNonNull(stale.current()).version()).isEqualTo(second);
+        assertThat(current.written()).isTrue();
+        assertThat(current.version()).isGreaterThan(second);
+        assertThat(value(writer.read(List.of("h1"), LONG).rows().get("h1"))).isEqualTo("y");
+    }
+
+    @Test
+    void contract7_putIfUnchanged_with_a_version_of_a_tombstone_writes_over_it() {
+        Store writer = open();
+        writer.put(List.of(entry("h1", "a")));
+        long tombstone = writer.invalidate(List.of("h1")).get("h1");
+
+        WriteResult result = writer.putIfUnchanged(List.of(ifVersion(entry("h1", "b"), tombstone)), LONG).get("h1");
+
+        assertThat(result.written()).isTrue();
+    }
+
+    @Test
+    void contract7_invalidate_creates_a_tombstone_for_a_missing_row() {
+        Store writer = open();
+
+        long version = writer.invalidate(List.of("missing")).get("missing");
+
+        Row row = writer.read(List.of("missing"), LONG).rows().get("missing");
+        assertThat(row.state()).isEqualTo(State.TOMBSTONE);
+        assertThat(row.version()).isEqualTo(version);
+    }
+
+    @Test
+    void contract7_invalidateIfUnchanged_invalidates_only_matching_value_rows() {
+        Store writer = open();
+        long a = writer.put(List.of(entry("a", "1"))).get("a");
+        long b = writer.put(List.of(entry("b", "1"))).get("b");
+        writer.put(List.of(entry("b", "2")));
+
+        Map<String, Long> invalidated = writer.invalidateIfUnchanged(List.of(Expected.ifVersion("a", a),
+                Expected.ifVersion("b", b), Expected.ifVersion("missing", 1L)));
+
+        assertThat(invalidated.keySet()).containsExactly("a");
+        Map<String, Row> rows = writer.read(List.of("a", "b", "missing"), LONG).rows();
+        assertThat(rows.get("a").state()).isEqualTo(State.TOMBSTONE);
+        assertThat(rows.get("a").version()).isEqualTo(invalidated.get("a"));
+        assertThat(rows.get("b").state()).isEqualTo(State.VALUE);
+        assertThat(rows).doesNotContainKey("missing");
+    }
+
+    @Test
+    void contract7_invalidateIfUnchanged_also_matches_a_tombstone_by_its_version_and_a_missing_row() {
+        Store writer = open();
+        long tombstone = writer.invalidate(List.of("t")).get("t");
+        writer.put(List.of(entry("present", "1")));
+
+        Map<String, Long> invalidated = writer.invalidateIfUnchanged(List.of(Expected.ifVersion("t", tombstone),
+                Expected.ifMissing("missing"), Expected.ifMissing("present")));
+
+        assertThat(invalidated.keySet()).containsExactlyInAnyOrder("t", "missing");
+        assertThat(invalidated.get("t")).isGreaterThan(tombstone);
+        assertThat(writer.read(List.of("t", "missing", "present"), LONG).rows())
+                .hasEntrySatisfying("missing", row -> assertThat(row.state()).isEqualTo(State.TOMBSTONE))
+                .hasEntrySatisfying("present", row -> assertThat(row.state()).isEqualTo(State.VALUE));
+        assertThat(writer.invalidateIfUnchanged(List.of(Expected.ifVersion("t", tombstone))))
+                .as("the version moved on").isEmpty();
+    }
+
+    @Test
+    void contract7_invalidateAll_touches_no_row_and_maintenance_deletes_the_rows_before_it() {
+        Store writer = open();
+        long value = writer.put(List.of(entry("a", "1"))).get("a");
+        long tombstone = writer.invalidate(List.of("t")).get("t");
+
+        long cutoff = writer.invalidateAll();
+        writer.put(List.of(entry("after", "v")));
+
+        Map<String, Row> rows = writer.read(List.of("a", "t"), LONG).rows();
+        assertThat(rows.get("a").state()).as("left as it was").isEqualTo(State.VALUE);
+        assertThat(rows.get("a").version()).isEqualTo(value);
+        assertThat(rows.get("t").version()).isEqualTo(tombstone);
+        assertThat(rows.values()).allMatch(row -> row.stamp() < cutoff);
+        assertThat(writer.pruneToSize(0)).as("only rows after the cut-off count").isEqualTo(1);
+        writer.put(List.of(entry("after", "v")));
+        assertThat(writer.pruneTombstones(LONG)).as("the rows before it, without a grace period").isEqualTo(2);
+        assertThat(writer.read(List.of("a", "t", "after"), LONG).rows()).containsOnlyKeys("after");
+    }
+
+    @Test
+    void contract7_a_row_created_on_missing_gets_a_version_as_every_write() {
+        Store writer = open();
+
+        WriteResult result = writer.putIfUnchanged(List.of(ifMissing(entry("h1", "v"))), LONG)
+                .get("h1");
+
+        assertThat(result.written()).isTrue();
+        assertThat(writer.read(List.of("h1"), LONG).rows().get("h1").version()).isEqualTo(result.version());
+        assertThat(writer.put(List.of(entry("h1", "w"))).get("h1")).as("increasing from there")
+                .isGreaterThan(result.version());
+    }
+
+    @Test
+    void contract7_expire_marks_rows_at_least_the_maximum_age_old_and_keeps_younger_ones() {
+        Store writer = open();
+        writer.put(List.of(entry("old", "o")));
+        pause(400);
+        writer.put(List.of(entry("young", "y")));
+
+        assertThat(writer.expire(Duration.ofMillis(300))).isEqualTo(1);
+
+        assertThat(writer.read(List.of("old"), LONG).rows().get("old").state()).isEqualTo(State.EXPIRED);
+        assertThat(writer.read(List.of("young"), LONG).rows().get("young").state()).isEqualTo(State.VALUE);
+    }
+
+    @Test
+    void contract7_an_expired_row_is_kept_for_the_grace_period_from_its_expiry() {
+        Store writer = open();
+        writer.put(List.of(entry("h1", "v")));
+        pause(400);
+        assertThat(writer.expire(Duration.ofMillis(300))).isEqualTo(1);
+
+        assertThat(writer.pruneTombstones(Duration.ofMillis(300))).as("its value was older, the expiry is not")
+                .isZero();
+        assertThat(writer.read(List.of("h1"), LONG).rows().get("h1").state()).isEqualTo(State.EXPIRED);
+        pause(400);
+        assertThat(writer.pruneTombstones(Duration.ofMillis(300))).isEqualTo(1);
+    }
+
+    @Test
+    void contract7_pruneToSize_deletes_the_oldest_values() {
+        Store writer = open();
+        for (int i = 0; i < 5; i++) {
+            writer.put(List.of(entry("h" + i, "v")));
+            pause(2);
+        }
+
+        assertThat(writer.pruneToSize(2)).isEqualTo(3);
+
+        assertThat(writer.read(List.of("h0", "h1", "h2", "h3", "h4"), LONG).rows().keySet()).containsExactlyInAnyOrder("h3", "h4");
+    }
+
+    @Test
+    void contract7_pruneTombstones_keeps_values_and_young_tombstones() {
+        Store writer = open();
+        writer.put(List.of(entry("value", "v")));
+        writer.invalidate(List.of("old"));
+        pause(100);
+        writer.invalidate(List.of("young"));
+
+        assertThat(writer.pruneTombstones(Duration.ofMillis(60))).isEqualTo(1);
+
+        assertThat(writer.read(List.of("value", "old", "young"), LONG).rows().keySet()).containsExactlyInAnyOrder("value", "young");
+    }
+}
