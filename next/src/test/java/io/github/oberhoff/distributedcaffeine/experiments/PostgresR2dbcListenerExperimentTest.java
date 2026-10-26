@@ -15,6 +15,8 @@
  */
 package io.github.oberhoff.distributedcaffeine.experiments;
 
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import io.r2dbc.postgresql.PostgresqlConnectionConfiguration;
 import io.r2dbc.postgresql.PostgresqlConnectionFactory;
 import io.r2dbc.postgresql.api.PostgresqlConnection;
@@ -23,9 +25,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.postgresql.PGConnection;
 import org.postgresql.PGNotification;
+import org.postgresql.core.BaseConnection;
+import org.postgresql.core.PGStream;
+import org.postgresql.core.QueryExecutorBase;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import reactor.core.Disposable;
 
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -35,9 +41,12 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -71,7 +80,32 @@ class PostgresR2dbcListenerExperimentTest {
                 RETURNING r.id, r.version)
             SELECT w.version, pg_notify('rows', 'WRITTEN|' || w.id || '|' || w.version || '|' || ?) FROM w""";
 
-    private enum Listener {JDBC, R2DBC}
+    // the write without its notification: sent after the commit, batched per writer (the BATCHED variants)
+    private static final String UPSERT_ONLY = """
+            WITH w AS (
+                INSERT INTO rows AS r (id, key, value, state, version, write_time)
+                VALUES (?, ?, ?, 'VALUE', (extract(epoch from clock_timestamp()) * 1000000)::bigint, now())
+                ON CONFLICT (id) DO UPDATE SET value = excluded.value, state = 'VALUE',
+                    version = greatest(r.version + 1, excluded.version), write_time = now()
+                RETURNING r.id, r.version)
+            SELECT w.version FROM w""";
+
+    // TAKEOVER: pgjdbc connects through a pooled DataSource, then the listener reads pgjdbc's stream itself
+    // BATCHED: pgjdbc listening, notifications sent by each writer after commit, at most one per window, each
+    // carrying every write of the window
+    private enum Listener {
+        JDBC(0), BATCHED_2MS(2), BATCHED_5MS(5), TAKEOVER(0), R2DBC(0);
+
+        final int windowMillis;
+
+        Listener(int windowMillis) {
+            this.windowMillis = windowMillis;
+        }
+
+        boolean batched() {
+            return windowMillis > 0;
+        }
+    }
 
     @Test
     void measure() throws Exception {
@@ -84,16 +118,14 @@ class PostgresR2dbcListenerExperimentTest {
             StringBuilder out = new StringBuilder("\n=== listener client, postgres:18, one session per instance ===\n")
                     .append(String.format("%-8s %10s %10s %10s %12s %12s %16s %10s%n", "listener", "keys",
                             "instances", "target/s", "arrival p50", "arrival p99", "PG CPU ms/1000w", "reached/s"));
-            for (int round = 0; round < 2; round++) {
-                for (int rate : new int[]{1_500, 3_000, 6_000}) {
-                    for (Listener listener : Listener.values()) {
-                        out.append(run(container, listener, 4, rate, false));
-                    }
+            Listener[] measured = {Listener.TAKEOVER, Listener.R2DBC};
+            for (int rate : new int[]{1_500, 3_000, 6_000}) {
+                for (Listener listener : measured) {
+                    out.append(run(container, listener, 4, rate, false));
                 }
-                out.append(run(container, Listener.R2DBC, 16, 3_000, false));
-                for (Listener listener : Listener.values()) {
-                    out.append(run(container, listener, 4, 1_500, true));
-                }
+            }
+            for (Listener listener : measured) {
+                out.append(run(container, listener, 4, 1_500, true));
             }
             System.out.println(out);
         }
@@ -111,7 +143,46 @@ class PostgresR2dbcListenerExperimentTest {
         for (int instance = 0; instance < instances; instance++) {
             long[] latency = new long[total];
             latencies.add(latency);
-            if (kind == Listener.JDBC) {
+            if (kind == Listener.TAKEOVER) {
+                HikariConfig config = new HikariConfig();
+                config.setJdbcUrl(container.getJdbcUrl());
+                config.setUsername(container.getUsername());
+                config.setPassword(container.getPassword());
+                config.setMaximumPoolSize(2);
+                HikariDataSource dataSource = new HikariDataSource(config);
+                Connection connection = dataSource.getConnection();
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute("LISTEN rows");
+                }
+                PGStream stream = takeOver(connection);
+                Thread thread = new Thread(() -> {
+                    try {
+                        boolean stop = false;
+                        while (!stop) {
+                            int type = stream.receiveChar();
+                            int length = stream.receiveInteger4();
+                            if (type == 'A') {
+                                stream.receiveInteger4(); // the notifying backend's pid
+                                stream.receiveCanonicalString(); // the channel
+                                stop = recordArrival(stream.receiveString(), latency, started, System.nanoTime());
+                            } else {
+                                stream.skip(length - 4);
+                            }
+                        }
+                    } catch (Exception e) {
+                        throw new IllegalStateException(e);
+                    } finally {
+                        stopped.countDown();
+                    }
+                });
+                thread.start();
+                closeables.add(() -> {
+                    // taken over: never back to the pool, which evicts an aborted connection
+                    connection.abort(Runnable::run);
+                    dataSource.close();
+                });
+                ready.countDown();
+            } else if (kind != Listener.R2DBC) {
                 Thread thread = new Thread(() -> {
                     try (Connection listener = connect(container)) {
                         try (Statement statement = listener.createStatement()) {
@@ -170,9 +241,11 @@ class PostgresR2dbcListenerExperimentTest {
         long begin = System.nanoTime();
         List<Thread> writers = new ArrayList<>();
         for (int w = 0; w < WRITERS; w++) {
+            BlockingQueue<String> pending = new LinkedBlockingQueue<>();
+            Thread sender = kind.batched() ? sender(container, pending, kind.windowMillis) : null;
             Thread writer = new Thread(() -> {
                 try (Connection connection = connect(container);
-                     PreparedStatement statement = connection.prepareStatement(UPSERT)) {
+                     PreparedStatement statement = connection.prepareStatement(kind.batched() ? UPSERT_ONLY : UPSERT)) {
                     for (int seq = next.getAndIncrement(); seq < total; seq = next.getAndIncrement()) {
                         long due = begin + (long) seq * 1_000_000_000L / rate;
                         while (System.nanoTime() < due) {
@@ -182,11 +255,20 @@ class PostgresR2dbcListenerExperimentTest {
                         statement.setString(1, id);
                         statement.setBytes(2, id.getBytes(StandardCharsets.UTF_8));
                         statement.setBytes(3, ("v" + seq).getBytes(StandardCharsets.UTF_8));
-                        statement.setInt(4, seq);
+                        if (!kind.batched()) {
+                            statement.setInt(4, seq);
+                        }
                         started[seq] = System.nanoTime();
                         try (ResultSet resultSet = statement.executeQuery()) {
                             resultSet.next();
+                            if (kind.batched()) {
+                                pending.add("WRITTEN|" + id + "|" + resultSet.getLong(1) + "|" + seq);
+                            }
                         }
+                    }
+                    if (sender != null) {
+                        pending.add("");
+                        sender.join();
                     }
                 } catch (Exception e) {
                     throw new IllegalStateException(e);
@@ -229,14 +311,73 @@ class PostgresR2dbcListenerExperimentTest {
                 missing > 0 ? "  (" + missing + " missing)" : "");
     }
 
-    // returns true for the stop marker
+    // the stream behind a pgjdbc connection, also through a pool's proxy: the field is protected, with no getter
+    private static PGStream takeOver(Connection connection) throws Exception {
+        Field field = QueryExecutorBase.class.getDeclaredField("pgStream");
+        field.setAccessible(true);
+        return (PGStream) field.get(connection.unwrap(BaseConnection.class).getQueryExecutor());
+    }
+
+    // returns true for the stop marker; a batched payload carries several writes, separated by ';'
     private static boolean recordArrival(String payload, long[] latency, long[] started, long now) {
         if (payload.equals("STOP")) {
             return true;
         }
-        int seq = Integer.parseInt(payload.substring(payload.lastIndexOf('|') + 1));
-        latency[seq] = (now - started[seq]) / 1_000;
+        for (String part : payload.split(";", -1)) {
+            int seq = Integer.parseInt(part.substring(part.lastIndexOf('|') + 1));
+            latency[seq] = (now - started[seq]) / 1_000;
+        }
         return false;
+    }
+
+    // sends the writes queued after their commits: at most one notification per window, each with every write
+    // queued meanwhile (up to PostgreSQL's 8000 bytes per payload); an empty entry ends it
+    private static Thread sender(PostgreSQLContainer container, BlockingQueue<String> pending, int windowMillis) {
+        Thread thread = new Thread(() -> {
+            try (Connection connection = connect(container);
+                 PreparedStatement notify = connection.prepareStatement("SELECT pg_notify('rows', ?)")) {
+                long last = 0;
+                boolean end = false;
+                while (!end) {
+                    String first = pending.take();
+                    long due = last + windowMillis * 1_000_000L;
+                    long wait = due - System.nanoTime();
+                    if (wait > 0) {
+                        LockSupport.parkNanos(wait);
+                    }
+                    List<String> drained = new ArrayList<>();
+                    drained.add(first);
+                    pending.drainTo(drained);
+                    end = drained.remove("");
+                    StringBuilder payload = new StringBuilder();
+                    for (String part : drained) {
+                        if (payload.length() + part.length() + 1 > 7_900) {
+                            send(notify, payload);
+                        }
+                        if (!payload.isEmpty()) {
+                            payload.append(';');
+                        }
+                        payload.append(part);
+                    }
+                    if (!payload.isEmpty()) {
+                        send(notify, payload);
+                    }
+                    last = System.nanoTime();
+                }
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        thread.start();
+        return thread;
+    }
+
+    private static void send(PreparedStatement notify, StringBuilder payload) throws Exception {
+        notify.setString(1, payload.toString());
+        try (ResultSet resultSet = notify.executeQuery()) {
+            resultSet.next();
+        }
+        payload.setLength(0);
     }
 
     private static long postgresCpuMicros(PostgreSQLContainer container) throws Exception {

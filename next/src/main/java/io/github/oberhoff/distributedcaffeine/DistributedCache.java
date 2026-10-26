@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.Cache;
 import org.jspecify.annotations.Nullable;
 
+import java.util.Map;
 import java.util.function.Function;
 
 /**
@@ -36,6 +37,28 @@ public interface DistributedCache<K, V> extends Cache<K, V>, AutoCloseable {
      * @return the distributed policy
      */
     DistributedPolicy<K, V> distributedPolicy();
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * If this instance does not hold the key, or holds a copy it has to confirm first (after missed announcements),
+     * the store is read: a value found there is returned and held by this instance afterwards. Only the loader is
+     * skipped, so this method can cost a store round trip. If the store does not answer, the key counts as absent.
+     * To look at this instance's copies only, without reading the store, use
+     * {@code policy().getIfPresentQuietly(key)}.
+     */
+    @Override
+    @Nullable V getIfPresent(K key);
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * The keys this instance does not hold are read from the store in one batch, as in {@link #getIfPresent}: the
+     * values found there are returned and held by this instance afterwards. Only the loader is skipped. To look at
+     * this instance's copies only, without reading the store, use {@code policy().getIfPresentQuietly(key)} per key.
+     */
+    @Override
+    Map<K, V> getAllPresent(Iterable<? extends K> keys);
 
     // a mapping function resolving to null is accepted (as by ConcurrentMap.computeIfAbsent) and caches nothing.
     // Caffeine documents a null result ("or null if the computed value is null") but cannot express it for a value

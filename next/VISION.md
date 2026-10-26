@@ -1763,6 +1763,21 @@ store's maximum age.
   service anyway, and the compile errors after the upgrade show what to change.
 - **Splitting later stays possible** without breaking anything (e.g. with many adapters or adapters on their own
   release cadence): the core artifact keeps its name.
+- **The Javadoc inherits Caffeine's text (decided 2026-10-27):**
+  - The rule: methods that override Caffeine's interfaces keep Caffeine's text through `{@inheritDoc}`, and add
+    only what differs or happens in addition. A method where nothing differs gets no comment at all.
+  - What the build needs: the javadoc tool copies inherited text only from source files. Caffeine's doc comments
+    are only in its sources jar, and by default `maven-javadoc-plugin` puts only our own `src/main/java` on the
+    sourcepath. Without configuration, `{@inheritDoc}` comes out empty, leaving our addition and a "Specified by"
+    link (checked 2026-10-27).
+  - The fix: unpack `caffeine-<version>-sources.jar` (`dependency:unpack`, classifier `sources`) into `target/`, and
+    add that directory to the plugin's `sourcepath`. With `-Dsourcepath=src/main/java:<the unpacked sources>`,
+    Caffeine's text appeared, followed by ours (checked 2026-10-27). `includeDependencySources` given on the
+    command line did not help.
+  - `-link` to Caffeine's Javadoc only makes "Specified by" a link and copies no text. It is still useful on top.
+  - IDEs resolve `{@inheritDoc}` from Caffeine's sources jar by themselves. Only the published Javadoc needs this.
+  - When: together with the javadoc plugin, which this module does not have yet and which Maven Central requires
+    for a release.
 
 ### MongoDB write concern: majority, journaled
 
@@ -1873,6 +1888,9 @@ variant twice):
 
 ### PostgreSQL listening: R2DBC
 
+**Superseded 2026-10-26:** R2DBC is ruled out. The listener takes over pgjdbc's stream instead, just as fast. See
+"PostgreSQL listening without R2DBC".
+
 **Decision:** the PostgreSQL adapter listens through r2dbc-postgresql; reads and writes stay on JDBC.
 
 - `r2dbc-postgresql` is an `optional` dependency like the drivers: required when PostgreSQL is used, with a clear
@@ -1956,6 +1974,143 @@ one listening session per instance, two paced writers, each variant twice):
 - **Costs:** r2dbc-postgresql brings Reactor and Netty (about 20 artifacts), and the listener needs connection
   settings of its own, since a JDBC `DataSource` (e.g. a pool) cannot be turned into an R2DBC connection.
   Transaction-mode poolers still cannot carry `LISTEN`, as today.
+
+### PostgreSQL listening without R2DBC: notifications after the commit, batched (measured 2026-10-26)
+
+**Why.** R2DBC brings Reactor, Netty and SCRAM (about 20 artifacts) and a second connection configuration. pgjdbc
+alone hands out only about 750 notifications/s per listening session.
+
+**Drained pgjdbc: no help.** After the first notification, a query was run to read every notification that arrived
+before its response, repeated while more kept coming. Measured with an empty query and with `SELECT 1`, 4 instances:
+
+- p50 at 208–947 ms (1,500 writes/s), 617–2,002 ms (3,000/s) and 712–3,075 ms (6,000/s);
+- a hot key at 489–1,878 ms.
+
+**Notifications after the commit, batched per writer.**
+
+- The write's statement no longer calls `pg_notify`.
+- After the commit, each writer queues its writes. It sends at most one notification per window, carrying every write
+  queued meanwhile (up to 8000 bytes, about 150 writes).
+- When idle it sends at once.
+- The listener is plain pgjdbc.
+
+Measured with `PostgresR2dbcListenerExperimentTest`, PostgreSQL 18, 4 instances, 2 writers:
+
+| Variant | 1,500 writes/s | 3,000 writes/s | 6,000 writes/s (reached) | hot key, 1,500/s | PostgreSQL CPU per 1,000 writes |
+|---|---|---|---|---|---|
+| batched, 2 ms window | 3.7 / 7.7 ms | 3.6 / 6.0 ms | 3.3 / 5.5 ms (5,678/s) | 3.4 / 5.4 ms | 95–215 ms |
+| batched, 5 ms window | 5.1 / 9.1 ms | 4.9 / 8.3 ms | 4.7 / 8.1 ms (5,990/s) | 5.0 / 8.6 ms | 68–111 ms |
+| R2DBC, `pg_notify` in the write | 0.5 / 1.7 ms | 0.5 / 0.7 ms | 0.5 / 0.8 ms (3,934/s) | 0.4 / 0.6 ms | 161–194 ms |
+
+The figures are p50 / p99 arrival.
+
+- **Latency:** a few milliseconds, which is about the window, at every rate and for a hot key. R2DBC stays at 0.5 ms.
+  pgjdbc's limit no longer bites: it counts notifications, not writes.
+- **Writes get faster:** writers reached about 6,000/s, against R2DBC's 3,900/s with `pg_notify` inside the write.
+  Notifying is no longer part of the transaction.
+- **PostgreSQL's CPU falls by up to about two thirds** (68 against 194 ms per 1,000 writes at 6,000/s). Every
+  notification wakes every listening session, and there are far fewer notifications.
+
+**What it needs: a writer's death counts as a gap.**
+
+- A write committed and not yet announced is lost if its writer dies before sending, and nobody notices.
+- So every instance tracks the last heartbeat it saw from every other instance; the heartbeats reach the others
+  through the feed. A heartbeat silent longer than a timeout moves the epoch.
+- The cases:
+  - a crash: detected by the silence;
+  - a writer cut off from the database: silent too, and it keeps its queue, sending once it reconnects;
+  - a long pause: a needless but harmless gap;
+  - a clean shutdown: the queue is sent first.
+- The bound in that case: the heartbeat timeout (seconds), instead of the delivery delay. It holds only for the rare
+  crash between a commit and its notification.
+- General: it works for every store where the library sends its own messages (Redis's `PUBLISH`, own streams), not
+  only for PostgreSQL.
+
+**Not decided yet:** whether to build it, and so drop R2DBC; and the window (2 ms gives lower latency, 5 ms less
+CPU; or adaptive, by the number of writing instances).
+
+**pgjdbc's stream taken over: as fast as R2DBC (measured 2026-10-26).**
+
+- How it works:
+  - the listening connection is taken from the user's `DataSource` (HikariCP in the measurement, so through a pool's
+    proxy);
+  - pgjdbc runs `LISTEN`;
+  - the listener then reads pgjdbc's own stream (`PGStream`) through its public methods (`receiveChar`,
+    `receiveInteger4`, `receiveString`, `skip`), parsing notifications (`A`) and skipping every other message;
+  - at the end, the connection is aborted (`Connection.abort`), not closed, so the pool evicts it.
+- Reuse: authentication and TLS stay pgjdbc's, with whatever the `DataSource` is configured for. No bytes are lost at
+  the handover, since pgjdbc's buffer is read as it is.
+- Reaching the stream: `QueryExecutorBase.pgStream` is `protected`, with no getter, so it takes reflection on that
+  one field. The executor is reached through `unwrap(BaseConnection.class).getQueryExecutor()`.
+- Measured with the writes notifying inside their transaction, as with R2DBC:
+
+| Listener (4 instances) | 1,500 writes/s | 3,000 writes/s | 6,000 writes/s (reached) | hot key, 1,500/s | PostgreSQL CPU per 1,000 writes |
+|---|---|---|---|---|---|
+| pgjdbc stream taken over | 0.4 / 0.6 ms | 0.5 / 0.7 ms | 0.5 / 0.8 ms (3,914/s) | 0.4 / 0.6 ms | 155–194 ms |
+| R2DBC | 0.4 / 0.7 ms | 0.5 / 0.8 ms | 0.5 / 0.8 ms (3,873/s) | 0.4 / 0.6 ms | 156–198 ms |
+
+  The figures are p50 / p99 arrival.
+
+- So the limit was in pgjdbc's `getNotifications` path (`processNotifies`), not in PostgreSQL, the socket or the
+  protocol.
+- Taking over the stream gives R2DBC's latency with no dependency, no second configuration, and the exactness of
+  notifying inside the transaction (no crash window, no tracking of writers' liveness).
+- Costs:
+  - reflection on one internal field, checked at startup with a clear error, and tested against the pgjdbc version
+    in use;
+  - one pool connection held per instance (to document, with HikariCP's leak detection);
+  - transaction poolers still cannot carry `LISTEN`.
+- Worth reporting upstream: a public way to read notifications without `processNotifies`' overhead.
+
+**Decided (2026-10-26): R2DBC is ruled out. Sources of changes, by kind.**
+
+| Source | Used | How |
+|---|---|---|
+| PostgreSQL: `NOTIFY` inside the write's transaction, the listener taking over pgjdbc's stream | the PostgreSQL adapter's default | the listening connection from the user's `DataSource`; exact (no crash window), 0.5 ms; no dependency beyond pgjdbc |
+| a generic message bus | stores without a native feed; or, optionally, to save PostgreSQL's CPU with many instances | the library sends after the commit, batched, numbered per sender, with heartbeats. Gap detection, including a writer's death, is in the core. A thin bus SPI: publish a batch, subscribe |
+| a native feed | where a store has one (MongoDB's change streams, a binlog, DynamoDB Streams) | an optional capability of the store SPI; it sees writes from outside the library too |
+
+Consequences, to build:
+
+- **The PostgreSQL listener on pgjdbc.**
+  - The adapter takes only the `DataSource`. `withListener(ConnectionFactory)` and the URL convenience go; listening
+    is switched on without a second configuration.
+  - The listener takes over one connection's stream.
+  - At startup it checks the field it reaches through reflection, with a clear error if pgjdbc changed.
+  - Its connection is aborted, not closed.
+- **The pom:** `r2dbc-postgresql`, `r2dbc-pool`, and the managed Reactor, Netty and SCRAM versions go.
+- **The experiments built on R2DBC** stay as recorded measurements, but their R2DBC code goes with the dependency:
+  - `PostgresJdbcVersusR2dbcExperimentTest` and `PostgresR2dbcCeilingExperimentTest` are removed;
+  - the listener experiment keeps the pgjdbc variants.
+- **The README** documents one held pool connection per instance (and HikariCP's leak detection), and that
+  transaction poolers cannot carry `LISTEN`.
+- **Later:** the bus SPI and its first implementations. In-transaction `NOTIFY` with pgjdbc's own `getNotifications`
+  is not offered, being limited to about 750 notifications a second.
+
+**What follows: pluggable message buses (recorded 2026-10-26, not built).** When the library sends its own messages
+after the commit, the transport no longer has to be the store. It can be a bus of the user's choice, as JetCache's
+broadcast manager is: Kafka, NATS, RabbitMQ, Redis pub/sub, JGroups, a Hazelcast topic, or `LISTEN/NOTIFY` itself.
+
+- **The bus SPI stays thin:** publish a batch of bytes, and subscribe. Optionally the bus reports a lost connection
+  itself.
+- **Gap detection is the core's job, whatever the bus.**
+  - Every instance numbers its batches (a sequence per sender) and publishes heartbeats over the bus, carrying its
+    last number.
+  - A receiver that sees a number missing, or a sender's heartbeat silent, moves the epoch.
+  - So even a bus that drops messages without a word (Redis pub/sub, core NATS) keeps our guarantee: no stale value
+    beyond the delivery delay, and a loss always detected. That is what JetCache's broadcast lacks; Hazelcast does
+    the same with its sequences per partition.
+  - Order across senders comes from the versions in the messages, as now.
+- **Two kinds of source, side by side:**
+  - a store's native feed (change streams, triggers that notify, binlog) sees every write, including writes from
+    outside the library;
+  - a bus sees only the library's own writes, but is fast, cheap, and works for any store.
+  - Writes from outside the library (a manual fix) reach the instances through a bus only after expiry. That is as
+    with JetCache, and to be documented.
+- **What it opens up:** a store without a native feed plus any bus gives every distribution mode, without the
+  polling feed: MariaDB plus Redis pub/sub, MySQL plus Kafka, DynamoDB plus SNS.
+- **It fits the thin SPI:** the store SPI is unchanged (a native feed stays an optional capability), and the bus is a
+  second, equally thin SPI. Sequences, heartbeats, batching and gap detection are built once, in the core.
 
 ### The PostgreSQL adapter (built 2026-10-22)
 
@@ -2100,6 +2255,35 @@ MongoAdapter.newBuilder(mongoClient, databaseName, collectionName)   // names ch
 - **Not tested here:** a real rollback or oplog rollover (error 280/286 for real), a real network failure, failover in a
   3-member replica set (the current generation's test harness has one), injected write failures (no proxy for the
   client yet), sharded clusters through `mongos`.
+
+### Redis adapters (decided 2026-10-26, not built)
+
+Redis gets adapters. JetCache keeps Caffeine as L1 and nothing but Redis as L2 (Jedis, Lettuce, Redisson or Spring
+Data Redis as the client), and keeps L1 consistent by Redis pub/sub on a best-effort basis: no versions, no replay, no
+repair after a lost message. Redisson's `RLocalCachedMap` is the other comparison on Redis. Two points set us apart:
+our guarantee on the same store, and more stores beyond it.
+
+Sketch, to be settled against the thin SPI ("Target design: a thin SPI, versions in the core"):
+
+- **Write and message in one Lua script:** compare the version, write the row (a hash: value, state, version, write
+  time), then `XADD` to the cache's stream. The script is atomic, so the feed's order is the write order, and no write
+  goes without its message.
+- **The feed is a Redis Stream,** not pub/sub and not keyspace notifications (both fire and forget, no replay; see
+  "The polling feed"). The listener runs `XREAD BLOCK` from the last ID it has seen, and the stream is trimmed with
+  `MAXLEN ~`.
+  - A gap is detected, not prevented: the stream was trimmed past the last seen ID, or its last ID is below ours
+    after a failover. Either one means an epoch.
+- **Durability:** replication is asynchronous, so a failover can lose acknowledged writes. That loss shows up as the
+  gap above. `WAIT` is optional.
+- **Cluster:** a script may only touch keys in one slot. In the first version, a hash tag `{cache}` puts a whole cache
+  in one slot, so the cache is not sharded. Several streams per cache (`{cache:i}`) can come later.
+- **No native TTL,** as for every store (see "What a store must deliver").
+- **Clients:** one internal Redis store over a small command interface (scripts by SHA, `XREAD`, `SCAN`), with one
+  thin binding per client. Lettuce comes first (asynchronous, cluster support, Spring Boot's default), then Jedis and
+  Redisson on demand.
+- **When:** later. MongoDB and PostgreSQL come first (decided 2026-10-26). Not before the thin SPI (step 2 of the
+  build plan), so the adapter is built once and against the target. The exact place in the order and a binding for
+  Spring Data Redis are decided when Redis comes up.
 
 ### Connection sharing: always per database
 
@@ -2893,6 +3077,35 @@ database focus).
   - write combining;
   - session tokens for read-your-writes across instances.
 
+### Comparable libraries: FusionCache (.NET), read 2026-10-26
+
+FusionCache keeps an L1 in memory and an L2 behind `IDistributedCache` (Redis, SQL Server and others), with a
+backplane (usually Redis pub/sub) to keep the L1s consistent. Like JetCache, it is a comparison point. This summary is
+based on its docs (`Tagging.md`, `Clear.md`, `AutoRecovery.md`, `Backplane.md`), not its code.
+
+- **Same as ours:** backplane messages carry no value, only key, action and timestamp. A node acts only if it holds
+  the key, and it reloads from L2.
+- **Weaker than ours:** a missed message is not detected. The docs advise a short L1 duration and describe no resync.
+  There is no documented check that drops a message older than the copy held. Races between a load and a remove are
+  not addressed. Our epoch on gaps, our versions and our conflicts cover these cases.
+- **`Clear` and `RemoveByTag` in O(1)** (relevant to plan B, the O(1) `invalidateAll`):
+  - Each one writes a marker entry with a timestamp. `Clear` uses two special tags: `*` to expire and `!` to remove.
+  - A read hides an entry created before the marker. The check is lazy, and untagged entries pay nothing.
+  - Hidden entries are not deleted in bulk; they disappear by their own expiry.
+  - It confirms that plan B works in practice, and that the O(n) cleanup can be left to maintenance.
+  - Its weak points, which we would avoid:
+    - It compares wall clocks, and the docs do not mention clock skew. We would use a generation (a counter).
+    - The markers are ordinary entries that can expire or be evicted, which would drop an invalidation. Our
+      generation would be durable.
+- **Ideas worth a look later, each opt-in and judged against the guarantee:**
+  - Tags (`RemoveByTag`) built on the same generation mechanism. This goes beyond Caffeine's API.
+  - Fail-safe: serving an expired value when the store fails. It contradicts the guarantee, so it could only exist
+    as an explicit opt-in.
+  - Soft and hard timeouts for loaders.
+  - Auto-recovery: failed L2 writes and publishes are queued, only the last per key is kept, and before a replay
+    the node checks whether L2 changed in the meantime. This could matter for the later bus SPI (failed publishes).
+    Our writes fail to the caller with an unknown outcome, by design.
+
 ### Target design: a thin SPI, versions in the core (decided 2026-10-26, not built; supersedes the target designs below)
 
 **Decided the same day: `invalidateAll` with Caffeine's semantics, by a sweep.** This supersedes, below:
@@ -2944,6 +3157,14 @@ What it costs:
 
 - O(n) writes in the store on a rare operation, typically an admin action (after a deployment, a migration, a
   reset).
+  - Reconsidered for very large caches (2026-10-26), with the sizes of future users unknown: at about 4–9 µs per row
+    (measured at 100,000 rows), 10 million rows take a minute or so. An O(1) generation would not remove that work;
+    it would move it, because the old rows still have to be deleted by maintenance, which is O(n) in the store as
+    well. What an O(1) `invalidateAll` changes is who waits (the caller or the background) and how long the mixed
+    state lasts. The total work in the store stays about the same.
+  - So the sweep stays, and it is built like maintenance: in batches the core paces, so that it does not overload
+    the store. The store-side bulk sweep (optional capability) keeps round trips down. An O(1) generation is kept
+    as plan B, a nice-to-have for later (build plan, "Later").
 - The two-instance Lincheck test assumes an atomic `invalidateAll`. Its model changes to Caffeine's semantics: for
   example, `invalidateAll` checked only together with operations on one key, or modelled as a series of removals.
 
@@ -3771,6 +3992,91 @@ each with the in-memory store). Nothing on the store contract.
 ### Open in the study
 
 Nothing left; the next step is the decision whether to build it, and in which order.
+
+## Build plan: start here (recorded 2026-10-26, nothing of it built)
+
+The decisions of 2026-10-26, in the order to build them. Every step stays green under the existing tests: the
+contract, the property test, Lincheck on one and on two instances, the minimal runs per change, and the full matrix
+at the end.
+
+1. **The PostgreSQL listener without R2DBC.** Small, independent, and a good first step. See "PostgreSQL listening
+   without R2DBC" and its decision.
+   - `PostgresListener` reads pgjdbc's stream: reflection on `QueryExecutorBase.pgStream`, reached through
+     `unwrap(BaseConnection.class).getQueryExecutor()`, and checked at startup.
+   - It parses `A` and skips other messages; `E` ends it with a loss.
+   - Its connection comes from the `DataSource` and is aborted at the end.
+   - The prototype is in `PostgresR2dbcListenerExperimentTest` (the `TAKEOVER` variant).
+   - `PostgresAdapter`: `withListener(ConnectionFactory)` and the URL convenience go.
+   - The pom drops `r2dbc-postgresql`, `r2dbc-pool`, and the managed Reactor, Netty and SCRAM versions.
+   - Tests: the PostgreSQL tests that build an R2DBC factory are `PostgresConnectionTest`, `PostgresFailoverTest`,
+     `PostgresPoolerTest`, `PostgresPropertyTest`, `PostgresRestartTest` and `PostgresTestDatabase`. Also
+     `simplelogger.properties`.
+   - The R2DBC experiments are removed; their results stay recorded here.
+   - The README documents one held pool connection per instance, and that transaction poolers cannot carry `LISTEN`.
+2. **The thin SPI, with versions in the core.** See "Target design: a thin SPI, versions in the core", with the
+   decisions at its start.
+   - Required: `read`, `write` with a condition, returning applied or conflict; `delete`; `keys` in batches.
+   - Versions are (incarnation, counter), computed by the core.
+   - The stamp, the cut-off, the basis and start values from the store go.
+3. **`invalidateAll` by a sweep.** Tombstones in paced batches, synchronous, one `INVALIDATED_ALL`, sweep writes
+   marked so they produce no per-key messages.
+   - The two-instance Lincheck model changes to Caffeine's semantics, with atomicity per key.
+4. **One reservation registry,** in place of `minimumVersions` and `writing` with `writeMinimums`. See "Design study:
+   L1 by invalidation and reservation", with the order rules of "Target design: reservations in L1, versions read but
+   never returned by writes".
+5. **MongoDB's bulk writes in one round trip:** a filter on the version, an upsert, a duplicate key meaning conflict.
+   The hot path becomes one operation on every store.
+6. **The benchmark:** `EndToEndBenchmark` with a hot key and a contention scenario, before and after.
+7. **Later, each judged on its own:**
+   - plan B, a nice-to-have: an O(1) `invalidateAll` by a per-cache generation (a slimmed design F, see "`invalidateAll`,
+     logical" and the sweep's costs under "Target design: a thin SPI"), so that the caller does not wait for the sweep;
+   - Redis adapters, after MongoDB and PostgreSQL are done (see "Redis adapters"); their place in the order and a
+     Spring Data Redis binding are decided then;
+   - stampede protection across instances: one load per key cluster-wide, not only per instance (each instance
+     already shares its loads through Caffeine's `AsyncCache`, see "Shared loads"); FusionCache has it as a
+     comparison;
+   - variable expiry per key in the store: a maximum age per entry (for example from an `Expiry`-like function or per
+     write), not only one per cache. Caffeine's own variable expiry already works in L1 and stays untouched (see
+     "Maximum age");
+   - a fourth distribution mode, `UPSERT` (replicate): a write elsewhere puts the key into every instance's L1, not
+     only into the holders'. This breaks invariant 8 knowingly and only in this mode.
+     - Cost: N store reads per write with N instances, because messages carry no values. L1 is polluted by keys that
+       are never read here, and W-TinyLFU may reject them anyway.
+     - Use case: small, read-mostly data that every instance needs.
+     - The cheaper alternative to weigh first: a warm-up (`getAll` or a `warmUp(keys)`) plus `UPDATE`;
+   - a warm-up: filling L1 at startup, from given keys (`warmUp(keys)` or `getAll`) or from the store's most recent
+     rows (by the write-time index). With `UPDATE`, the warmed keys then stay current. It is useful on its own, and it
+     is the cheaper alternative to `UPSERT`;
+   - a distribution-only store mode (proposed 2026-10-27): the store is a channel for distribution, not an L2.
+     - Rows keep their values only for the time of distribution, a retention of about 5 minutes. After that the
+       value goes, or the whole row goes; versions stay monotonic through the incarnation.
+     - A local miss calls the loader directly, not the store. The reservation registry protects the load: a message
+       for the key during the load means the result is not admitted.
+     - `UPDATE` (and `UPSERT`) re-read the value within the retention. A message read after the retention, from a
+       lagging listener, is treated as an invalidation.
+     - Gaps lead to an epoch, as usual.
+     - Benefits: the store stays small, and the O(n) `invalidateAll` shrinks with it. With `INVALIDATE`, no value
+       needs to be written at all, so values would not even need to be serializable.
+     - Comparable: Redisson's `StoreMode.LOCALCACHE` (from memory, not verified);
+   - write-behind for load results (proposed 2026-10-27): a loaded value is returned to the caller, and to the
+     callers waiting on the same future, before its conditional write to the store has returned. The write follows
+     in the background.
+     - Saves one store round trip per miss on the caller's path. That matters little against a slow loader, but
+       a lot with a slow store.
+     - Safe, because a load result is not a user's write. Until the write returns, L1 holds it as unconfirmed, under
+       the reservation. A conflict replaces or drops it, as now. Returning it early is a read linearized at the load,
+       before a racing change.
+     - Costs: other instances do not find the value in the store yet, so they load it themselves (see stampede
+       protection across instances). A failed write leaves only the L1 copy, which is fine for a cache.
+     - Not for user writes (`put`, `invalidate`, `compute`). Returning before the store confirms would break
+       read-your-writes across instances, durability, and the conflict outcome of `compute`. At most an explicit
+       opt-in with weaker, documented guarantees, together with write combining;
+   - capabilities for further stores (the drawbacks per store are under the one-number design's fallback);
+   - session tokens;
+   - write combining;
+   - an issue upstream at pgjdbc.
+
+The frame for every step: "Positioning and the complexity budget".
 
 ## Open design questions
 
