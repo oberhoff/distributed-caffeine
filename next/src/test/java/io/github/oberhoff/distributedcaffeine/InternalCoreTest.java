@@ -52,6 +52,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -364,6 +365,104 @@ public class InternalCoreTest {
         } finally {
             threads.shutdownNow();
         }
+    }
+
+    // a slow load holds no lock of Caffeine's, on every path (the synchronous get: a_slow_load_does_not_block_other_keys):
+    // the function Caffeine runs inside ConcurrentHashMap.compute only installs an empty future, and the store round
+    // trips and the user's loader run after it. Otherwise a load would block every key in its hash bin for its whole
+    // duration, and every insert once the map resizes (the transfer locks each bin). A hundred other keys, starting
+    // from Caffeine's initial table of 16 bins, hit both cases
+
+    private static final int OTHER_KEYS = 100;
+
+    // loads "slow" only once armed, and then waits for the release
+    private static CacheLoader<String, String> slowFor(AtomicBoolean armed, CountDownLatch loading,
+                                                       CountDownLatch release) {
+        return key -> {
+            if (key.equals("slow") && armed.get()) {
+                loading.countDown();
+                assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+            }
+            return "loaded " + key;
+        };
+    }
+
+    // while the slow load waits, every other key is answered; the slow load is released in any case
+    private static void otherKeysAnsweredDuring(CountDownLatch loading, CountDownLatch release,
+                                                Function<String, String> get) throws Exception {
+        try {
+            assertThat(loading.await(5, TimeUnit.SECONDS)).isTrue();
+            CompletableFuture.runAsync(() -> {
+                for (int i = 0; i < OTHER_KEYS; i++) {
+                    assertThat(get.apply("other " + i)).isEqualTo("loaded other " + i);
+                }
+            }).get(10, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void a_slow_mapping_function_blocks_no_other_key() throws Exception {
+        CountDownLatch loading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CacheLoader<String, String> loader = slowFor(new AtomicBoolean(true), loading, release);
+        Function<String, String> function = key -> {
+            try {
+                return loader.load(key);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        DistributedCache<String, String> cache = plain();
+        CompletableFuture<String> slow = CompletableFuture.supplyAsync(() -> cache.get("slow", function));
+
+        otherKeysAnsweredDuring(loading, release, key -> cache.get(key, function));
+
+        assertThat(slow.get(5, TimeUnit.SECONDS)).isEqualTo("loaded slow");
+    }
+
+    @Test
+    void a_slow_asynchronous_load_blocks_no_other_key() throws Exception {
+        CountDownLatch loading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        DistributedAsyncLoadingCache<String, String> cache = builder(LONG)
+                .buildAsync(slowFor(new AtomicBoolean(true), loading, release));
+        closeables.add(cache);
+        // started from another thread: a regression running the load inside the compute would hold this one
+        CompletableFuture<String> slow = CompletableFuture.supplyAsync(() -> cache.get("slow").join());
+
+        otherKeysAnsweredDuring(loading, release, key -> cache.get(key).join());
+
+        assertThat(slow.get(5, TimeUnit.SECONDS)).isEqualTo("loaded slow");
+    }
+
+    @Test
+    void a_slow_bulk_load_blocks_no_other_key() throws Exception {
+        CountDownLatch loading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        DistributedLoadingCache<String, String> cache = loading(slowFor(new AtomicBoolean(true), loading, release));
+        CompletableFuture<Map<String, String>> slow = CompletableFuture.supplyAsync(() -> cache.getAll(List.of("slow")));
+
+        otherKeysAnsweredDuring(loading, release, key -> cache.getAll(List.of(key)).get(key));
+
+        assertThat(slow.get(5, TimeUnit.SECONDS)).containsEntry("slow", "loaded slow");
+    }
+
+    @Test
+    void a_slow_refresh_blocks_no_other_key() throws Exception {
+        // Caffeine calls asyncReload inside a computeIfAbsent of its own map of refreshes
+        AtomicBoolean armed = new AtomicBoolean();
+        CountDownLatch loading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        DistributedLoadingCache<String, String> cache = loading(slowFor(armed, loading, release));
+        assertThat(cache.get("slow")).isEqualTo("loaded slow");
+        armed.set(true);
+        CompletableFuture<String> slow = cache.refresh("slow");
+
+        otherKeysAnsweredDuring(loading, release, cache::get);
+
+        assertThat(slow.get(5, TimeUnit.SECONDS)).isEqualTo("loaded slow");
     }
 
     // races between a load and a change elsewhere (ordering rule 6)
