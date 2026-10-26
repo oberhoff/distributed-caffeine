@@ -2,6 +2,8 @@ name: Retarget Pull Request to Develop
 
 on:
   pull_request:
+    branches:
+      - main
     types:
       - opened
       - reopened
@@ -19,7 +21,6 @@ jobs:
   retarget-pull-request-to-develop:
     name: Retarget Pull Request to Develop
     runs-on: ubuntu-latest
-    if: github.base_ref == 'main'
     steps:
       - name: Change base branch to develop
         uses: actions/github-script@v7
