@@ -2817,7 +2817,875 @@ The scaling is sublinear (each write waits for the journal under `majority`, con
 part), and with change streams open more concurrency gets slower again: 16 is the choice. One round trip per batch
 would need a bulk write, which returns no versions: a store would then have to report a write's version as unknown
 (an SPI change: the core would hold such a value untrusted), or read the versions back, which a write meanwhile
-makes ambiguous. Not built.
+makes ambiguous. Not built; decided 2026-10-26 (next section): read back with an op id, inside the adapter.
+
+### Positioning and the complexity budget (decided 2026-10-26; the frame for every design decision)
+
+**What makes the library unique.** Caffeine's API, on the database an application already has, with no stale value
+in L1 beyond the delivery delay, even under races and failures. No other library offers that combination:
+
+| Gap | Redisson, JetCache | Hazelcast, Infinispan | This library |
+|---|---|---|---|
+| Infrastructure | Redis required | a cluster of their own | the existing database (PostgreSQL, MongoDB) as L2 and feed |
+| API | their own | their own | Caffeine's, as a drop-in |
+| A load racing a write (stale set) | stale until the TTL | protected | protected |
+| Lost messages | stale until the TTL | detected per partition | detected; L1 distrusted until checked |
+| `compute` across instances | local only, or a lock | atomic (entry processor) | atomic, one store operation on the hot path |
+| `invalidateAll` | racy | cluster-wide | exact, atomic per key as in Caffeine (since the decision for a sweep; before: O(1) and atomic across keys) |
+
+A simpler design that bounds every rare race by a mandatory maximum age in L1 was considered and rejected: it would
+be no better than the others.
+
+**The complexity budget: the core's mechanisms, each tied to a guarantee that makes the library unique.**
+
+| Mechanism | Guarantee |
+|---|---|
+| a version per key, counted by the store; conditional writes | atomic `compute`; no stale sets |
+| versions from reads and messages; one reservation registry | no stale value in L1 beyond the delivery delay; hot keys stay cached |
+| stamp and cut-off, with the basis | exact `invalidateAll` in O(1) |
+| the epoch on gaps | lost messages never leave stale values |
+| a fresh row's start value from the store's counter | a recreated key is never confused with its old lifetime, without a clock |
+| the store guard and retries | robustness when the store fails |
+
+Revised the same day: with one number per write (a section below), the first, third and fifth collapse into one,
+which gives four mechanisms.
+
+Revised again the same day, with the thin SPI and `invalidateAll` by a sweep:
+
+| Mechanism | Guarantee |
+|---|---|
+| versions (incarnation, counter) computed by the core; compare-and-set in the store | atomic `compute`; no stale sets; a recreated key never confused with its old lifetime |
+| one reservation registry, ordered within an incarnation and conservative across them | no stale value in L1 beyond the delivery delay; hot keys stay cached |
+| `invalidateAll` as a sweep of tombstones with one message | exact, with Caffeine's semantics (atomic per key) |
+| the epoch on gaps | lost messages never leave stale values |
+| the store guard and retries | robustness when the store fails |
+
+The stamp, the cut-off, the basis and start values from the store are gone.
+
+**The rule.** A new mechanism goes in only if it strengthens one of these guarantees or closes a measured
+performance gap. The store focus follows from it: databases with a global counter and a native feed (see the
+database focus).
+
+**What it means for the alternatives worked through on 2026-10-26.**
+
+- **Kept, as a simplification of today's core** (not a redesign):
+  - one reservation registry instead of `minimumVersions` and `writing`/`writeMinimums`;
+  - the scattered "drop older" cases folded into one check at release;
+  - versions read from the store, as now.
+- **Kept as it is:** writes return their version. PostgreSQL returns it for free with `RETURNING`; MongoDB keeps its
+  16 concurrent calls per batch.
+- **Out:**
+  - op ids only for recognising echoes;
+  - writes without versions as the rule;
+  - parking until the echo;
+  - starting fresh rows at 1, with revalidation by age;
+  - the stamp as an optional tier for stores without a global counter;
+  - the stamp as the version;
+  - Lamport and hybrid logical clocks;
+  - leases for linearizable L1 reads;
+  - the simple design bounded by a maximum age.
+- **Later, only if measured or needed:**
+  - MongoDB batches in one bulk write: an optional version in write results, and op ids for the unknown ones;
+  - op ids for resolving unknown outcomes, making `put` safe to retry: a robustness gain, judged on its own;
+  - the polling feed scanning by stamp instead of store time: needed once a store without a native feed is in focus
+    again;
+  - a periodic scan as a safety net;
+  - write combining;
+  - session tokens for read-your-writes across instances.
+
+### Target design: a thin SPI, versions in the core (decided 2026-10-26, not built; supersedes the target designs below)
+
+**Decided the same day: `invalidateAll` with Caffeine's semantics, by a sweep.** This supersedes, below:
+
+- the control row;
+- visibility in the core;
+- the cut-off and the basis;
+- the 2ε wait and the measured skew;
+- the capabilities "checks the cut-off when writing" and "global counter" (for `invalidateAll`).
+
+Why:
+
+- `invalidateAll` is the only operation that spans keys. Every store makes a single key atomic cheaply, but a
+  statement about all keys at once needs a global barrier, and a global barrier is always coordination.
+- Every rule that existed only for an atomic O(1) `invalidateAll` goes:
+  - a stamp and a basis on every row, and the rules for visibility;
+  - the control row read with every store read;
+  - the cut-off check and the hot path depending on it;
+  - the 2ε wait and the skew check;
+  - purging hidden rows.
+- What remains is what Caffeine itself promises: atomic per key, not across keys.
+
+How:
+
+- **A tombstone for every key**, written by the store, in batches the core controls and paces. In SQL that means
+  batches, not one `UPDATE` holding locks over the whole table.
+  - Tombstones, not physical deletes: a load decided before the sweep must conflict with the tombstone's version, as
+    with any `invalidate`. A physical delete would let it through.
+  - Tombstones carry no value, and are purged after the grace period as now.
+- **Synchronous by default**, as in Caffeine: `invalidateAll()` returns when the sweep is complete, so no instance
+  reads an older value from the store afterwards. The asynchronous caches get it as a future.
+  - During the sweep, a mixed state is allowed: some keys removed, some not yet. Caffeine behaves the same.
+- **One message instead of n.**
+  - The sweep's writes are marked so that they produce no per-key messages: a flag in the row that the trigger or
+    the change-stream filter skips, settled per adapter.
+  - At the end, one `INVALIDATED_ALL` clears every L1. After the call returns, the other instances are cleared within
+    the delivery delay, the same bound as for any write.
+- **A failure partway** leaves the cache partly invalidated, and the call fails with its outcome unknown, as any
+  failed write does. Another `invalidateAll` completes it; no sweep state is kept to resume.
+
+What it gives:
+
+- Still exact: no stale value. A racing load conflicts with its key's tombstone.
+- **The hot path on every store,** no cut-off to check: MongoDB's `compute` drops to one operation.
+- No extra key on store reads.
+- Every store equal for `invalidateAll`; no clock, no counter.
+
+What it costs:
+
+- O(n) writes in the store on a rare operation, typically an admin action (after a deployment, a migration, a
+  reset).
+- The two-instance Lincheck test assumes an atomic `invalidateAll`. Its model changes to Caffeine's semantics: for
+  example, `invalidateAll` checked only together with operations on one key, or modelled as a series of removals.
+
+The SPI after this decision:
+
+- Required: `read(keys)`; `write(entries)` with "if the version is X / if absent / unconditionally", returning
+  applied or conflict; `delete(keys)` for the purge; a way to enumerate a cache's keys in batches, for the sweep.
+- Optional capabilities:
+  - a native feed;
+  - a scan by time, for the polling feed and gap repair;
+  - server time;
+  - a global counter, only as an optimisation of the scan's order;
+  - a bulk sweep done in the store (SQL `UPDATE … WHERE` in batches, MongoDB's `updateMany`), instead of the core
+    enumerating and writing.
+
+**Accepted the same day: L1 is stale for at most the delivery delay** (in `NONE`, until expiry), as the distribution
+modes already work.
+
+- That is the best a cache with a local copy can do without slowing writes. Attiya and Welch (1994): with a message
+  delay d, a linearizable register cannot make both reads and writes faster than d.
+- Closing the window would cost one of these:
+  - every write waiting for every instance's confirmation, or for their leases to run out;
+  - reads from the store (`getFromStore`);
+  - for one's own writes only, session tokens (an option for later).
+- Others (JetCache, Redisson's local cached map, Hazelcast's near cache) have the same window in the normal case,
+  but they leave it under lost messages and racing loads, often until the TTL. Holding the bound under races and
+  failures too is what sets this library apart.
+
+**Why.** The library should stay open to many stores, and new ones keep coming. So either fallbacks, or one solution
+that fits all, and either way a thin SPI. The answer: **the store only does compare-and-set on a version it does not
+interpret; the core does everything else, once, for every store.** The model built for stores without a global
+counter becomes the default. The global counter becomes an optional upgrade.
+
+**The SPI.** Required, which every key-value store can do:
+
+1. `read(keys)`: the rows as stored (value, state, version, time). The control row is one more key in the same
+   batch.
+2. `write(entries)`: per entry, "write this row if the stored version is X / if absent / unconditionally". It returns
+   applied or conflict, nothing else.
+3. `delete(keys)`: for the purge.
+
+The store does not interpret versions: no `+1`, no returns, no rules for visibility. MongoDB, DynamoDB (condition
+expressions), Cassandra (lightweight transactions), Redis (Lua or `WATCH`), etcd and every SQL database can do this.
+
+Optional capabilities, each an upgrade:
+
+| Capability | Gain |
+|---|---|
+| a native feed | `INVALIDATE` and `UPDATE` without polling |
+| a scan by time | the polling feed, gap repair |
+| server time | the cut-off from the store's clock instead of the instance's |
+| a global counter (sequence, cluster time, `rowversion`) | an exact `invalidateAll`, without the wait and without an assumption about skew |
+| checks the cut-off when writing | the hot path: `compute` on a value held in L1 in one operation, a decision under an older cut-off refused. Without it, `compute` reads first (two operations), as MongoDB does today |
+
+**The core.**
+
+- **Versions:** (incarnation, counter), computed by the core.
+  - A conditional write sends `expected` and `(inc, c + 1)`.
+  - An insert, or a `put` on a key not held, sends `(new random incarnation, 1)`.
+  - A `put` on a key held writes conditionally on its known version.
+  - The core always knows what it wrote, so nothing is returned.
+  - Across incarnations the order is unknown, so L1 acts conservatively: a message removes what is held, a
+    reservation counts as poisoned, a read from the store wins.
+- **The control row:** the record of the last `invalidateAll`, holding the cut-off.
+  - It is written only by `invalidateAll`, as one write whatever the cache's size. Normal writes never touch it.
+    Rows the cut-off hides are purged later by maintenance.
+  - Its value is the time plus ε, with a wait of 2ε, or a counter value with the global counter capability.
+- **Visibility, decided in the core.** A row is visible if it was written after the cut-off and its basis (the
+  cut-off its decision was made under, a field of the row) is not older.
+  - The control row is read with every batch from the store, so that a read from the store never returns a value
+    just invalidated by another instance whose `INVALIDATED_ALL` has not arrived yet.
+  - The SQL adapters can join it into the statement, as today. Filtering in the store is only an optimisation.
+- **Reservations, the epoch, the store guard:** as decided.
+
+**What it solves.**
+
+- **MongoDB's bulk writes in one round trip:**
+  - conditional: `updateOne({_id, v: expected}, {$set: {v: new, …}})`;
+  - insert: an upsert, where a duplicate key means conflict;
+  - unconditional: `replaceOne` with upsert.
+  - No read back, no marker.
+- DynamoDB's batches, Cassandra, Redis: the same pattern, without special cases.
+- A new store implements three methods, and adds capabilities when it has them.
+
+**What it costs.**
+
+| Cost | Weight |
+|---|---|
+| a `put` on a key not held starts a new incarnation, so its order against other writes is unknown, and L1 acts conservatively | low: a hot key is usually held, and then the `put` is conditional on the known version |
+| without the global counter, `invalidateAll` waits 2ε and is exact only while the measured skew stays within ε | only on the rare operation; PostgreSQL and MongoDB declare the counter |
+| without the cut-off check, `compute` reads first | as MongoDB today |
+| the control row read with every batch | one more key in the same round trip |
+| the refactor: versions move from the store to the core | high, once |
+
+**Compared with the designs below.**
+
+| | One number from the store | A thin SPI, versions in the core |
+|---|---|---|
+| what a store must do | count, return, filter | compare-and-set on a version it does not interpret |
+| returns | mandatory (MongoDB's bulk: two round trips) | none |
+| stores without a global counter | a fallback, a special case | the normal case |
+| exact `invalidateAll` without an assumption | everywhere with a counter | where the counter capability exists |
+
+The one-number design and its fallback below remain as the reasoning, and as what the global counter capability
+gives.
+
+### Design study: one number per write, the stamp as the version (recorded 2026-10-26, not built)
+
+**The idea, as in etcd's `revision` and a database's log sequence number.** One number, assigned by the store on
+every write, does every job a number does today:
+
+| Today | With one number |
+|---|---|
+| a per-key version (`+1`) | the stamp, which increases per key too |
+| a fresh row's start value | gone: a global counter is above every older lifetime by itself |
+| the order of messages and reads in L1 | the stamp |
+| `invalidateAll`'s cut-off | the control row's stamp, as now |
+| the basis in the SPI | gone: the expected stamp is the basis. A decision on a row with stamp `s` stands exactly while `s > cutoff`. SQL checks that in the write's statement; MongoDB stores `s` as `b` internally, with its visibility rule unchanged |
+| the feed's position, gap repair | "since stamp X", as now |
+| session tokens (later) | free: the highest stamp seen |
+
+Ruled out earlier because it narrows the stores. Under the database focus and the complexity budget that no longer
+counts: the cut-off needs a global counter anyway.
+
+**Checked on PostgreSQL 17.**
+
+- Writer A updates a row and holds its lock. B waits for the same row. C draws from the sequence meanwhile.
+- Result: A = 2, C = 4, B = 5. A waiting `UPDATE` draws again once it has the lock, so per key the stamp follows
+  commit order.
+
+**The core, with one number.**
+
+| Mechanism | Guarantee |
+|---|---|
+| one number from the store per write; conditional writes on it | atomic `compute`; no stale sets; recreated keys never confused; exact `invalidateAll` in O(1) |
+| one reservation registry, ordered by the number | no stale value in L1 beyond the delivery delay; hot keys stay cached |
+| the epoch on gaps; repair by a scan from the last number | lost messages never leave stale values |
+| the store guard and retries | robustness when the store fails |
+
+Four mechanisms instead of the six in the complexity budget, with the same guarantees.
+
+**Writes return their number.** There are four ways a writer can learn where its write sits in the key's order:
+
+1. The store returns it: etcd, Spanner, Kafka, Facebook TAO.
+2. It arrives later with the echo: Hazelcast. That costs an op id in every message, and in `NONE` mode the version
+   stays unknown, so the hot path is lost.
+3. The writer keeps nothing of its write: Redis client-side caching. That lowers the hit rate.
+4. The writer decides the order: Cassandra, Lamport clocks, hybrid logical clocks. That brings clocks, or real-time
+   anomalies.
+
+A conditional write with per-key `+1` knows its new version (`expected + 1`), but only it, and that rule goes with one
+number. Returning costs nothing on PostgreSQL (`RETURNING`), and nothing on MongoDB's single writes
+(`findOneAndUpdate`).
+
+**MongoDB's bulk writes stay inside the adapter: two round trips per batch, whatever its size.**
+
+- Round trip one: one unordered bulk write of `updateOne` with `upsert: true`.
+  - The filter carries the condition: `_id`, and `s: expected` for a conditional write.
+  - The update sets `s: $$CLUSTER_TIME`, `b`, and a write marker `w`, random per batch.
+  - The result tells each index apart: in the upserts, inserted; duplicate key `11000`, conflict; neither, updated.
+- Round trip two: one read of `{s, w}` for the applied keys, values not included. Where `w` is the batch's, `s` is
+  the write's number. Otherwise someone wrote after it, and it is reported as applied but overwritten, so the core
+  installs nothing.
+- The rare purge race (a row expected but purged meanwhile, so the upsert inserts) shows in the upserts. It is
+  repaired by deleting the document if `w` is still the batch's, and reporting a conflict.
+- The marker never leaves the adapter. The SPI and the core are unchanged.
+
+**What it costs.**
+
+| Cost | Weight |
+|---|---|
+| fewer stores: a global counter, set atomically in the write and returnable | already paid: the cut-off needs one |
+| PostgreSQL's sequence must use `CACHE 1`, the default: with a cache per session a later write can get a lower number | new, and a hard requirement: checked at startup, as `PostgresSchema` checks the schema, and documented |
+| no dense numbers per key (8, 15, 42 …) | low: the core uses neither a count of writes nor gaps per key; debugging loses a little |
+| thicker adapters: MongoDB's bulk path | medium; adapter code, tested there |
+| the refactor: the SPI, three adapters, the core, every test that uses versions | high, once; done under the contract, property and Lincheck tests |
+| checks before building: `$$CLUSTER_TIME` increasing per MongoDB document and never repeating; MariaDB under row locks | to do |
+
+Not a cost:
+
+- Write speed: the number is drawn today already, and the version column goes.
+- Clocks: MongoDB's cluster time is a hybrid clock that never goes back.
+- Overflow: a `bigint` sequence lasts about 292,000 years at a million writes a second. MongoDB's cluster time lasts
+  until 2106.
+
+**Considered and not adopted.**
+
+- **A version from 1, plus a server timestamp.** The clock would order the cut-off: after a failover to a standby
+  whose clock is behind, rows written after an `invalidateAll` would be hidden, so writes would be lost. In
+  PostgreSQL, `now()` is also the transaction's start, not its commit. The clock would also tell a key's lifetimes
+  apart, which works only while no clock goes back further than the grace period. Its clock-free form is today's
+  model: the start from the sequence.
+- **Starting at the last version seen plus one.** Someone must remember that version after the tombstone's purge:
+  - the writing instance may never have seen it;
+  - keeping tombstones forever grows without bound;
+  - a watermark of purged versions needs an atomic read across rows, which MongoDB cannot do.
+  The cheapest form of "last seen plus one" is global: the sequence.
+- **Stores without a global counter: a counter row.** One row per cache, drawn from on every write. It costs two
+  round trips per write (or a transaction), and a hotspot: DynamoDB allows about 1,000 writes a second per
+  partition, which would cap the whole cache. Every write must also be conditional ("only if lower than mine",
+  retried on failure). Drawing blocks brings a time bound back; sharding the counter loses the global order. It
+  would live inside an adapter, the core unchanged. Saved for later, at that price.
+
+**The caveat for stores that scale out.** A global order across all writes is always a point of coordination, and
+the further a store scales out, the more it costs:
+
+| Store | Global number | Price |
+|---|---|---|
+| one primary (PostgreSQL, a MongoDB replica set) | sequence, cluster time | about free |
+| sharded MongoDB | cluster time | cheap: a hybrid clock, exchanged anyway |
+| distributed SQL (CockroachDB, YugabyteDB, Spanner) | commit timestamp, sequence | expensive (restarts, a hotspot, a round trip between regions), or only as safe as the bound on clock skew |
+| key-value at scale (DynamoDB, Cassandra) | none, or a counter row | a hotspot, about 1,000 writes a second |
+
+One number ties every write to that order. For the focus (PostgreSQL, MongoDB) that is free. Order across keys is
+truly needed for two things only: the cut-off of `invalidateAll`, and a fresh row's start. Order per key is cheap
+everywhere, local to a partition.
+
+So the store's requirement is written narrowly: **a number per write that increases per key and can be compared
+with the cut-off**. How an adapter gets it is its own business: a sequence, cluster time, a commit timestamp, a
+counter row. The core never prescribes a global counter, and a store that scales out pays only what it must.
+
+**The fallback for stores without a global counter (decided 2026-10-26, not built; for DynamoDB, Cassandra,
+distributed SQL, when one is wanted).**
+
+- **Per key: a counter and a random incarnation id.**
+  - A fresh insert draws a random 64-bit incarnation, and the version is (incarnation, counter `+1`).
+  - The same incarnation: the counter orders.
+  - A different one: the order is unknown, and L1 acts conservatively:
+    - a message removes what is held;
+    - a reservation counts as poisoned;
+    - a read from the store wins.
+  - Lifetimes change rarely, so that is about free; a collision has a chance of 2^-64.
+  - No clock, no global counter, and no start values.
+- **`invalidateAll`: server time with a wait (as Spanner's commit wait).**
+  - The cut-off is the store's time `T` plus ε, the assumed bound on clock skew, and `invalidateAll` waits 2ε before
+    it returns. A row is visible if its time is after the cut-off.
+  - With skew within ε:
+    - every row written before is hidden, so nothing is stale;
+    - every row written after the return is visible;
+    - writes overlapping the call go either way, which is linearizable.
+  - The errors lean the harmless way. A clock behind by more than ε hides writes just after, which is a miss, like an
+    eviction. Only a clock ahead by more than ε leaves a row from before visible, which is stale.
+  - Hence a generous ε: it only lengthens the rare `invalidateAll`, never a write.
+  - **Measured skew.** Every heartbeat compares the store's time with the instance's, bounded by the round trip. Above
+    ε/2 the instance warns; above ε, `invalidateAll` is refused (`StoreException`) instead of risking stale values.
+  - A store without server time in writes (DynamoDB): the writing instance sets the time, ε covers the instances'
+    clocks, and they measure their skew against each other through the heartbeat rows.
+- **Cost:** writes are unchanged. `invalidateAll` is O(1) and takes 2ε, one second with CockroachDB's default bound
+  of 500 ms. The assumption is the one CockroachDB and Spanner make: bounded skew, here measured.
+- **Versions in write results: mandatory in the SPI. Whether the store returns them or the adapter computes them is
+  the adapter's business.**
+  - With a global counter, the version is the stamp, and the store returns it: `RETURNING`, `findOneAndUpdate`,
+    `OUTPUT`. MongoDB's bulk writes read it back with the write marker.
+  - In the fallback, the adapter mostly computes it:
+    - a conditional write: `expected + 1`;
+    - an insert: `(new incarnation, 1)`;
+    - an unconditional single write: returned by the store (DynamoDB's `UPDATED_NEW`); Cassandra writes conditionally
+      anyway;
+    - a bulk `put` that cannot do `+1` (DynamoDB's `BatchWriteItem`): a new incarnation per item, known to the
+      writer, at a cost in hits on keys hot through `put`.
+  - Since every case delivers a version, the core needs no path for a version left unknown. So none of the
+    following: op ids for echoes, parking, a special case in `NONE` mode. That keeps the core within the complexity
+    budget, and it supersedes the "optional version in write results" from the target design's settled points.
+- **Performance against the global counter: not a degraded mode.** Each store takes the path that is fastest for it.
+
+  | Point | Global counter | Fallback |
+  |---|---|---|
+  | `invalidateAll` | O(1), returns at once | O(1), waits 2ε (one second, say) |
+  | hits on keys written by bulk `put` | full, the order always known | fewer: a new incarnation per item leaves the order unknown, so L1 acts conservatively |
+  | hits after a key is recreated | full | one extra miss (rare) |
+  | guarantee | exact, without an assumption | exact while skew stays within ε |
+  | single writes, conditional writes, inserts, reads | one round trip | one round trip, the version computed |
+  | write throughput as the store scales out | every write draws from one counter, a point of coordination | nothing global: writes scale with the partitions |
+
+  - On a single primary (PostgreSQL, MongoDB) the global counter is free and best: exact, no wait, full hits. It
+    stays the main path.
+  - On a store that scales out, the fallback is the faster one, since a global counter would be its bottleneck. It
+    trades a slower `invalidateAll` and some hits on keys hot through `put` for writes that scale freely.
+- **Drawbacks per store**, as known on 2026-10-26. Points marked "to check" are not verified yet.
+
+  | Store | Path | Drawbacks |
+  |---|---|---|
+  | PostgreSQL | global counter | the sequence must keep `CACHE 1` (checked at startup); `NOTIFY` payloads are capped at 8000 bytes; one connection per instance stays open for `LISTEN` |
+  | MongoDB | global counter | **bulk writes return no versions**: two round trips (bulk write, then a read of `{s, w}` with the write marker), plus classifying each index and repairing the purge race in the adapter; a write cannot check the cut-off in its filter (no read of a second document), so a decision under an older cut-off is hidden by `b` instead of refused; `$$CLUSTER_TIME` increasing and unique per document (to check) |
+  | MariaDB | global counter | no `RETURNING` on `UPDATE`: `PREVIOUS VALUE FOR` in the same session, or a read back in the same transaction (row locks held a little longer); no native feed: the binlog through a replication client (`binlog_format=ROW`, replication privileges) or the polling feed; under Galera, sequences are not globally ordered; a waiting `UPDATE` drawing after its lock (to check) |
+  | MySQL | global counter, emulated | no sequences: a ticket table on `AUTO_INCREMENT` (one more small insert per write, `innodb_autoinc_lock_mode=2`, tickets deleted now and then); no native feed (binlog or polling) |
+  | SQL Server | global counter (`rowversion`) | the feed is Change Tracking or CDC, filled from the log, so close to polling, with a latency of seconds; Query Notifications are coarse |
+  | Oracle | global counter | under RAC a sequence keeps its order only with `ORDER`, which coordinates across nodes; the feed (Continuous Query Notification, Advanced Queuing) depends on edition and licence (to check) |
+  | CockroachDB | global counter (commit timestamp) or fallback | `cluster_logical_timestamp()` pins the transaction's timestamp, so more restarts under contention, and only under `SERIALIZABLE`; it must be packed into 64 bits (assumes a logical part below 1000); a sequence is a hotspot of one range; changefeeds need `kv.rangefeed.enabled` and a licence check |
+  | DynamoDB | fallback | no server time in writes, so ε must cover the instances' clocks; `BatchWriteItem` cannot `+1`, so bulk `put`s take a new incarnation per item and lose hits on keys hot through `put`; no `updateAll`; Streams keep 24 hours (a longer outage is a gap) |
+  | Cassandra | fallback | `+1` only through lightweight transactions (Paxos, several round trips), so every write is a slow conditional one; no usable feed (CDC writes files per node), and a scan by time needs an index of its own; `TRUNCATE` removes without tombstones |
+
+  | Redis | global counter on one node, or with all keys of a cache in one slot (a hash tag); fallback in cluster mode | a Lua script does `INCR` of a counter, the row and the message atomically, and returns the number. In cluster mode a script reaches keys of one slot only, so a global counter means one shard (no scaling out), otherwise the fallback (per key, with `TIME` for the cut-off). Asynchronous replication and AOF `everysec` can lose the last writes on a failover or crash, **and the counter can go back**, a hard risk for every order: a change of `run_id` or of the primary must count as a gap (the epoch), and the counter is raised past anything handed out. Keyspace notifications carry no version and are fire-and-forget, so the script publishes its own message (`PUBLISH`, `SPUBLISH` in a cluster), or appends to a stream (`XADD`: ordered and resumable by ID, so gaps are repaired, but it must be trimmed). A scan in stamp order needs an index of its own (a sorted set) or the stream |
+
+  - **Stores like Redis** (from what is known, not checked in detail). What decides: atomic scripts, whether the
+    counter can go back after a failover, and a feed.
+    - Valkey, ElastiCache, Azure Cache for Redis: as Redis.
+    - **AWS MemoryDB:** the best fit. Every write is committed to a durable log across zones before it is
+      acknowledged, so the counter never goes back: as safe as PostgreSQL's sequence, with Redis's API.
+    - Dragonfly: multi-threaded on one node, so a global counter needs no cluster and scales up far. Lua needs its
+      keys declared. Replication is asynchronous, so failovers must be detected.
+    - Apache Kvrocks (on RocksDB, on disk): durable on disk, Lua, pub/sub and streams; replication asynchronous.
+      Suits large values or scarce memory.
+    - Garnet: Lua in newer versions (to check); young.
+    - Upstash: Lua over HTTP, so every call is an HTTP request; slow for a cache.
+    - **Several writable primaries** (KeyDB's active replication, Redis Enterprise Active-Active): two primaries can
+      hand out the same counter value, or merge rows by their own rules (CRDTs, not last write wins on a version).
+      Only the fallback, with care, or without active replication.
+  - Common to the fallback: `invalidateAll` waits 2ε, and is exact only while the measured skew stays within ε.
+- **SPI:** a store declares which it has: a global counter (exact, no assumption), or time with a bound on skew (the
+  wait and the skew check on). PostgreSQL and MongoDB keep the global counter: free there, and exact without any
+  assumption.
+- **Considered for these stores and not adopted:**
+  - a sweep of tombstones (O(n), and not atomic across keys);
+  - a generation checked atomically on every write (a transaction per write);
+  - a generation in the key alone (not exact);
+  - a generation acknowledged by every instance (exact and free for writes, but it needs membership with leases).
+
+### Versions known to the writer instead of reported by the store: not adopted (decided 2026-10-26)
+
+The question: must a store report the version it wrote, or is it enough that it increments the version and assigns
+the stamp, with the writer working the rest out? Worked through and decided against, as a redesign of the contract;
+the gain is reachable inside an adapter.
+
+**What the alternative would be.**
+
+- The store only increments and checks conditions, and reports per write applied, conflict or inserted, without a
+  version.
+- The writer computes the versions itself:
+  - a conditional write gives `expected + 1`;
+  - a fresh row, where none exists (not over a tombstone), gets a version made of an incarnation and a counter
+    (`(incarnation, 1)`), with the incarnation taken from the writer's clock (a hybrid logical clock), packed into
+    one long (milliseconds × 2^20 plus the counter).
+- An unconditional `put` or `remove` (`old + 1`, last write wins) would be held in L1 with its version unknown, and
+  dropped on the next message for the key until the writer's own echo, or a read, gives the version.
+- MongoDB batches in one bulk write:
+  - `updateOne` with the condition in the filter and `upsert: true`, unordered;
+  - a conflict is then a duplicate-key error at its index (MongoDB retries such an upsert itself only when the filter
+    is the unique key alone);
+  - an insert shows in the upserts, an update in neither;
+  - the rare case "a row expected, but purged meanwhile" inserts, which shows in the upserts and would be repaired
+    after.
+
+**What stays necessary either way.**
+
+- "Last write wins, highest version wins" orders by arrival, not by decision. So the conditions stay:
+  - a load must lose against a removal that came after its read (the tombstone gives it something to conflict
+    with; the condition makes it lose);
+  - `compute` across instances needs a compare-and-set, or it loses updates.
+- A timestamp never orders, because a clock can go back after a failover. Order comes from counters: the per-key
+  version, and the sequence or cluster time for the stamp.
+- A fresh row starts above every version its key ever had (from the store, as now). Starting at 1 would be safe
+  only if every L1 copy expired before the tombstone's grace period ended, a timing assumption that a GC pause or a
+  stalled feed breaks.
+
+**Pros.**
+
+- MongoDB batches in one round trip, instead of 16 calls in flight. Single operations cost the same either way:
+  `findOneAndUpdate` returns the document at no extra cost.
+- Stores without `RETURNING` (MariaDB's `UPDATE`). Low priority while per-SQL adapters are saved for later.
+- A smaller SPI for adapter authors.
+
+**Cons, which decided it.**
+
+- Correctness would depend on clocks for the first time: it would require no clock jump larger than the grace
+  period. That assumption is weak, but it is a new class of failure. Today correctness depends on no clock.
+- The change lands in the Lincheck-verified core where it is most delicate: "version unknown" in the write
+  registry, where eight races were found.
+- Unconditional writes would be held with their version unknown: fewer L1 hits under contention, more cases.
+- A new version format in every adapter and every message.
+- PostgreSQL gains nothing: `RETURNING` is free.
+
+**Decided.**
+
+- The contract stays: a store reports the version it wrote, and correctness stays free of clocks.
+- How an adapter learns the version is its own business. MongoDB's batches can be done in two round trips whatever
+  their size, without changing the SPI or the core:
+  - conditional writes: the bulk write above, applied, conflict or inserted per index, then `expected + 1` for the
+    updated rows;
+  - unconditional writes: a bulk write that also stores an op id;
+  - then one read of `{v, op}` for the batch's keys (and the inserted rows' versions). Where the op is the
+    writer's, the version is its own. Where it is not, someone wrote after it, and the write is reported as
+    overwritten, which the core drops as it already does.
+  - The op id is what keeps a stranger's version from being taken as one's own.
+- The op id is worth having on every store on its own, as a robustness feature: a write whose outcome is unknown is
+  then resolved by reading the row (the op is the writer's: it happened), instead of only dropping the key from L1.
+  That makes even a `put` safe to retry.
+- Reconsider the redesign only if a store comes that can neither return nor derive its versions. So far every
+  candidate can (Cassandra's lightweight transactions report applied, DynamoDB's `UpdateItem` returns values, Redis
+  scripts return anything).
+- Next, in this order:
+  1. the op id;
+  2. the Docker stall confirmed on native databases;
+  3. MongoDB's bulk writes as above, measured against the native numbers.
+
+### Design study: L1 by invalidation and reservation instead of version order (recorded 2026-10-26, not built)
+
+The goal: a simpler core for L1 that is not weaker, following what others do in production. The store side stays
+as it is: versions as compare-and-set tokens, stamps, the cut-off and the basis.
+
+**What others do.**
+
+| System | L1 kept current by | Loads racing writes | Lost messages |
+|---|---|---|---|
+| Redis client-side caching | invalidations from the server, no versions | a "load in progress" placeholder; an invalidation removes it; the reply is stored only if it is still there | clear L1 on reconnect |
+| Hazelcast Near Cache | invalidations with a sequence per partition | a reservation with an id; installed only if still one's own | gaps in the sequence detected; a repair task clears |
+| Facebook memcache | deletes | a lease per miss; a set counts only with a valid lease; a delete revokes it | (no L1) |
+| Redisson local cached map, JetCache | pub/sub invalidation or update, no versions | none (accepted) | clear, or replay a log of 10 minutes |
+
+None of them order versions inside L1. They protect a load by a reservation, and treat a gap by clearing.
+
+**Today, for comparison.**
+
+- L1 keeps the newer of two versions and ignores an older message.
+- That needs ordering rules wherever L1 changes:
+  - `writeMinimums` and `writing`, the minimum check in `install`;
+  - `dropOlder`, including a load in flight, and at the version itself;
+  - catch-up when a read finds the store ahead.
+- Most of the eight races Lincheck found were in exactly these rules.
+
+**The mechanism.**
+
+1. **A held value keeps its version as a token, not as an order.** A message `(key, v)` leaves a held value in place
+   only if its version equals `v`: it announces the very state L1 holds, as one's own echo or a late echo of the row
+   just read. Any other `v`, older or newer, removes it. Versions are unique per key, so equality identifies a
+   state; no comparison by size anywhere in L1.
+2. **Every operation that will install takes a reservation first**, before its read or write is sent: a load after a
+   miss, a refresh, a write, `compute`. Reservations live in the per-key registry that exists today (`writing`), not
+   in Caffeine, so views, sizes, stats and listeners never see them.
+3. **A message for a reserved key poisons the reservation.** So does a local `invalidate`, an `invalidateAll` (the
+   epoch), or **a second reservation of the same key**.
+4. **An operation installs only if its reservation is unpoisoned, under the registry's lock.** Otherwise it installs
+   nothing, and the next read goes to the store.
+5. **A gap moves the epoch on, as today.** Revalidation compares the store's version with the held one, for equality
+   again.
+
+**Why it is safe.**
+
+- Every message arrives after its commit: `NOTIFY` at commit, change streams, and the polling feed's scan.
+- The reservation is in place before the read or write is sent. So every write that commits after it reaches the
+  instance as a message, and poisons the reservation or removes the installed value.
+- A write that committed before is seen by the read. Its late message only removes a value of another version: an
+  extra miss, never a stale value.
+- Two operations on one key in one instance poison each other: neither installs.
+  - Without that rule, the operation whose write committed first could install last, a stale value until the next
+    message, or for good in `NONE` mode.
+  - This is the one subtle case; Lincheck must cover it.
+- The hot path is unchanged:
+  - a trusted held value is unpoisoned, and has seen no gap and no message for another version;
+  - the decision writes conditionally on its version, and a wrong one conflicts.
+
+**What it removes.**
+
+- The minimums (a flag instead of a version per key), `dropOlder`, catch-up, `tooOld`, and the ordering branches
+  in `install` and the message handling.
+- The registry stays, but it holds a flag. One rule replaces several: "anything about this key while I was busy
+  means I install nothing."
+
+**What it costs.**
+
+- **Extra misses where today's design keeps a value.**
+  - A late message of an older version removes a newer held value; today it is ignored.
+  - Two concurrent operations on one key in one instance install nothing.
+  - Both happen only under contention on the same key. The benchmark has to show how often.
+- **`UPDATE` mode becomes "remove, then load again"** under a fresh reservation. That is how it works already, in
+  effect.
+- **A rebuild of the most delicate part of the core**, verified against the same tests: the contract, the property
+  test, Lincheck on one and on two instances, the full matrix.
+
+**Decision points before building.**
+
+- Accept the extra misses under contention, as measured, or not.
+- On poisoning by a second reservation: "neither installs" (simple, safe), or "the later one installs if its write
+  committed later". The second option needs version order again, and so is not adopted.
+- Build it as a variant alongside the current core and compare (more code for a while), or replace in place (git
+  as the fallback).
+
+### Further alternatives (recorded 2026-10-26, not built)
+
+The alternatives so far:
+
+1. **Versions known to the writer.** Not adopted as a redesign. MongoDB's bulk writes go inside the adapter
+   instead.
+2. **L1 by invalidation and reservation.** The study above.
+
+Three more make sense; three others were considered and do not fit.
+
+**3. Revalidation by version (as HTTP's ETag): staleness bounded without trusting the feed.**
+
+- L1 serves a value. When the value is older than a time T, the next access checks it in the background, with a
+  read of versions only (`VersionsResult` exists). An equal version keeps the value; another one loads again.
+- This is Caffeine's `refreshAfterWrite`, but a few bytes instead of a load.
+- Robustness:
+  - staleness is bounded by T even after a message lost without notice;
+  - today only gap detection and the heartbeat cover that case.
+- Reach: it works on every store, with a feed or without. SQL stores without a native feed (MariaDB, …) would get
+  distribution without the polling feed's scan.
+- Performance: checks are batched and asynchronous; the caller never waits for one.
+- Best as a safety net beside 2: the feed makes changes arrive fast, revalidation guarantees the bound. It could
+  also stand alone, for `NONE` mode with a bounded staleness.
+
+**4. Writes never install in L1 (cache-aside, delete on write).**
+
+- A write only removes its key from L1; only reads install, under a reservation.
+- It is the simplest form of 2: no installs from writes, and no need to recognise one's own echo.
+- Cost: the next read after a write goes to the store. Bad for write-then-read workloads, harmless for read-heavy
+  ones.
+- An option, or the first step of 2, extended to installs from writes once measured.
+
+**5. Leases in the store (Facebook memcache).**
+
+- A miss takes a lease from the store, in one operation with its read. A write revokes the lease, and a load writes
+  only with a valid one.
+- Gain: a stampede across instances is avoided: one loads, the others wait. Today Caffeine prevents it only within
+  an instance.
+- Cost: a write on every miss, and lease logic in every adapter.
+- Only if stampedes across instances show up in measurements; not a core design.
+
+**Considered and not a fit.**
+
+| Design | Why not |
+|---|---|
+| One ordered log as the only truth (change data capture, e.g. PostgreSQL logical replication: apply up to a position, read one's own writes by waiting for one's position) | the strongest and clearest semantics, but heavy to run (replication slots, `wal_level=logical`), and one's own writes wait for the log: not simple |
+| Ownership per key (Hazelcast, Infinispan: consistent hashing, writes routed to the owner) | needs cluster membership among the instances, a second system beside the store: the store is meant to be the only coordinator |
+| Order by timestamp (last write wins as in Cassandra) | correctness would depend on clocks: ruled out in alternative 1 |
+
+**How they combine.**
+
+| Design | Robustness | Performance | Simplicity |
+|---|---|---|---|
+| 2 | high | extra misses under contention | simpler L1 |
+| 2 + 3 | highest: bounded staleness even after a lost message | plus small asynchronous checks | simple, plus one rule |
+| 2 with 4's rule | high | a read after each write | simplest |
+
+Recommended target: 2 + 3 (superseded the same day by the target design below).
+
+- 3 is replaced there by the polling feed as the safety net: it is a pull as well, already built, and bounded
+  without depending on access.
+- 4's rule is an option for read-heavy workloads, or 2's first step.
+- 5 only if measured.
+- 1 stays inside the MongoDB adapter.
+
+### Target design: reservations in L1, versions read but never returned by writes (recorded 2026-10-26, not built)
+
+**Status after the complexity budget (same day).**
+
+- Of this target, only the one reservation registry and versions read from the store are kept, as a simplification
+  of today's core.
+- Writes keep returning their version.
+- Op ids and writes without versions are for later, only if MongoDB's bulk writes are measured worth it.
+- See "Positioning and the complexity budget".
+
+The rest is kept for the reasoning.
+
+**The final target (revised the same day; it supersedes "the design" below where they differ).** It has four parts:
+
+- **Reservations in L1**, as in alternative 2.
+- **Versions from reads and feeds.** The store keeps a per-key version (`old + 1`; a fresh row starts at a value from
+  the store). Reads and messages carry it.
+- **Op ids** for recognising one's own unconditional writes, and for resolving unknown outcomes.
+- **Writes that return only applied or conflict.**
+
+| Path | Version known? | Rule in L1 |
+|---|---|---|
+| a read or reload under a reservation | yes, the read returns it | install if its version is at least the highest version announced during the reservation, and at least what L1 holds |
+| a message | yes, it carries it | at or below what is held: ignore; newer: remove (`INVALIDATE`) or reload under a reservation (`UPDATE`) |
+| a conditional write | yes: `expected + 1`, computed by the writer | as a read |
+| an unconditional `put` or `remove` | no | install only if no message came during the reservation; its echo, recognised by op id, fills in the version |
+
+Why not op ids alone (the design below):
+
+- Without order, a reload under a reservation is cancelled by every message during it. A key written by others
+  faster than one round trip would then never be cached.
+- Today's code avoids that by version order. So does this target: the newest read installs at once.
+- Parking a result until its own echo arrives would also work, with commit order instead of versions. But it relies
+  on the feed delivering in commit order, which the polling feed's re-scan breaks, and it needs a timeout.
+- Versions read from the store need neither.
+
+Compared with today:
+
+- Order is kept in two places only: the install check and the handling of messages.
+- Gone are versions in write results, catch-up, and the minimum rules spread across the core.
+- Concurrent operations in one instance are decided by version, so the newer one installs.
+
+Left out on purpose: one's own unconditional `put` or `remove` while others write the same key.
+
+- The case: its version is unknown, so a message during its reservation stops the install, and the next read loads
+  the key. One miss, only under contention on that key.
+- The possible fix: park that write's value, and install it when its echo arrives (recognised by op id) if the
+  echo's version is at least the highest one seen meanwhile. The echo carries the version, so this works with the
+  polling feed too, and does not rely on commit order.
+- Built only if the benchmark shows the miss matters.
+
+**The three points to settle before switching (settled 2026-10-26).**
+
+1. **Fresh rows: the version after an insert.**
+   - A fresh row starts at a value from the store. In PostgreSQL that is `nextval` of the stamp sequence. It is
+     above the old lifetime's last version because every write draws a stamp from the same sequence.
+   - The writer cannot know that value without a return. Drawing blocks of values ahead (hi/lo) would break the
+     guarantee: a block drawn long ago can lie below versions written since.
+   - Without it, a load (the most common install) would be held with its version unknown. In `NONE` mode no echo
+     fills the version in, so `compute` on a loaded key would always read first: the one-operation hot path lost.
+   - Superseded the same day: the version is mandatory, returned by the store or computed by the adapter. See the
+     one-number design's fallback.
+   - Settled: the version in a write's result is **optional** per entry.
+     - Applied with the version, or applied without it, or conflict.
+     - PostgreSQL returns it (`RETURNING`, free). So does a conditional replace anywhere (`expected + 1`, computed by
+       the adapter).
+     - MongoDB's bulk writes and MariaDB's `UPDATE` do not. For those, the core holds the value with its version
+       unknown: a message with the writer's op id fills the version in, any other message removes the value, and
+       the hot path reads first.
+2. **Reservations beside Caffeine's loads.**
+   - Caffeine's future for a load in flight stays: it de-duplicates concurrent loads and serves the waiters, and
+     replacing it would rebuild what Caffeine does well.
+   - Today there are two registries for the same job:
+     - `minimumVersions` for loads, checked after a load completed (`checkMinimumVersion`);
+     - `writing` with `writeMinimums` for writes, checked in `install`.
+   - Settled: **one registry, a reservation per key**, holding a count of operations in flight and the highest
+     version announced meanwhile.
+     - A load, a reload and a write each reserve before they read or write.
+     - On completion: a load's future is compare-and-removed from Caffeine if older than the reservation's highest
+       version, as today; a write installs under the registry's lock only if not older.
+     - A gap or `invalidateAll` is the epoch, as today.
+   - Consequence, and a finding: with versions read from the store, the target is **today's core simplified**, not
+     a rebuild.
+     - The rules for loads and writes merge into one.
+     - Versions leave the write results (where unknown).
+     - The scattered "drop older" cases become one check at release.
+     - The switch can be done step by step, under the existing tests.
+3. **The polling feed: scan by stamp, not by store time.**
+   - Today it reads the changes "since the last poll plus an overlap", measured by `write_time`, the store's clock.
+     A clock stepping back further than the overlap (a failover to a standby whose clock is behind) loses changes
+     without notice.
+   - Settled: scan by **stamp**.
+     - A stamp is drawn before its commit, so a late commit can carry a stamp below the position already scanned.
+     - The overlap is therefore kept in stamps, but its width is measured on the **scanner's own monotonic clock**
+       (`System.nanoTime`): re-scan from the highest stamp seen at least the overlap ago.
+     - That assumes a write commits within the overlap after drawing its stamp. A write slower than that is already
+       handled: the writing instance touches it again (rewrites it as it is, so a later poll finds it), as
+       `InternalPollingStore` does today for writes slower than the overlap or with an unknown outcome. The overlap
+       is measured on local clocks only, never on a wall clock and never on the store's.
+   - The index it needs, `(discriminator, stamp)`:
+     - Measured on PostgreSQL 17, 200,000 rows, single-row updates inside the server (no round trip, no commit):
+       10.2–10.7 µs without, 10.7–11.7 µs with, so about 1 µs more per write.
+     - Against a write's round trip and commit (milliseconds) that is negligible. HOT updates were impossible already,
+       as `write_time` in the maintenance index changes on every write.
+     - MongoDB and JDBC need the same index. MongoDB's scan is only the safety net and gap repair; its feed is
+       native.
+
+Store-first-then-L1 costs in every design:
+
+- In `INVALIDATE` mode, a write by another instance means one miss.
+- In `UPDATE` mode, it means one reload per instance holding the key.
+- Avoiding either would need values in messages; not adopted.
+
+The rest of this section is the step before, kept for the reasoning: the scan, the safety net, and the costs still
+apply.
+
+**The goals.**
+
+- Fast writes and fast reads, in batches too: one round trip per batch.
+- A small, general SPI.
+- A core that is not too complex to maintain.
+
+**What brought it together.**
+
+- Alternative 2 never orders by version; it only asks whether two things are the same state.
+- An id the writer chooses itself answers that as well, and is known without a return.
+- Alternative 1 needed clocks only for order: a fresh row starting above everything before. Without order, that
+  need disappears.
+
+**The design.**
+
+| Part | What it is |
+|---|---|
+| Row | key, value, state, **op id**, **stamp**, basis |
+| Op id | chosen by the writer, unique, never reused: 128 bits, an instance id drawn from a store sequence at start plus a local counter. It replaces the per-key version everywhere. |
+| Stamp | assigned by the store, ordered across keys (a sequence, cluster time). It orders `invalidateAll`'s cut-off and the scan, as now. |
+| Writes | conditional (`WHERE op = :expected`, or absent) or unconditional; return per entry **applied or conflict**, nothing else |
+| L1 | alternative 2: reservations in the per-key registry, with equality of op ids instead of version order |
+
+**What uses equality of op ids.**
+
+- Recognising an echo: a message for exactly the state held.
+- The hot path's compare-and-set.
+- A load losing against a removal: the tombstone has an op id of its own.
+- Resolving an unknown outcome: read the row; the op is the writer's, so the write applied.
+
+**What it gives.**
+
+- MongoDB: one bulk write per batch, a conflict being a duplicate-key error at its index. One round trip, no read
+  back.
+- JDBC: `executeBatch`, with an update count per entry; no `RETURNING`.
+- PostgreSQL: one statement, as now.
+- No version start values, no clocks, no version in write results.
+
+**What it costs.**
+
+- 16 bytes per row and per message instead of 8.
+- MongoDB's race "a row expected, but purged meanwhile" inserts; it shows in the upserts and is repaired after.
+- A rebuild of the store contract, the adapters, the core's L1 part, and every test that uses versions: the
+  contract, the property test, the Lincheck models, the in-memory store. The public `StoredValue` shows no version,
+  so users see no change.
+
+**The SPI.** Every store does:
+
+1. read keys: rows and the cut-off;
+2. write entries: per entry, applied or conflict;
+3. `invalidateAll`: the control row;
+4. **scan**: the changes after a position, in store order.
+
+A native feed is optional.
+
+**The scan, and what is mandatory.** The scan returns the rows changed after a position (key, op id, state, stamp),
+in order and limited. It reads again over a window of late commits, because a stamp or write time is assigned
+before the commit and can commit out of order. That is what the polling feed does today, by write time on its
+maintenance index.
+
+| Use | Needed for correctness? |
+|---|---|
+| Distribution for a store without a native feed (the polling feed) | yes, there: it is that store's only feed |
+| Repairing a gap: scan since the last position seen, instead of distrusting all of L1 | no: the epoch is correct without it, only more expensive (every held value checked on its next read) |
+| A periodic scan beside a native feed, as a safety net | no: a bonus |
+
+**Why the safety net is only a bonus.**
+
+- Correctness needs every lost message to be noticed, not to be replayed.
+- The native feeds report their losses:
+  - a broken `LISTEN` connection, which reconnects;
+  - a change stream whose resume point is gone from the oplog;
+  - a full `NOTIFY` queue fails the writer's transaction, so nothing is lost silently;
+  - a feed that falls silent is caught by the heartbeat.
+- Every reported loss moves the epoch on.
+- So the safety net only guards against a loss nobody reports: a bug in a driver, or in our own code. That is
+  defence in depth, off by default.
+
+**Why mandatory anyway.**
+
+- It makes every distribution mode possible on every store.
+- A gap is then repaired by scanning, not by distrusting everything.
+- Its price: an index for the scan, kept on every write. PostgreSQL, MongoDB and JDBC have one on write time for
+  maintenance already, so no extra index is needed.
 
 ### Costs of the cut-off, and optimisation candidates (recorded 2026-10-24, after step 2)
 
