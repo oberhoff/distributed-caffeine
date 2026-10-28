@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine.testing;
 import io.github.oberhoff.distributedcaffeine.spi.Change;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
+import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import org.jspecify.annotations.Nullable;
 
@@ -204,8 +205,8 @@ final class InMemoryDelivery implements ChangeSubscription {
                 }
             } else {
                 Change message = (Change) item;
-                if (message.kind() == Change.Kind.INVALIDATED_ALL) {
-                    // nothing moves across an INVALIDATED_ALL
+                if (Store.CONTROL_HASH.equals(message.hash())) {
+                    // nothing moves across a write of the control row (the core's invalidateAll)
                     segment.add(message);
                     flush(segment);
                 } else {
@@ -232,7 +233,7 @@ final class InMemoryDelivery implements ChangeSubscription {
         Map<String, Deque<Change>> byKey = new LinkedHashMap<>();
         Change trailingInvalidatedAll = null;
         for (Change message : segment) {
-            if (message.kind() == Change.Kind.INVALIDATED_ALL) {
+            if (Store.CONTROL_HASH.equals(message.hash())) {
                 trailingInvalidatedAll = message;
             } else {
                 byKey.computeIfAbsent(message.hash(), hash -> new ArrayDeque<>()).addLast(message);

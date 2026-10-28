@@ -30,9 +30,8 @@ import java.util.List;
  *     <li><b>Within the window:</b> every row of the cache written within the given duration before the scan, by the
  *     store's clock (the write time of {@link Row#age()}), is reported with its latest version: a value row as
  *     {@link Change.Kind#WRITTEN}, a tombstone as {@link Change.Kind#INVALIDATED}, an expired row as
- *     {@link Change.Kind#EXPIRED}. Rows written earlier may be reported too. The control row of
- *     {@link Store#invalidateAll} is not reported: the core reads the cut-off with every poll
- *     ({@link ReadResult#cutoff()}) and announces its changes itself.</li>
+ *     {@link Change.Kind#EXPIRED}. Rows written earlier may be reported too. Reserved rows (the control row
+ *     included) are reported like any other.</li>
  *     <li><b>No deletes:</b> deleted rows report nothing ({@link Store#pruneToSize}, {@link Store#pruneTombstones}),
  *     as in a change feed.</li>
  *     <li><b>Own cache only:</b> the rows of the store's own cache, none of another cache's, also where several caches

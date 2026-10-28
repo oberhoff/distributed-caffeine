@@ -15,34 +15,21 @@
  */
 package io.github.oberhoff.distributedcaffeine.spi;
 
-import org.jspecify.annotations.Nullable;
-
 import static java.util.Objects.requireNonNull;
 
 /**
- * An announcement of a committed write. Carries no value: a holder that needs the new value reads the row.
+ * An announcement of a committed write. Carries no value: a holder that needs the new value reads the row. A write of
+ * the {@link Store#CONTROL_HASH control row} is announced like any other; the core takes it as {@code invalidateAll}.
  *
  * @param kind    the kind of the write
- * @param hash    the hash of the written key, {@code null} only for {@link Kind#INVALIDATED_ALL}
- * @param version the version the store assigned to the write, {@code 0} for {@link Kind#INVALIDATED_ALL}
+ * @param hash    the hash of the written key
+ * @param version the version the write carried
  */
-public record Change(Kind kind, @Nullable String hash, long version) {
+public record Change(Kind kind, String hash, long version) {
 
     public Change {
         requireNonNull(kind, "kind cannot be null");
-        if ((kind == Kind.INVALIDATED_ALL) != (hash == null)) {
-            throw new IllegalArgumentException("hash must be null exactly for " + Kind.INVALIDATED_ALL);
-        }
-    }
-
-    /**
-     * Returns the change announcing that every row of the cache was invalidated.
-     *
-     * @param version the store's time of the sweep: a value row with a lower version is invalidated
-     * @return the change
-     */
-    public static Change invalidatedAll(long version) {
-        return new Change(Kind.INVALIDATED_ALL, null, version);
+        requireNonNull(hash, "hash cannot be null");
     }
 
     /**
@@ -64,11 +51,6 @@ public record Change(Kind kind, @Nullable String hash, long version) {
         /**
          * A row exceeded its maximum age and was marked expired. Holders drop the key without reading.
          */
-        EXPIRED,
-
-        /**
-         * Every row of the cache was invalidated. Carries no hash and no version.
-         */
-        INVALIDATED_ALL
+        EXPIRED
     }
 }

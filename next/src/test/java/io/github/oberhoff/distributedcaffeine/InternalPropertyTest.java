@@ -23,16 +23,12 @@ import io.github.oberhoff.distributedcaffeine.spi.ChangeFeed;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeScan;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
-import io.github.oberhoff.distributedcaffeine.spi.Entry;
-import io.github.oberhoff.distributedcaffeine.spi.Expected;
-import io.github.oberhoff.distributedcaffeine.spi.ExpectedEntry;
-import io.github.oberhoff.distributedcaffeine.spi.ReadResult;
 import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
-import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
+import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import io.github.oberhoff.distributedcaffeine.testing.ScanOnlyStore;
 import io.github.oberhoff.distributedcaffeine.testing.StorageOnlyStore;
@@ -76,7 +72,9 @@ import static org.assertj.core.api.Assertions.fail;
  * the source. Values are unique tokens, so a stale one is recognizable.
  * <ul>
  *     <li><b>Freshness</b> (of L2): after each phase, the store holds for every key either no value or the source's
- *     current one. A stale load that slipped past a write (ordering rules 4 and 6) leaves an old token.</li>
+ *     current one. A stale load that slipped past a write (ordering rules 4 and 6) leaves an old token. Allowed: a
+ *     token the source held when an {@code invalidateAll} began, which a load that read it before and wrote after
+ *     leaves behind (the race accepted since 2026-10-28).</li>
  *     <li><b>Presence</b> (of L2): a key whose last confirmed write (put, {@code putAll}, compute, replace) was not
  *     invalidated since holds exactly that value in the store. Freshness allows no value, so a write lost or hidden
  *     (by a filter hiding too much) passes it; writes and {@code invalidateAll} never overlap in this model, so the
@@ -107,6 +105,10 @@ public class InternalPropertyTest {
     private final Map<String, String> keysByHash = new ConcurrentHashMap<>();
     // the presence oracle: per key, the value of the last confirmed write since its last invalidation
     private final Map<String, String> confirmed = new ConcurrentHashMap<>();
+    // per key, the source's values at each invalidateAll: a load that read one before it and writes after it leaves it
+    // behind, the race accepted (VISION.md, "Target design: invalidateAll by the store's time, hidden on read"), so the
+    // freshness oracle allows them; tokens are unique, and a later write of the key replaces such a value in the store
+    private final Map<String, Set<String>> beforeInvalidateAll = new ConcurrentHashMap<>();
     // the pruning variant: a maximum size below the number of keys and maintenance every few milliseconds, so that
     // size pruning deletes rows silently while the instances work (presence then cannot be asked for)
     private boolean pruning;
@@ -137,7 +139,6 @@ public class InternalPropertyTest {
     @ValueSource(longs = {1, 2, 3, 4})
     void with_stores_not_checking_the_basis(long seed) throws Exception {
         InMemoryBackend backend = new InMemoryBackend(seed);
-        backend.database.setChecksBasis(false); // as MongoDB: writes decided under an older cut-off are only hidden
         assertThat(run(seed, backend, PHASES)).as("phases checked").isEqualTo(PHASES);
     }
 
@@ -239,6 +240,8 @@ public class InternalPropertyTest {
                 // the source changes broadly, then everything is invalidated: a load that read the source before
                 // must not leave its value behind
                 lockAll(() -> {
+                    source.forEach((k, value) -> beforeInvalidateAll
+                            .computeIfAbsent(k, ignored -> ConcurrentHashMap.newKeySet()).add(value));
                     for (int changed = 0; changed < KEYS; changed++) {
                         double change = random.nextDouble();
                         if (change < 0.5) {
@@ -360,7 +363,8 @@ public class InternalPropertyTest {
             StoredValue<String> stored = instances.get(0).distributedPolicy().getFromStore(k);
             String inStore = stored == null ? null : stored.value();
             String inSource = source.get(k);
-            if (inStore != null && !inStore.equals(inSource)) {
+            if (inStore != null && !inStore.equals(inSource)
+                    && !beforeInvalidateAll.getOrDefault(k, Set.of()).contains(inStore)) {
                 violations.add("freshness: the store holds " + inStore + " for " + k + ", the source " + inSource);
             }
             String written = confirmed.get(k);
@@ -370,8 +374,10 @@ public class InternalPropertyTest {
             }
             for (int instance = 0; instance < instances.size(); instance++) {
                 String answer = instances.get(instance).getIfPresent(k);
-                // pruned silently, a held copy stays: it is still the last value written, the source's
-                boolean prunedButHeld = pruning && inStore == null && answer != null && answer.equals(inSource);
+                // pruned silently, a held copy stays: it is still the last value written, the source's, or one a load
+                // racing an invalidateAll left behind (allowed by freshness as well)
+                boolean prunedButHeld = pruning && inStore == null && answer != null && (answer.equals(inSource)
+                        || beforeInvalidateAll.getOrDefault(k, Set.of()).contains(answer));
                 if (!Objects.equals(answer, inStore) && !prunedButHeld) {
                     InternalCore<String, String> core = ((InternalDistributedLoadingCache<String, String>) instances.get(instance)).core;
                     violations.add("convergence: instance " + instance + " answers " + answer + " for " + k
@@ -601,7 +607,8 @@ public class InternalPropertyTest {
         public List<Change> changedWithin(Duration within) {
             List<Change> changes = scan.changedWithin(within);
             changes.forEach(change -> trace(label + " POLLED " + change.kind() + " "
-                    + (change.hash() == null ? "ALL" : keysByHash.getOrDefault(change.hash(), "?")) + " @"
+                    + (Store.CONTROL_HASH.equals(change.hash()) ? "ALL"
+                    : keysByHash.getOrDefault(change.hash(), "?")) + " @"
                     + change.version()));
             return changes;
         }
@@ -647,7 +654,7 @@ public class InternalPropertyTest {
         }
 
         @Override
-        public ReadResult read(Collection<String> hashes, Duration maxAge) {
+        public Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
             return slow("read " + keys(hashes), () -> super.read(hashes, maxAge));
         }
 
@@ -657,33 +664,12 @@ public class InternalPropertyTest {
         }
 
         @Override
-        public Map<String, Long> put(Collection<Entry> entries) {
-            return slow("put " + entries.stream().map(entry -> keysByHash.get(entry.hash()) + "="
-                    + new String(entry.value(), java.nio.charset.StandardCharsets.UTF_8)).toList(), () -> super.put(entries));
-        }
-
-        @Override
-        public Map<String, WriteResult> putIfUnchanged(Collection<ExpectedEntry> entries, Duration maxAge) {
-            return slow("putIfUnchanged " + entries.stream().map(expected -> keysByHash.get(expected.entry().hash()) + "="
-                    + new String(expected.entry().value(), java.nio.charset.StandardCharsets.UTF_8) + " if "
-                    + expected.expectedVersion()).toList(), () -> super.putIfUnchanged(entries, maxAge));
-        }
-
-        @Override
-        public Map<String, Long> invalidate(Collection<String> hashes) {
-            return slow("invalidate " + keys(hashes), () -> super.invalidate(hashes));
-        }
-
-        @Override
-        public Map<String, Long> invalidateIfUnchanged(Collection<Expected> expectations) {
-        Map<String, Long> expected = Expected.byHash(expectations);
-            return slow("invalidateIfUnchanged " + keys(expected.keySet()) + expected.values(),
-                    () -> super.invalidateIfUnchanged(expectations));
-        }
-
-        @Override
-        public long invalidateAll() {
-            return slow("invalidateALL", super::invalidateAll);
+        public Set<String> write(Collection<Write> writes) {
+            return slow("write " + writes.stream().map(write -> keysByHash.getOrDefault(write.hash(), "?") + "="
+                    + (write.value() == null ? "TOMBSTONE"
+                    : new String(write.value(), java.nio.charset.StandardCharsets.UTF_8)) + "@" + write.version()
+                    + (write.isUnconditional() ? "" : " if " + (write.expectsMissing() ? "missing" : write.expected())))
+                    .toList(), () -> super.write(writes));
         }
 
         // what the instance receives, for the trace
@@ -694,7 +680,7 @@ public class InternalPropertyTest {
                 @Override
                 public void onChanges(List<Change> messages) {
                     for (Change message : messages) {
-                        trace(label + " RECEIVED " + message.kind() + " " + (message.hash() == null ? "ALL"
+                        trace(label + " RECEIVED " + message.kind() + " " + (Store.CONTROL_HASH.equals(message.hash()) ? "ALL "
                                 : keysByHash.getOrDefault(message.hash(), "?") + " ") + "@" + message.version());
                     }
                     listener.onChanges(messages);

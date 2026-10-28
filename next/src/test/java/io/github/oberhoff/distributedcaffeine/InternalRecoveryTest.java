@@ -17,13 +17,13 @@ package io.github.oberhoff.distributedcaffeine;
 
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
-import io.github.oberhoff.distributedcaffeine.spi.ReadResult;
 import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.State;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import java.util.Map;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -33,7 +33,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -81,7 +80,7 @@ public class InternalRecoveryTest {
         Adapter<String, String> adapter = settings -> new InternalCoreTest.DelegatingStore(
                 backend.open(settings)) {
             @Override
-            public ReadResult read(Collection<String> hashes, Duration maxAge) {
+            public Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
                 reads.incrementAndGet();
                 storeCalls.incrementAndGet();
                 return super.read(hashes, maxAge);
@@ -95,9 +94,9 @@ public class InternalRecoveryTest {
             }
 
             @Override
-            public Map<String, Long> put(Collection<io.github.oberhoff.distributedcaffeine.spi.Entry> entries) {
+            public java.util.Set<String> write(Collection<io.github.oberhoff.distributedcaffeine.spi.Write> writes) {
                 storeCalls.incrementAndGet();
-                return super.put(entries);
+                return super.write(writes);
             }
         };
         return DistributedCaffeine.newBuilder(adapter)
@@ -387,7 +386,7 @@ public class InternalRecoveryTest {
 
         Store store = track(backend.open());
         await(() -> {
-            Row row = store.read(List.of(new InternalHasher<String>(null).wrap("k").hash()), LONG).rows()
+            Row row = store.read(List.of(new InternalHasher<String>(null).wrap("k").hash()), LONG)
                     .get(new InternalHasher<String>(null).wrap("k").hash());
             return row == null || row.state() == State.EXPIRED;
         });
@@ -406,7 +405,7 @@ public class InternalRecoveryTest {
         for (int i = 0; i < 12; i++) {
             hashes.add(new InternalHasher<String>(null).wrap("k" + i).hash());
         }
-        await(() -> store.read(hashes, LONG).rows().size() == 5);
-        assertThat(store.read(hashes.subList(7, 12), LONG).rows()).hasSize(5);
+        await(() -> store.read(hashes, LONG).size() == 5);
+        assertThat(store.read(hashes.subList(7, 12), LONG)).hasSize(5);
     }
 }

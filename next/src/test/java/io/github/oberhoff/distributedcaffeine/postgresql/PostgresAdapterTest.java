@@ -28,6 +28,7 @@ import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -224,7 +225,7 @@ abstract class PostgresAdapterTest {
                     && second.policy().getIfPresentQuietly("k") == null);
             assertThat(first.getIfPresent("k")).isEqualTo(value);
 
-            String terminated = listener(application);
+            String terminated = requireNonNull(listener(application));
             database.execute("SELECT pg_terminate_backend(" + terminated + ")");
             await(() -> listening(application) == 1 && !terminated.equals(listener(application))
                     && first.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED
@@ -235,8 +236,8 @@ abstract class PostgresAdapterTest {
                 && second.policy().getIfPresentQuietly("k") == null);
     }
 
-    // the process id of the session listening for an application
-    private String listener(String application) {
+    // the process id of the session listening for an application, null if none listens (reconnecting)
+    private @Nullable String listener(String application) {
         try {
             return query("SELECT pid FROM pg_stat_activity WHERE application_name = '" + application
                     + "' AND query LIKE 'LISTEN%'");
@@ -248,8 +249,8 @@ abstract class PostgresAdapterTest {
     // the sessions of an application whose last statement was a LISTEN: those listening
     private int listening(String application) {
         try {
-            return Integer.parseInt(query("SELECT count(*) FROM pg_stat_activity WHERE application_name = '"
-                    + application + "' AND query LIKE 'LISTEN%'"));
+            return Integer.parseInt(requireNonNull(query("SELECT count(*) FROM pg_stat_activity WHERE "
+                    + "application_name = '" + application + "' AND query LIKE 'LISTEN%'")));
         } catch (SQLException e) {
             throw new IllegalStateException(e);
         }
@@ -317,9 +318,24 @@ abstract class PostgresAdapterTest {
                 + "' AND indexdef LIKE '%(discriminator, state, write_time)%'")).isEqualTo("1");
         assertThat(columnType(table, "key")).isEqualTo("text");
         assertThat(columnType(table, "version")).isEqualTo("bigint");
-        assertThat(columnType(table, "stamp")).isEqualTo("bigint");
-        assertThat(query("SELECT to_regclass('adapter.\"" + table + "_stamps\"') IS NOT NULL"))
-                .as("the stamp sequence, created with the table").isEqualTo("t");
+        assertThat(columnType(table, "stamp")).as("no stamp since step 3: ages decide").isNull();
+        assertThat(columnType(table, "basis")).isNull();
+    }
+
+    @Test
+    void a_table_of_the_previous_layout_is_refused_unless_it_is_reset() {
+        database.execute("CREATE SCHEMA IF NOT EXISTS adapter");
+        database.execute("CREATE TABLE adapter.\"" + table + "\" (discriminator text, id text, stamp bigint)");
+        database.execute("COMMENT ON TABLE adapter.\"" + table + "\" IS 'distributed-caffeine schema 1'");
+
+        Function<DistributedCaffeine<String, String>, DistributedCaffeine<String, String>> unchanged =
+                Function.identity();
+        assertThatThrownBy(() -> cache(unchanged)).isInstanceOf(StoreException.class)
+                .hasMessageContaining(PostgresTable.MARKER).hasMessageContaining("withSchemaReset");
+
+        DistributedCache<String, String> reset = track(strings(adapter().withSchemaReset().build()).build());
+        reset.put("k", "v");
+        assertThat(reset.getIfPresent("k")).isEqualTo("v");
     }
 
     @Test
@@ -392,7 +408,8 @@ abstract class PostgresAdapterTest {
         assertThat(mixed.getIfPresent("k")).isEqualTo("v");
     }
 
-    private String columnType(String tableName, String column) {
+    // null if there is no such column
+    private @Nullable String columnType(String tableName, String column) {
         try {
             return query("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = to_regclass("
                     + "'adapter.\"" + tableName + "\"') AND attname = '" + column + "'");
@@ -401,13 +418,13 @@ abstract class PostgresAdapterTest {
         }
     }
 
-    private String query(String sql) throws SQLException {
+    // the first column of the first row; null if there is no row
+    private @Nullable String query(String sql) throws SQLException {
         DataSource dataSource = database.dataSource;
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(sql);
              ResultSet resultSet = statement.executeQuery()) {
-            resultSet.next();
-            return resultSet.getString(1);
+            return resultSet.next() ? resultSet.getString(1) : null;
         }
     }
 }

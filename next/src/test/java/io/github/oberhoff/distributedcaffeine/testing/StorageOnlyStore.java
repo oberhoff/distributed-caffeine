@@ -15,17 +15,15 @@
  */
 package io.github.oberhoff.distributedcaffeine.testing;
 
-import io.github.oberhoff.distributedcaffeine.spi.Entry;
-import io.github.oberhoff.distributedcaffeine.spi.Expected;
-import io.github.oberhoff.distributedcaffeine.spi.ExpectedEntry;
-import io.github.oberhoff.distributedcaffeine.spi.ReadResult;
+import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
-import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
+import io.github.oberhoff.distributedcaffeine.spi.Write;
 
 import java.time.Duration;
 import java.util.Collection;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * A store forwarding its storage to another and offering no change feed, as an adapter for a plain key-value store
@@ -41,7 +39,7 @@ public class StorageOnlyStore implements Store {
     }
 
     @Override
-    public ReadResult read(Collection<String> hashes, Duration maxAge) {
+    public Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
         return delegate.read(hashes, maxAge);
     }
 
@@ -51,39 +49,13 @@ public class StorageOnlyStore implements Store {
     }
 
     @Override
-    public Map<String, Long> put(Collection<Entry> entries) {
-        return delegate.put(entries);
+    public Set<String> write(Collection<Write> writes) {
+        return delegate.write(writes);
     }
 
     @Override
-    public boolean checksBasis() {
-        return delegate.checksBasis();
-    }
-
-    @Override
-    public Map<String, WriteResult> putIfUnchanged(
-            Collection<ExpectedEntry> entries, Duration maxAge) {
-        return delegate.putIfUnchanged(entries, maxAge);
-    }
-
-    @Override
-    public Map<String, Long> invalidate(Collection<String> hashes) {
-        return delegate.invalidate(hashes);
-    }
-
-    @Override
-    public Map<String, Long> invalidateIfUnchanged(Collection<Expected> expectations) {
-        return delegate.invalidateIfUnchanged(expectations);
-    }
-
-    @Override
-    public long invalidateAll() {
-        return delegate.invalidateAll();
-    }
-
-    @Override
-    public int expire(Duration maxAge) {
-        return delegate.expire(maxAge);
+    public int expire(Duration maxAge, long version) {
+        return delegate.expire(maxAge, version);
     }
 
     @Override
@@ -94,6 +66,11 @@ public class StorageOnlyStore implements Store {
     @Override
     public int pruneTombstones(Duration retention) {
         return delegate.pruneTombstones(retention);
+    }
+
+    @Override
+    public Duration clockAllowance() {
+        return delegate.clockAllowance();
     }
 
     @Override
