@@ -17,11 +17,11 @@ package io.github.oberhoff.distributedcaffeine.testing;
 
 import io.github.oberhoff.distributedcaffeine.spi.Change;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
-import io.github.oberhoff.distributedcaffeine.spi.Entry;
-import io.github.oberhoff.distributedcaffeine.spi.ExpectedEntry;
 import io.github.oberhoff.distributedcaffeine.spi.RecordingListener;
 import io.github.oberhoff.distributedcaffeine.spi.Row;
+import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
+import io.github.oberhoff.distributedcaffeine.spi.Write;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -45,8 +45,19 @@ class InMemoryDatabaseFaultsTest {
     private static final Duration QUIET = Duration.ofMillis(300);
     private static final Duration LONG = Duration.ofHours(1);
 
-    private static Entry entry(String hash, String value) {
-        return new Entry(hash, hash.getBytes(StandardCharsets.UTF_8), value.getBytes(StandardCharsets.UTF_8));
+    private static final AtomicLong VERSIONS = new AtomicLong();
+
+    // an unconditional write of a value, at a version unique in this test class
+    private static Write entry(String hash, String value) {
+        return Write.value(hash, hash.getBytes(StandardCharsets.UTF_8), value.getBytes(StandardCharsets.UTF_8),
+                VERSIONS.incrementAndGet());
+    }
+
+    // writes the value and returns the version it was written at
+    private static long put(InMemoryStore store, String hash, String value) {
+        Write write = entry(hash, value);
+        store.write(List.of(write));
+        return write.version();
     }
 
     @Test
@@ -57,12 +68,12 @@ class InMemoryDatabaseFaultsTest {
             store.subscribe(observer);
             database.failNextWrites(1, false);
 
-            assertThatThrownBy(() -> store.put(List.of(entry("h1", "v"))))
+            assertThatThrownBy(() -> store.write(List.of(entry("h1", "v"))))
                     .isInstanceOfSatisfying(StoreException.class, e -> assertThat(e.isOutcomeUnknown()).isFalse());
 
-            assertThat(store.read(List.of("h1"), LONG).rows()).isEmpty();
+            assertThat(store.read(List.of("h1"), LONG)).isEmpty();
             assertThat(observer.settle(QUIET)).isEmpty();
-            store.put(List.of(entry("h1", "v")));
+            store.write(List.of(entry("h1", "v")));
             observer.await(m -> !m.isEmpty(), TIMEOUT);
         }
     }
@@ -75,10 +86,10 @@ class InMemoryDatabaseFaultsTest {
             store.subscribe(observer);
             database.failNextWrites(1, true);
 
-            assertThatThrownBy(() -> store.put(List.of(entry("h1", "v"))))
+            assertThatThrownBy(() -> store.write(List.of(entry("h1", "v"))))
                     .isInstanceOfSatisfying(StoreException.class, e -> assertThat(e.isOutcomeUnknown()).isTrue());
 
-            assertThat(store.read(List.of("h1"), LONG).rows()).containsKey("h1");
+            assertThat(store.read(List.of("h1"), LONG)).containsKey("h1");
             observer.await(m -> m.stream().anyMatch(x -> x.kind() == Change.Kind.WRITTEN), TIMEOUT);
         }
     }
@@ -90,22 +101,22 @@ class InMemoryDatabaseFaultsTest {
             RecordingListener observer = new RecordingListener();
             ChangeSubscription subscription = store.subscribe(observer);
             database.pauseDelivery();
-            store.put(List.of(entry("h1", "v")));
+            store.write(List.of(entry("h1", "v")));
 
             database.setDown(true);
             observer.awaitLosses(1, TIMEOUT);
             assertThatThrownBy(subscription::resume).as("not reachable while down")
                     .isInstanceOfSatisfying(StoreException.class, e -> assertThat(e.isRetryable()).isTrue());
             List<String> hashes = List.of("h1");
-            List<Entry> entries = List.of(entry("h2", "v"));
+            List<Write> entries = List.of(entry("h2", "v"));
             assertThatThrownBy(() -> store.read(hashes, LONG)).isInstanceOf(StoreException.class);
-            assertThatThrownBy(() -> store.put(entries)).isInstanceOf(StoreException.class);
+            assertThatThrownBy(() -> store.write(entries)).isInstanceOf(StoreException.class);
             database.resumeDelivery();
             assertThat(observer.settle(QUIET)).as("undelivered messages are lost").isEmpty();
 
             database.setDown(false);
             subscription.resume();
-            assertThat(store.read(List.of("h1"), LONG).rows()).containsKey("h1");
+            assertThat(store.read(List.of("h1"), LONG)).containsKey("h1");
         }
     }
 
@@ -116,7 +127,7 @@ class InMemoryDatabaseFaultsTest {
             RecordingListener observer = new RecordingListener();
             store.subscribe(observer);
             database.pauseDelivery();
-            store.put(List.of(entry("h1", "v")));
+            store.write(List.of(entry("h1", "v")));
 
             database.gap();
             database.resumeDelivery();
@@ -135,7 +146,7 @@ class InMemoryDatabaseFaultsTest {
             database.pauseDelivery();
             List<Long> versions = new ArrayList<>();
             for (int i = 0; i < 10; i++) {
-                versions.add(store.put(List.of(entry("h1", "v" + i))).get("h1"));
+                versions.add(put(store, "h1", "v" + i));
             }
             assertThat(observer.settle(QUIET)).isEmpty();
 
@@ -155,7 +166,7 @@ class InMemoryDatabaseFaultsTest {
             store.subscribe(observer);
             database.setDuplicateProbability(1.0);
 
-            long version = store.put(List.of(entry("h1", "v"))).get("h1");
+            long version = put(store, "h1", "v");
 
             assertThat(observer.await(m -> m.size() == 2, TIMEOUT))
                     .containsExactly(new Change(Change.Kind.WRITTEN, "h1", version),
@@ -164,7 +175,7 @@ class InMemoryDatabaseFaultsTest {
     }
 
     @Test
-    void reordering_across_keys_keeps_the_order_per_key_and_around_invalidated_all() {
+    void reordering_across_keys_keeps_the_order_per_key_and_around_a_write_of_the_control_row() {
         InMemoryDatabase database = new InMemoryDatabase(InMemoryDatabaseFaultsTest::micros, 7);
         try (InMemoryStore store = database.openStore("cache")) {
             RecordingListener observer = new RecordingListener();
@@ -174,17 +185,18 @@ class InMemoryDatabaseFaultsTest {
             List<Change> committed = new ArrayList<>();
             for (int i = 0; i < 100; i++) {
                 String hash = "h" + (i % 5);
-                long version = requireNonNull(store.put(List.of(entry(hash, "v" + i))).get(hash));
+                long version = put(store, hash, "v" + i);
                 committed.add(new Change(Change.Kind.WRITTEN, hash, version));
             }
-            store.invalidateAll();
+            // the core's invalidateAll: a write of the control row
+            store.write(List.of(Write.value(Store.CONTROL_HASH, new byte[0], new byte[0], 999)));
             String hash = "h0";
-            long after = store.put(List.of(entry(hash, "after"))).get(hash);
+            long after = put(store, hash, "after");
 
             database.resumeDelivery();
 
             List<Change> messages = observer.await(m -> m.size() == 102, TIMEOUT);
-            assertThat(messages.get(100).kind()).isEqualTo(Change.Kind.INVALIDATED_ALL);
+            assertThat(messages.get(100)).isEqualTo(new Change(Change.Kind.WRITTEN, Store.CONTROL_HASH, 999));
             assertThat(messages.get(101)).isEqualTo(new Change(Change.Kind.WRITTEN, hash, after));
             List<Change> beforeInvalidateAll = messages.subList(0, 100);
             assertThat(beforeInvalidateAll).as("reordered").isNotEqualTo(committed);
@@ -207,7 +219,7 @@ class InMemoryDatabaseFaultsTest {
             long start = System.nanoTime();
             int writes = 20;
             for (int i = 0; i < writes; i++) {
-                store.put(List.of(entry("h" + i, "v")));
+                store.write(List.of(entry("h" + i, "v")));
             }
             observer.await(m -> m.size() == writes, TIMEOUT);
 
@@ -216,20 +228,20 @@ class InMemoryDatabaseFaultsTest {
     }
 
     @Test
-    void the_store_clock_decides_versions_and_ages() {
+    void the_store_clock_decides_ages_and_versions_are_stored_as_given() {
         AtomicLong clock = new AtomicLong(1_000_000_000L);
         InMemoryDatabase database = new InMemoryDatabase(clock::get, 1);
         try (InMemoryStore store = database.openStore("cache")) {
 
-            long first = store.put(List.of(entry("h1", "v"))).get("h1");
+            store.write(List.of(Write.value("h1", new byte[]{1}, new byte[]{1}, 77)));
             clock.addAndGet(5_000_000L);
-            Duration age = store.read(List.of("h1"), LONG).rows().get("h1").age();
+            Duration age = store.read(List.of("h1"), LONG).get("h1").age();
             clock.addAndGet(-60_000_000L); // the clock goes backwards
-            long second = store.put(List.of(entry("h1", "v2"))).get("h1");
+            store.write(List.of(Write.value("h1", new byte[]{1}, new byte[]{2}, 5)));
 
-            assertThat(first).isEqualTo(1_000_000_000L);
             assertThat(age).isEqualTo(Duration.ofSeconds(5));
-            assertThat(second).isEqualTo(first + 1);
+            assertThat(store.read(List.of("h1"), LONG).get("h1").version()).as("as given, not ordered")
+                    .isEqualTo(5);
         }
     }
 
@@ -241,13 +253,11 @@ class InMemoryDatabaseFaultsTest {
         try (InMemoryStore store = database.openStore("cache")) {
             database.setCommitDelay(Duration.ofMillis(5), 1);
 
-            long version = store.put(List.of(entry("h1", "v"))).get("h1");
+            store.write(List.of(entry("h1", "v")));
 
-            // the looks at the clock: the time before the delay, the stamp, the version as applied, the read
-            Row row = store.read(List.of("h1"), LONG).rows().get("h1");
-            assertThat(row.age()).as("the write time is the time before the delay").isEqualTo(Duration.ofSeconds(3));
-            assertThat(row.stamp()).as("the stamp taken before the delay").isEqualTo(1_001_000_000L);
-            assertThat(version).as("the version taken as the write is applied").isEqualTo(1_002_000_000L);
+            // the looks at the clock: the write time before the delay, the read
+            Row row = store.read(List.of("h1"), LONG).get("h1");
+            assertThat(row.age()).as("the write time is the time before the delay").isEqualTo(Duration.ofSeconds(1));
         }
     }
 
@@ -258,8 +268,8 @@ class InMemoryDatabaseFaultsTest {
             AtomicLong steps = new AtomicLong();
             database.setBeforeConditionalWrite(steps::incrementAndGet);
 
-            store.put(List.of(entry("h1", "v")));
-            store.putIfUnchanged(List.of(ExpectedEntry.ifMissing(entry("h2", "v"), Row.NO_BASIS)), LONG);
+            store.write(List.of(entry("h1", "v")));
+            store.write(List.of(entry("h2", "v").ifMissing()));
 
             assertThat(steps).hasValue(1);
         }

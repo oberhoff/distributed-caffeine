@@ -17,11 +17,10 @@ package io.github.oberhoff.distributedcaffeine;
 
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
-import io.github.oberhoff.distributedcaffeine.spi.Entry;
-import io.github.oberhoff.distributedcaffeine.spi.Expected;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
+import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
@@ -172,11 +171,13 @@ class InternalMapTest {
         DistributedCache<String, String> other = cache();
         DistributedCache<String, String> remover = track(builder(store -> new InternalCoreTest.DelegatingStore(store) {
             @Override
-            public Map<String, Long> invalidateIfUnchanged(Collection<Expected> expectations) {
-                if (interfere.getAndSet(false)) {
+            public Set<String> write(Collection<Write> writes) {
+                // before the conditional removal is applied
+                if (writes.stream().anyMatch(write -> write.isTombstone() && !write.isUnconditional())
+                        && interfere.getAndSet(false)) {
                     other.put("k", "newer");
                 }
-                return super.invalidateIfUnchanged(expectations);
+                return super.write(writes);
             }
         }).build());
         other.put("k", "v");
@@ -490,14 +491,14 @@ class InternalMapTest {
         DistributedCache<String, String> other = cache();
         DistributedCache<String, String> writer = track(builder(store -> new InternalCoreTest.DelegatingStore(store) {
             @Override
-            public Map<String, Long> put(Collection<Entry> entries) {
-                Map<String, Long> versions = super.put(entries);
-                if (interfere.getAndSet(false)) {
+            public Set<String> write(Collection<Write> writes) {
+                Set<String> conflicts = super.write(writes);
+                if (writes.stream().anyMatch(write -> !write.isTombstone()) && interfere.getAndSet(false)) {
                     // a newer write elsewhere, announced to the writer before it commits its own to L1
                     other.put("k", "newer");
                     settle();
                 }
-                return versions;
+                return conflicts;
             }
         }).build());
 
@@ -513,13 +514,13 @@ class InternalMapTest {
         DistributedCache<String, String> other = cache();
         DistributedCache<String, String> writer = track(builder(store -> new InternalCoreTest.DelegatingStore(store) {
             @Override
-            public Map<String, Long> put(Collection<Entry> entries) {
-                Map<String, Long> versions = super.put(entries);
-                if (interfere.getAndSet(false)) {
+            public Set<String> write(Collection<Write> writes) {
+                Set<String> conflicts = super.write(writes);
+                if (writes.stream().anyMatch(write -> !write.isTombstone()) && interfere.getAndSet(false)) {
                     other.invalidateAll();
                     settle();
                 }
-                return versions;
+                return conflicts;
             }
         }).build());
 

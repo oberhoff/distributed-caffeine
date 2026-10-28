@@ -25,15 +25,12 @@ import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeFeed;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
-import io.github.oberhoff.distributedcaffeine.spi.Entry;
-import io.github.oberhoff.distributedcaffeine.spi.Expected;
-import io.github.oberhoff.distributedcaffeine.spi.ExpectedEntry;
-import io.github.oberhoff.distributedcaffeine.spi.ReadResult;
 import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
-import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
+import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
@@ -44,10 +41,11 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 
@@ -134,14 +132,15 @@ public class AsyncLoadThreadsExperimentTest {
                     Store store = new SlowStore(database.openStore("t"));
                     AsyncLoadingCache<String, String> plain = Caffeine.newBuilder().buildAsync((key, executor) ->
                             CompletableFuture.supplyAsync(() -> store.read(List.of(key), Duration.ofHours(1)), storePool)
-                                    .thenCompose(read -> read.rows().containsKey(key)
-                                            ? CompletableFuture.completedFuture(new String(requireNonNull(read.rows().get(key).value()),
+                                    .thenCompose(read -> read.containsKey(key)
+                                            ? CompletableFuture.completedFuture(new String(requireNonNull(read.get(key).value()),
                                                     StandardCharsets.UTF_8))
                                             : sourceLoad(key, executor).thenApplyAsync(value -> {
-                                        store.putIfUnchanged(List.of(ExpectedEntry.ifMissing(new Entry(key,
-                                                key.getBytes(StandardCharsets.UTF_8),
-                                                value.getBytes(StandardCharsets.UTF_8)), Row.NO_BASIS)),
-                                                Duration.ofHours(1));
+                                        // any positive version: the store only compares it
+                                        store.write(List.of(Write.value(key, key.getBytes(StandardCharsets.UTF_8),
+                                                value.getBytes(StandardCharsets.UTF_8),
+                                                ThreadLocalRandom.current().nextLong(1, Long.MAX_VALUE))
+                                                .ifMissing()));
                                         return value;
                                     }, storePool)));
                     start = System.nanoTime();
@@ -191,7 +190,7 @@ public class AsyncLoadThreadsExperimentTest {
         }
 
         @Override
-        public ReadResult read(Collection<String> hashes, Duration maxAge) {
+        public Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
             return slow(delegate.read(hashes, maxAge));
         }
 
@@ -201,33 +200,13 @@ public class AsyncLoadThreadsExperimentTest {
         }
 
         @Override
-        public Map<String, Long> put(Collection<Entry> entries) {
-            return slow(delegate.put(entries));
+        public Set<String> write(Collection<Write> writes) {
+            return slow(delegate.write(writes));
         }
 
         @Override
-        public Map<String, WriteResult> putIfUnchanged(Collection<ExpectedEntry> entries, Duration maxAge) {
-            return slow(delegate.putIfUnchanged(entries, maxAge));
-        }
-
-        @Override
-        public Map<String, Long> invalidate(Collection<String> hashes) {
-            return slow(delegate.invalidate(hashes));
-        }
-
-        @Override
-        public Map<String, Long> invalidateIfUnchanged(Collection<Expected> expectations) {
-            return slow(delegate.invalidateIfUnchanged(expectations));
-        }
-
-        @Override
-        public long invalidateAll() {
-            return delegate.invalidateAll();
-        }
-
-        @Override
-        public int expire(Duration maxAge) {
-            return delegate.expire(maxAge);
+        public int expire(Duration maxAge, long version) {
+            return delegate.expire(maxAge, version);
         }
 
         @Override

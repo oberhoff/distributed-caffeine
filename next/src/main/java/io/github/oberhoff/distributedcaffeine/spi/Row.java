@@ -31,21 +31,12 @@ import static java.util.Objects.requireNonNull;
  * @param value   the serialized value in the cache's value format, {@code null} unless the state is
  *                {@link State#VALUE}
  * @param state   the state of the row
- * @param version the version the store assigned to the row's last write
- * @param age     how long ago the row was written, by the store's clock
- * @param stamp   the store's stamp of the row's last write, comparable with every other row's of the cache and with
- *                {@link ReadResult#cutoff()}: a write confirmed before another one began has the lower stamp
- * @param basis   the cut-off the row's last write was decided under (the one the read its decision was based on
- *                reported), or {@link #NO_BASIS} for a write decided on nothing read; stored as written
+ * @param version the version the row's last write carried
+ * @param age     how long ago the row was written, by the store's clock; the ages of one read are measured at the
+ *                same instant, so they compare like the times of the writes
  */
 @SuppressWarnings("ArrayRecordComponent") // equals, hashCode and toString below compare and show the contents
-public record Row(String hash, byte[] key, byte @Nullable [] value, State state, long version, Duration age,
-                  long stamp, long basis) {
-
-    /**
-     * The basis of a write decided on nothing read (an unconditional put, a tombstone): never hidden by its basis.
-     */
-    public static final long NO_BASIS = Long.MAX_VALUE;
+public record Row(String hash, byte[] key, byte @Nullable [] value, State state, long version, Duration age) {
 
     public Row {
         requireNonNull(hash, "hash cannot be null");
@@ -57,30 +48,6 @@ public record Row(String hash, byte[] key, byte @Nullable [] value, State state,
         }
     }
 
-    /**
-     * Whether a row is visible under a cut-off (VISION.md, "The decision's cut-off on every row"): no cut-off set, or
-     * written after it and decided under it. A row not visible counts as missing; a store applies this wherever it
-     * selects rows by visibility (maintenance), the core to what it reads.
-     *
-     * @param stamp  the row's stamp
-     * @param basis  the row's basis
-     * @param cutoff the cut-off, {@code 0} if none was ever set
-     * @return whether the row is visible
-     */
-    public static boolean visible(long stamp, long basis, long cutoff) {
-        return cutoff == 0 || (stamp > cutoff && basis >= cutoff);
-    }
-
-    /**
-     * Whether this row is visible under a cut-off (see {@link #visible(long, long, long)}).
-     *
-     * @param cutoff the cut-off, {@code 0} if none was ever set
-     * @return whether the row is visible
-     */
-    public boolean visible(long cutoff) {
-        return visible(stamp, basis, cutoff);
-    }
-
     @Override
     public boolean equals(@Nullable Object object) {
         return object instanceof Row that
@@ -89,20 +56,17 @@ public record Row(String hash, byte[] key, byte @Nullable [] value, State state,
                 && Arrays.equals(value, that.value)
                 && state == that.state
                 && version == that.version
-                && age.equals(that.age)
-                && stamp == that.stamp
-                && basis == that.basis;
+                && age.equals(that.age);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(hash, Arrays.hashCode(key), Arrays.hashCode(value), state, version, age, stamp, basis);
+        return Objects.hash(hash, Arrays.hashCode(key), Arrays.hashCode(value), state, version, age);
     }
 
     @Override
     public String toString() {
-        return "Row[hash=" + hash + ", state=" + state + ", version=" + version + ", age=" + age + ", stamp="
-                + stamp + ", basis=" + basis + ", key=" + key.length + " bytes, value="
-                + (value == null ? "none" : value.length + " bytes") + "]";
+        return "Row[hash=" + hash + ", state=" + state + ", version=" + version + ", age=" + age + ", key="
+                + key.length + " bytes, value=" + (value == null ? "none" : value.length + " bytes") + "]";
     }
 }

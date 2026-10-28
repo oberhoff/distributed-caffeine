@@ -17,15 +17,12 @@ package io.github.oberhoff.distributedcaffeine.testing;
 
 import io.github.oberhoff.distributedcaffeine.spi.Change;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
-import io.github.oberhoff.distributedcaffeine.spi.Entry;
-import io.github.oberhoff.distributedcaffeine.spi.Expected;
-import io.github.oberhoff.distributedcaffeine.spi.ExpectedEntry;
-import io.github.oberhoff.distributedcaffeine.spi.ReadResult;
 import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.State;
+import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
-import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
+import io.github.oberhoff.distributedcaffeine.spi.Write;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
@@ -34,13 +31,19 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Supplier;
 
+import static java.util.Objects.requireNonNull;
+
 // One cache's rows and subscriptions. Every operation holds the table's monitor, so writes are serialized per table
-// and their messages are queued in commit order.
+// and their messages are queued in commit order. The control row (Store#CONTROL_HASH) is an ordinary row here, as in
+// any store; only maintenance knows it: reserved rows ('#') are never expired or pruned, and the rows it hides
+// (written at or before it) are neither expired nor counted for the size, but deleted with the old tombstones.
 final class InMemoryTable {
 
     private static final byte[] NO_KEY = new byte[0];
@@ -48,8 +51,6 @@ final class InMemoryTable {
     private final InMemoryDatabase database;
     private final Map<String, StoredRow> rows = new HashMap<>();
     private final List<InMemoryDelivery> deliveries = new CopyOnWriteArrayList<>();
-    // the cut-off: the stamp of the last invalidateAll (the control row), 0 if none
-    private long invalidatedAll;
 
     InMemoryTable(InMemoryDatabase database) {
         this.database = database;
@@ -60,13 +61,12 @@ final class InMemoryTable {
     }
 
     @SuppressWarnings("ArrayRecordComponent") // never compared or hashed, only held by hash
-    private record StoredRow(byte[] key, byte @Nullable [] value, State state, long version, long writeTimeMicros,
-                             long stamp, long basis) {
+    private record StoredRow(byte[] key, byte @Nullable [] value, State state, long version, long writeTimeMicros) {
     }
 
-    // reads
+    // reads: every age of one read measured at the same instant
 
-    synchronized ReadResult read(Collection<String> hashes, Duration maxAge) {
+    synchronized Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
         checkUp();
         checkRead();
         long now = database.nowMicros();
@@ -77,7 +77,7 @@ final class InMemoryTable {
                 result.put(hash, row);
             }
         }
-        return new ReadResult(result, invalidatedAll);
+        return result;
     }
 
     synchronized VersionsResult readVersions(Collection<String> hashes, Duration maxAge) {
@@ -85,117 +85,61 @@ final class InMemoryTable {
         checkRead();
         long now = database.nowMicros();
         Map<String, Long> versions = new LinkedHashMap<>();
-        Map<String, Long> stamps = new LinkedHashMap<>();
-        Map<String, Long> bases = new LinkedHashMap<>();
+        Map<String, Duration> ages = new LinkedHashMap<>();
         for (String hash : hashes) {
             StoredRow row = rows.get(hash);
             if (row != null && row.state == State.VALUE && younger(row, maxAge, now)) {
                 versions.put(hash, row.version);
-                stamps.put(hash, row.stamp);
-                bases.put(hash, row.basis);
+                ages.put(hash, age(row, now));
             }
         }
-        return new VersionsResult(versions, stamps, bases, invalidatedAll);
+        return new VersionsResult(versions, ages);
     }
 
     // writes
 
-    synchronized Map<String, Long> put(Collection<Entry> entries) {
-        return write(() -> {
-            Map<String, Long> versions = new LinkedHashMap<>();
+    // values and tombstones at the versions given, each under its condition; returns the hashes that conflicted
+    synchronized Set<String> write(Collection<Write> writes) {
+        return committing(() -> {
+            Set<String> conflicts = new LinkedHashSet<>();
             List<Change> messages = new ArrayList<>();
-            for (Entry entry : entries) {
-                long version = store(entry.hash(), entry.key(), entry.value(), State.VALUE, Row.NO_BASIS);
-                versions.put(entry.hash(), version);
-                messages.add(new Change(Change.Kind.WRITTEN, entry.hash(), version));
-            }
-            return new Outcome<>(versions, messages);
-        });
-    }
-
-    synchronized Map<String, WriteResult> putIfUnchanged(Collection<ExpectedEntry> entries, Duration maxAge) {
-        return write(() -> {
-            long now = database.nowMicros();
-            Map<String, WriteResult> results = new LinkedHashMap<>();
-            List<Change> messages = new ArrayList<>();
-            for (ExpectedEntry expected : entries) {
-                Entry entry = expected.entry();
-                StoredRow current = rows.get(entry.hash());
+            for (Write write : writes) {
+                StoredRow current = rows.get(write.hash());
                 boolean matches;
-                if (expected.expectsMissing()) {
+                if (write.isUnconditional()) {
+                    matches = true;
+                } else if (write.expectsMissing()) {
                     matches = current == null;
                 } else {
-                    matches = current != null && current.version == expected.expectedVersion();
+                    matches = current != null && current.version == write.expected();
                 }
-                // decided under an older cut-off: refused in the same step (Store#checksBasis)
-                matches &= !database.checksBasis || invalidatedAll == 0 || expected.basis() >= invalidatedAll;
-                if (matches) {
-                    long version = store(entry.hash(), entry.key(), entry.value(), State.VALUE, expected.basis());
-                    results.put(entry.hash(), WriteResult.written(version));
-                    messages.add(new Change(Change.Kind.WRITTEN, entry.hash(), version));
+                if (!matches) {
+                    conflicts.add(write.hash());
+                } else if (write.isTombstone()) {
+                    store(write.hash(), current == null ? NO_KEY : current.key, null, State.TOMBSTONE,
+                            write.version());
+                    messages.add(new Change(Change.Kind.INVALIDATED, write.hash(), write.version()));
                 } else {
-                    results.put(entry.hash(), WriteResult.conflict(asRead(entry.hash(), current, maxAge, now),
-                            current == null ? 0L : current.version));
+                    store(write.hash(), requireNonNull(write.key()), write.value(), State.VALUE, write.version());
+                    messages.add(new Change(Change.Kind.WRITTEN, write.hash(), write.version()));
                 }
             }
-            return new Outcome<>(results, messages);
+            return new Outcome<>(conflicts, messages);
         });
     }
 
-    synchronized Map<String, Long> invalidate(Collection<String> hashes) {
-        return write(() -> {
-            Map<String, Long> versions = new LinkedHashMap<>();
-            List<Change> messages = new ArrayList<>();
-            for (String hash : hashes) {
-                StoredRow current = rows.get(hash);
-                long version = store(hash, current == null ? NO_KEY : current.key, null, State.TOMBSTONE,
-                        Row.NO_BASIS);
-                versions.put(hash, version);
-                messages.add(new Change(Change.Kind.INVALIDATED, hash, version));
-            }
-            return new Outcome<>(versions, messages);
-        });
-    }
+    // maintenance: never a reserved row; rows the control row hides are neither expired nor counted
 
-    synchronized Map<String, Long> invalidateIfUnchanged(Collection<Expected> expectations) {
-        Map<String, Long> expected = Expected.byHash(expectations);
-        return write(() -> {
-            Map<String, Long> versions = new LinkedHashMap<>();
-            List<Change> messages = new ArrayList<>();
-            expected.forEach((hash, expectedVersion) -> {
-                StoredRow current = rows.get(hash);
-                boolean matches = expectedVersion == ExpectedEntry.MISSING ? current == null
-                        : current != null && current.version == expectedVersion;
-                if (matches) {
-                    long version = store(hash, current == null ? NO_KEY : current.key, null, State.TOMBSTONE,
-                        Row.NO_BASIS);
-                    versions.put(hash, version);
-                    messages.add(new Change(Change.Kind.INVALIDATED, hash, version));
-                }
-            });
-            return new Outcome<>(versions, messages);
-        });
-    }
-
-    // the control row only: its stamp is the cut-off, before which every row counts as missing
-    synchronized long invalidateAll() {
-        return write(() -> {
-            invalidatedAll = database.nextStamp();
-            return new Outcome<>(invalidatedAll, List.of(Change.invalidatedAll(invalidatedAll)));
-        });
-    }
-
-    // maintenance
-
-    synchronized int expire(Duration maxAge) {
-        return write(() -> {
+    synchronized int expire(Duration maxAge, long version) {
+        return committing(() -> {
             long now = database.nowMicros();
             List<Change> messages = new ArrayList<>();
             for (String hash : List.copyOf(rows.keySet())) {
                 StoredRow current = rows.get(hash);
-                if (current.state == State.VALUE && visible(current) && !younger(current, maxAge, now)) {
+                if (!reserved(hash) && current.state == State.VALUE && !hidden(current)
+                        && !younger(current, maxAge, now)) {
                     // the write time of the expiry: its grace period before pruning counts from now
-                    long version = store(hash, current.key, null, State.EXPIRED, Row.NO_BASIS);
+                    store(hash, current.key, null, State.EXPIRED, version);
                     messages.add(new Change(Change.Kind.EXPIRED, hash, version));
                 }
             }
@@ -206,7 +150,8 @@ final class InMemoryTable {
     synchronized int pruneToSize(long maxSize) {
         checkUp();
         List<Map.Entry<String, StoredRow>> values = rows.entrySet().stream()
-                .filter(entry -> entry.getValue().state == State.VALUE && visible(entry.getValue()))
+                .filter(entry -> !reserved(entry.getKey()) && entry.getValue().state == State.VALUE
+                        && !hidden(entry.getValue()))
                 // oldest first; among equally old ones the higher hash goes first, so the lowest is kept
                 .sorted(Comparator.<Map.Entry<String, StoredRow>>comparingLong(entry -> entry.getValue().writeTimeMicros)
                         .thenComparing(Map.Entry::getKey, Comparator.reverseOrder()))
@@ -221,13 +166,13 @@ final class InMemoryTable {
     synchronized int pruneTombstones(Duration retention) {
         checkUp();
         long now = database.nowMicros();
-        List<String> expired = rows.entrySet().stream()
-                .filter(entry -> !visible(entry.getValue())
-                        || (entry.getValue().state != State.VALUE && !younger(entry.getValue(), retention, now)))
+        List<String> deleted = rows.entrySet().stream()
+                .filter(entry -> !reserved(entry.getKey()) && (hidden(entry.getValue())
+                        || (entry.getValue().state != State.VALUE && !younger(entry.getValue(), retention, now))))
                 .map(Map.Entry::getKey)
                 .toList();
-        expired.forEach(rows::remove);
-        return expired.size();
+        deleted.forEach(rows::remove);
+        return deleted.size();
     }
 
     // the changes written within the window, by the store's clock: the latest state of each row, without values
@@ -289,7 +234,7 @@ final class InMemoryTable {
 
     // runs a write under the table's monitor (held by the caller), with the injected failures: before commit
     // nothing happens; after commit the write and its messages stand, and the failure is reported anyway
-    private <T> T write(Supplier<Outcome<T>> write) {
+    private <T> T committing(Supplier<Outcome<T>> write) {
         checkUp();
         Boolean failure = database.faults.takeWriteFailure();
         if (Boolean.FALSE.equals(failure)) {
@@ -305,31 +250,39 @@ final class InMemoryTable {
         return outcome.result;
     }
 
-    private long store(String hash, byte[] key, byte @Nullable [] value, State state, long basis) {
-        long now = database.nowMicros();
-        long clock = database.versionMicros();
-        StoredRow current = rows.get(hash);
-        // a per-key counter: a new row starts at the store's time, above every version an earlier row of the key had
-        long version = current == null ? clock : current.version + 1;
-        rows.put(hash, new StoredRow(key, value, state, version, now, database.nextStamp(), basis));
-        return version;
+    // the version as the core chose it: stored, never computed here
+    private void store(String hash, byte[] key, byte @Nullable [] value, State state, long version) {
+        rows.put(hash, new StoredRow(key, value, state, version, database.nextWriteTime()));
     }
 
-    // written after the last invalidateAll and decided under it
-    private boolean visible(StoredRow row) {
-        return Row.visible(row.stamp, row.basis, invalidatedAll);
+    private static boolean reserved(String hash) {
+        return hash.startsWith("#");
+    }
+
+    // written at or before the control row: counted as missing by the core
+    private boolean hidden(StoredRow row) {
+        StoredRow control = rows.get(Store.CONTROL_HASH);
+        return control != null && row.writeTimeMicros <= control.writeTimeMicros;
+    }
+
+    private static Duration age(StoredRow row, long nowMicros) {
+        return Duration.ofNanos(Math.max(0, nowMicros - row.writeTimeMicros) * 1_000);
     }
 
     private static boolean younger(StoredRow row, Duration maxAge, long nowMicros) {
         return nowMicros - row.writeTimeMicros < maxAge.toNanos() / 1_000;
     }
 
+    // a value row at least as old as the maximum age reads as expired, without its value but with its version
     private static @Nullable Row asRead(String hash, @Nullable StoredRow row, Duration maxAge, long nowMicros) {
-        if (row == null || (row.state == State.VALUE && !younger(row, maxAge, nowMicros))) {
+        if (row == null) {
             return null;
         }
-        Duration age = Duration.ofNanos(Math.max(0, nowMicros - row.writeTimeMicros) * 1_000);
-        return new Row(hash, row.key, row.value, row.state, row.version, age, row.stamp, row.basis);
+        Duration age = age(row, nowMicros);
+        if (row.state == State.VALUE && !younger(row, maxAge, nowMicros)) {
+            return new Row(hash, row.key, null, State.EXPIRED, row.version, age);
+        }
+        return new Row(hash, row.key, row.value, row.state, row.version, age);
     }
 
     private void checkRead() {

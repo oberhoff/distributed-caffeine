@@ -16,13 +16,8 @@
 package io.github.oberhoff.distributedcaffeine;
 
 /**
- * Linearizability across two instances on a store that refuses a write decided under an older cut-off: the hot path
- * (a write decided on a held value, one store operation) is taken.
+ * Linearizability across two instances; the hot path (a write decided on a held value, one store operation) is taken
+ * where a value is held and trusted.
  */
 public class InternalLinearizabilityTwoInstancesTest extends AbstractTwoInstanceLinearizabilityTest {
-
-    @Override
-    protected boolean checksBasis() {
-        return true;
-    }
 }

@@ -49,13 +49,13 @@ public abstract class ChangeScanContractTest extends AbstractContractTest {
     void contract1_every_row_written_within_the_window_is_reported_with_its_latest_state_and_version() {
         Store writer = open();
         ChangeScan scan = scanning(open());
-        writer.put(List.of(entry("expired", "e")));
+        writer.write(List.of(entry("expired", "e")));
         pause(60);
-        writer.expire(Duration.ofMillis(50));
-        long expired = writer.read(List.of("expired"), LONG).rows().get("expired").version();
-        writer.put(List.of(entry("value", "v1")));
-        long value = writer.put(List.of(entry("value", "v2"))).get("value");
-        long tombstone = writer.invalidate(List.of("tombstone")).get("tombstone");
+        long expired = nextVersion();
+        writer.expire(Duration.ofMillis(50), expired);
+        writer.write(List.of(entry("value", "v1")));
+        long value = written(writer, entry("value", "v2"));
+        long tombstone = written(writer, tombstone("tombstone"));
 
         Map<String, Change> changes = byHash(scan.changedWithin(Duration.ofSeconds(10)));
 
@@ -68,9 +68,9 @@ public abstract class ChangeScanContractTest extends AbstractContractTest {
     void contract1_a_row_written_before_the_window_may_be_left_out_and_one_after_it_is_not() {
         Store writer = open();
         ChangeScan scan = scanning(open());
-        writer.put(List.of(entry("before", "v")));
+        writer.write(List.of(entry("before", "v")));
         pause(300);
-        writer.put(List.of(entry("within", "v")));
+        writer.write(List.of(entry("within", "v")));
 
         Map<String, Change> changes = byHash(scan.changedWithin(Duration.ofMillis(150)));
 
@@ -78,14 +78,16 @@ public abstract class ChangeScanContractTest extends AbstractContractTest {
     }
 
     @Test
-    void contract1_the_control_row_of_invalidate_all_is_not_reported() {
+    void contract1_a_write_of_the_control_row_is_reported_like_any_row() {
         Store writer = open();
         ChangeScan scan = scanning(open());
+        Write control = control();
 
-        writer.invalidateAll();
+        writer.write(List.of(control));
 
-        assertThat(scan.changedWithin(Duration.ofSeconds(10))).allMatch(change -> change.hash() != null)
-                .noneMatch(change -> change.kind() == Change.Kind.INVALIDATED_ALL);
+        assertThat(byHash(scan.changedWithin(Duration.ofSeconds(10))))
+                .containsEntry(Store.CONTROL_HASH, new Change(Change.Kind.WRITTEN, Store.CONTROL_HASH,
+                        control.version()));
     }
 
     // contract point 2: deletes report nothing
@@ -94,10 +96,10 @@ public abstract class ChangeScanContractTest extends AbstractContractTest {
     void contract2_deleted_rows_report_nothing() {
         Store writer = open();
         ChangeScan scan = scanning(open());
-        writer.put(List.of(entry("pruned", "v")));
+        writer.write(List.of(entry("pruned", "v")));
         pause(2);
-        writer.put(List.of(entry("kept", "v")));
-        writer.invalidate(List.of("tombstone"));
+        writer.write(List.of(entry("kept", "v")));
+        writer.write(List.of(tombstone("tombstone")));
         assertThat(writer.pruneToSize(1)).isEqualTo(1);
         assertThat(writer.pruneTombstones(Duration.ZERO)).isEqualTo(1);
 
@@ -110,8 +112,8 @@ public abstract class ChangeScanContractTest extends AbstractContractTest {
     void contract3_a_scan_reports_nothing_of_another_cache() {
         Store theirs = openOther();
         ChangeScan scan = scanning(open());
-        theirs.put(List.of(entry("h1", "theirs")));
-        theirs.invalidate(List.of("h2"));
+        theirs.write(List.of(entry("h1", "theirs")));
+        theirs.write(List.of(tombstone("h2")));
 
         assertThat(scan.changedWithin(Duration.ofSeconds(10))).isEmpty();
     }

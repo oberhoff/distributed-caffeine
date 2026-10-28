@@ -33,15 +33,8 @@ import static java.util.Objects.requireNonNull;
  */
 final class InternalValue<V> {
 
-    // a basis not known: a value this instance put unconditionally (its row's basis is no cut-off it was decided
-    // under), or one from a path that does not report it
-    static final long UNKNOWN_BASIS = -1;
-
     private final V value;
     private final long version;
-    // the cut-off under which the value is known to be visible: a write decided on it carries this basis (VISION.md,
-    // "The decision's cut-off on every row")
-    private final long basis;
     private volatile int epoch;
     // no REPLACED event for this wrapper: replaced in L1 by a wrapper of the identical value instance (as in Caffeine),
     // or a refresh result installed by the core, which Caffeine then discards as overtaken
@@ -51,17 +44,12 @@ final class InternalValue<V> {
     private final AtomicReference<@Nullable Object> key = new AtomicReference<>();
 
     InternalValue(V value, long version, int epoch) {
-        this(value, version, epoch, UNKNOWN_BASIS);
-    }
-
-    InternalValue(V value, long version, int epoch, long basis) {
         this.value = requireNonNull(value, "value cannot be null");
         if (version <= 0) {
             throw new IllegalArgumentException("version must be positive");
         }
         this.version = version;
         this.epoch = epoch;
-        this.basis = basis;
     }
 
     // the user's value of a value that may be absent
@@ -86,10 +74,6 @@ final class InternalValue<V> {
 
     int epoch() {
         return epoch;
-    }
-
-    long basis() {
-        return basis;
     }
 
     /**

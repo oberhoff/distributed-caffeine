@@ -15,32 +15,25 @@
  */
 package io.github.oberhoff.distributedcaffeine.spi;
 
+import java.time.Duration;
 import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
 
 /**
- * What a read of versions found ({@link Store#readVersions}): per hash the version, the stamp and the basis of the
- * value row's last write ({@link Row#stamp()}, {@link Row#basis()}), and the cut-off of the cache
- * ({@link ReadResult#cutoff()}).
+ * What a read of versions found ({@link Store#readVersions}): per hash the version and the age of the value row's last
+ * write; the ages of one read are measured at the same instant.
  *
  * @param versions the versions of the value rows found, by hash
- * @param stamps   the stamps of the same rows, by hash
- * @param bases    the bases of the same rows, by hash
- * @param cutoff   the stamp of the cache's last {@link Store#invalidateAll()}, 0 if none
+ * @param ages     the ages of the same rows, by hash
  */
-public record VersionsResult(Map<String, Long> versions, Map<String, Long> stamps, Map<String, Long> bases,
-                             long cutoff) {
+public record VersionsResult(Map<String, Long> versions, Map<String, Duration> ages) {
 
     public VersionsResult {
         requireNonNull(versions, "versions cannot be null");
-        requireNonNull(stamps, "stamps cannot be null");
-        requireNonNull(bases, "bases cannot be null");
-        if (!versions.keySet().equals(stamps.keySet()) || !versions.keySet().equals(bases.keySet())) {
-            throw new IllegalArgumentException("versions, stamps and bases must name the same rows");
-        }
-        if (cutoff < 0) {
-            throw new IllegalArgumentException("cutoff cannot be negative");
+        requireNonNull(ages, "ages cannot be null");
+        if (!versions.keySet().equals(ages.keySet())) {
+            throw new IllegalArgumentException("versions and ages must name the same rows");
         }
     }
 }

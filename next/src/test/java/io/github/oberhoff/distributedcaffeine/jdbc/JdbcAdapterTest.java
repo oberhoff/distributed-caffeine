@@ -19,10 +19,11 @@ import io.github.oberhoff.distributedcaffeine.DistributedCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
 import io.github.oberhoff.distributedcaffeine.SynchronizationState;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
-import io.github.oberhoff.distributedcaffeine.spi.Entry;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
+import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import io.github.oberhoff.distributedcaffeine.spi.Write;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -74,7 +75,7 @@ class JdbcAdapterTest {
     }
 
     @Test
-    void the_table_its_index_and_its_sequence_are_created_once() throws SQLException {
+    void the_table_and_its_index_are_created_once() throws SQLException {
         cache(JdbcAdapter.DEFAULT_DISCRIMINATOR);
         cache("another");
 
@@ -83,6 +84,19 @@ class JdbcAdapterTest {
                      table.toUpperCase(java.util.Locale.ROOT), null)) {
             assertThat(tables.next()).isTrue();
         }
+    }
+
+    @Test
+    void a_table_of_the_earlier_layout_is_refused_naming_the_remedy() throws SQLException {
+        try (Connection connection = JdbcTestDatabase.DATA_SOURCE.getConnection();
+             java.sql.Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE " + table + " (discriminator VARCHAR(200) NOT NULL, "
+                    + "id VARCHAR(200) NOT NULL, stamp BIGINT NOT NULL, basis BIGINT NOT NULL, "
+                    + "PRIMARY KEY (discriminator, id))");
+        }
+
+        assertThatThrownBy(() -> cache(JdbcAdapter.DEFAULT_DISCRIMINATOR)).isInstanceOf(StoreException.class)
+                .hasMessageContaining("earlier version").hasMessageContaining("drop it");
     }
 
     @Test
@@ -144,14 +158,18 @@ class JdbcAdapterTest {
         try (Connection shared = JdbcTestDatabase.DATA_SOURCE.getConnection();
              Store store = JdbcAdapter.newBuilder(sharing(shared), table).<String, String>build()
                      .createStore(StoreSettings.of(Format.TEXT, Format.TEXT))) {
-            Entry entry = new Entry("h", "k".getBytes(StandardCharsets.UTF_8), "v".getBytes(StandardCharsets.UTF_8));
-            store.put(List.of(entry));
+            store.write(List.of(write(1)));
             assertThat(shared.getAutoCommit()).as("written in a transaction, then auto-commit again").isTrue();
 
             shared.setAutoCommit(false);
-            store.put(List.of(entry));
+            store.write(List.of(write(2)));
             assertThat(shared.getAutoCommit()).as("came without auto-commit, goes back without").isFalse();
-            assertThat(store.read(List.of("h"), Duration.ofHours(1)).rows()).containsKey("h");
+            assertThat(store.read(List.of("h"), Duration.ofHours(1))).containsKey("h");
         }
+    }
+
+    // an unconditional write of one key; versions are the core's to choose, any positive one does here
+    private static Write write(long version) {
+        return Write.value("h", "k".getBytes(StandardCharsets.UTF_8), "v".getBytes(StandardCharsets.UTF_8), version);
     }
 }

@@ -18,10 +18,8 @@ package io.github.oberhoff.distributedcaffeine;
 import io.github.oberhoff.distributedcaffeine.InternalStoreGuard.Operation;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
-import io.github.oberhoff.distributedcaffeine.spi.Entry;
-import io.github.oberhoff.distributedcaffeine.spi.ExpectedEntry;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
-import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
+import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -33,7 +31,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Deque;
 import java.util.List;
-import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
@@ -87,16 +85,18 @@ class InternalRetryTest {
     private DistributedCache<String, String> cache() {
         Adapter<String, String> adapter = settings -> new InternalCoreTest.DelegatingStore(
                 database.openStore("cache")) {
+            // the writes of values, unconditional (put) or conditional; tombstones (the heartbeat's too) pass
             @Override
-            public Map<String, Long> put(Collection<Entry> entries) {
-                puts.incrementAndGet();
-                return faulty(() -> super.put(entries));
-            }
-
-            @Override
-            public Map<String, WriteResult> putIfUnchanged(Collection<ExpectedEntry> entries, Duration maxAge) {
-                conditionalWrites.incrementAndGet();
-                return faulty(() -> super.putIfUnchanged(entries, maxAge));
+            public Set<String> write(Collection<Write> writes) {
+                if (writes.stream().allMatch(Write::isTombstone)) {
+                    return super.write(writes);
+                }
+                if (writes.stream().allMatch(Write::isUnconditional)) {
+                    puts.incrementAndGet();
+                } else {
+                    conditionalWrites.incrementAndGet();
+                }
+                return faulty(() -> super.write(writes));
             }
         };
         DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(adapter)
