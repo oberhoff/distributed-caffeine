@@ -44,8 +44,8 @@ abstract class PostgresStoreContractTest extends StoreContractTest {
         PostgresAdapter.Builder otherBuilder = PostgresAdapter.newBuilder(database.dataSource, "contract", table)
                 .withDiscriminator("other");
         if (listening) {
-            builder.withListener(database.listener);
-            otherBuilder.withListener(database.listener);
+            builder.withListenerDataSource(database.listener);
+            otherBuilder.withListenerDataSource(database.listener);
         }
         PostgresAdapter<String, String> adapter = builder.build();
         PostgresAdapter<String, String> other = otherBuilder.build();

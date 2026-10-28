@@ -20,22 +20,21 @@ import com.zaxxer.hikari.HikariDataSource;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
-import io.r2dbc.postgresql.PostgresqlConnectionConfiguration;
-import io.r2dbc.postgresql.PostgresqlConnectionFactory;
-import io.r2dbc.spi.ConnectionFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import javax.sql.DataSource;
 import java.time.Duration;
+import java.util.function.UnaryOperator;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * The PostgreSQL adapter behind PgBouncer ({@link PostgresTopology#SINGLE_SERVER_BEHIND_TRANSACTION_POOLER}): the
- * data source through it in transaction mode works (the contract suites run so); a listener behind it receives
- * nothing, since a transaction-mode pooler lends its server session only for a transaction, and a data source in
- * statement mode cannot run the adapter's transactions: both fail the build, naming the cause.
+ * data source through it in transaction mode works, with a listener data source of its own reaching the database
+ * directly (the contract suites run so); listening through the pooler receives nothing, since a transaction-mode
+ * pooler lends its server session only for a transaction, and a data source in statement mode cannot run the
+ * adapter's transactions: both fail the build, naming the cause.
  */
 @Timeout(120)
 abstract class PostgresPoolerTest {
@@ -45,25 +44,19 @@ abstract class PostgresPoolerTest {
     private final PostgresTestDatabase database = PostgresTestDatabase.get();
     private final String table = PostgresTestDatabase.freshTable();
 
-    private DistributedCaffeine<String, String> strings(DataSource dataSource, ConnectionFactory listener) {
-        return DistributedCaffeine.<String, String>newBuilder(PostgresAdapter.newBuilder(dataSource, "pooler", table)
-                        .withListener(listener).build())
+    private DistributedCaffeine<String, String> strings(DataSource dataSource,
+                                                        UnaryOperator<PostgresAdapter.Builder> configuration) {
+        return DistributedCaffeine.<String, String>newBuilder(configuration.apply(PostgresAdapter.newBuilder(dataSource,
+                        "pooler", table)).build())
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
                 .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000));
     }
 
     @Test
-    void a_listener_behind_a_pooler_in_transaction_mode_fails_the_build() {
-        ConnectionFactory pooled = new PostgresqlConnectionFactory(PostgresqlConnectionConfiguration.builder()
-                .host(database.poolerHost())
-                .port(database.poolerPort())
-                .username(database.username())
-                .password(database.password())
-                .database(database.databaseName())
-                .connectTimeout(Duration.ofSeconds(5))
-                .build());
-        DistributedCaffeine<String, String> builder = strings(database.dataSource, pooled);
+    void listening_through_a_pooler_in_transaction_mode_fails_the_build() {
+        // the data source through the pooler, listened through as well: no listener data source of its own
+        DistributedCaffeine<String, String> builder = strings(database.dataSource, UnaryOperator.identity());
 
         assertThatThrownBy(builder::build).isInstanceOf(StoreException.class)
                 .hasMessageContaining("transaction-mode pooler");
@@ -79,7 +72,8 @@ abstract class PostgresPoolerTest {
         config.setMaximumPoolSize(4);
         config.setInitializationFailTimeout(-1);
         try (HikariDataSource pooled = new HikariDataSource(config)) {
-            DistributedCaffeine<String, String> builder = strings(pooled, database.listener);
+            DistributedCaffeine<String, String> builder = strings(pooled,
+                    adapter -> adapter.withListenerDataSource(database.listener));
 
             assertThatThrownBy(builder::build).isInstanceOf(StoreException.class)
                     .hasStackTraceContaining("statement pooling mode");

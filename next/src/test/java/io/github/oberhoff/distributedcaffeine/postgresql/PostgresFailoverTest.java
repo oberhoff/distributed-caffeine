@@ -23,10 +23,6 @@ import io.github.oberhoff.distributedcaffeine.DistributionMode;
 import io.github.oberhoff.distributedcaffeine.SynchronizationState;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
-import io.r2dbc.postgresql.MultiHostConnectionStrategy;
-import io.r2dbc.postgresql.PostgresqlConnectionConfiguration;
-import io.r2dbc.postgresql.PostgresqlConnectionFactory;
-import io.r2dbc.spi.ConnectionFactory;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -44,9 +40,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * The PostgreSQL adapter through a failover: a primary streaming to a standby, both reached through multi-host
- * connection details that look for the primary ({@code targetServerType=primary} for JDBC and R2DBC), the primary
- * stopped and the standby promoted. Writing resumes on the new primary, the listening session reconnects to it, and
- * what was written before is still there. On a primary with a standby, built anew after each test, which breaks it.
+ * connection details that look for the primary ({@code targetServerType=primary}), listened through as well, the
+ * primary stopped and the standby promoted. Writing resumes on the new primary, the listening session reconnects to
+ * it, and what was written before is still there. On a primary with a standby, built anew after each test, which breaks it.
  */
 @Timeout(300)
 @SuppressWarnings("SqlNoDataSourceInspection") // the SQL runs against the test containers
@@ -85,23 +81,9 @@ abstract class PostgresFailoverTest {
         return track(new HikariDataSource(config));
     }
 
-    private ConnectionFactory listener() {
-        return new PostgresqlConnectionFactory(PostgresqlConnectionConfiguration.builder()
-                .addHost("localhost", database.port())
-                .addHost("localhost", database.standbyPort())
-                .targetServerType(MultiHostConnectionStrategy.TargetServerType.PRIMARY)
-                .hostRecheckTime(Duration.ofSeconds(1))
-                .username(database.username())
-                .password(database.password())
-                .database(database.databaseName())
-                .connectTimeout(Duration.ofSeconds(2))
-                .build());
-    }
-
-    private DistributedCache<String, String> cache(HikariDataSource pool, ConnectionFactory listener,
-                                                   DistributionMode mode) {
+    private DistributedCache<String, String> cache(HikariDataSource pool, DistributionMode mode) {
         return track(DistributedCaffeine.<String, String>newBuilder(PostgresAdapter.newBuilder(pool, "failover",
-                                "cache").withListener(listener).build())
+                                "cache").build())
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
                 .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000).withTimeout(Duration.ofSeconds(5)))
@@ -117,9 +99,8 @@ abstract class PostgresFailoverTest {
     @Test
     void writing_and_listening_move_to_the_promoted_standby_and_nothing_confirmed_is_lost() throws Exception {
         HikariDataSource pool = pool();
-        ConnectionFactory listener = listener();
-        DistributedCache<String, String> writer = cache(pool, listener, DistributionMode.NONE);
-        DistributedCache<String, String> holder = cache(pool, listener, DistributionMode.INVALIDATE);
+        DistributedCache<String, String> writer = cache(pool, DistributionMode.NONE);
+        DistributedCache<String, String> holder = cache(pool, DistributionMode.INVALIDATE);
         writer.put("k", "before");
         assertThat(holder.getIfPresent("k")).isEqualTo("before");
         assertThat(awaitUpTo(() -> {
@@ -154,9 +135,8 @@ abstract class PostgresFailoverTest {
     @Test
     void a_confirmed_write_the_failover_loses_is_held_by_no_cache() throws Exception {
         HikariDataSource pool = pool();
-        ConnectionFactory listener = listener();
-        DistributedCache<String, String> writer = cache(pool, listener, DistributionMode.INVALIDATE);
-        DistributedCache<String, String> holder = cache(pool, listener, DistributionMode.INVALIDATE);
+        DistributedCache<String, String> writer = cache(pool, DistributionMode.INVALIDATE);
+        DistributedCache<String, String> holder = cache(pool, DistributionMode.INVALIDATE);
         writer.put("k", "before");
         assertThat(holder.getIfPresent("k")).isEqualTo("before");
         assertThat(awaitUpTo(() -> {

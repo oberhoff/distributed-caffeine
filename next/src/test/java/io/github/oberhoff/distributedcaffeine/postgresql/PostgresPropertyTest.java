@@ -20,9 +20,6 @@ import io.github.oberhoff.distributedcaffeine.PropertyBackend;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.testing.SilencingProxy;
-import io.r2dbc.postgresql.PostgresqlConnectionConfiguration;
-import io.r2dbc.postgresql.PostgresqlConnectionFactory;
-import io.r2dbc.spi.ConnectionFactory;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -43,7 +40,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * The property test (freshness and convergence, see {@link InternalPropertyTest}) on PostgreSQL: real latency, real
- * notifications through the shared R2DBC session, and the faults PostgreSQL has: a terminated listening session (a
+ * notifications through a listening session of its own, and the faults PostgreSQL has: a terminated listening session (a
  * gap, as every reconnect is one), a statement rejected by the server (retried), and a connection broken during a
  * statement (the outcome unknown).
  */
@@ -64,15 +61,8 @@ abstract class PostgresPropertyTest {
         // the listening session, through a proxy that can slow every round trip down; named as the shared one, so
         // that terminating listeners reaches it
         private final SilencingProxy proxy = proxy(database);
-        private final ConnectionFactory listener = new PostgresqlConnectionFactory(
-                PostgresqlConnectionConfiguration.builder()
-                        .host("127.0.0.1")
-                        .port(proxy.port())
-                        .username(database.username())
-                        .password(database.password())
-                        .database(database.databaseName())
-                        .applicationName(PostgresTestDatabase.LISTENER_APPLICATION)
-                        .build());
+        private final DataSource listener = database.direct("127.0.0.1", proxy.port(), database.databaseName(),
+                PostgresTestDatabase.LISTENER_APPLICATION);
 
         private static SilencingProxy proxy(PostgresTestDatabase database) {
             try {
@@ -86,7 +76,7 @@ abstract class PostgresPropertyTest {
 
         @Override
         public Store open(StoreSettings settings) {
-            return PostgresAdapter.newBuilder(faulty(), "property", table).withListener(listener).build()
+            return PostgresAdapter.newBuilder(faulty(), "property", table).withListenerDataSource(listener).build()
                     .createStore(settings);
         }
 

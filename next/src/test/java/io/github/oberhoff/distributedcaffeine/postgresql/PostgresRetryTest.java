@@ -122,7 +122,7 @@ abstract class PostgresRetryTest {
     private DistributedCache<String, String> cache() {
         DistributedCache<String, String> cache = DistributedCaffeine.<String, String>newBuilder(
                         PostgresAdapter.newBuilder(faulty(), "retry", PostgresTestDatabase.freshTable())
-                                .withListener(database.listener).build())
+                                .withListenerDataSource(database.listener).build())
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
                 .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(10_000))

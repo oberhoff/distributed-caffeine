@@ -32,8 +32,8 @@ public final class PostgresCacheBackend implements CacheBackend {
 
     @Override
     public Store open(StoreSettings settings) {
-        return PostgresAdapter.newBuilder(database.dataSource, "suite", table).withListener(database.listener).build()
-                .createStore(settings);
+        return PostgresAdapter.newBuilder(database.dataSource, "suite", table)
+                .withListenerDataSource(database.listener).build().createStore(settings);
     }
 
     @Override
