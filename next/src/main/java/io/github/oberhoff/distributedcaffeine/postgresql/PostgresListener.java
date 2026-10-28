@@ -20,43 +20,53 @@ import io.github.oberhoff.distributedcaffeine.spi.Change;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
-import io.r2dbc.postgresql.api.Notification;
-import io.r2dbc.postgresql.api.PostgresqlConnection;
-import io.r2dbc.spi.Connection;
-import io.r2dbc.spi.ConnectionFactories;
-import io.r2dbc.spi.ConnectionFactory;
-import io.r2dbc.spi.ConnectionFactoryOptions;
-import io.r2dbc.spi.Option;
-import io.r2dbc.spi.Result;
-import io.r2dbc.spi.Wrapped;
 import org.jspecify.annotations.Nullable;
-import reactor.core.Disposable;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
+import org.postgresql.PGConnection;
+import org.postgresql.PGNotification;
+import org.postgresql.core.BaseConnection;
+import org.postgresql.core.PGStream;
+import org.postgresql.core.QueryExecutorBase;
+import org.postgresql.util.DriverInfo;
 
 import javax.sql.DataSource;
+import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /**
- * Listening on PostgreSQL through R2DBC (VISION.md, "PostgreSQL listening: R2DBC" and "Connection sharing"): one
- * session per connection factory (by identity), shared by every cache instance using it, each cache on a channel of
- * its own (table and discriminator), dispatched by channel name. The payload is {@code kind|hash|version}.
+ * Listening on PostgreSQL through pgjdbc (VISION.md, "PostgreSQL listening without R2DBC" and "Connection sharing"):
+ * one session per listener data source (by identity), shared by every cache instance using it, each cache on a
+ * channel of its own (table and discriminator), dispatched by channel name. The payload is {@code kind|hash|version}.
  * <p>
- * The session proves it receives notifications on every subscription: a notification sent through the JDBC data
+ * The session is one connection of the data source whose stream the listener takes over. pgjdbc connects (with
+ * whatever authentication and TLS the data source is configured for) and runs the first {@code LISTEN}s; then the
+ * listener reads pgjdbc's stream itself, on a thread of its own, parsing notifications and skipping every other
+ * message. pgjdbc's own way to them ({@code getNotifications}) hands out only about 750 notifications/s per session;
+ * reading the stream directly is as fast as R2DBC was (measured, VISION.md). Later {@code LISTEN}s and
+ * {@code UNLISTEN}s are sent on the same stream as simple queries, answered through the listener's thread. The stream
+ * is reached through reflection on one protected field, checked at the first subscription.
+ * <p>
+ * The session proves it receives notifications on every subscription: a notification sent through the store's data
  * source must arrive within 5 seconds (which detects a transaction-mode pooler). A lost session is reported as
  * {@code onLost()} and re-established only when a cache asks ({@code resume()}, VISION.md, "Supervision"): once per
  * loss, whoever asks first; and also when a cache suspects the session went silent (its heartbeat), which then counts
@@ -69,26 +79,14 @@ import java.util.concurrent.TimeoutException;
 final class PostgresListener {
 
     private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine.postgresql");
-    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
+    private static final Duration COMMAND_TIMEOUT = Duration.ofSeconds(10);
     static final long PROBE_TIMEOUT_SECONDS = 5;
     private static final int PROBE_ATTEMPTS = 3;
-    private static final IdentityHashMap<ConnectionFactory, Session> SESSIONS = new IdentityHashMap<>();
+    private static final IdentityHashMap<DataSource, Session> SESSIONS = new IdentityHashMap<>();
+    // pgjdbc's stream behind a connection: protected, with no getter; null if this pgjdbc does not have it
+    private static final @Nullable Field PG_STREAM = pgStreamField();
 
     private PostgresListener() {
-    }
-
-    // jdbc:postgresql://host:port/database?options -> r2dbc:postgresql://host:port/database?options
-    static ConnectionFactory connectionFactory(String jdbcUrl, String user, String password) {
-        if (!jdbcUrl.startsWith("jdbc:postgresql:")) {
-            throw new IllegalArgumentException("not a PostgreSQL JDBC URL: " + jdbcUrl);
-        }
-        ConnectionFactoryOptions options = ConnectionFactoryOptions.parse("r2dbc:" + jdbcUrl.substring("jdbc:".length()))
-                .mutate()
-                .option(ConnectionFactoryOptions.USER, user)
-                .option(ConnectionFactoryOptions.PASSWORD, password)
-                .option(Option.valueOf("applicationName"), "distributed-caffeine-listener")
-                .build();
-        return ConnectionFactories.get(options);
     }
 
     /**
@@ -96,12 +94,17 @@ final class PostgresListener {
      * notifications arrive, so every write committed afterwards is delivered (contract point 4).
      */
     @SuppressWarnings("java:S1181") // whatever fails, the registration is released before it is rethrown
-    static ChangeSubscription subscribe(ConnectionFactory factory, DataSource dataSource, String channel,
+    static ChangeSubscription subscribe(DataSource listenerDataSource, DataSource dataSource, String channel,
                                         ChangeListener listener) {
+        if (PG_STREAM == null) {
+            throw new StoreException("Listening on PostgreSQL reads pgjdbc's stream, reached through the field "
+                    + "QueryExecutorBase.pgStream, which pgjdbc " + DriverInfo.DRIVER_VERSION + " does not have or "
+                    + "does not let be reached; use a pgjdbc version this library supports", false);
+        }
         Session session;
         Registration registration;
         synchronized (SESSIONS) {
-            session = SESSIONS.computeIfAbsent(factory, Session::new);
+            session = SESSIONS.computeIfAbsent(listenerDataSource, Session::new);
             registration = session.register(channel, listener, dataSource);
         }
         try {
@@ -115,19 +118,20 @@ final class PostgresListener {
     }
 
     /**
-     * Whether the session of the factory has dispatched everything notified before this call (tests): a notification
-     * sent now must arrive through it; notifications arrive in commit order, so everything before it has arrived too.
+     * Whether the session of the listener data source has dispatched everything notified before this call (tests): a
+     * notification sent now must arrive through it; notifications arrive in commit order, so everything before it has
+     * arrived too.
      */
-    static boolean barrier(ConnectionFactory factory, DataSource dataSource) {
+    static boolean barrier(DataSource listenerDataSource, DataSource dataSource) {
         Session session;
         synchronized (SESSIONS) {
-            session = SESSIONS.get(factory);
+            session = SESSIONS.get(listenerDataSource);
         }
         if (session == null) {
             return true;
         }
         synchronized (session) {
-            if (session.connection == null) {
+            if (session.held == null) {
                 return false;
             }
         }
@@ -147,6 +151,70 @@ final class PostgresListener {
         } catch (IllegalArgumentException e) {
             return null;
         }
+    }
+
+    // the message and SQL state of an ErrorResponse's body: fields of a type byte and a string each, ended by a zero
+    // byte (pgjdbc sets client_encoding to UTF8)
+    static String error(byte[] body) {
+        String message = "";
+        String state = "";
+        int at = 0;
+        while (at < body.length && body[at] != 0) {
+            byte field = body[at++];
+            int end = at;
+            while (end < body.length && body[end] != 0) {
+                end++;
+            }
+            String value = new String(body, at, end - at, StandardCharsets.UTF_8);
+            if (field == 'M') {
+                message = value;
+            } else if (field == 'C') {
+                state = value;
+            }
+            at = end + 1;
+        }
+        return message + " (SQL state " + state + ")";
+    }
+
+    // InaccessibleObjectException (a module not opening it) and SecurityException are RuntimeExceptions
+    @SuppressWarnings("java:S3011") // the one internal field taken over, by design (VISION.md)
+    private static @Nullable Field pgStreamField() {
+        try {
+            Field field = QueryExecutorBase.class.getDeclaredField("pgStream");
+            if (field.getType() != PGStream.class) {
+                return null;
+            }
+            field.setAccessible(true);
+            return field;
+        } catch (NoSuchFieldException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static String listen(String channel) {
+        return "LISTEN " + PostgresTable.quote(channel);
+    }
+
+    // aborted, not closed: the stream was taken over, so the connection must never be used again, and a pool must not
+    // hand it out again. Closed after that, which hands it back to a pool as broken (HikariCP evicts it, failing to
+    // reset its state). On a thread of its own: a broken connection must hold nothing up, and is released under the
+    // session's lock
+    @SuppressWarnings("java:S1166") // a connection being let go of fails as it pleases
+    private static void release(Connection connection) {
+        Thread closer = new Thread(() -> {
+            try {
+                connection.abort(Runnable::run);
+            } catch (SQLException | RuntimeException ignored) {
+                // closed already
+            }
+            try {
+                connection.close();
+            } catch (SQLException | RuntimeException ignored) {
+                // a pool finding it broken
+            }
+        }, "distributed-caffeine-postgresql-release");
+        closer.setDaemon(true);
+        closer.start();
     }
 
     private static final class Registration implements ChangeSubscription {
@@ -184,25 +252,91 @@ final class PostgresListener {
         }
     }
 
+    // a connection whose stream the listener took over: read only by its session's thread, written (LISTEN, UNLISTEN)
+    // only under this object's monitor
+    private static final class Held {
+
+        private final Connection connection;
+        private final PGStream stream;
+        // the commands sent and not yet answered, in the order sent: each ReadyForQuery answers the oldest
+        private final Queue<CompletableFuture<Void>> commands = new ConcurrentLinkedQueue<>();
+        @GuardedBy("this")
+        private boolean ended;
+
+        Held(Connection connection, PGStream stream) {
+            this.connection = connection;
+            this.stream = stream;
+        }
+
+        // a simple query ('Q'), waiting for its ReadyForQuery; an error ends the session (see read)
+        void execute(String sql) {
+            CompletableFuture<Void> answered = new CompletableFuture<>();
+            synchronized (this) {
+                if (ended) {
+                    throw new StoreException("The PostgreSQL listener's session ended", false);
+                }
+                commands.add(answered);
+                try {
+                    byte[] text = stream.getEncoding().encode(sql);
+                    stream.sendChar('Q');
+                    stream.sendInteger4(4 + text.length + 1);
+                    stream.send(text);
+                    stream.sendChar(0);
+                    stream.flush();
+                } catch (IOException e) {
+                    throw new StoreException("Listening on PostgreSQL failed (" + sql + "): " + e.getMessage(), e,
+                            false);
+                }
+            }
+            try {
+                answered.get(COMMAND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            } catch (ExecutionException e) {
+                throw new StoreException("Listening on PostgreSQL failed (" + sql + "): " + e.getCause().getMessage(),
+                        e.getCause(), false);
+            } catch (TimeoutException e) {
+                throw new StoreException("Listening on PostgreSQL failed (" + sql + "): no answer within "
+                        + COMMAND_TIMEOUT.toSeconds() + " s", e, false);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new StoreException("Listening on PostgreSQL was interrupted (" + sql + ")", e, false);
+            }
+        }
+
+        void answered() {
+            CompletableFuture<Void> oldest = commands.poll();
+            if (oldest != null) {
+                oldest.complete(null);
+            }
+        }
+
+        // no command is sent after this; those waiting fail
+        void end(Throwable cause) {
+            synchronized (this) {
+                ended = true;
+            }
+            for (CompletableFuture<Void> waiting; (waiting = commands.poll()) != null; ) {
+                waiting.completeExceptionally(cause);
+            }
+        }
+    }
+
     // one listening session; its state is guarded by the session's monitor, dispatch reads concurrent structures
     private static final class Session {
 
-        private final ConnectionFactory factory;
+        private final DataSource listenerDataSource;
         private final Map<String, List<Registration>> channels = new ConcurrentHashMap<>();
         private final Map<String, CompletableFuture<Void>> probes = new ConcurrentHashMap<>();
         private final String probeChannel = "dc_probe_" + UUID.randomUUID().toString().replace("-", "");
         @GuardedBy("this")
-        private @Nullable Connection connection;
-        @GuardedBy("this")
-        private @Nullable Disposable notifications;
+        private @Nullable Held held;
         // counts the connections established, so that a loss is re-established once, whoever asks first
         @GuardedBy("this")
         private long generation;
         @GuardedBy("this")
         private boolean closed;
 
-        Session(ConnectionFactory factory) {
-            this.factory = factory;
+        Session(DataSource listenerDataSource) {
+            this.listenerDataSource = listenerDataSource;
         }
 
         Registration register(String channel, ChangeListener listener, DataSource dataSource) {
@@ -214,15 +348,15 @@ final class PostgresListener {
         // listens on the registration's channel, connecting if there is no connection (re-established for the caches
         // that lost it, who learn of it when they resume)
         synchronized void listen(Registration registration) {
-            if (connection != null) {
+            if (held != null) {
                 try {
-                    listen(connection, registration.channel);
+                    held.execute(PostgresListener.listen(registration.channel));
                 } catch (StoreException e) {
                     // broken before its loss was noticed: connected anew below
-                    discard(connection);
+                    discard(held);
                 }
             }
-            if (connection == null) {
+            if (held == null) {
                 connect();
             }
             registration.generation = generation;
@@ -239,10 +373,10 @@ final class PostgresListener {
                 if (closed) {
                     return;
                 }
-                if (connection == null || (!registration.lost && generation == registration.generation)) {
-                    if (connection != null) {
+                if (held == null || (!registration.lost && generation == registration.generation)) {
+                    if (held != null) {
                         LOGGER.log(Level.WARNING, "The PostgreSQL listener is suspected silent; reconnecting");
-                        discard(connection);
+                        discard(held);
                         forEachRegistration(other -> {
                             if (other != registration && !other.lost) {
                                 delivering.add(other);
@@ -274,85 +408,120 @@ final class PostgresListener {
                 }
                 boolean reconnected;
                 synchronized (this) {
-                    reconnected = connection == null || generation != probed;
+                    reconnected = held == null || generation != probed;
                 }
                 if (!reconnected || attempt == PROBE_ATTEMPTS) {
                     throw new StoreException("The listener connection received no notification within "
-                            + PROBE_TIMEOUT_SECONDS + " s (transaction-mode pooler?); point the R2DBC ConnectionFactory "
-                            + "directly at the database or at a session-mode pooler", false);
+                            + PROBE_TIMEOUT_SECONDS + " s (transaction-mode pooler?); listen through a data source "
+                            + "that reaches the database directly or through a session-mode pooler "
+                            + "(PostgresAdapter.Builder.withListenerDataSource)", false);
                 }
             }
         }
 
-        // connects and listens on every channel; fails with a StoreException
+        // takes a connection of the data source over and listens on every channel; fails with a StoreException
         @GuardedBy("this")
+        @SuppressWarnings("java:S2095") // the connection is held until the session lets go of it (release)
         private void connect() {
-            Connection opened;
+            Connection connection;
             try {
-                opened = Mono.from(factory.create()).block(CONNECT_TIMEOUT);
-            } catch (RuntimeException e) {
+                connection = listenerDataSource.getConnection();
+            } catch (SQLException | RuntimeException e) {
                 throw new StoreException("Connecting the PostgreSQL listener failed: " + e.getMessage(), e, false);
             }
-            if (opened == null) {
-                throw new StoreException("Connecting the PostgreSQL listener failed", false);
-            }
             try {
-                PostgresqlConnection postgres = unwrap(opened);
-                listen(opened, probeChannel);
-                for (String channel : channels.keySet()) {
-                    listen(opened, channel);
+                if (!connection.isWrapperFor(BaseConnection.class)) {
+                    throw new StoreException("The listener's data source must hand out pgjdbc connections "
+                            + "(org.postgresql), not " + connection.getClass().getName(), false);
                 }
-                notifications = postgres.getNotifications().subscribe(this::dispatch,
-                        failure -> lost(opened, failure), () -> lost(opened, null));
-                connection = opened;
+                // LISTEN takes effect at its commit
+                connection.setAutoCommit(true);
+                PostgresStore.bound(connection, COMMAND_TIMEOUT);
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute(PostgresListener.listen(probeChannel));
+                    for (String channel : channels.keySet()) {
+                        statement.execute(PostgresListener.listen(channel));
+                    }
+                }
+                // what pgjdbc received meanwhile, read without waiting; then nothing is left in its hands
+                PGNotification[] early = connection.unwrap(PGConnection.class).getNotifications();
+                // the session idles between notifications: no read timeout (a silent one is the core's heartbeat's
+                // to find)
+                connection.setNetworkTimeout(Runnable::run, 0);
+                PGStream stream = (PGStream) streamField().get(
+                        connection.unwrap(BaseConnection.class).getQueryExecutor());
+                Held taken = new Held(connection, stream);
+                held = taken;
                 generation++;
-            } catch (RuntimeException e) {
-                closeQuietly(opened);
+                if (early != null) {
+                    for (PGNotification notification : early) {
+                        dispatch(notification.getName(), notification.getParameter());
+                    }
+                }
+                Thread reader = new Thread(() -> read(taken), "distributed-caffeine-postgresql-listener");
+                reader.setDaemon(true);
+                reader.start();
+            } catch (SQLException | ReflectiveOperationException | RuntimeException e) {
+                held = null;
+                release(connection);
                 throw e instanceof StoreException storeException ? storeException
                         : new StoreException("Listening on PostgreSQL failed: " + e.getMessage(), e, false);
             }
         }
 
-        @SuppressWarnings("ReferenceEquality") // a wrapper unwrapping to itself ends the chain
-        private static PostgresqlConnection unwrap(Connection connection) {
-            Object current = connection;
-            while (!(current instanceof PostgresqlConnection) && current instanceof Wrapped<?> wrapped) {
-                Object inner = wrapped.unwrap();
-                if (inner == current) {
-                    break;
-                }
-                current = inner;
+        private static Field streamField() {
+            Field field = PG_STREAM;
+            if (field == null) {
+                throw new IllegalStateException("checked when subscribing");
             }
-            if (current instanceof PostgresqlConnection postgres) {
-                return postgres;
-            }
-            throw new StoreException("The listener's ConnectionFactory must create r2dbc-postgresql connections, not "
-                    + connection.getClass().getName(), false);
+            return field;
         }
 
-        private static void listen(Connection connection, String channel) {
-            execute(connection, "LISTEN " + PostgresTable.quote(channel));
-        }
-
-        private static void execute(Connection connection, String sql) {
+        // the session's thread: the backend's messages, by their type byte and length (which counts itself).
+        // NotificationResponse ('A') is dispatched, ReadyForQuery ('Z') answers a command, an ErrorResponse ('E')
+        // ends the session (a LISTEN refused, the backend terminated); everything else is skipped
+        @SuppressWarnings("java:S1181") // whatever ends the session, it is reported as lost
+        private void read(Held taken) {
+            PGStream stream = taken.stream;
+            Throwable failure;
             try {
-                Flux.from(connection.createStatement(sql).execute()).flatMap(Result::getRowsUpdated).then()
-                        .block(CONNECT_TIMEOUT);
-            } catch (RuntimeException e) {
-                throw new StoreException("Listening on PostgreSQL failed (" + sql + "): " + e.getMessage(), e, false);
+                for (; ; ) {
+                    int type = stream.receiveChar();
+                    int length = stream.receiveInteger4();
+                    if (length < 4) {
+                        throw new IOException("a backend message of type " + type + " with length " + length);
+                    }
+                    switch (type) {
+                        case 'A' -> {
+                            stream.receiveInteger4(); // the notifying backend's process id
+                            String channel = stream.receiveCanonicalString();
+                            dispatch(channel, stream.receiveString());
+                        }
+                        case 'Z' -> {
+                            stream.skip(length - 4);
+                            taken.answered();
+                        }
+                        case 'E' -> throw new StoreException("The PostgreSQL listener's session failed: "
+                                + error(stream.receive(length - 4)), false);
+                        default -> stream.skip(length - 4);
+                    }
+                }
+            } catch (IOException | RuntimeException | Error e) {
+                failure = e;
             }
+            taken.end(failure);
+            lost(taken, failure);
         }
 
-        private void dispatch(Notification notification) {
-            String payload = notification.getParameter();
-            if (probeChannel.equals(notification.getName())) {
+        private void dispatch(String channel, @Nullable String payload) {
+            if (probeChannel.equals(channel)) {
                 CompletableFuture<Void> probe = payload == null ? null : probes.remove(payload);
                 if (probe != null) {
                     probe.complete(null);
                 }
                 return;
             }
-            List<Registration> registrations = channels.get(notification.getName());
+            List<Registration> registrations = channels.get(channel);
             Change message = payload == null ? null : parse(payload);
             if (registrations == null || message == null) {
                 return;
@@ -372,7 +541,7 @@ final class PostgresListener {
             String token = UUID.randomUUID().toString();
             CompletableFuture<Void> arrived = new CompletableFuture<>();
             probes.put(token, arrived);
-            try (java.sql.Connection jdbc = dataSource.getConnection()) {
+            try (Connection jdbc = dataSource.getConnection()) {
                 int previousTimeout = PostgresStore.bound(jdbc, Duration.ofSeconds(PROBE_TIMEOUT_SECONDS));
                 try (PreparedStatement statement = jdbc.prepareStatement("SELECT pg_notify(?, ?)")) {
                     statement.setString(1, probeChannel);
@@ -393,7 +562,7 @@ final class PostgresListener {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return true;
-            } catch (java.util.concurrent.ExecutionException e) {
+            } catch (ExecutionException e) {
                 return true;
             } finally {
                 probes.remove(token);
@@ -402,10 +571,10 @@ final class PostgresListener {
 
         // the session broke: every cache is told, and resumes it when it can
         @SuppressWarnings("ReferenceEquality") // only the connection that broke is the current one
-        private void lost(Connection broken, @Nullable Throwable failure) {
+        private void lost(Held broken, Throwable failure) {
             List<Registration> told = new ArrayList<>();
             synchronized (this) {
-                if (connection != broken || closed) {
+                if (held != broken || closed) {
                     return;
                 }
                 discard(broken);
@@ -414,19 +583,15 @@ final class PostgresListener {
                     told.add(registration);
                 });
             }
-            LOGGER.log(Level.WARNING, "The PostgreSQL listener lost its connection{0}",
-                    failure == null ? "" : " (" + failure.getMessage() + ")");
-            Throwable cause = failure != null ? failure : new IllegalStateException("the listening session ended");
-            told.forEach(registration -> notify(() -> registration.listener.onLost(cause)));
+            LOGGER.log(Level.WARNING, "The PostgreSQL listener lost its connection ({0})", failure.getMessage());
+            told.forEach(registration -> notify(() -> registration.listener.onLost(failure)));
         }
 
-        // lets go of a broken connection; its notifications end, and its loss reported later is ignored
-        private synchronized void discard(Connection broken) {
-            connection = null;
-            if (notifications != null) {
-                notifications.dispose();
-            }
-            closeQuietly(broken);
+        // lets go of a broken connection; its thread ends, and its loss reported later is ignored
+        @GuardedBy("this")
+        private void discard(Held broken) {
+            held = null;
+            release(broken.connection);
         }
 
         private static void notify(Runnable call) {
@@ -444,7 +609,6 @@ final class PostgresListener {
         }
 
         void unregister(Registration registration) {
-            boolean empty;
             synchronized (SESSIONS) {
                 synchronized (this) {
                     List<Registration> registrations = channels.get(registration.channel);
@@ -452,19 +616,18 @@ final class PostgresListener {
                         registrations.remove(registration);
                         if (registrations.isEmpty()) {
                             channels.remove(registration.channel);
-                            if (connection != null) {
+                            if (held != null && !channels.isEmpty()) {
                                 try {
-                                    execute(connection, "UNLISTEN " + PostgresTable.quote(registration.channel));
+                                    held.execute("UNLISTEN " + PostgresTable.quote(registration.channel));
                                 } catch (StoreException e) {
-                                    // the session breaks or closes anyway
+                                    // the session breaks anyway
                                 }
                             }
                         }
                     }
-                    empty = channels.isEmpty();
-                    if (empty) {
+                    if (channels.isEmpty()) {
                         close();
-                        SESSIONS.remove(factory, this);
+                        SESSIONS.remove(listenerDataSource, this);
                     }
                 }
             }
@@ -473,21 +636,9 @@ final class PostgresListener {
         @GuardedBy("this")
         private void close() {
             closed = true;
-            if (notifications != null) {
-                notifications.dispose();
-            }
-            if (connection != null) {
-                closeQuietly(connection);
-                connection = null;
-            }
-        }
-
-        // without waiting: a broken connection may take its timeout to close, and is closed under the session's lock
-        private static void closeQuietly(Connection connection) {
-            try {
-                Mono.from(connection.close()).timeout(CONNECT_TIMEOUT).onErrorResume(e -> Mono.empty()).subscribe();
-            } catch (RuntimeException ignored) {
-                // closing a broken connection
+            if (held != null) {
+                release(held.connection);
+                held = null;
             }
         }
     }

@@ -29,7 +29,6 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
 import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
-import io.r2dbc.spi.ConnectionFactory;
 import org.jspecify.annotations.Nullable;
 import org.postgresql.PGConnection;
 
@@ -69,7 +68,7 @@ import java.util.WeakHashMap;
 // the SQL runs against the user's database, unknown to the IDE; what is formatted into it are the quoted table name,
 // placeholders and fixed expressions, never values, which are always bound
 @SuppressWarnings({"SqlNoDataSourceInspection", "java:S2077"})
-class PostgresStore implements Store {
+final class PostgresStore implements Store, ChangeFeed {
 
     private static final int CHUNK = 1_000;
     // the stamp of a write (Row#stamp): from the table's sequence, as is the version a new row starts at, so that
@@ -94,23 +93,24 @@ class PostgresStore implements Store {
     }
 
     private final DataSource dataSource;
+    private final DataSource listenerDataSource;
     private final PostgresTable table;
     private final Duration timeout;
     private final String t;
 
-    private PostgresStore(DataSource dataSource, PostgresTable table, Duration timeout) {
+    PostgresStore(DataSource dataSource, DataSource listenerDataSource, PostgresTable table, Duration timeout) {
         this.dataSource = dataSource;
+        this.listenerDataSource = listenerDataSource;
         this.table = table;
         this.timeout = timeout;
         this.t = table.qualified;
     }
 
-    // with a listener, a store announcing its writes by LISTEN/NOTIFY; without, one supporting only
-    // DistributionMode.NONE
-    static PostgresStore of(DataSource dataSource, PostgresTable table,
-                            @Nullable ConnectionFactory listenerConnectionFactory, Duration timeout) {
-        return listenerConnectionFactory == null ? new PostgresStore(dataSource, table, timeout)
-                : new Listening(dataSource, table, listenerConnectionFactory, timeout);
+    // the change feed: notifications on the cache's own channel, through the listening session of the listener's
+    // data source (shared with every other cache listening through it)
+    @Override
+    public ChangeSubscription subscribe(ChangeListener listener) {
+        return PostgresListener.subscribe(listenerDataSource, dataSource, table.channel, listener);
     }
 
     // reads
@@ -725,23 +725,5 @@ class PostgresStore implements Store {
 
     private static long micros(Duration duration) {
         return duration.toNanos() / 1_000;
-    }
-
-    // the store with its change feed: notifications on the cache's own channel
-    private static final class Listening extends PostgresStore implements ChangeFeed {
-
-        private final ConnectionFactory listenerConnectionFactory;
-
-        Listening(DataSource dataSource, PostgresTable table, ConnectionFactory listenerConnectionFactory,
-                  Duration timeout) {
-            super(dataSource, table, timeout);
-            this.listenerConnectionFactory = listenerConnectionFactory;
-        }
-
-        @Override
-        public ChangeSubscription subscribe(ChangeListener listener) {
-            return PostgresListener.subscribe(listenerConnectionFactory, super.dataSource, super.table.channel,
-                    listener);
-        }
     }
 }

@@ -17,10 +17,6 @@ package io.github.oberhoff.distributedcaffeine.experiments;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
-import io.r2dbc.postgresql.PostgresqlConnectionConfiguration;
-import io.r2dbc.postgresql.PostgresqlConnectionFactory;
-import io.r2dbc.postgresql.api.PostgresqlConnection;
-import io.r2dbc.postgresql.api.PostgresqlResult;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.postgresql.PGConnection;
@@ -29,7 +25,6 @@ import org.postgresql.core.BaseConnection;
 import org.postgresql.core.PGStream;
 import org.postgresql.core.QueryExecutorBase;
 import org.testcontainers.postgresql.PostgreSQLContainer;
-import reactor.core.Disposable;
 
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
@@ -48,24 +43,25 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
 
-import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Open question 1 of VISION.md, option 2: does a listener that drains notifications promptly (r2dbc-postgresql,
- * Netty-based) keep propagation prompt with one session per instance, above pgjdbc's ~750/s per-session limit? One
+ * Listening without R2DBC (VISION.md, "PostgreSQL listening without R2DBC"): how fast notifications reach one session
+ * per instance, and at what cost to PostgreSQL, for pgjdbc's own getNotifications (limited to ~750/s per session),
+ * notifications batched per writer after the commit, and pgjdbc's stream taken over (what the adapter does). The
+ * R2DBC variant it was measured against is gone with the dependency; its figures stay recorded in VISION.md. One
  * channel; writes paced by two writers, to random keys of 10,000 or to one hot key. Measures the time until a
  * notification arrives (over all instances) and PostgreSQL's CPU from the container's cgroup counters.
  * <p>
  * Not run by default, only with {@code -Dexperiments=true}; run with
- * {@code mvn test -Dtest=PostgresR2dbcListenerExperimentTest -Dexperiments=true}.
+ * {@code mvn test -Dtest=PostgresListenerExperimentTest -Dexperiments=true}.
  */
 @EnabledIfSystemProperty(named = "experiments", matches = "true")
 // a measurement: it prints what it measures rather than asserting it, and paces itself with pauses;
 // each writer thread (read) prepares its own statement, as the adapter does
 // the SQL runs against a test container, unknown to the IDE
 @SuppressWarnings({"SqlNoDataSourceInspection", "java:S2699", "java:S2925", "java:S9142"})
-class PostgresR2dbcListenerExperimentTest {
+class PostgresListenerExperimentTest {
 
     private static final int KEYS = 10_000;
     private static final int WRITERS = 2;
@@ -94,7 +90,7 @@ class PostgresR2dbcListenerExperimentTest {
     // BATCHED: pgjdbc listening, notifications sent by each writer after commit, at most one per window, each
     // carrying every write of the window
     private enum Listener {
-        JDBC(0), BATCHED_2MS(2), BATCHED_5MS(5), TAKEOVER(0), R2DBC(0);
+        JDBC(0), BATCHED_2MS(2), BATCHED_5MS(5), TAKEOVER(0);
 
         final int windowMillis;
 
@@ -118,7 +114,7 @@ class PostgresR2dbcListenerExperimentTest {
             StringBuilder out = new StringBuilder("\n=== listener client, postgres:18, one session per instance ===\n")
                     .append(String.format("%-8s %10s %10s %10s %12s %12s %16s %10s%n", "listener", "keys",
                             "instances", "target/s", "arrival p50", "arrival p99", "PG CPU ms/1000w", "reached/s"));
-            Listener[] measured = {Listener.TAKEOVER, Listener.R2DBC};
+            Listener[] measured = {Listener.TAKEOVER, Listener.JDBC};
             for (int rate : new int[]{1_500, 3_000, 6_000}) {
                 for (Listener listener : measured) {
                     out.append(run(container, listener, 4, rate, false));
@@ -182,7 +178,7 @@ class PostgresR2dbcListenerExperimentTest {
                     dataSource.close();
                 });
                 ready.countDown();
-            } else if (kind != Listener.R2DBC) {
+            } else {
                 Thread thread = new Thread(() -> {
                     try (Connection listener = connect(container)) {
                         try (Statement statement = listener.createStatement()) {
@@ -208,29 +204,6 @@ class PostgresR2dbcListenerExperimentTest {
                     }
                 });
                 thread.start();
-            } else {
-                PostgresqlConnectionFactory factory = new PostgresqlConnectionFactory(
-                        PostgresqlConnectionConfiguration.builder()
-                                .host(container.getHost())
-                                .port(container.getMappedPort(5432))
-                                .username(container.getUsername())
-                                .password(container.getPassword())
-                                .database(container.getDatabaseName())
-                                .build());
-                PostgresqlConnection connection = requireNonNull(factory.create().block());
-                connection.createStatement("LISTEN rows").execute()
-                        .flatMap(PostgresqlResult::getRowsUpdated).then().block();
-                Disposable subscription = connection.getNotifications().subscribe(notification -> {
-                    long now = System.nanoTime();
-                    if (recordArrival(requireNonNull(notification.getParameter()), latency, started, now)) {
-                        stopped.countDown();
-                    }
-                });
-                closeables.add(() -> {
-                    subscription.dispose();
-                    connection.close().block();
-                });
-                ready.countDown();
             }
         }
         ready.await();

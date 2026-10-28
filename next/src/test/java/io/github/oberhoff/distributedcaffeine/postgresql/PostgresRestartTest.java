@@ -23,9 +23,6 @@ import io.github.oberhoff.distributedcaffeine.DistributionMode;
 import io.github.oberhoff.distributedcaffeine.SynchronizationState;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
-import io.r2dbc.postgresql.PostgresqlConnectionConfiguration;
-import io.r2dbc.postgresql.PostgresqlConnectionFactory;
-import io.r2dbc.spi.ConnectionFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -81,26 +78,14 @@ abstract class PostgresRestartTest {
         return track(new HikariDataSource(config));
     }
 
-    private ConnectionFactory listener() {
-        return new PostgresqlConnectionFactory(PostgresqlConnectionConfiguration.builder()
-                .host("localhost")
-                .port(database.port())
-                .username(database.username())
-                .password(database.password())
-                .database(database.databaseName())
-                .connectTimeout(Duration.ofSeconds(2))
-                .build());
+    private DistributedCache<String, String> cache(HikariDataSource pool, DistributionMode mode) {
+        return cache(pool, mode, 1_000, LONG);
     }
 
-    private DistributedCache<String, String> cache(HikariDataSource pool, ConnectionFactory listener,
-                                                   DistributionMode mode) {
-        return cache(pool, listener, mode, 1_000, LONG);
-    }
-
-    private DistributedCache<String, String> cache(HikariDataSource pool, ConnectionFactory listener,
-                                                   DistributionMode mode, long maximumSize, Duration maintenance) {
+    private DistributedCache<String, String> cache(HikariDataSource pool, DistributionMode mode, long maximumSize,
+                                                   Duration maintenance) {
         return track(DistributedCaffeine.<String, String>newBuilder(PostgresAdapter.newBuilder(pool, "restart",
-                                "cache").withListener(listener).build())
+                                "cache").build())
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
                 .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(maximumSize)
@@ -132,11 +117,10 @@ abstract class PostgresRestartTest {
     @Test
     void a_restart_of_the_server_is_ridden_out_once_it_is_back() {
         HikariDataSource pool = pool();
-        ConnectionFactory listener = listener();
-        DistributedCache<String, String> writer = cache(pool, listener, DistributionMode.NONE);
-        DistributedCache<String, String> holder = cache(pool, listener, DistributionMode.INVALIDATE);
+        DistributedCache<String, String> writer = cache(pool, DistributionMode.NONE);
+        DistributedCache<String, String> holder = cache(pool, DistributionMode.INVALIDATE);
         // maintenance every 200 ms, pruning the table to 10 values: it fails while the server is down
-        cache(pool, listener, DistributionMode.NONE, 10, Duration.ofMillis(200));
+        cache(pool, DistributionMode.NONE, 10, Duration.ofMillis(200));
         writer.put("k", "before");
         assertThat(holder.getIfPresent("k")).isEqualTo("before");
 

@@ -807,7 +807,7 @@ protocols, status queries by group, eviction publishing and the async publish dr
 ### Java baseline: 17
 
 Java 17, as in the current generation. None of the dependencies (Caffeine, Jackson 3, the MongoDB and PostgreSQL
-drivers, r2dbc-postgresql, Fory, hash4j) require more, and everyone on the current generation can move to this one
+drivers, Fory, hash4j) require more, and everyone on the current generation can move to this one
 without upgrading Java.
 
 - **What 17 already has:** records, sealed interfaces, `switch` expressions, `instanceof` patterns, and exhaustive
@@ -869,7 +869,7 @@ instances. A bridge between the generations is out of scope: it would bring the 
 | `startSynchronization()` / `stopSynchronization()` | gone; `close()` (`AutoCloseable`) and build anew |
 | `DistributedPolicy.getAdapter()` | gone |
 | `withListenerSharingMode` / `withWatcherSharingMode` | gone: always shared per database |
-| PostgreSQL `withListenerDataSource(...)` | an R2DBC `ConnectionFactory` for listening (or JDBC URL, user and password) |
+| PostgreSQL `withListenerDataSource(...)` | kept, optional: listening goes through the `DataSource` by default |
 | `weakKeys()` / `weakValues()` / `softValues()` (rejected today too) | rejected |
 
 Unchanged, so user code carries over: `Hashable`, `HashProvider` and the hash computation, the serializer
@@ -1093,15 +1093,15 @@ clearly, and it removes a state (`STOPPED`) and the class of errors behind the p
   `DataSource` first makes ours fail at every shutdown, and a registered hook keeps the cache and its classloader
   alive across redeploys until it is removed, which needs `close()` anyway.
 
-**Ownership:** the user owns what they pass in (`MongoClient`, `DataSource`, R2DBC `ConnectionFactory`, executor)
+**Ownership:** the user owns what they pass in (`MongoClient`, `DataSource`, executor)
 and closes it; the library owns only what it opens (listening sessions, cursors, threads) and closes it with the
 last cache using it.
 
 ### Adapter ownership: one adapter per cache
 
-- **An adapter describes where one cache lives in the store:** the user's client (`MongoClient`, or `DataSource`
-  plus R2DBC `ConnectionFactory`), database, table or collection, and discriminator. At `build()` it
-  creates the cache's internal `Store` (the SPI, invisible to users).
+- **An adapter describes where one cache lives in the store:** the user's client (`MongoClient`, or `DataSource`),
+  database, table or collection, and discriminator. At `build()` it creates the cache's internal `Store` (the SPI,
+  invisible to users).
 - **What is shared is not the adapter but what is expensive underneath:** listening sessions and cursors, through
   the registry keyed by client identity and database ("Connection sharing"). A shared adapter object was
   rejected: a second lifecycle object (who closes it, what happens to caches still attached), sharing done twice
@@ -1531,9 +1531,10 @@ since they cost speed, not correctness. This replaces today's "create, or fall b
   even a cache that has seen nothing yet cannot read older than that.
 
 **PostgreSQL probe:** on start the listener notifies itself and waits for it; if it does not arrive, `build()` fails
-("the listener connection receives no notifications (transaction-mode pooler?); point the R2DBC `ConnectionFactory`
-directly at the database or at a session-mode pooler"). A silently dead connection is found by the core's heartbeat
-(it was a periodic self-notification of the listener until the core supervised the feed).
+("the listener connection received no notification (transaction-mode pooler?); listen through a data source that
+reaches the database directly or through a session-mode pooler (`withListenerDataSource`)"). A silently dead
+connection is found by the core's heartbeat (it was a periodic self-notification of the listener until the core
+supervised the feed).
 
 **MongoDB: sharded collections stay refused**, as today; a sharded cluster through `mongos` with an unsharded
 collection stays allowed. The composite `_id` could become the shard key later; out of scope for now.
@@ -1740,7 +1741,7 @@ store's maximum age.
 ### Coordinates, packaging and version
 
 - **One artifact**, as today: `io.github.oberhoff.distributed-caffeine:distributed-caffeine`.
-- **The MongoDB driver, the PostgreSQL driver, r2dbc-postgresql (the PostgreSQL listener) and Jackson are
+- **The MongoDB driver, the PostgreSQL driver and Jackson are
   `optional` dependencies.** Users add what they use (usually they have the driver already); the driver version is
   always the user's own. Minimum supported versions are documented and covered by the test matrix. Today the
   drivers, Fory and Jackson are compile dependencies, so every user gets both drivers and both serialization
@@ -1904,6 +1905,7 @@ variant twice):
   gives no password, and dynamic credentials such as IAM tokens are computed inside it); reading the getters of known
   types (`HikariDataSource`, `PGSimpleDataSource`) would break silently with dynamic credentials, so only on demand.
 - **Reads and writes stay on JDBC; R2DBC alone was measured and rejected** (`PostgresJdbcVersusR2dbcExperimentTest`,
+  removed 2026-10-28 with the dependency,
   PostgreSQL 18, pgjdbc with HikariCP against r2dbc-postgresql 1.1.1 with r2dbc-pool 1.0.2, both pools of 10, 10,000
   rows of 1 KB, each operation twice):
 
@@ -1955,7 +1957,8 @@ variant twice):
   CPU stays at the 1-channel level (about 140–175 ms per 1,000 writes for 4 instances) and it also covers hot
   keys.
 
-R2DBC listener measured (`PostgresR2dbcListenerExperimentTest`, r2dbc-postgresql 1.1.1, PostgreSQL 18, one channel,
+R2DBC listener measured (`PostgresR2dbcListenerExperimentTest`, now `PostgresListenerExperimentTest` without its
+R2DBC variant; r2dbc-postgresql 1.1.1, PostgreSQL 18, one channel,
 one listening session per instance, two paced writers, each variant twice):
 
 | Listener | Keys | Instances | Writes/s | Arrival p50 / p99 | PostgreSQL CPU per 1,000 writes |
@@ -1994,7 +1997,8 @@ before its response, repeated while more kept coming. Measured with an empty que
 - When idle it sends at once.
 - The listener is plain pgjdbc.
 
-Measured with `PostgresR2dbcListenerExperimentTest`, PostgreSQL 18, 4 instances, 2 writers:
+Measured with `PostgresR2dbcListenerExperimentTest` (now `PostgresListenerExperimentTest`), PostgreSQL 18, 4
+instances, 2 writers:
 
 | Variant | 1,500 writes/s | 3,000 writes/s | 6,000 writes/s (reached) | hot key, 1,500/s | PostgreSQL CPU per 1,000 writes |
 |---|---|---|---|---|---|
@@ -2120,7 +2124,7 @@ broadcast manager is: Kafka, NATS, RabbitMQ, Redis pub/sub, JGroups, a Hazelcast
 ```java
 PostgresAdapter.newBuilder(dataSource, schemaName, tableName)   // names mandatory, at most 63 bytes, quoted
     .withDiscriminator("orders")                                // optional, "default"
-    .withListener(connectionFactory)                            // R2DBC; or withListener(jdbcUrl, user, password)
+    .withListenerDataSource(listenerDataSource)                 // optional: behind a transaction-mode pooler
     .withSchemaReset()                                          // optional
     .build();                                                   // the timeout is the cache's (see Settings)
 ```
@@ -2143,11 +2147,14 @@ PostgresAdapter.newBuilder(dataSource, schemaName, tableName)   // names mandato
   pgjdbc has no socket timeout by default. A timed-out statement is not retried (another attempt would most likely
   wait as long again); a timed-out write has an unknown outcome. The listener's JDBC probe is bounded by the probe
   timeout the same way.
-- **The listener is required only to distribute.** With `DistributionMode.NONE` nothing subscribes, so neither a
-  listener nor r2dbc-postgresql is needed: without a listener the store offers no change feed, and `build()` with
-  another mode fails naming `withListener`. The listener is typed as
-  `io.r2dbc.spi.ConnectionFactory`; `withListener(jdbcUrl, user, password)` creates a new factory per call, so caches
-  share a session only when given the same factory object.
+- **Listening goes through the `DataSource`** (built 2026-10-28, see "PostgreSQL listening without R2DBC"): one of
+  its connections, whose pgjdbc stream the listener takes over, held while a cache listens through it and shared by
+  every cache given the same `DataSource` object. With `DistributionMode.NONE` nothing subscribes and nothing is
+  held. A pool's leak detection reports the held connection; at the end it is aborted and closed, which hands it back
+  to a pool as broken (HikariCP evicts it). A transaction-mode pooler cannot carry `LISTEN`, which the start's probe
+  detects: such a setup gives the adapter a listener `DataSource` of its own (`withListenerDataSource`), reaching the
+  database directly or through a session-mode pooler. Later `LISTEN`s and `UNLISTEN`s go over the taken stream as
+  simple queries, answered through the listener's thread; an `ErrorResponse` ends the session as a loss.
 - **Table:** `(discriminator, id, key, value, state, version, write_time)`, primary key `(discriminator, id)`, one
   index `(discriminator, state, write_time)`, the marker as table comment; `key` and `value` typed by the formats
   (`bytea`, `text`, `jsonb`), so a table refuses caches with other serializers, naming the column. `key` is nullable:
@@ -2287,12 +2294,13 @@ Sketch, to be settled against the thin SPI ("Target design: a thin SPI, versions
 
 ### Connection sharing: always per database
 
-Listening connections are shared between caches, always per database: one R2DBC session per `ConnectionFactory` on
-PostgreSQL, one change stream cursor per `MongoClient` and database on MongoDB. There is no sharing mode to choose:
-today's `ListenerSharingMode` / `WatcherSharingMode` (`INSTANCE`, `TABLE`/`COLLECTION`, `DATABASE`) are dropped. On
-PostgreSQL the reason for the narrower levels was the pgjdbc limit of about 750 notifications/s per session, which
-R2DBC does not have (one session carried 30,000/s, below); on MongoDB `DATABASE` was the default already; what
-remained was "isolation", with no concrete case behind it.
+Listening connections are shared between caches, always per database: one session per listener `DataSource` on
+PostgreSQL (R2DBC's `ConnectionFactory` until 2026-10-28), one change stream cursor per `MongoClient` and database
+on MongoDB. There is no sharing mode to choose: today's `ListenerSharingMode` / `WatcherSharingMode` (`INSTANCE`,
+`TABLE`/`COLLECTION`, `DATABASE`) are dropped. On PostgreSQL the reason for the narrower levels was the pgjdbc
+limit of about 750 notifications/s per session, which R2DBC did not have (one session carried 30,000/s, below), nor
+has the stream taken over; on MongoDB `DATABASE` was the default already; what remained was "isolation", with no
+concrete case behind it.
 
 - **One shared session / cursor per database**, reference-counted in a registry; every cache has its own subscription
   with its own worker queue (coalescing hash set, generous overflow limit with drop and `onGap()`). The shared thread
@@ -2303,7 +2311,8 @@ remained was "isolation", with no concrete case behind it.
 
 What changes:
 
-- **PostgreSQL's sharing key** is the R2DBC `ConnectionFactory` (by identity) instead of the listener `DataSource`;
+- **PostgreSQL's sharing key** is the listener `DataSource` (by identity; the R2DBC `ConnectionFactory` until
+  2026-10-28);
   MongoDB's is `MongoClient` and database.
 - **As few sessions as possible is also cheapest for PostgreSQL:** every listening session costs it about 33 µs per
   write.
@@ -2315,8 +2324,8 @@ What changes:
 - **Failed applies are dropped on both stores:** MongoDB re-queues today because of the old persistence semantics;
   in this model dropping a key is always safe (as for failed reads).
 
-Measured (`PostgresR2dbcCeilingExperimentTest`, PostgreSQL 18, one R2DBC session listening on 20 channels as for 20
-caches, writes spread over all channels by 8 or 16 paced writers, each rate twice):
+Measured (`PostgresR2dbcCeilingExperimentTest`, removed 2026-10-28 with R2DBC; PostgreSQL 18, one R2DBC session
+listening on 20 channels as for 20 caches, writes spread over all channels by 8 or 16 paced writers, each rate twice):
 
 | `synchronous_commit` | Target writes/s | Reached | Arrival p50 / p99 | Lost | PostgreSQL CPU per 1,000 writes |
 |---|---|---|---|---|---|
@@ -3999,8 +4008,10 @@ The decisions of 2026-10-26, in the order to build them. Every step stays green 
 contract, the property test, Lincheck on one and on two instances, the minimal runs per change, and the full matrix
 at the end.
 
-1. **The PostgreSQL listener without R2DBC.** Small, independent, and a good first step. See "PostgreSQL listening
-   without R2DBC" and its decision.
+1. **The PostgreSQL listener without R2DBC.** Built 2026-10-28. Deviation: an optional listener `DataSource`
+   (`withListenerDataSource`) stays, for a `DataSource` behind a transaction-mode pooler; by default listening goes
+   through the one `DataSource`. The README items are in the adapter's Javadoc (`next/` has no README yet). See
+   "PostgreSQL listening without R2DBC" and its decision.
    - `PostgresListener` reads pgjdbc's stream: reflection on `QueryExecutorBase.pgStream`, reached through
      `unwrap(BaseConnection.class).getQueryExecutor()`, and checked at startup.
    - It parses `A` and skips other messages; `E` ends it with a loss.
@@ -4092,8 +4103,9 @@ None at the moment. New ones go here as they come up while building.
      carrier threads in `synchronized` blocks on Java 21–23 (fixed in Java 24).
   2. ~~A non-blocking load path for the asynchronous caches~~: built 2026-10-21 (see Async variants).
 - **MongoDB's reactive-streams driver** was not measured against the sync driver (PostgreSQL's R2DBC was, and lost
-  for statements). If it is reconsidered, measure it like `PostgresJdbcVersusR2dbcExperimentTest` (writes, conditional
-  writes, batched reads, same replica set) and check its dependencies; the SPI stays blocking either way.
+  for statements). If it is reconsidered, measure it like the removed `PostgresJdbcVersusR2dbcExperimentTest`
+  (writes, conditional writes, batched reads, same replica set) and check its dependencies; the SPI stays blocking
+  either way.
 
 Checked and not adopted: JetCache's per-key refresh tasks (Caffeine refreshes on access), its non-strict
 distributed lock (not a cache concern), result codes instead of the Caffeine API (the store guard covers failures),
@@ -4182,6 +4194,8 @@ in about one run in eight before it was fixed), not a substitute for the targete
 - Hashing on every user call: 2–4 times a plain Caffeine hit (30–65 ns), 32 bytes per call.
 - After a gap, a version read per held key (lazily and in a rate-limited background pass).
 - With absent caching, each instance learns its own absences.
-- Dependencies: Fory always (about 2.7 MB plus Janino); for PostgreSQL also r2dbc-postgresql with Reactor and
-  Netty (about 6.6 MB).
+- Dependencies: Fory always (about 2.7 MB plus Janino); for PostgreSQL only pgjdbc (R2DBC with Reactor and Netty,
+  about 6.6 MB, gone 2026-10-28).
+- PostgreSQL's listener reads pgjdbc's stream through reflection on one internal field (`QueryExecutorBase.pgStream`),
+  checked at the first subscription; a pgjdbc release could change it.
 - Every PostgreSQL `NOTIFY` wakes every listening session (about 33 µs of PostgreSQL CPU each).
