@@ -77,7 +77,8 @@ abstract class PostgresAdapterTest {
     }
 
     private PostgresAdapter.Builder adapter() {
-        return PostgresAdapter.newBuilder(database.dataSource, "adapter", table).withListener(database.listener);
+        return PostgresAdapter.newBuilder(database.dataSource, "adapter", table)
+                .withListenerDataSource(database.listener);
     }
 
     private DistributedCaffeine<String, String> strings(PostgresAdapter<String, String> adapter) {
@@ -158,7 +159,7 @@ abstract class PostgresAdapterTest {
         // BINARY (Fory, the default)
         DistributedCache<String, Order> binary = track(DistributedCaffeine.newBuilder(
                         PostgresAdapter.newBuilder(database.dataSource, "adapter", table + "_binary")
-                                .withListener(database.listener).<String, Order>build())
+                                .withListenerDataSource(database.listener).<String, Order>build())
                 .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(100)).build());
         binary.put("k", new Order("o1", 3));
         assertThat(requireNonNull(binary.distributedPolicy().getFromStore("k")).value()).isEqualTo(new Order("o1", 3));
@@ -166,7 +167,7 @@ abstract class PostgresAdapterTest {
         // JSON (jsonb)
         DistributedCache<String, Order> json = track(DistributedCaffeine.newBuilder(
                         PostgresAdapter.newBuilder(database.dataSource, "adapter", table + "_json")
-                                .withListener(database.listener).<String, Order>build())
+                                .withListenerDataSource(database.listener).<String, Order>build())
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(new JacksonSerializer<>(Order.class, true)))
                 .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(100)).build());
@@ -192,34 +193,66 @@ abstract class PostgresAdapterTest {
     }
 
     @Test
-    void the_listener_can_be_given_as_jdbc_details() {
-        DistributedCache<String, String> writer = cache(Function.identity());
-        DistributedCache<String, String> holder = track(strings(PostgresAdapter.newBuilder(database.dataSource,
-                        "adapter", table)
-                .withListener(database.jdbcUrl(), database.username(),
-                        database.password())
-                .build()).build());
+    void listening_holds_one_connection_of_the_data_source_for_all_caches_and_gives_it_back_as_broken() {
+        String application = "dc-adapter-" + table;
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl(database.jdbcUrl());
+        config.setUsername(database.username());
+        config.setPassword(database.password());
+        config.addDataSourceProperty("ApplicationName", application);
+        // one connection for listening, one for everything else: a connection taken over and not given back, or
+        // given back and handed out again, would leave nothing to reconnect with
+        config.setMaximumPoolSize(2);
+        config.setConnectionTimeout(2_000);
+        HikariDataSource pool = track(new HikariDataSource(config));
+        DistributedCache<String, String> writer = track(strings(PostgresAdapter.newBuilder(pool, "adapter", table)
+                .build()).withDistributionMode(DistributionMode.NONE).build());
         writer.put("k", "old");
-        assertThat(holder.getIfPresent("k")).isEqualTo("old");
+        assertThat(listening(application)).as("nothing listens without distribution").isZero();
 
-        writer.put("k", "new");
+        DistributedCache<String, String> first = track(strings(PostgresAdapter.newBuilder(pool, "adapter", table)
+                .build()).build());
+        DistributedCache<String, String> second = track(strings(PostgresAdapter.newBuilder(pool, "adapter", table)
+                .build()).build());
+        assertThat(listening(application)).as("one session for both").isEqualTo(1);
+        for (int round = 0; round < 3; round++) {
+            String value = "round " + round;
+            assertThat(first.getIfPresent("k")).isNotNull();
+            assertThat(second.getIfPresent("k")).isNotNull();
+            writer.put("k", value);
+            await(() -> first.policy().getIfPresentQuietly("k") == null
+                    && second.policy().getIfPresentQuietly("k") == null);
+            assertThat(first.getIfPresent("k")).isEqualTo(value);
 
-        await(() -> holder.policy().getIfPresentQuietly("k") == null);
+            String terminated = listener(application);
+            database.execute("SELECT pg_terminate_backend(" + terminated + ")");
+            await(() -> listening(application) == 1 && !terminated.equals(listener(application))
+                    && first.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED
+                    && second.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
+        }
+        writer.put("k", "after the reconnects");
+        await(() -> first.policy().getIfPresentQuietly("k") == null
+                && second.policy().getIfPresentQuietly("k") == null);
     }
 
-    @Test
-    void without_distribution_no_listener_is_needed_and_with_it_a_missing_one_fails_the_build() {
-        PostgresAdapter<String, String> withoutListener = PostgresAdapter.newBuilder(
-                database.dataSource, "adapter", table).build();
-        DistributedCache<String, String> none = track(strings(withoutListener)
-                .withDistributionMode(DistributionMode.NONE).build());
-        none.put("k", "v");
-        assertThat(none.getIfPresent("k")).isEqualTo("v");
-        none.close();
+    // the process id of the session listening for an application
+    private String listener(String application) {
+        try {
+            return query("SELECT pid FROM pg_stat_activity WHERE application_name = '" + application
+                    + "' AND query LIKE 'LISTEN%'");
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
+        }
+    }
 
-        DistributedCaffeine<String, String> builder = strings(withoutListener);
-        assertThatThrownBy(builder::build).isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("no change feed").hasMessageContaining("withListener");
+    // the sessions of an application whose last statement was a LISTEN: those listening
+    private int listening(String application) {
+        try {
+            return Integer.parseInt(query("SELECT count(*) FROM pg_stat_activity WHERE application_name = '"
+                    + application + "' AND query LIKE 'LISTEN%'"));
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     @Test
@@ -309,7 +342,8 @@ abstract class PostgresAdapterTest {
         cache(Function.identity());
 
         DistributedCaffeine<String, byte[]> binary = DistributedCaffeine.newBuilder(PostgresAdapter.newBuilder(
-                        database.dataSource, "adapter", table).withListener(database.listener).<String, byte[]>build())
+                        database.dataSource, "adapter", table).withListenerDataSource(database.listener)
+                        .<String, byte[]>build())
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString()))
                 .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(100));
         assertThatThrownBy(binary::build)
@@ -352,8 +386,8 @@ abstract class PostgresAdapterTest {
                 .as("distinct caches, distinct channels").isNotEqualTo(longest.channel);
 
         // a mixed-case name survives as given
-        DistributedCache<String, String> mixed = track(strings(PostgresAdapter.newBuilder(
-                database.dataSource, "Adapter", "Mixed" + table).withListener(database.listener).build()).build());
+        DistributedCache<String, String> mixed = track(strings(PostgresAdapter.newBuilder(database.dataSource,
+                "Adapter", "Mixed" + table).withListenerDataSource(database.listener).build()).build());
         mixed.put("k", "v");
         assertThat(mixed.getIfPresent("k")).isEqualTo("v");
     }

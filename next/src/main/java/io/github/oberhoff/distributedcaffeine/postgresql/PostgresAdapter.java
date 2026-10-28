@@ -18,7 +18,6 @@ package io.github.oberhoff.distributedcaffeine.postgresql;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
-import io.r2dbc.spi.ConnectionFactory;
 import org.jspecify.annotations.Nullable;
 
 import javax.sql.DataSource;
@@ -27,19 +26,24 @@ import java.nio.charset.StandardCharsets;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Where one cache lives in PostgreSQL: a table (shared by several caches through the discriminator), read and
- * written through the user's JDBC {@link DataSource}, and listened to through an R2DBC connection factory.
+ * Where one cache lives in PostgreSQL: a table (shared by several caches through the discriminator), read, written
+ * and listened to through the user's JDBC {@link DataSource}.
  * <pre>{@code
  * PostgresAdapter<String, Order> adapter = PostgresAdapter.<String, Order>newBuilder(dataSource, "app", "cache")
  *     .withDiscriminator("orders")
- *     .withListener(jdbcUrl, user, password)
  *     .build();
  * }</pre>
  * One adapter per cache: {@code build()} of a second cache with the same adapter object fails while the first is
  * open.
  * <p>
- * Requires {@code org.postgresql:postgresql}; listening additionally requires {@code org.postgresql:r2dbc-postgresql}
- * (not needed with {@code DistributionMode.NONE}). PostgreSQL 9.6 or later; standbys are refused.
+ * Listening (every distribution mode but {@code DistributionMode.NONE}) holds one connection of the data source for
+ * as long as a cache listens through it: one per data source, shared by every cache using the same data source
+ * object. A pool's leak detection (such as HikariCP's {@code leakDetectionThreshold}) reports it as a leak, which it
+ * is not. A transaction-mode pooler (such as PgBouncer's {@code pool_mode = transaction}) cannot carry
+ * {@code LISTEN}, which the start detects: give such a setup a data source for listening of its own, reaching the
+ * database directly or through a session-mode pooler ({@link Builder#withListenerDataSource(DataSource)}).
+ * <p>
+ * Requires {@code org.postgresql:postgresql}, nothing else. PostgreSQL 9.6 or later; standbys are refused.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
@@ -56,7 +60,7 @@ public final class PostgresAdapter<K, V> implements Adapter<K, V> {
     private final String schemaName;
     private final String tableName;
     private final String discriminator;
-    private final @Nullable ConnectionFactory listenerConnectionFactory;
+    private final DataSource listenerDataSource;
     private final boolean schemaReset;
 
     private PostgresAdapter(Builder builder) {
@@ -64,14 +68,14 @@ public final class PostgresAdapter<K, V> implements Adapter<K, V> {
         this.schemaName = builder.schemaName;
         this.tableName = builder.tableName;
         this.discriminator = builder.discriminator;
-        this.listenerConnectionFactory = builder.listenerConnectionFactory;
+        this.listenerDataSource = builder.listenerDataSource != null ? builder.listenerDataSource : builder.dataSource;
         this.schemaReset = builder.schemaReset;
     }
 
     /**
      * Starts a builder for an adapter on the given table.
      *
-     * @param dataSource the data source for reads and writes (not a standby)
+     * @param dataSource the data source for reads, writes and listening (not a standby)
      * @param schemaName the schema of the table (at most 63 bytes, quoted, so case is kept)
      * @param tableName  the table (at most 63 bytes, quoted)
      * @return the builder
@@ -85,13 +89,12 @@ public final class PostgresAdapter<K, V> implements Adapter<K, V> {
         PostgresTable table = new PostgresTable(schemaName, tableName, discriminator, settings.keyFormat(),
                 settings.valueFormat());
         PostgresSchema.ensure(dataSource, table, schemaReset, settings.timeout());
-        return PostgresStore.of(dataSource, table, listenerConnectionFactory, settings.timeout());
+        return new PostgresStore(dataSource, listenerDataSource, table, settings.timeout());
     }
 
     @Override
     public String toString() {
-        return "PostgresAdapter[" + schemaName + "." + tableName + ", discriminator " + discriminator
-                + (listenerConnectionFactory == null ? ", without listener (withListener)" : "") + "]";
+        return "PostgresAdapter[" + schemaName + "." + tableName + ", discriminator " + discriminator + "]";
     }
 
     /**
@@ -103,7 +106,7 @@ public final class PostgresAdapter<K, V> implements Adapter<K, V> {
         private final String schemaName;
         private final String tableName;
         private String discriminator = DEFAULT_DISCRIMINATOR;
-        private @Nullable ConnectionFactory listenerConnectionFactory;
+        private @Nullable DataSource listenerDataSource;
         private boolean schemaReset;
 
         private Builder(DataSource dataSource, String schemaName, String tableName) {
@@ -130,33 +133,16 @@ public final class PostgresAdapter<K, V> implements Adapter<K, V> {
         }
 
         /**
-         * Sets the R2DBC connection factory to listen for notifications through (required unless the cache uses
-         * {@code DistributionMode.NONE}). Listening sessions are shared per connection factory (by identity), so
-         * pass the same object to every adapter of a database. It must reach the database directly or through a
-         * session-mode pooler: transaction-mode poolers cannot carry {@code LISTEN}, which the start detects.
+         * Sets a data source of its own to listen for notifications through, in place of the one for reads and
+         * writes. Optional: only for a data source that cannot carry {@code LISTEN}, such as one through a
+         * transaction-mode pooler; this one must reach the same database directly or through a session-mode pooler.
+         * Its connections must be pgjdbc's ({@code org.postgresql}), also behind a pool.
          *
-         * @param connectionFactory the connection factory (not a pool)
+         * @param listenerDataSource the data source to listen through
          * @return this builder
          */
-        public Builder withListener(ConnectionFactory connectionFactory) {
-            requireDriver("io.r2dbc.postgresql.PostgresqlConnectionFactory", "org.postgresql:r2dbc-postgresql");
-            this.listenerConnectionFactory = requireNonNull(connectionFactory, "connectionFactory cannot be null");
-            return this;
-        }
-
-        /**
-         * Sets the listener from JDBC connection details: {@code jdbc:postgresql://host:port/database?options}
-         * becomes {@code r2dbc:postgresql://...}. Every call creates a new connection factory, so for sharing one
-         * listening session between the caches of a database, create it once with {@link #withListener(ConnectionFactory)}.
-         *
-         * @param jdbcUrl  the JDBC URL
-         * @param user     the user
-         * @param password the password
-         * @return this builder
-         */
-        public Builder withListener(String jdbcUrl, String user, String password) {
-            requireDriver("io.r2dbc.postgresql.PostgresqlConnectionFactory", "org.postgresql:r2dbc-postgresql");
-            this.listenerConnectionFactory = PostgresListener.connectionFactory(jdbcUrl, user, password);
+        public Builder withListenerDataSource(DataSource listenerDataSource) {
+            this.listenerDataSource = requireNonNull(listenerDataSource, "listenerDataSource cannot be null");
             return this;
         }
 

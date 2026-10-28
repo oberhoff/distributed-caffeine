@@ -50,7 +50,7 @@ abstract class PostgresNotifyQueueTest {
     void a_write_that_cannot_be_announced_is_refused_as_certainly_not_written() throws Exception {
         try (DistributedCache<String, String> cache = DistributedCaffeine.<String, String>newBuilder(
                         PostgresAdapter.newBuilder(database.dataSource, "queue", "cache")
-                                .withListener(database.listener).build())
+                                .withListenerDataSource(database.listener).build())
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
                 .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(1_000))

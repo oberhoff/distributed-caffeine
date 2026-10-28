@@ -30,16 +30,10 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.testing.SilencingProxy;
-import io.r2dbc.postgresql.PostgresqlConnectionConfiguration;
-import io.r2dbc.postgresql.PostgresqlConnectionFactory;
-import io.r2dbc.spi.ConnectionFactory;
-import io.r2dbc.spi.ConnectionFactoryMetadata;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.postgresql.ds.PGSimpleDataSource;
-import org.reactivestreams.Publisher;
-import reactor.core.publisher.Mono;
 
 import javax.sql.DataSource;
 import java.lang.reflect.InvocationTargetException;
@@ -95,20 +89,12 @@ abstract class PostgresConnectionTest {
         return closeable;
     }
 
-    // a listener connection factory of its own, so that its session is not shared with other tests
-    private ConnectionFactory listener(String host, int port, String databaseName, String application) {
-        return new PostgresqlConnectionFactory(PostgresqlConnectionConfiguration.builder()
-                .host(host)
-                .port(port)
-                .username(database.username())
-                .password(database.password())
-                .database(databaseName)
-                .applicationName(application)
-                .connectTimeout(Duration.ofSeconds(5))
-                .build());
+    // a listener data source of its own, so that its session is not shared with other tests
+    private DataSource listener(String host, int port, String databaseName, String application) {
+        return database.direct(host, port, databaseName, application);
     }
 
-    private ConnectionFactory listener(String application) {
+    private DataSource listener(String application) {
         return listener(database.host(), database.port(),
                 database.databaseName(), application);
     }
@@ -117,8 +103,8 @@ abstract class PostgresConnectionTest {
         return "dc-connection-" + NAMES.incrementAndGet();
     }
 
-    private PostgresAdapter<String, String> adapter(DataSource dataSource, ConnectionFactory listener) {
-        return PostgresAdapter.newBuilder(dataSource, "connection", table).withListener(listener).build();
+    private PostgresAdapter<String, String> adapter(DataSource dataSource, DataSource listener) {
+        return PostgresAdapter.newBuilder(dataSource, "connection", table).withListenerDataSource(listener).build();
     }
 
     private DistributedCaffeine<String, String> strings(PostgresAdapter<String, String> adapter) {
@@ -132,7 +118,7 @@ abstract class PostgresConnectionTest {
                 .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000).withHeartbeatInterval(heartbeat));
     }
 
-    private DistributedCache<String, String> cache(ConnectionFactory listener) {
+    private DistributedCache<String, String> cache(DataSource listener) {
         return track(strings(adapter(database.dataSource, listener)).build());
     }
 
@@ -210,7 +196,8 @@ abstract class PostgresConnectionTest {
         config.setMaximumPoolSize(1);
         HikariDataSource pool = track(new HikariDataSource(config));
         DistributedCache<String, String> cache = track(strings(PostgresAdapter.newBuilder(pool, "connection", table)
-                .withListener(database.listener).build()).withStore(store -> store.withTimeout(Duration.ofSeconds(2)))
+                .withListenerDataSource(database.listener).build())
+                .withStore(store -> store.withTimeout(Duration.ofSeconds(2)))
                 .build());
         cache.put("k", "before");
 
@@ -239,7 +226,7 @@ abstract class PostgresConnectionTest {
         config.setPassword(database.password());
         config.setMaximumPoolSize(4);
         HikariDataSource pool = track(new HikariDataSource(config));
-        ConnectionFactory listener = listener("127.0.0.1", proxy.port(), database.databaseName(),
+        DataSource listener = listener("127.0.0.1", proxy.port(), database.databaseName(),
                 application());
         // the default heartbeat (10 s): a beat takes a few slow round trips, well within it
         Duration heartbeat = Duration.ofSeconds(10);
@@ -312,7 +299,7 @@ abstract class PostgresConnectionTest {
 
     @Test
     void a_listener_failing_on_a_notification_leaves_the_others_on_the_session_undisturbed() {
-        ConnectionFactory shared = listener(application());
+        DataSource shared = listener(application());
         AtomicInteger failed = new AtomicInteger();
         Store raw = track(adapter(database.dataSource, shared).createStore(StoreSettings.of(Format.TEXT, Format.TEXT)));
         track(((ChangeFeed) raw).subscribe(new ChangeListener() {
@@ -355,7 +342,7 @@ abstract class PostgresConnectionTest {
         config.setPassword(database.password());
         config.setMaximumPoolSize(2);
         HikariDataSource slowPool = track(new HikariDataSource(config));
-        ConnectionFactory shared = listener(application());
+        DataSource shared = listener(application());
         DistributedCache<String, String> writer = writer();
         // updates its copy by reading the new value, through a data source whose every round trip takes 2 s
         DistributedCache<String, String> slow = track(strings(adapter(slowPool, shared))
@@ -378,7 +365,7 @@ abstract class PostgresConnectionTest {
     @Test
     void the_shared_session_is_opened_once_and_closed_with_its_last_cache() {
         String application = application();
-        ConnectionFactory shared = listener(application);
+        DataSource shared = listener(application);
         DistributedCache<String, String> first = cache(shared);
         DistributedCache<String, String> second = cache(shared);
         assertThat(sessions(application)).isEqualTo(1);
@@ -400,7 +387,7 @@ abstract class PostgresConnectionTest {
     @Test
     void a_cache_joining_the_shared_session_while_it_reconnects_receives_what_is_written() {
         String application = application();
-        ConnectionFactory shared = listener(application);
+        DataSource shared = listener(application);
         DistributedCache<String, String> first = cache(shared);
         DistributedCache<String, String> writer = writer();
 
@@ -450,8 +437,8 @@ abstract class PostgresConnectionTest {
         writer.put("k", "old");
         assertThat(holder.getIfPresent("k")).isEqualTo("old");
 
-        // a backend message of a type that does not exist: the session fails on its own network thread
-        proxy.sendToClients(new byte[]{'~', 0, 0, 0, 4});
+        // a backend message whose length is shorter than the length itself: the session fails on its own thread
+        proxy.sendToClients(new byte[]{'~', 0, 0, 0, 0});
         writer.put("k", "written after the broken message");
 
         awaitState(holder, SynchronizationState.SYNCHRONIZED);
@@ -487,21 +474,18 @@ abstract class PostgresConnectionTest {
                 + application + "'");
     }
 
-    // a listener connection factory whose next connects fail, as long as failures are left
-    private static ConnectionFactory failing(ConnectionFactory real, AtomicInteger failures, AtomicInteger attempts) {
-        return new ConnectionFactory() {
-            @Override
-            public Publisher<? extends io.r2dbc.spi.Connection> create() {
-                attempts.incrementAndGet();
-                return failures.getAndUpdate(n -> Math.max(0, n - 1)) > 0
-                        ? Mono.error(new IllegalStateException("injected: cannot connect")) : real.create();
-            }
-
-            @Override
-            public ConnectionFactoryMetadata getMetadata() {
-                return real.getMetadata();
-            }
-        };
+    // a listener data source whose next connects fail, as long as failures are left
+    private DataSource failing(DataSource real, AtomicInteger failures, AtomicInteger attempts) {
+        return (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("getConnection")) {
+                        attempts.incrementAndGet();
+                        if (failures.getAndUpdate(n -> Math.max(0, n - 1)) > 0) {
+                            throw new SQLException("injected: cannot connect", "08001");
+                        }
+                    }
+                    return invoke(real, method, args);
+                });
     }
 
     // the database as a standby would answer it: pg_is_in_recovery() is true. Fresh physical connections, so that

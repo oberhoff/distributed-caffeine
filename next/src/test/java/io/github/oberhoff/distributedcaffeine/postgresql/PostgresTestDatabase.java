@@ -21,10 +21,8 @@ import com.github.dockerjava.api.model.Ports.Binding;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import io.github.oberhoff.distributedcaffeine.testing.Ports;
-import io.r2dbc.postgresql.PostgresqlConnectionConfiguration;
-import io.r2dbc.postgresql.PostgresqlConnectionFactory;
-import io.r2dbc.spi.ConnectionFactory;
 import org.jspecify.annotations.Nullable;
+import org.postgresql.ds.PGSimpleDataSource;
 import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.Container.ExecResult;
 import org.testcontainers.containers.GenericContainer;
@@ -32,6 +30,7 @@ import org.testcontainers.containers.Network;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.images.builder.Transferable;
 
+import javax.sql.DataSource;
 import java.io.IOException;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -51,7 +50,8 @@ import static java.util.Objects.requireNonNull;
  * The PostgreSQL store of the topology running now, started by its test class before its suites and stopped after
  * them ({@link PostgresTopologyTests}): one at a time, so the suites find it with {@link #get()}. Every server on a
  * network of its own and a fixed host port, which it keeps across a restart; a pooled JDBC data source and one
- * listener connection factory (so that the suites share the listening session, as caches of one database do).
+ * listener data source, direct and named (so that the suites share the listening session, as caches of one database
+ * do, and a test can terminate it).
  * Built per topology:
  * <ul>
  *     <li>single server, and one with a notification queue of 256 pages (PostgreSQL 17 or later);</li>
@@ -91,7 +91,7 @@ final class PostgresTestDatabase implements AutoCloseable {
     private int standbyPort;
     private boolean broken;
     HikariDataSource dataSource;
-    ConnectionFactory listener;
+    DataSource listener;
 
     private PostgresTestDatabase(String image, PostgresTopology topology) {
         this.image = image;
@@ -153,14 +153,7 @@ final class PostgresTestDatabase implements AutoCloseable {
         config.setMaximumPoolSize(16);
         config.setInitializationFailTimeout(-1);
         dataSource = new HikariDataSource(config);
-        listener = new PostgresqlConnectionFactory(PostgresqlConnectionConfiguration.builder()
-                .host(host())
-                .port(primaryPort)
-                .username(USER)
-                .password(PASSWORD)
-                .database(DATABASE)
-                .applicationName(LISTENER_APPLICATION)
-                .build());
+        listener = direct(host(), primaryPort, DATABASE, LISTENER_APPLICATION);
         broken = false;
     }
 
@@ -248,6 +241,27 @@ final class PostgresTestDatabase implements AutoCloseable {
 
     String host() {
         return "localhost";
+    }
+
+    /**
+     * A data source of plain pgjdbc connections, no pool, named so that its sessions can be found: to listen through.
+     *
+     * @param host         the host
+     * @param port         the port
+     * @param databaseName the database
+     * @param application  the application name of its sessions
+     * @return the data source
+     */
+    DataSource direct(String host, int port, String databaseName, String application) {
+        PGSimpleDataSource direct = new PGSimpleDataSource();
+        direct.setServerNames(new String[]{host});
+        direct.setPortNumbers(new int[]{port});
+        direct.setDatabaseName(databaseName);
+        direct.setUser(USER);
+        direct.setPassword(PASSWORD);
+        direct.setApplicationName(application);
+        direct.setConnectTimeout(5);
+        return direct;
     }
 
     int port() {
