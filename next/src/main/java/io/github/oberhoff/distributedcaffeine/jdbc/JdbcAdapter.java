@@ -27,14 +27,14 @@ import static java.util.Objects.requireNonNull;
 
 /**
  * An adapter for SQL databases reached through plain JDBC (VISION.md, "Design study: portable store primitives",
- * step 5): it implements only the primitives of {@link PrimitiveStore} in portable SQL (sequences, {@code UPDATE}
- * then {@code INSERT} for an upsert, {@code INSERT ... SELECT} for a conditional insert), which builds the rest of
+ * step 5): it implements only the primitives of {@link PrimitiveStore} in portable SQL ({@code UPDATE} then
+ * {@code INSERT} for an upsert, a plain {@code INSERT} for a conditional one), which builds the rest of
  * the store from them, and the cache polls it for changes, having no notifications. What SQL leaves to each database
- * (the types of bytes and times, the time now) comes from the product name. Tested on MariaDB (10.3 or later, which
- * has sequences); databases speaking the standard (H2, HSQLDB) should work but are untested. Not MySQL (no
- * sequences), PostgreSQL (its own adapter), SQL Server, Oracle or DB2 (their own types or syntax), which would need
- * a dialect each. A table holds the caches of one or more discriminators; it, its index and its sequence are created
- * if missing.
+ * (the types of bytes and times, the time now) comes from the product name. Tested on MariaDB (10.3 or later);
+ * databases speaking the standard (H2, HSQLDB) should work but are untested. Not MySQL (untested), PostgreSQL (its
+ * own adapter), SQL Server, Oracle or DB2 (their own types or syntax), which would need a dialect each. A table holds
+ * the caches of one or more discriminators; it and its index are created if missing (a table of the layout before
+ * 2026-10-28, with stamp and basis columns, is refused: drop it while no cache uses it).
  * <pre>{@code
  * DistributedCaffeine.newBuilder(JdbcAdapter.newBuilder(dataSource, "orders_cache").build())
  *     .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(100_000))

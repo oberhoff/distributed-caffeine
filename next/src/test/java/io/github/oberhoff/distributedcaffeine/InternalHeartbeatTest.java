@@ -28,18 +28,21 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class InternalHeartbeatTest {
 
+    // the version of the last beat sent
     private final AtomicLong version = new AtomicLong();
     private final AtomicInteger silenced = new AtomicInteger();
     private final AtomicInteger resumed = new AtomicInteger();
-    private final InternalHeartbeat heartbeat = new InternalHeartbeat(version::incrementAndGet,
-            silenced::incrementAndGet, resumed::incrementAndGet);
+    private final InternalHeartbeat heartbeat = new InternalHeartbeat(beat -> {
+        version.set(beat);
+        return true;
+    }, silenced::incrementAndGet, resumed::incrementAndGet);
 
     @Test
     void a_beat_announced_before_the_next_tick_keeps_the_feed_up() {
         heartbeat.tick();
-        heartbeat.received(1);
+        heartbeat.received(version.get());
         heartbeat.tick();
-        heartbeat.received(2);
+        heartbeat.received(version.get());
         heartbeat.tick();
 
         assertThat(heartbeat.isSilent()).isFalse();
@@ -47,9 +50,29 @@ class InternalHeartbeatTest {
     }
 
     @Test
-    void a_later_beat_of_another_instance_proves_the_own_one_arrived() {
+    void the_beats_continue_one_incarnation() {
         heartbeat.tick();
-        heartbeat.received(5); // per key in commit order: version 1 came before
+        long first = version.get();
+        heartbeat.tick();
+
+        assertThat(version.get()).isEqualTo(InternalVersion.next(first));
+    }
+
+    @Test
+    void a_beat_of_another_instance_proves_nothing_about_the_own_one() {
+        heartbeat.tick();
+        heartbeat.received(InternalVersion.fresh()); // another incarnation: no order against the own beat
+
+        heartbeat.tick();
+
+        assertThat(heartbeat.isSilent()).isTrue();
+        assertThat(silenced).hasValue(1);
+    }
+
+    @Test
+    void a_later_own_beat_proves_the_earlier_one_arrived() {
+        heartbeat.tick();
+        heartbeat.received(InternalVersion.next(version.get())); // per key in commit order
 
         heartbeat.tick();
 
@@ -65,8 +88,8 @@ class InternalHeartbeatTest {
         assertThat(heartbeat.isSilent()).isTrue();
         assertThat(silenced).hasValue(1);
 
-        heartbeat.received(1);
-        heartbeat.received(3);
+        heartbeat.received(version.get());
+        heartbeat.received(InternalVersion.fresh());
 
         assertThat(heartbeat.isSilent()).isFalse();
         assertThat(resumed).hasValue(1);
@@ -74,10 +97,10 @@ class InternalHeartbeatTest {
 
     @Test
     void no_beat_while_the_store_does_not_answer_and_so_no_silence() {
-        InternalHeartbeat failing = new InternalHeartbeat(() -> {
+        InternalHeartbeat failing = new InternalHeartbeat(beat -> {
             throw new IllegalStateException("store down");
         }, silenced::incrementAndGet, resumed::incrementAndGet);
-        InternalHeartbeat refused = new InternalHeartbeat(() -> 0, silenced::incrementAndGet,
+        InternalHeartbeat refused = new InternalHeartbeat(beat -> false, silenced::incrementAndGet,
                 resumed::incrementAndGet);
 
         failing.tick();

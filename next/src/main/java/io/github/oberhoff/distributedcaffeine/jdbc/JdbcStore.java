@@ -47,13 +47,13 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-// The store of one cache on a table: the primitives, in plain JDBC and portable SQL (sequences, UPDATE then INSERT
-// for an upsert, INSERT ... SELECT for a conditional insert; VISION.md, "Design study", step 5), each in a transaction
-// with the read of the version it wrote, as SQL has no portable RETURNING. Versions and stamps come from one sequence,
-// so a new row starts above every earlier version of its id without any clock; the write time, for ages, is the
-// database's clock, in UTC. What SQL does not standardise (the type of bytes and times, the time now) comes from a
-// dialect, by the database's product name. Keys and values are stored as bytes, whatever the format. Tested on
-// MariaDB.
+// The store of one cache on a table: the primitives, in plain JDBC and portable SQL (UPDATE then INSERT for an
+// upsert, INSERT ... SELECT for a conditional insert; VISION.md, "Design study", step 5), each in a transaction of its
+// own. Versions are the core's, stored as given and compared for equality, so a write needs no read back (SQL has no
+// portable RETURNING); the write time, for ages, is the database's clock, in UTC, and every read or scan measures the
+// ages of its rows against one reading of it, so that they compare with the control row's (invalidateAll). What SQL
+// does not standardise (the type of bytes and times, the time now) comes from a dialect, by the database's product
+// name. Keys and values are stored as bytes, whatever the format. Tested on MariaDB.
 @SuppressWarnings({"SqlNoDataSourceInspection", "java:S2077"}) // the SQL runs against the user's database; quoted names
 final class JdbcStore extends PrimitiveStore {
 
@@ -62,7 +62,6 @@ final class JdbcStore extends PrimitiveStore {
     private final DataSource dataSource;
     private final Dialect dialect;
     private final String table;
-    private final String sequence;
     private final String discriminator;
     private final int timeoutSeconds;
 
@@ -70,7 +69,6 @@ final class JdbcStore extends PrimitiveStore {
         this.dataSource = dataSource;
         this.dialect = dialect;
         this.table = table;
-        this.sequence = table + "_stamps";
         this.discriminator = discriminator;
         this.timeoutSeconds = (int) Math.max(1, Math.min(Integer.MAX_VALUE, (timeout.toMillis() + 999) / 1_000));
     }
@@ -121,12 +119,14 @@ final class JdbcStore extends PrimitiveStore {
         }
     }
 
-    // the schema: the table, its index for scans by write time, and the sequence; created where missing. Returns
-    // the database's dialect
+    // the schema: the table and its index for scans by write time, created where missing. A table of the layout
+    // before 2026-10-28 (with stamp and basis columns for the cut-off of invalidateAll) is refused, naming the
+    // remedy: its rows cannot be written without them. Returns the database's dialect
     static Dialect ensure(DataSource dataSource, String table) {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             Dialect dialect = Dialect.of(connection);
             if (exists(connection, table)) {
+                requireLayout(connection, table);
                 return dialect;
             }
             try {
@@ -139,11 +139,8 @@ final class JdbcStore extends PrimitiveStore {
                             state VARCHAR(16) NOT NULL,
                             version BIGINT NOT NULL,
                             write_time %3$s NOT NULL,
-                            stamp BIGINT NOT NULL,
-                            basis BIGINT NOT NULL,
                             PRIMARY KEY (discriminator, id))""".formatted(table, dialect.bytes, dialect.timestamp));
                 statement.execute("CREATE INDEX %1$s_written ON %1$s (discriminator, write_time)".formatted(table));
-                statement.execute("CREATE SEQUENCE %s_stamps".formatted(table));
             } catch (SQLException e) {
                 if (!exists(connection, table)) { // not just another instance creating it at the same time
                     throw e;
@@ -152,6 +149,18 @@ final class JdbcStore extends PrimitiveStore {
             return dialect;
         } catch (SQLException e) {
             throw new StoreException("Creating the table " + table + " failed: " + e.getMessage(), e, false);
+        }
+    }
+
+    private static void requireLayout(Connection connection, String table) throws SQLException {
+        try (ResultSet columns = connection.getMetaData().getColumns(connection.getCatalog(), null, "%", "%")) {
+            while (columns.next()) {
+                if (table.equalsIgnoreCase(columns.getString("TABLE_NAME"))
+                        && "stamp".equalsIgnoreCase(columns.getString("COLUMN_NAME"))) {
+                    throw new StoreException("The table " + table + " has the layout of an earlier version (stamp "
+                            + "and basis columns); drop it while no cache uses it, and it is created anew", false);
+                }
+            }
         }
     }
 
@@ -176,7 +185,7 @@ final class JdbcStore extends PrimitiveStore {
         List<String> all = new ArrayList<>(hashes);
         for (int from = 0; from < all.size(); from += CHUNK) {
             List<String> chunk = all.subList(from, Math.min(all.size(), from + CHUNK));
-            String sql = "SELECT id, k, v, state, version, write_time, stamp, %s, basis FROM %s WHERE "
+            String sql = "SELECT id, k, v, state, version, write_time, %s FROM %s WHERE "
                     .formatted(dialect.now, table) + "discriminator = ? AND id IN (" + String.join(", ",
                     Collections.nCopies(chunk.size(), "?")) + ")";
             rows.putAll(run(Kind.READ, connection -> {
@@ -193,8 +202,7 @@ final class JdbcStore extends PrimitiveStore {
                             byte[] value = state == State.VALUE ? resultSet.getBytes(3) : null;
                             String hash = resultSet.getString(1);
                             found.put(hash, new Row(hash, key == null ? new byte[0] : key, value, state,
-                                    resultSet.getLong(5), age(resultSet, 6, 8), resultSet.getLong(7),
-                                    resultSet.getLong(9)));
+                                    resultSet.getLong(5), age(resultSet, 6, 7)));
                         }
                     }
                 }
@@ -205,15 +213,12 @@ final class JdbcStore extends PrimitiveStore {
     }
 
     @Override
-    protected List<PrimitiveStore.Head> scanRows(@Nullable State state) {
-        String sql = ("SELECT id, state, version, write_time, stamp, %s, basis FROM %s WHERE "
-                + "discriminator = ?").formatted(dialect.now, table) + (state == null ? "" : " AND state = ?");
+    protected List<PrimitiveStore.Head> scanRows() {
+        String sql = "SELECT id, state, version, write_time, %s FROM %s WHERE discriminator = ?"
+                .formatted(dialect.now, table);
         return run(Kind.READ, connection -> {
             try (PreparedStatement statement = prepare(connection, sql)) {
                 statement.setString(1, discriminator);
-                if (state != null) {
-                    statement.setString(2, state.name());
-                }
                 return heads(statement);
             }
         });
@@ -229,8 +234,8 @@ final class JdbcStore extends PrimitiveStore {
                 resultSet.next();
                 now = dialect.time(resultSet, 1);
             }
-            String sql = ("SELECT id, state, version, write_time, stamp, %s, basis FROM %s "
-                    + "WHERE discriminator = ? AND write_time > ?").formatted(dialect.now, table);
+            String sql = "SELECT id, state, version, write_time, %s FROM %s WHERE discriminator = ? AND write_time > ?"
+                    .formatted(dialect.now, table);
             try (PreparedStatement statement = prepare(connection, sql)) {
                 statement.setString(1, discriminator);
                 statement.setObject(2, dialect.parameter(now.minus(within.toNanos() / 1_000, ChronoUnit.MICROS)));
@@ -244,57 +249,53 @@ final class JdbcStore extends PrimitiveStore {
         try (ResultSet resultSet = statement.executeQuery()) {
             while (resultSet.next()) {
                 heads.add(new PrimitiveStore.Head(resultSet.getString(1), State.valueOf(resultSet.getString(2)),
-                        resultSet.getLong(3), age(resultSet, 4, 6), resultSet.getLong(5), resultSet.getLong(7)));
+                        resultSet.getLong(3), age(resultSet, 4, 5)));
             }
         }
         return heads;
     }
 
+    // the age against the statement's one reading of the clock, the same for every row it returns
     private Duration age(ResultSet resultSet, int writeTime, int now) throws SQLException {
         Duration age = Duration.between(dialect.time(resultSet, writeTime), dialect.time(resultSet, now));
         return age.isNegative() ? Duration.ZERO : age;
     }
 
-    // writes: the statement and the read of the version it wrote, in one transaction
+    // writes: each in one transaction; whether a conditional one applied is its update count
 
     // UPDATE, and INSERT where no row matched; one inserted meanwhile by another instance is updated after all, in
-    // the same transaction (no portable SQL upserts: MERGE is not MariaDB's, ON DUPLICATE KEY not the standard's)
+    // the same transaction (no portable SQL upserts: MERGE is not MariaDB's, ON DUPLICATE KEY not the standard's).
+    // A null key keeps the row's key (a tombstone)
     @Override
-    protected long upsertRow(String hash, byte[] key, byte @Nullable [] value, State state) {
-        String update = ("UPDATE %s SET k = ?, v = ?, state = ?, basis = ?, version = version + 1, write_time = %s, "
-                + "stamp = NEXT VALUE FOR %s WHERE discriminator = ? AND id = ?")
-                .formatted(table, dialect.now, sequence);
-        String insert = ("INSERT INTO %1$s (discriminator, id, k, v, state, basis, version, write_time, stamp) VALUES "
-                + "(?, ?, ?, ?, ?, ?, NEXT VALUE FOR %2$s, %3$s, NEXT VALUE FOR %2$s)")
-                .formatted(table, sequence, dialect.now);
-        @Nullable Long version = run(Kind.WRITE, connection -> {
-            if (updated(connection, update, hash, key, value, state)) {
-                return version(connection, hash);
+    protected void upsertRow(String hash, byte @Nullable [] key, byte @Nullable [] value, State state, long version) {
+        String update = ("UPDATE %s SET k = COALESCE(?, k), v = ?, state = ?, version = ?, write_time = %s "
+                + "WHERE discriminator = ? AND id = ?").formatted(table, dialect.now);
+        String insert = ("INSERT INTO %s (discriminator, id, k, v, state, version, write_time) VALUES "
+                + "(?, ?, ?, ?, ?, ?, %s)").formatted(table, dialect.now);
+        this.<@Nullable Void>run(Kind.WRITE, connection -> {
+            if (updated(connection, update, hash, key, value, state, version)) {
+                return null;
             }
             try (PreparedStatement statement = prepare(connection, insert)) {
                 statement.setString(1, discriminator);
                 statement.setString(2, hash);
                 bind(statement, 3, key, value, state);
-                statement.setLong(6, Row.NO_BASIS);
+                statement.setLong(6, version);
                 statement.executeUpdate();
             } catch (SQLException e) {
-                if (!isDuplicate(e) || !updated(connection, update, hash, key, value, state)) {
+                if (!isDuplicate(e) || !updated(connection, update, hash, key, value, state, version)) {
                     throw e;
                 }
             }
-            return version(connection, hash);
+            return null;
         });
-        if (version == null) {
-            throw new StoreException("An upsert of " + hash + " left no row", false);
-        }
-        return version;
     }
 
-    private boolean updated(Connection connection, String update, String hash, byte[] key, byte @Nullable [] value,
-                            State state) throws SQLException {
+    private boolean updated(Connection connection, String update, String hash, byte @Nullable [] key,
+                            byte @Nullable [] value, State state, long version) throws SQLException {
         try (PreparedStatement statement = prepare(connection, update)) {
             bind(statement, 1, key, value, state);
-            statement.setLong(4, Row.NO_BASIS);
+            statement.setLong(4, version);
             statement.setString(5, discriminator);
             statement.setString(6, hash);
             return statement.executeUpdate() > 0;
@@ -306,66 +307,41 @@ final class JdbcStore extends PrimitiveStore {
                 || (e.getSQLState() != null && e.getSQLState().startsWith("23"));
     }
 
-    // conditional writes refuse a basis below the cut-off in the statement that writes (Store#checksBasis); one
-    // committing at once with an invalidateAll may pass it, and is hidden by its basis then
     @Override
-    public boolean checksBasis() {
-        return true;
-    }
-
-    // the basis is at least the cut-off; binds the basis and the discriminator. Through a derived table, which a
-    // database refusing a subquery on the table a statement writes (MariaDB before 10.3.2) accepts too
-    private String decidedUnderCutoff() {
-        return ("? >= COALESCE((SELECT c.stamp FROM (SELECT stamp FROM %s WHERE discriminator = ? AND id = '%s') c), "
-                + "0)").formatted(table, CONTROL_ID);
-    }
-
-    @Override
-    protected @Nullable Long replaceRow(String hash, long version, byte[] key, byte @Nullable [] value,
-                                        State state, long basis) {
-        String sql = ("UPDATE %s SET k = ?, v = ?, state = ?, basis = ?, version = version + 1, "
-                + "write_time = %s, stamp = NEXT VALUE FOR %s WHERE discriminator = ? AND id = ? "
-                + "AND version = ? AND %s").formatted(table, dialect.now, sequence, decidedUnderCutoff());
+    protected boolean replaceRow(String hash, long expected, long version, byte @Nullable [] key,
+                                 byte @Nullable [] value, State state) {
+        String sql = ("UPDATE %s SET k = COALESCE(?, k), v = ?, state = ?, version = ?, write_time = %s "
+                + "WHERE discriminator = ? AND id = ? AND version = ?").formatted(table, dialect.now);
         return run(Kind.WRITE, connection -> {
             try (PreparedStatement statement = prepare(connection, sql)) {
                 bind(statement, 1, key, value, state);
-                statement.setLong(4, basis);
+                statement.setLong(4, version);
                 statement.setString(5, discriminator);
                 statement.setString(6, hash);
-                statement.setLong(7, version);
-                statement.setLong(8, basis);
-                statement.setString(9, discriminator);
-                if (statement.executeUpdate() == 0) {
-                    return null;
-                }
+                statement.setLong(7, expected);
+                return statement.executeUpdate() > 0;
             }
-            return version(connection, hash);
         });
     }
 
+    // a plain INSERT: the primary key refuses a second row of the id, which is the answer
     @Override
-    protected @Nullable Long insertRow(String hash, byte[] key, byte @Nullable [] value, State state,
-                                       long basis) {
-        String sql = ("INSERT INTO %1$s (discriminator, id, k, v, state, basis, version, write_time, stamp) SELECT "
-                + "?, ?, ?, ?, ?, ?, NEXT VALUE FOR %2$s, %3$s, NEXT VALUE FOR %2$s FROM (SELECT 1 AS x) one "
-                + "WHERE %4$s").formatted(table, sequence, dialect.now, decidedUnderCutoff());
+    protected boolean insertRow(String hash, long version, byte @Nullable [] key, byte @Nullable [] value,
+                                State state) {
+        String sql = ("INSERT INTO %s (discriminator, id, k, v, state, version, write_time) VALUES "
+                + "(?, ?, ?, ?, ?, ?, %s)").formatted(table, dialect.now);
         try {
             return run(Kind.INSERT, connection -> {
                 try (PreparedStatement statement = prepare(connection, sql)) {
                     statement.setString(1, discriminator);
                     statement.setString(2, hash);
                     bind(statement, 3, key, value, state);
-                    statement.setLong(6, basis);
-                    statement.setLong(7, basis);
-                    statement.setString(8, discriminator);
-                    if (statement.executeUpdate() == 0) {
-                        return null;
-                    }
+                    statement.setLong(6, version);
+                    return statement.executeUpdate() > 0;
                 }
-                return version(connection, hash);
             });
         } catch (Duplicate e) {
-            return null;
+            return false;
         }
     }
 
@@ -389,22 +365,11 @@ final class JdbcStore extends PrimitiveStore {
 
     // helpers
 
-    private static void bind(PreparedStatement statement, int index, byte[] key, byte @Nullable [] value, State state)
-            throws SQLException {
+    private static void bind(PreparedStatement statement, int index, byte @Nullable [] key, byte @Nullable [] value,
+                             State state) throws SQLException {
         statement.setBytes(index, key);
         statement.setBytes(index + 1, value);
         statement.setString(index + 2, state.name());
-    }
-
-    private @Nullable Long version(Connection connection, String hash) throws SQLException {
-        try (PreparedStatement statement = prepare(connection,
-                "SELECT version FROM %s WHERE discriminator = ? AND id = ?".formatted(table))) {
-            statement.setString(1, discriminator);
-            statement.setString(2, hash);
-            try (ResultSet resultSet = statement.executeQuery()) {
-                return resultSet.next() ? resultSet.getLong(1) : null;
-            }
-        }
     }
 
     private PreparedStatement prepare(Connection connection, String sql) throws SQLException {

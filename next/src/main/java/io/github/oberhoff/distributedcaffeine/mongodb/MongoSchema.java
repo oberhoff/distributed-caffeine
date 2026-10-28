@@ -30,7 +30,6 @@ import com.mongodb.client.model.Updates;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import org.bson.BsonDocument;
 import org.bson.BsonInt32;
-import org.bson.BsonInt64;
 import org.bson.BsonString;
 import org.bson.Document;
 
@@ -44,7 +43,7 @@ import java.util.function.Function;
 // collections are refused; a collection with the schema marker of this version is used, a missing one is created
 // (the marker document first, which creates the collection, so a concurrent start sees either nothing or the
 // marker), one without the marker is refused or dropped and recreated with withSchemaReset(). A missing index only
-// warns. The cache's control document is created if missing.
+// warns.
 final class MongoSchema {
 
     private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine.mongodb");
@@ -97,8 +96,6 @@ final class MongoSchema {
                 collection.createIndex(INDEX, new IndexOptions().name("distributed-caffeine"));
             }
             checkIndex(collection, location);
-            collection.updateOne(Filters.eq("_id", location.controlId), Updates.setOnInsert("t", new BsonInt64(0)),
-                    new UpdateOptions().upsert(true));
         } catch (MongoException e) {
             throw new StoreException("Checking collection " + location + " failed: " + e.getMessage(), e, false);
         }

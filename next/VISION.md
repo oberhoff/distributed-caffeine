@@ -3115,7 +3115,92 @@ based on its docs (`Tagging.md`, `Clear.md`, `AutoRecovery.md`, `Backplane.md`),
     the node checks whether L2 changed in the meantime. This could matter for the later bus SPI (failed publishes).
     Our writes fail to the caller with an unknown outcome, by design.
 
+### Target design: `invalidateAll` by the store's time, hidden on read (decided 2026-10-28, not built; supersedes the sweep)
+
+**Decided 2026-10-28:** `invalidateAll` writes one time and hides every row written at or before it; maintenance
+deletes those rows later. This replaces the synchronous sweep of "Target design: a thin SPI" below, and the stamp, the
+basis and the basis check of today's cut-off. It is what memcached's `flush_all` and Varnish's bans do, applied to the
+store.
+
+**Why not the sweep.** It is O(n) for the caller (about 4–9 µs per row, a minute or so for 10 million rows). An O(1)
+`invalidateAll` only moves that work into the background, but the caller no longer waits, and nothing is unusual
+about that: every O(1) design in the industry cleans up lazily.
+
+**What others do and accept** (researched 2026-10-28):
+
+| System | Invalidate-all | A write pays | Accepted |
+|---|---|---|---|
+| memcached `flush_all` | one server time ("oldest live"); older items expired on access, reclaimed by the LRU | nothing | the server clock; racing sets survive |
+| Varnish bans | a ban list with times, checked on lookup; the ban lurker cleans in the background | nothing | the server clock |
+| FusionCache `Clear()` | a special tag's timestamp; older entries hidden on read; no purge, entries die by TTL | nothing | the writers' clocks (skew loses or keeps entries); racing loads survive |
+| Redisson local cached map | deletes the hash, publishes a clear message | nothing | O(n) in Redis; local copies stale for the message delay |
+| Spring `RedisCache.clear()` | `SCAN` plus `DEL` in batches | nothing | O(n), half cleared while it runs |
+| Hazelcast, Infinispan | removes every entry, near caches invalidated by events | nothing | O(n), not atomic across keys |
+| Caffeine, Guava | key by key | nothing | O(n); loads in flight explicitly undefined |
+| namespace versioning (memcached pattern) | bump a version key carried by every key | **an extra read per operation** | old entries die by TTL |
+
+Common ground: racing loads and writes survive everywhere; the O(1) designs trust a server clock and clean up lazily;
+none of them makes a write read anything extra, except namespace versioning. Requirement here too: **a `put` reads
+nothing extra.**
+
+**How.**
+
+1. **`invalidateAll()`:** an unconditional `write` of the cache's control row, a reserved key (the core refuses `#`
+   hashes). The time the store writes it at is the cut-off. It announces one `INVALIDATED_ALL`, which clears every
+   L1 and moves the epoch on. O(1), whatever the size of the cache.
+2. **A `put`** writes as now, stamped with the store's time (its write time). It reads nothing extra.
+3. **Reads** carry the control row: the core adds its key to every batch it reads (Redis `MGET`, DynamoDB
+   `BatchGetItem`, SQL `IN`, MongoDB `$in`), so it costs no round trip; a read reports the cut-off even when no row
+   is found. A row **at least as old as the control row** counts as missing. The comparison uses the ages every store
+   already reports for the maximum age, all from one clock reading within one read, so the core needs no absolute
+   time and the SPI no new field.
+4. **Maintenance** deletes the hidden rows in small paced batches, in the background; size pruning ignores them.
+   Nothing stays in the store for ever, and nobody waits for it.
+
+It fits the thin SPI: the control row is one more key, written and read through `write` and `read`. A store has
+nothing new to implement.
+
+**What goes:** the stamp column and its sequence (PostgreSQL), the basis and `Store#checksBasis`, the cut-off and
+stamps in `ReadResult`/`VersionsResult`/`Row`, `Store#invalidateAll` as a method of its own, `Row#visible`, and the
+2ε wait. Ages replace stamps for the comparison.
+
+**What we accept, as the industry does.**
+
+- **A racing load or `compute`:** one that read before the clear and commits after it is stamped after it, so its
+  value survives, stale until the maximum age or the next write of the key. Only the writer knows its decision is
+  older than the clear; a timestamp says when a row was written, not when its value was decided. Caffeine documents
+  loads in flight during `invalidateAll` as undefined; memcached, Redis, Hazelcast and FusionCache let them survive.
+  Rare (a load must overlap the clear) and bounded. The repair is for later (build plan, "Later").
+- **The clock.** Stores with a time that never goes backwards (MongoDB's cluster time, a monotonic counter) have no
+  caveat. With a wall clock (PostgreSQL's `now()`, Redis `TIME`), a step back (an NTP correction, a failover to a
+  standby whose clock is behind) could make a `put` just after a clear look older than it and hide it.
+  `invalidateAll` therefore waits the documented maximum skew (milliseconds) before returning: still O(1), the `put`
+  untouched. memcached and Varnish trust the server clock the same way.
+- **PostgreSQL's `now()`** is the transaction's start: a write whose statement began before the clear but committed
+  after it counts as before it. Linearizable, since the two overlapped; the window is one short statement.
+- **Other instances** clear L1 within the delivery delay, the bound every change has.
+
+**The repair, for later.** A load or `compute` knows the cut-off from its own read (no extra read: the control row
+comes with it). Generic: each instance keeps a short log of its recent conditional writes, and when it learns a newer
+cut-off (the `INVALIDATED_ALL` message, a poll, a read) it tombstones those decided under an older one, each
+conditionally on its own version: stale at most for the delivery delay. Optional capability for stores that can (SQL):
+the conditional write's statement checks the control row itself and conflicts if the cut-off moved, with no window at
+all. `NONE` mode would read the control row after a conditional write, or keep accepting the race. A `put` is never
+involved: it is not based on a read.
+
+**Compared.**
+
+| | Caller waits | Extra per `put` | Extra per row | Racing loads |
+|---|---|---|---|---|
+| today's cut-off | no | nothing | stamp and basis | exact |
+| the sweep | yes, O(n) | nothing | nothing | exact |
+| **this design** | **no** | **nothing** | **nothing (write time and age reused)** | **survive until the maximum age, as everywhere; the repair later makes them exact on SQL and bounded by the delivery delay elsewhere** |
+
 ### Target design: a thin SPI, versions in the core (decided 2026-10-26, not built; supersedes the target designs below)
+
+**Superseded in part 2026-10-28:** `invalidateAll` by a sweep is replaced by the store's time, hidden on read; see
+"Target design: `invalidateAll` by the store's time, hidden on read" above. The rest of this section stands, and
+its part on versions in the core is built (build plan, step 2).
 
 **Decided the same day: `invalidateAll` with Caffeine's semantics, by a sweep.** This supersedes, below:
 
@@ -4002,7 +4087,7 @@ each with the in-memory store). Nothing on the store contract.
 
 Nothing left; the next step is the decision whether to build it, and in which order.
 
-## Build plan: start here (recorded 2026-10-26, nothing of it built)
+## Build plan: start here (recorded 2026-10-26; steps 1 to 4 built 2026-10-28)
 
 The decisions of 2026-10-26, in the order to build them. Every step stays green under the existing tests: the
 contract, the property test, Lincheck on one and on two instances, the minimal runs per change, and the full matrix
@@ -4025,22 +4110,98 @@ at the end.
    - The R2DBC experiments are removed; their results stay recorded here.
    - The README documents one held pool connection per instance, and that transaction poolers cannot carry `LISTEN`.
 2. **The thin SPI, with versions in the core.** See "Target design: a thin SPI, versions in the core", with the
-   decisions at its start.
+   decisions at its start. Built 2026-10-28, with these decisions:
+   - The cut-off, the stamp, the basis and the control row stay until step 3, which replaces them with the sweep;
+     only the store's versions go now.
+   - One write method, `write(Collection<Write>)`: a value or a tombstone per key, at the core's version, conditioned
+     on a version, on the key missing, or on nothing; it returns only the hashes that conflicted. It replaces `put`,
+     `putIfUnchanged`, `invalidate` and `invalidateIfUnchanged` (and `Entry`, `ExpectedEntry`, `Expected`,
+     `WriteResult`). `expire` takes the version its rows get.
+   - Versions are packed into the one `long` (`InternalVersion`): 39 random bits of incarnation, 24 bits of counter.
+     Schemas, messages and the polling feed are unchanged. Incarnation 0 is below every other (a value from the
+     source alone); a new incarnation once the counter is exhausted.
+   - A read returns a value row older than the maximum age as `EXPIRED` at its version, instead of omitting it, so
+     that a write can be conditioned on it without a conflict reporting the row.
+   - A conflict reports no row: a load starts over with a read, a refresh reads the row to answer the newer value.
+   - A `put` on a held key writes conditionally on the held version, continuing its incarnation; on a conflict it
+     reads the rows' versions and writes on them again, at a new incarnation only after the third conflict. So
+     nearly every write continues the key's one incarnation, and L1 can order it.
+   - L1 across incarnations: a value not known to be at least as new is dropped (a message, a refused commit, two
+     held values meeting). A commit refused or dropped for an unknown order also drops a load in flight and blocks
+     every write still in flight on the key until they have all ended (the minimum becomes "anything").
+   - The heartbeat beats at versions of an incarnation of its own and counts only its own beats as arrived.
    - Required: `read`, `write` with a condition, returning applied or conflict; `delete`; `keys` in batches.
    - Versions are (incarnation, counter), computed by the core.
    - The stamp, the cut-off, the basis and start values from the store go.
-3. **`invalidateAll` by a sweep.** Tombstones in paced batches, synchronous, one `INVALIDATED_ALL`, sweep writes
-   marked so they produce no per-key messages.
-   - The two-instance Lincheck model changes to Caffeine's semantics, with atomicity per key.
+3. **`invalidateAll` by the store's time, hidden on read** (decided 2026-10-28, replacing the sweep). See "Target
+   design: `invalidateAll` by the store's time, hidden on read". Built 2026-10-28, with these decisions:
+   - The control row is a value row under `Store.CONTROL_HASH` (`#invalidated`), written by the core through `write`
+     and added to every read; its write is announced as an ordinary `WRITTEN`, which the core takes as
+     `invalidateAll` (`Change.Kind.INVALIDATED_ALL` is gone). Reserved rows (`#` hashes) are never expired or pruned.
+   - `read` returns the rows only (`ReadResult` is gone); `VersionsResult` carries versions and ages; `Row` and
+     `Write` have no stamp and no basis. PostgreSQL and MongoDB refuse tables of the previous layout (schema marker
+     2) unless reset; the JDBC adapter refuses a table with a `stamp` column.
+   - `Store#clockAllowance()` (10 ms by default, zero for the in-memory store): what `invalidateAll` waits before it
+     returns, so that no `put` pays for a wall clock's skew or millisecond resolution.
+   - The atomic map operations of one instance are atomic per key against its own `invalidateAll`, as in Caffeine:
+     they hold the shared side of `InternalClearLock` from decision to commit, `invalidateAll` the exclusive side
+     while it writes the control row and clears L1. Monitor-based, not `ReentrantReadWriteLock`: Lincheck 3.7's model
+     checker reports correct uses of the latter as hung once more locking happens inside (reproduced with a probe),
+     and models monitors correctly. `invalidateAll` from inside an atomic operation is refused with a clear error.
+     Puts, reads and loads take no lock; loads keep the accepted race, as in Caffeine.
+   - The hot path (deciding on a trusted held value) applies on every store now.
+   - Tests: the race tests that closed the accepted race are disabled with a reason (the acceptance tests of its
+     repair); the two-instance Lincheck model no longer has `invalidateAll` (an instance not having heard of one is
+     the accepted race); the property test's freshness oracle allows a token the source held when an
+     `invalidateAll` began, and a held copy of one after size pruning.
+   - The control row becomes a reserved key the core writes through `write` and adds to every read; a row at least as
+     old as it counts as missing (ages, not stamps).
+   - `invalidateAll` waits the maximum skew of a wall clock before returning (not with MongoDB's cluster time).
+   - Maintenance deletes hidden rows in paced batches.
+   - The stamp, its sequence, the basis, `checksBasis`, `Row#visible`, the cut-off fields and `Store#invalidateAll`
+     go.
+   - A racing load is accepted as the industry does (its repair is under "Later"); the Lincheck models and the
+     property test's oracle change to Caffeine's semantics: atomic per key, loads in flight during `invalidateAll`
+     allowed to survive.
 4. **One reservation registry,** in place of `minimumVersions` and `writing` with `writeMinimums`. See "Design study:
    L1 by invalidation and reservation", with the order rules of "Target design: reservations in L1, versions read but
-   never returned by writes".
+   never returned by writes". Built 2026-10-28:
+   - One map per hash of (holders, minimum): the operations in flight that will put into L1, and the least version L1
+     must hold when they do ("anything" where the order is not known). Messages and removals raise the minimum; an
+     install checks it under the key's entry; every release drops what is held below it.
+   - Every operation that installs reserves: loads (single, bulk, and Caffeine's own refresh load), `putAsync`,
+     writes, reads of the store and refreshes. A load reserves right after its future entered L1; a message finding a
+     future in flight without a reservation (that window) drops it: its waiters still get its value, its owner does
+     not hold it, at most one miss.
+   - Gone: `checkMinimumVersion` and its callback per message on a load in flight; absent caching asks the
+     reservation's minimum instead of `minimumVersions`.
+   - Order stays by version within an incarnation (the design study's equality-only rule is not adopted): a late
+     message of an older version still leaves a newer held value in place.
 5. **MongoDB's bulk writes in one round trip:** a filter on the version, an upsert, a duplicate key meaning conflict.
    The hot path becomes one operation on every store.
 6. **The benchmark:** `EndToEndBenchmark` with a hot key and a contention scenario, before and after.
 7. **Later, each judged on its own:**
-   - plan B, a nice-to-have: an O(1) `invalidateAll` by a per-cache generation (a slimmed design F, see "`invalidateAll`,
-     logical" and the sweep's costs under "Target design: a thin SPI"), so that the caller does not wait for the sweep;
+   - the cut-off remembered per instance instead of the control row read with every read (recorded 2026-10-28), only
+     if the benchmark (step 6) shows the extra key matters (measured about +10–30 µs on a one-key PostgreSQL read;
+     no round trip, it rides in the same batch):
+     - needs an absolute time from the store: a read returning write times, or the store's "now" at the read, in
+       place of the ages compared within one read (an SPI change);
+     - the instance reads the control row once per `INVALIDATED_ALL` (the message carries its version, not its
+       time), and again at start and after a gap or a loss; in `NONE` mode (no messages) it keeps reading it with
+       every read;
+     - it weakens a guarantee held now: a store read right after an `invalidateAll` elsewhere would serve rows from
+       before it until the message arrives (store point 3 broken for `invalidateAll`), stale for the delivery
+       delay, the bound already accepted for L1, now for store reads and loads too;
+   - striping the core's read-write lock between the atomic map operations and `invalidateAll` (recorded 2026-10-28):
+     64 stripes by the key's hash, `invalidateAll` taking every stripe's write side in order. It spreads the read
+     side's shared state over 64 cache lines; the gain is small while atomic map operations are store-bound
+     (thousands per second per instance), so it waits for the benchmark (step 6). The stall around an
+     `invalidateAll` (the atomic operations in flight draining, about one store round trip, at worst the store's
+     timeout) stays the same with stripes;
+   - the repair of loads racing `invalidateAll` (see "Target design: `invalidateAll` by the store's time"): a short log
+     of each instance's recent conditional writes, tombstoned when a newer cut-off is learned; and, as an optional
+     capability for SQL stores, the conditional write's statement checking the control row itself. Until then the
+     race is accepted, as Caffeine, memcached, Redis, Hazelcast and FusionCache accept it;
    - Redis adapters, after MongoDB and PostgreSQL are done (see "Redis adapters"); their place in the order and a
      Spring Data Redis binding are decided then;
    - stampede protection across instances: one load per key cluster-wide, not only per instance (each instance

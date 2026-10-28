@@ -36,11 +36,15 @@ import java.util.Map;
 /**
  * Linearizability across two instances sharing one store (Lincheck): the operations that are atomic across instances
  * (the {@code asMap()} compute methods, {@code putIfAbsent}, {@code put}, {@code remove}, {@code replace}, through
- * the store), a read of the store, {@code put} and {@code invalidateAll}, each on either instance, must give results
- * that some sequential order of them on a plain map gives too. Reads served from L1 are not among them: across
- * instances they are only eventually consistent, by design. Without distribution, the instances learn of each other
- * only through the store, so their L1 is as stale as it can be (the hot path's hardest case), and nothing runs in the
- * background. {@code invalidateAll} on several keys: its cut-off is one write, atomic for the store's readers.
+ * the store), a read of the store, and {@code put}, each on either instance, must give results that some sequential
+ * order of them on a plain map gives too. Reads served from L1 are not among them: across instances they are only
+ * eventually consistent, by design. Without distribution, the instances learn of each other only through the store,
+ * so their L1 is as stale as it can be (the hot path's hardest case), and nothing runs in the background.
+ * <p>
+ * Not {@code invalidateAll}: an operation decided on another instance before it hears of one survives it, the race
+ * accepted since 2026-10-28 (VISION.md, "Target design: {@code invalidateAll} by the store's time, hidden on read";
+ * its repair is under "Later"). Against the instance's own atomic operations it is checked by
+ * {@code InternalLinearizabilityInvalidateAllTest}.
  */
 @Param(name = "instance", gen = IntGen.class, conf = "0:1")
 @Param(name = "key", gen = IntGen.class, conf = "1:3")
@@ -61,13 +65,9 @@ public abstract class AbstractTwoInstanceLinearizabilityTest {
     protected AbstractTwoInstanceLinearizabilityTest() {
         closePrevious();
         InMemoryDatabase database = new InMemoryDatabase();
-        database.setChecksBasis(checksBasis());
         caches = List.of(open(database), open(database));
         previous = caches;
     }
-
-    // whether the store refuses a write decided under an older cut-off (Store#checksBasis), enabling the hot path
-    protected abstract boolean checksBasis();
 
     private static DistributedCache<String, String> open(InMemoryDatabase database) {
         Adapter<String, String> adapter = settings -> database.openStore("cache");
@@ -167,11 +167,6 @@ public abstract class AbstractTwoInstanceLinearizabilityTest {
         return on(instance).asMap().merge(key(key), value(value), String::concat);
     }
 
-    @Operation
-    public void invalidateAll(@Param(name = "instance") int instance) {
-        on(instance).invalidateAll();
-    }
-
     // minutes, as every invocation builds two instances through instrumented code: run on request
     // (-Dmodelchecking=true)
     @Test
@@ -236,10 +231,6 @@ public abstract class AbstractTwoInstanceLinearizabilityTest {
 
         public String merge(int instance, int key, int value) {
             return map.merge(key(key), value(value), String::concat);
-        }
-
-        public void invalidateAll(int instance) {
-            map.clear();
         }
     }
 }

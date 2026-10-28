@@ -138,16 +138,14 @@ final class PostgresListener {
         return session.probe(dataSource);
     }
 
-    // kind|hash|version; INVALIDATED_ALL carries neither
+    // kind|hash|version; anything else (garbage on the channel, a payload of an earlier layout) is ignored
     static @Nullable Change parse(String payload) {
         String[] parts = payload.split("\\|", -1);
-        if (parts.length != 3) {
+        if (parts.length != 3 || parts[1].isEmpty()) {
             return null;
         }
         try {
-            Change.Kind kind = Change.Kind.valueOf(parts[0]);
-            return kind == Change.Kind.INVALIDATED_ALL ? Change.invalidatedAll(Long.parseLong(parts[2]))
-                    : new Change(kind, parts[1], Long.parseLong(parts[2]));
+            return new Change(Change.Kind.valueOf(parts[0]), parts[1], Long.parseLong(parts[2]));
         } catch (IllegalArgumentException e) {
             return null;
         }

@@ -24,10 +24,10 @@ import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeFeed;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
-import io.github.oberhoff.distributedcaffeine.spi.Entry;
 import io.github.oberhoff.distributedcaffeine.spi.State;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
+import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import io.github.oberhoff.distributedcaffeine.testing.StorageOnlyStore;
 import org.junit.jupiter.api.AfterEach;
@@ -195,7 +195,7 @@ public class InternalCoreTest {
         assertThat(cache.get("k")).isNull();
 
         assertThat(cache.estimatedSize()).isZero();
-        assertThat(store().read(List.of(hash("k")), LONG).rows()).isEmpty();
+        assertThat(store().read(List.of(hash("k")), LONG)).isEmpty();
     }
 
     @Test
@@ -228,7 +228,8 @@ public class InternalCoreTest {
     @Test
     void an_unreadable_row_is_a_miss_and_the_load_replaces_it() {
         Assumptions.assumeTrue(backend.inMemory() != null, "a real database refuses to store the unreadable bytes");
-        store().put(List.of(new Entry(hash("k"), "k".getBytes(StandardCharsets.UTF_8), new byte[]{(byte) 0xff})));
+        store().write(List.of(Write.value(hash("k"), "k".getBytes(StandardCharsets.UTF_8), new byte[]{(byte) 0xff},
+                InternalVersion.fresh())));
         DistributedCache<String, Long> cache = DistributedCaffeine.<String, Long>newBuilder(backend::open)
                 .withSerializers(serializers -> serializers.withValueSerializer(StringSerializer.ofLong()))
                 .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(10))
@@ -319,7 +320,7 @@ public class InternalCoreTest {
         faults.failNextReads(1);
 
         assertThat(cache.get("k")).isEqualTo("v1");
-        assertThat(store().read(List.of(hash("k")), LONG).rows()).as("the source-only value was not written").isEmpty();
+        assertThat(store().read(List.of(hash("k")), LONG)).as("the source-only value was not written").isEmpty();
 
         assertThat(cache.get("k")).as("not trusted: checked, found missing, loaded properly").isEqualTo("v2");
         assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("v2");
@@ -517,14 +518,14 @@ public class InternalCoreTest {
     void invalidations_on_every_attempt_return_the_last_value_uncached() {
         Store other = store();
         DistributedLoadingCache<String, String> cache = loading(key -> {
-            other.invalidate(List.of(hash(key)));
+            other.write(List.of(Write.tombstone(hash(key), InternalVersion.fresh())));
             return "outdated";
         });
 
         assertThat(cache.get("k")).isEqualTo("outdated");
 
         assertThat(cache.estimatedSize()).isZero();
-        assertThat(store().read(List.of(hash("k")), LONG).rows().get(hash("k")).state()).isEqualTo(State.TOMBSTONE);
+        assertThat(store().read(List.of(hash("k")), LONG).get(hash("k")).state()).isEqualTo(State.TOMBSTONE);
     }
 
     // writes
@@ -548,9 +549,10 @@ public class InternalCoreTest {
         CountDownLatch fastCommitted = new CountDownLatch(1);
         Adapter<String, String> delaying = settings -> new DelegatingStore(backend.open(settings)) {
             @Override
-            public Map<String, Long> put(java.util.Collection<Entry> entries) {
-                Map<String, Long> versions = super.put(entries);
-                if (new String(entries.iterator().next().value(), StandardCharsets.UTF_8).equals("slow")) {
+            public Set<String> write(java.util.Collection<Write> writes) {
+                Set<String> conflicts = super.write(writes);
+                byte[] value = writes.iterator().next().value();
+                if (value != null && new String(value, StandardCharsets.UTF_8).equals("slow")) {
                     slowWritten.countDown();
                     try {
                         assertThat(fastCommitted.await(5, TimeUnit.SECONDS)).isTrue();
@@ -558,7 +560,7 @@ public class InternalCoreTest {
                         Thread.currentThread().interrupt();
                     }
                 }
-                return versions;
+                return conflicts;
             }
         };
         DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(delaying)

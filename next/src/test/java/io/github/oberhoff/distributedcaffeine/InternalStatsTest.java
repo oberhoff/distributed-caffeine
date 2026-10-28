@@ -87,9 +87,9 @@ class InternalStatsTest {
     }
 
     @Test
-    void a_compute_writing_on_a_held_value_is_one_store_operation_if_the_store_checks_the_basis() {
+    void a_compute_writing_on_a_held_value_is_one_store_operation() {
         DistributedCache<String, String> cache = cache();
-        cache.asMap().compute("k", (key, current) -> "1"); // read and write: held with the cut-off it read
+        cache.asMap().compute("k", (key, current) -> "1"); // read and write: held
         long reads = stats(cache).storeReadCount();
         long writes = stats(cache).storeWriteCount();
 
@@ -100,18 +100,6 @@ class InternalStatsTest {
         cache.asMap().computeIfPresent("k", (key, current) -> current);
         assertThat(stats(cache).storeReadCount() - reads).as("writing nothing: checked by a read").isOne();
         assertThat(stats(cache).storeWriteCount() - writes).isOne();
-        assertThat(cache.getIfPresent("k")).isEqualTo("12");
-    }
-
-    @Test
-    void a_compute_reads_first_if_the_store_does_not_check_the_basis() {
-        database.setChecksBasis(false);
-        DistributedCache<String, String> cache = cache();
-        cache.asMap().compute("k", (key, current) -> "1");
-        long reads = stats(cache).storeReadCount();
-
-        cache.asMap().compute("k", (key, current) -> current + "2");
-        assertThat(stats(cache).storeReadCount() - reads).isOne();
         assertThat(cache.getIfPresent("k")).isEqualTo("12");
     }
 

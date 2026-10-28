@@ -69,12 +69,16 @@ public abstract class AbstractLinearizabilityTest {
         previous = cache;
     }
 
+    // on a thread of its own: an invocation the model checker aborted may have left a lock of the previous instance
+    // held (Caffeine's own), and closing it would then wait for good while Lincheck collects a failure's trace
     @AfterAll
     static void closePrevious() {
         DistributedLoadingCache<String, String> open = previous;
         previous = null;
         if (open != null) {
-            open.close();
+            Thread closer = new Thread(open::close, "lincheck-close-previous");
+            closer.setDaemon(true);
+            closer.start();
         }
     }
 

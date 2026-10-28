@@ -20,6 +20,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -42,12 +43,21 @@ import static org.assertj.core.api.Assertions.assertThat;
  * be one of Caffeine's two orders: "the operation, then {@code invalidateAll}" (the key absent) or "{@code
  * invalidateAll}, then the operation" (the operation as on an absent key). Never a value derived from the state before
  * the {@code invalidateAll}.
+ * <p>
+ * Since the {@code invalidateAll} by the store's time (2026-10-28) this race is accepted, as Caffeine, memcached, Redis,
+ * Hazelcast and FusionCache accept it: the tests closing it are disabled until its repair; those of own values written
+ * after an unannounced {@code invalidateAll} still hold.
  */
 @Timeout(30)
 @SuppressWarnings("resource") // every cache a test opens is closed after it (@AfterEach)
 class InternalInvalidateAllRaceTest {
 
     private static final Duration LONG = Duration.ofHours(1);
+    // the race these tests close is accepted for now, as the industry accepts it: a load or an update that read before
+    // another instance's invalidateAll and writes after it survives it (VISION.md, "Target design: invalidateAll by the
+    // store's time, hidden on read"). They are the acceptance tests of its repair (build plan, "Later")
+    private static final String RACE_ACCEPTED = "racing loads and updates are accepted until their repair (VISION.md, "
+            + "build plan, Later)";
 
     private final InMemoryDatabase database = new InMemoryDatabase();
     private final CacheBackend backend = CacheBackend.of(database);
@@ -108,6 +118,7 @@ class InternalInvalidateAllRaceTest {
     // reads through the source: a value read before the invalidateAll must not stay
 
     @Test
+    @Disabled(RACE_ACCEPTED)
     void a_load_racing_an_invalidate_all_leaves_no_value_from_before_it() {
         DistributedLoadingCache<String, String> loader = loading();
         DistributedCache<String, String> other = plain();
@@ -121,6 +132,7 @@ class InternalInvalidateAllRaceTest {
     }
 
     @Test
+    @Disabled(RACE_ACCEPTED)
     void a_refresh_racing_an_invalidate_all_leaves_no_value_from_before_it() throws Exception {
         DistributedLoadingCache<String, String> loader = loading();
         DistributedCache<String, String> other = plain();
@@ -136,6 +148,7 @@ class InternalInvalidateAllRaceTest {
     }
 
     @Test
+    @Disabled(RACE_ACCEPTED)
     void a_compute_if_absent_racing_an_invalidate_all_leaves_no_value_from_before_it() {
         DistributedCache<String, String> computing = plain();
         DistributedCache<String, String> other = plain();
@@ -151,6 +164,7 @@ class InternalInvalidateAllRaceTest {
     // derived from the value present: after the invalidateAll the key is absent
 
     @Test
+    @Disabled(RACE_ACCEPTED)
     void a_compute_on_a_present_value_racing_an_invalidate_all_does_not_derive_from_it() {
         DistributedCache<String, String> computing = plain();
         DistributedCache<String, String> other = plain();
@@ -164,6 +178,7 @@ class InternalInvalidateAllRaceTest {
     }
 
     @Test
+    @Disabled(RACE_ACCEPTED)
     void a_compute_if_present_racing_an_invalidate_all_leaves_the_key_absent() {
         DistributedCache<String, String> computing = plain();
         DistributedCache<String, String> other = plain();
@@ -177,6 +192,7 @@ class InternalInvalidateAllRaceTest {
     }
 
     @Test
+    @Disabled(RACE_ACCEPTED)
     void a_merge_on_a_present_value_racing_an_invalidate_all_does_not_derive_from_it() {
         DistributedCache<String, String> computing = plain();
         DistributedCache<String, String> other = plain();
@@ -190,6 +206,7 @@ class InternalInvalidateAllRaceTest {
     }
 
     @Test
+    @Disabled(RACE_ACCEPTED)
     void a_replace_racing_an_invalidate_all_leaves_the_key_absent() {
         DistributedCache<String, String> replacing = plain();
         DistributedCache<String, String> other = plain();
@@ -203,6 +220,7 @@ class InternalInvalidateAllRaceTest {
     }
 
     @Test
+    @Disabled(RACE_ACCEPTED)
     void a_replace_of_a_value_racing_an_invalidate_all_leaves_the_key_absent() {
         DistributedCache<String, String> replacing = plain();
         DistributedCache<String, String> other = plain();
@@ -216,6 +234,7 @@ class InternalInvalidateAllRaceTest {
     }
 
     @Test
+    @Disabled(RACE_ACCEPTED)
     void a_load_racing_an_invalidate_all_whose_write_lands_with_its_outcome_unknown_leaves_no_value_from_before_it() {
         DistributedLoadingCache<String, String> loader = loading();
         DistributedCache<String, String> other = plain();
@@ -237,6 +256,7 @@ class InternalInvalidateAllRaceTest {
     // the window between the time of a write and its commit
 
     @Test
+    @Disabled(RACE_ACCEPTED)
     void a_load_writing_while_an_invalidate_all_commits_is_hidden_by_its_basis() throws Exception {
         CountDownLatch called = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);

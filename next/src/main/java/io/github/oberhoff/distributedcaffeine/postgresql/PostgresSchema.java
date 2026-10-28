@@ -64,8 +64,9 @@ final class PostgresSchema {
             boolean exists = exists(connection, table);
             if (exists && !schemaReset) {
                 throw new StoreException("Table " + table + " exists without the schema marker '"
-                        + PostgresTable.MARKER + "' (e.g. a table of distributed-caffeine 0.x). Stop all instances "
-                        + "using it, then drop it or configure another name, or enable withSchemaReset().", false);
+                        + PostgresTable.MARKER + "' (e.g. a table of an earlier layout, or of distributed-caffeine "
+                        + "0.x). Stop all instances using it, then drop it or configure another name, or enable "
+                        + "withSchemaReset().", false);
             }
             create(connection, table, schemaReset);
         }
@@ -171,8 +172,6 @@ final class PostgresSchema {
         expected.put("state", "text");
         expected.put("version", "bigint");
         expected.put("write_time", "timestamp with time zone");
-        expected.put("stamp", "bigint");
-        expected.put("basis", "bigint");
         Map<String, String> actual = new LinkedHashMap<>();
         try (PreparedStatement statement = connection.prepareStatement("""
                 SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute
@@ -191,17 +190,6 @@ final class PostgresSchema {
                         + " is " + (type == null ? "missing" : type) + ", expected " + column.getValue()
                         + (column.getKey().equals("key") || column.getKey().equals("value")
                         ? " (the table was created for other serializers; use another table)" : ""), false);
-            }
-        }
-        try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT to_regclass(?) IS NOT NULL")) {
-            statement.setString(1, table.sequence);
-            try (ResultSet resultSet = statement.executeQuery()) {
-                resultSet.next();
-                if (!resultSet.getBoolean(1)) {
-                    throw new StoreException("Table " + table + " has no stamp sequence " + table.sequence
-                            + ". See the DDL:\n" + table.ddl(), false);
-                }
             }
         }
     }

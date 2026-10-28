@@ -18,11 +18,11 @@ package io.github.oberhoff.distributedcaffeine.postgresql;
 import io.github.oberhoff.distributedcaffeine.DistributedCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
-import io.github.oberhoff.distributedcaffeine.spi.Entry;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import io.github.oberhoff.distributedcaffeine.spi.Write;
 import org.junit.jupiter.api.Test;
 
 import javax.sql.DataSource;
@@ -52,8 +52,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 abstract class PostgresRetryTest {
 
     private static final Duration LONG = Duration.ofHours(1);
-    private static final Entry ENTRY = new Entry("h", "h".getBytes(StandardCharsets.UTF_8),
-            "v".getBytes(StandardCharsets.UTF_8));
+    // an unconditional write; versions are the core's, any positive one does here
+    private static final Write WRITE = Write.value("h", "h".getBytes(StandardCharsets.UTF_8),
+            "v".getBytes(StandardCharsets.UTF_8), 1);
 
     private final PostgresTestDatabase database = PostgresTestDatabase.get();
     private final AtomicInteger passingStatements = new AtomicInteger();
@@ -146,7 +147,7 @@ abstract class PostgresRetryTest {
             failingStatements.set(1);
             sqlState = "40P01";
 
-            assertFailure(() -> store.put(List.of(ENTRY)), false, true);
+            assertFailure(() -> store.write(List.of(WRITE)), false, true);
             assertThat(executions).as("tried once").hasValue(1);
         }
     }
@@ -156,7 +157,7 @@ abstract class PostgresRetryTest {
         try (Store store = store()) {
             failingConnections.set(1);
 
-            assertFailure(() -> store.put(List.of(ENTRY)), false, true);
+            assertFailure(() -> store.write(List.of(WRITE)), false, true);
         }
     }
 
@@ -165,7 +166,7 @@ abstract class PostgresRetryTest {
         try (Store store = store()) {
             sqlState = "08006";
             failingStatements.set(1);
-            assertFailure(() -> store.put(List.of(ENTRY)), true, true);
+            assertFailure(() -> store.write(List.of(WRITE)), true, true);
             failingStatements.set(1);
             assertFailure(() -> store.read(List.of("h"), LONG), false, true);
         }
@@ -177,23 +178,23 @@ abstract class PostgresRetryTest {
             failingStatements.set(1);
             sqlState = "42601";
 
-            assertFailure(() -> store.put(List.of(ENTRY)), false, false);
+            assertFailure(() -> store.write(List.of(WRITE)), false, false);
         }
     }
 
     @Test
     void a_batch_failing_after_a_part_of_it_was_written_has_its_outcome_unknown() {
         try (Store store = store()) {
-            List<Entry> entries = new ArrayList<>();
+            List<Write> writes = new ArrayList<>();
             for (int index = 0; index < 1_500; index++) {
-                entries.add(new Entry("h" + index, ("k" + index).getBytes(StandardCharsets.UTF_8),
-                        "v".getBytes(StandardCharsets.UTF_8)));
+                writes.add(Write.value("h" + index, ("k" + index).getBytes(StandardCharsets.UTF_8),
+                        "v".getBytes(StandardCharsets.UTF_8), 1));
             }
             passingStatements.set(1); // the first chunk of 1,000 is written, the second rejected
             failingStatements.set(1);
             sqlState = "40P01";
 
-            assertThatThrownBy(() -> store.put(entries)).isInstanceOfSatisfying(StoreException.class,
+            assertThatThrownBy(() -> store.write(writes)).isInstanceOfSatisfying(StoreException.class,
                     e -> assertThat(e.isOutcomeUnknown()).isTrue()).hasMessageContaining("part of the write");
         }
     }

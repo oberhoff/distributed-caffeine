@@ -19,14 +19,15 @@ import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.Change;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
-import io.github.oberhoff.distributedcaffeine.spi.Entry;
-import io.github.oberhoff.distributedcaffeine.spi.ReadResult;
 import io.github.oberhoff.distributedcaffeine.spi.RecordingListener;
+import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
+import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryStore;
 import io.github.oberhoff.distributedcaffeine.testing.ScanOnlyStore;
+import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -36,7 +37,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -91,14 +92,23 @@ class InternalPollingTest {
                 Duration.ofMillis(20), executor));
     }
 
-    private static Entry entry(String hash, String value) {
-        return new Entry(hash, hash.getBytes(StandardCharsets.UTF_8), value.getBytes(StandardCharsets.UTF_8));
+    // an unconditional write of a value at a new version, as the core writes a put
+    private static Write entry(String hash, String value) {
+        return Write.value(hash, hash.getBytes(StandardCharsets.UTF_8), value.getBytes(StandardCharsets.UTF_8),
+                InternalVersion.fresh());
+    }
+
+    // writes the value and returns its version
+    private static long put(Store store, String hash, String value) {
+        Write write = entry(hash, value);
+        store.write(List.of(write));
+        return write.version();
     }
 
     // the version of the one key the touch tests write
     private long version() {
         try (InMemoryStore store = database.openStore("cache")) {
-            return store.read(List.of("h1"), LONG).rows().get("h1").version();
+            return store.read(List.of("h1"), LONG).get("h1").version();
         }
     }
 
@@ -174,31 +184,31 @@ class InternalPollingTest {
         Store slow = new io.github.oberhoff.distributedcaffeine.testing.StorageOnlyStore(track(database.openStore(
                 "cache"))) {
             @Override
-            public Map<String, Long> put(Collection<Entry> entries) {
-                Map<String, Long> versions = super.put(entries);
+            public Set<String> write(Collection<Write> writes) {
+                Set<String> conflicts = super.write(writes);
                 pause(60);
-                return versions;
+                return conflicts;
             }
         };
         InternalPollingStore store = polling(slow, LONG);
 
-        long written = store.put(List.of(entry("h1", "v"))).get("h1");
+        long written = put(store, "h1", "v");
 
-        await(() -> version() > written);
+        await(() -> version() != written);
     }
 
     @Test
     void a_write_with_its_outcome_unknown_is_touched_again_after_twice_the_timeout() {
         InternalPollingStore store = polling(track(database.openStore("cache")), LONG);
-        store.put(List.of(entry("h1", "before")));
+        store.write(List.of(entry("h1", "before")));
         long before = version();
         database.failNextWrites(1, true);
 
-        assertThatThrownBy(() -> store.put(List.of(entry("h1", "v")))).isInstanceOf(StoreException.class);
+        assertThatThrownBy(() -> store.write(List.of(entry("h1", "v")))).isInstanceOf(StoreException.class);
         long landed = version();
 
-        assertThat(landed).as("it landed").isGreaterThan(before);
-        await(() -> version() > landed);
+        assertThat(landed).as("it landed").isNotEqualTo(before);
+        await(() -> version() != landed);
     }
 
     @Test
@@ -207,21 +217,23 @@ class InternalPollingTest {
         Store slow = new io.github.oberhoff.distributedcaffeine.testing.StorageOnlyStore(track(database.openStore(
                 "cache"))) {
             @Override
-            public Map<String, Long> put(Collection<Entry> entries) {
-                Map<String, Long> versions = super.put(entries);
-                other.invalidateAll(); // the write is before the cut-off, its call returns after it
+            public Set<String> write(Collection<Write> writes) {
+                Set<String> conflicts = super.write(writes);
+                // the core's invalidateAll: the write is before the control row, its call returns after it
+                other.write(List.of(Write.value(Store.CONTROL_HASH, new byte[0], new byte[0], 1L << 41)));
                 pause(60);
-                return versions;
+                return conflicts;
             }
         };
         InternalPollingStore store = polling(slow, LONG);
 
-        long written = store.put(List.of(entry("h1", "v"))).get("h1");
+        long written = put(store, "h1", "v");
         pause(200);
 
-        ReadResult read = other.read(List.of("h1"), LONG);
-        assertThat(read.rows().get("h1").version()).as("not rewritten").isEqualTo(written);
-        assertThat(read.rows().get("h1").stamp()).isLessThan(read.cutoff());
+        Map<String, Row> read = other.read(List.of("h1", Store.CONTROL_HASH), LONG);
+        assertThat(read.get("h1").version()).as("not rewritten").isEqualTo(written);
+        assertThat(read.get("h1").age()).as("hidden by the control row")
+                .isGreaterThanOrEqualTo(read.get(Store.CONTROL_HASH).age());
     }
 
     // polls failing
@@ -235,7 +247,7 @@ class InternalPollingTest {
         database.setDown(true);
         pause(100);
         database.setDown(false);
-        store.put(List.of(entry("h1", "after a short failure")));
+        store.write(List.of(entry("h1", "after a short failure")));
         observer.await(messages -> messages.stream().anyMatch(message -> "h1".equals(message.hash())),
                 Duration.ofSeconds(5));
         assertThat(observer.awaitLosses(0, Duration.ZERO)).isZero();
@@ -244,7 +256,7 @@ class InternalPollingTest {
         observer.awaitLosses(1, Duration.ofSeconds(5));
         database.setDown(false);
         subscription.resume();
-        store.put(List.of(entry("h2", "after the resume")));
+        store.write(List.of(entry("h2", "after the resume")));
 
         List<Change> messages = observer.await(received -> received.stream()
                 .anyMatch(message -> "h2".equals(message.hash())), Duration.ofSeconds(5));

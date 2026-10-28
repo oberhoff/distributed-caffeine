@@ -20,18 +20,16 @@ import io.github.oberhoff.distributedcaffeine.spi.ChangeFeed;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeScan;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
-import io.github.oberhoff.distributedcaffeine.spi.Entry;
-import io.github.oberhoff.distributedcaffeine.spi.Expected;
-import io.github.oberhoff.distributedcaffeine.spi.ExpectedEntry;
-import io.github.oberhoff.distributedcaffeine.spi.ReadResult;
+import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
-import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
+import io.github.oberhoff.distributedcaffeine.spi.Write;
 
 import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static java.util.Objects.requireNonNull;
@@ -50,7 +48,7 @@ public final class InMemoryStore implements Store, ChangeFeed, ChangeScan {
     }
 
     @Override
-    public ReadResult read(Collection<String> hashes, Duration maxAge) {
+    public Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
         checkOpen();
         return table.read(requireNonNull(hashes), requireNonNull(maxAge));
     }
@@ -62,45 +60,22 @@ public final class InMemoryStore implements Store, ChangeFeed, ChangeScan {
     }
 
     @Override
-    public Map<String, Long> put(Collection<Entry> entries) {
+    public Set<String> write(Collection<Write> writes) {
         checkOpen();
-        return table.database().write(() -> table.put(requireNonNull(entries)));
+        if (requireNonNull(writes).stream().anyMatch(write -> !write.isUnconditional())) {
+            table.database().beforeConditionalWrite();
+        }
+        // a write of the control row is the core's invalidateAll: its own fault window (setBeforeInvalidateAllApplies)
+        if (writes.stream().anyMatch(write -> Store.CONTROL_HASH.equals(write.hash()))) {
+            return table.database().invalidating(() -> table.write(writes));
+        }
+        return table.database().write(() -> table.write(writes));
     }
 
     @Override
-    public boolean checksBasis() {
-        return table.database().checksBasis;
-    }
-
-    @Override
-    public Map<String, WriteResult> putIfUnchanged(Collection<ExpectedEntry> entries, Duration maxAge) {
+    public int expire(Duration maxAge, long version) {
         checkOpen();
-        table.database().beforeConditionalWrite();
-        return table.database().write(() -> table.putIfUnchanged(requireNonNull(entries), requireNonNull(maxAge)));
-    }
-
-    @Override
-    public Map<String, Long> invalidate(Collection<String> hashes) {
-        checkOpen();
-        return table.database().write(() -> table.invalidate(requireNonNull(hashes)));
-    }
-
-    @Override
-    public Map<String, Long> invalidateIfUnchanged(Collection<Expected> expectations) {
-        checkOpen();
-        return table.database().write(() -> table.invalidateIfUnchanged(requireNonNull(expectations)));
-    }
-
-    @Override
-    public long invalidateAll() {
-        checkOpen();
-        return table.database().invalidating(table::invalidateAll);
-    }
-
-    @Override
-    public int expire(Duration maxAge) {
-        checkOpen();
-        return table.database().write(() -> table.expire(requireNonNull(maxAge)));
+        return table.database().write(() -> table.expire(requireNonNull(maxAge), version));
     }
 
     @Override
@@ -127,6 +102,12 @@ public final class InMemoryStore implements Store, ChangeFeed, ChangeScan {
         ChangeSubscription subscription = table.subscribe(requireNonNull(listener));
         subscriptions.add(subscription);
         return subscription;
+    }
+
+    // the database's write times are strictly increasing: nothing to allow for
+    @Override
+    public Duration clockAllowance() {
+        return Duration.ZERO;
     }
 
     @Override

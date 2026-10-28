@@ -18,17 +18,13 @@ package io.github.oberhoff.distributedcaffeine.postgresql;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeFeed;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
-import io.github.oberhoff.distributedcaffeine.spi.Entry;
-import io.github.oberhoff.distributedcaffeine.spi.Expected;
-import io.github.oberhoff.distributedcaffeine.spi.ExpectedEntry;
-import io.github.oberhoff.distributedcaffeine.spi.ReadResult;
 import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.State;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
-import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
+import io.github.oberhoff.distributedcaffeine.spi.Write;
 import org.jspecify.annotations.Nullable;
 import org.postgresql.PGConnection;
 
@@ -41,23 +37,25 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLTransientConnectionException;
 import java.sql.Statement;
+import java.sql.Types;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
-import java.util.TreeSet;
 import java.util.WeakHashMap;
 
 
 /**
  * The store of one cache instance on PostgreSQL (VISION.md, "PostgreSQL: statements and propagation measured"). Every
  * write is one statement that writes and notifies ({@code pg_notify} over the rows a CTE returns), so a notification
- * exists exactly when the write committed; the version of a new row is the server's time in microseconds, of every
- * later write of the row {@code old + 1}.
+ * exists exactly when the write committed. Versions are the core's: a row gets the version its write carries, and a
+ * conditional write compares the stored one for equality, nothing else.
  * Batches are written in the order of their hashes, so concurrent batches lock rows in the same order.
  * <p>
  * Failures (VISION.md, "Write retries"): one attempt each, classified for the core, which retries: a statement the
@@ -71,15 +69,12 @@ import java.util.WeakHashMap;
 final class PostgresStore implements Store, ChangeFeed {
 
     private static final int CHUNK = 1_000;
-    // the stamp of a write (Row#stamp): from the table's sequence, as is the version a new row starts at, so that
-    // neither depends on a clock (a clock stepping back, a failover to a standby whose clock is behind)
-    private static final String WRITTEN = "r.stamp";
-    // the cache's control row: its write time is the cut-off of the last invalidateAll (the core refuses '#' hashes)
-    static final String CONTROL_ID = "#invalidated";
+    // the age by the server's clock; now() is the transaction's start, so every age of one statement is measured at
+    // the same instant and the core can compare them (with the control row's, Store#CONTROL_HASH)
     private static final String AGE_MICROS = "(extract(epoch from (now() - write_time)) * 1000000)::bigint";
     private static final String YOUNGER = "write_time > now() - (?::bigint * interval '1 microsecond')";
-    // the basis of a write decided on nothing read (Row.NO_BASIS)
-    private static final String NO_BASIS = String.valueOf(Row.NO_BASIS);
+    // the core's reserved rows (Store#CONTROL_HASH, the heartbeat's): never touched by maintenance
+    private static final String NOT_RESERVED = "left(r.id, 1) <> '#'";
     // physical connections checked for not being a standby, once each (weakly held, as the pool's connections come
     // and go)
     private static final Map<Object, Boolean> PRIMARIES = Collections.synchronizedMap(new WeakHashMap<>());
@@ -115,344 +110,178 @@ final class PostgresStore implements Store, ChangeFeed {
 
     // reads
 
-    // the rows and the cut-off, in one statement: the cut-off comes back even if no row matches. Each id a lookup of
-    // its own by the primary key (LATERAL, kept apart by LIMIT 1, at most one row by the key anyway): with statistics
-    // behind a table that grew fast, the planner took the discriminator's prefix of the maintenance index and filtered
-    // every row of the cache (measured: 60,000 rows read for 100 hits), also when the ids were joined
+    // every row as it is, also rows the control row hides (the core compares the ages, all measured at the statement's
+    // now()). Each id a lookup of its own by the primary key (LATERAL, kept apart by LIMIT 1, at most one row by the
+    // key anyway): with statistics behind a table that grew fast, the planner took the discriminator's prefix of the
+    // maintenance index and filtered every row of the cache (measured: 60,000 rows read for 100 hits), also when the
+    // ids were joined. A value row at least as old as the maximum age reads as EXPIRED (no value, its version): no
+    // value counts for it, but a write is conditioned on its version (the store reports nothing else when a write
+    // conflicts)
     @Override
-    public ReadResult read(Collection<String> hashes, Duration maxAge) {
+    public Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
         return run(Kind.READ, connection -> {
             Map<String, Row> rows = new LinkedHashMap<>();
-            long invalidatedAll = 0;
             try (PreparedStatement statement = connection.prepareStatement("""
-                    SELECT r.id, r.key, r.value, r.state, r.version, %s, %s, n.cutoff, r.basis
-                    FROM (SELECT %s AS cutoff) AS n LEFT JOIN (unnest(?::text[]) AS i (id)
-                        CROSS JOIN LATERAL (SELECT * FROM %s AS r WHERE r.discriminator = ? AND r.id = i.id
-                            AND (r.state <> 'VALUE' OR %s) LIMIT 1) AS r) ON true"""
-                    .formatted(AGE_MICROS.replace("write_time", "r.write_time"), WRITTEN, cutoff(), t,
-                            YOUNGER.replace("write_time", "r.write_time")))) {
-                statement.setString(1, table.discriminator);
-                statement.setArray(2, connection.createArrayOf("text", hashes.toArray()));
-                statement.setString(3, table.discriminator);
-                statement.setLong(4, micros(maxAge));
-                try (ResultSet resultSet = statement.executeQuery()) {
-                    while (resultSet.next()) {
-                        invalidatedAll = resultSet.getLong(8);
-                        if (resultSet.getString(1) != null) {
-                            Row row = row(resultSet);
-                            rows.put(row.hash(), row);
-                        }
-                    }
-                }
-            }
-            return new ReadResult(rows, invalidatedAll);
-        });
-    }
-
-    // the row r is visible under the cut-off (Row.visible): written after the last invalidateAll and decided under
-    // it; binds the discriminator
-    private String visible() {
-        return ("NOT EXISTS (SELECT 1 FROM %s AS c WHERE c.discriminator = ? AND c.id = '%s' AND (r.stamp "
-                + "<= c.stamp OR r.basis < c.stamp))").formatted(t, CONTROL_ID);
-    }
-
-    // the stamp of the control row's write, 0 if there is none; binds the discriminator
-    private String cutoff() {
-        return "coalesce((SELECT c.stamp FROM %s AS c WHERE ".formatted(t) + "c.discriminator = ? AND c.id = '"
-                + CONTROL_ID + "'), 0)";
-    }
-
-    @Override
-    public VersionsResult readVersions(Collection<String> hashes, Duration maxAge) {
-        return run(Kind.READ, connection -> {
-            Map<String, Long> versions = new LinkedHashMap<>();
-            Map<String, Long> stamps = new LinkedHashMap<>();
-            Map<String, Long> bases = new LinkedHashMap<>();
-            long invalidatedAll = 0;
-            try (PreparedStatement statement = connection.prepareStatement("""
-                    SELECT r.id, r.version, %s, n.cutoff, r.basis
-                    FROM (SELECT %s AS cutoff) AS n LEFT JOIN (unnest(?::text[]) AS i (id)
-                        CROSS JOIN LATERAL (SELECT * FROM %s AS r WHERE r.discriminator = ? AND r.id = i.id
-                            AND r.state = 'VALUE' AND %s LIMIT 1) AS r) ON true"""
-                    .formatted(WRITTEN, cutoff(), t, YOUNGER.replace("write_time", "r.write_time")))) {
-                statement.setString(1, table.discriminator);
-                statement.setArray(2, connection.createArrayOf("text", hashes.toArray()));
-                statement.setString(3, table.discriminator);
-                statement.setLong(4, micros(maxAge));
-                try (ResultSet resultSet = statement.executeQuery()) {
-                    while (resultSet.next()) {
-                        invalidatedAll = resultSet.getLong(4);
-                        if (resultSet.getString(1) != null) {
-                            versions.put(resultSet.getString(1), resultSet.getLong(2));
-                            stamps.put(resultSet.getString(1), resultSet.getLong(3));
-                            bases.put(resultSet.getString(1), resultSet.getLong(5));
-                        }
-                    }
-                }
-            }
-            return new VersionsResult(versions, stamps, bases, invalidatedAll);
-        });
-    }
-
-    // writes
-
-    @Override
-    public Map<String, Long> put(Collection<Entry> entries) {
-        Map<String, Long> versions = new LinkedHashMap<>();
-        try {
-            for (List<Entry> chunk : chunks(sorted(entries))) {
-                String sql = """
-                        WITH i (id, key, value) AS (VALUES %s),
-                        w AS (
-                            INSERT INTO %s AS r (discriminator, id, key, value, state, version, write_time, stamp)
-                            SELECT ?, i.id, i.key, i.value, 'VALUE', %s, now(), %s FROM i ORDER BY i.id
-                            ON CONFLICT (discriminator, id) DO UPDATE SET key = excluded.key, value = excluded.value,
-                                state = 'VALUE', version = r.version + 1,
-                                write_time = excluded.write_time, stamp = excluded.stamp, basis = %s
-                            RETURNING r.id, r.version)
-                        SELECT w.id, w.version, pg_notify(?, 'WRITTEN|' || w.id || '|' || w.version) FROM w"""
-                        .formatted(rows(chunk.size(), "(?::text, ?::%s, ?::%s)"), t, table.nextStamp(),
-                                table.nextStamp(), NO_BASIS);
-                versions.putAll(run(Kind.WRITE, connection -> {
-                    try (PreparedStatement statement = connection.prepareStatement(sql)) {
-                        int index = bindEntries(statement, 1, chunk, null);
-                        statement.setString(index++, table.discriminator);
-                        statement.setString(index, table.channel);
-                        return versions(statement);
-                    }
-                }));
-            }
-        } catch (StoreException e) {
-            throw versions.isEmpty() ? e : e.afterPartlyApplied();
-        }
-        return versions;
-    }
-
-    // the cut-off read in the statement that writes: a write committing at once with an invalidateAll may pass it,
-    // and is hidden by its basis then
-    @Override
-    public boolean checksBasis() {
-        return true;
-    }
-
-    @Override
-    public Map<String, WriteResult> putIfUnchanged(Collection<ExpectedEntry> entries, Duration maxAge) {
-        Map<String, ExpectedEntry> byHash = new TreeMap<>();
-        entries.forEach(expected -> byHash.put(expected.entry().hash(), expected));
-        Map<String, WriteResult> results = new LinkedHashMap<>();
-        try {
-            for (List<ExpectedEntry> chunk : chunks(new ArrayList<>(byHash.values()))) {
-                String sql = """
-                        WITH i (id, key, value, expected, basis) AS (VALUES %s),
-                        k (cutoff) AS (SELECT %s),
-                        u AS (
-                            UPDATE %s AS r SET key = i.key, value = i.value, state = 'VALUE',
-                                version = r.version + 1, write_time = now(), stamp = %s, basis = i.basis
-                            FROM i, k WHERE r.discriminator = ? AND r.id = i.id AND i.expected <> -1
-                                AND r.version = i.expected AND i.basis >= k.cutoff
-                            RETURNING r.id, r.version),
-                        n AS (
-                            INSERT INTO %s AS r (discriminator, id, key, value, state, version, write_time, stamp,
-                                basis)
-                            SELECT ?, i.id, i.key, i.value, 'VALUE', %s, now(), %s, i.basis FROM i, k
-                            WHERE i.expected = -1 AND i.basis >= k.cutoff
-                            ORDER BY i.id
-                            ON CONFLICT (discriminator, id) DO NOTHING
-                            RETURNING r.id, r.version),
-                        w AS (SELECT id, version FROM u UNION ALL SELECT id, version FROM n)
-                        SELECT w.id, w.version, pg_notify(?, 'WRITTEN|' || w.id || '|' || w.version) FROM w"""
-                        .formatted(rows(chunk.size(), "(?::text, ?::%s, ?::%s, ?::bigint, ?::bigint)"), cutoff(), t,
-                                table.nextStamp(), t, table.nextStamp(), table.nextStamp());
-                Map<String, Long> written = run(Kind.WRITE, connection -> {
-                    try (PreparedStatement statement = connection.prepareStatement(sql)) {
-                        List<Entry> chunkEntries = chunk.stream().map(ExpectedEntry::entry).toList();
-                        int index = bindEntries(statement, 1, chunkEntries, chunk);
-                        statement.setString(index++, table.discriminator); // the cut-off's
-                        statement.setString(index++, table.discriminator);
-                        statement.setString(index++, table.discriminator);
-                        statement.setString(index, table.channel);
-                        return versions(statement);
-                    }
-                });
-                List<String> conflicting = new ArrayList<>();
-                for (ExpectedEntry expected : chunk) {
-                    String hash = expected.entry().hash();
-                    if (written.containsKey(hash)) {
-                        results.put(hash, WriteResult.written(written.get(hash)));
-                    } else {
-                        conflicting.add(hash);
-                    }
-                }
-                if (!conflicting.isEmpty()) {
-                    results.putAll(conflicts(conflicting, maxAge));
-                }
-            }
-        } catch (StoreException e) {
-            throw results.isEmpty() ? e : e.afterPartlyApplied();
-        }
-        return results;
-    }
-
-    // what prevented a conditional write: the row as a read sees it (a value too old to count is no row, but its
-    // version is reported), or nothing
-    private Map<String, WriteResult> conflicts(List<String> hashes, Duration maxAge) {
-        return run(Kind.READ, connection -> {
-            Map<String, WriteResult> results = new LinkedHashMap<>();
-            hashes.forEach(hash -> results.put(hash, WriteResult.conflict(null, 0)));
-            try (PreparedStatement statement = connection.prepareStatement("""
-                    SELECT r.id, key, value, state, version, %s, %s, (state <> 'VALUE' OR %s), basis
+                    SELECT r.id, r.key, r.value,
+                        CASE WHEN r.state = 'VALUE' AND NOT (%s) THEN 'EXPIRED' ELSE r.state END,
+                        r.version, %s
                     FROM unnest(?::text[]) AS i (id)
-                        CROSS JOIN LATERAL (SELECT * FROM %s AS r WHERE r.discriminator = ? AND r.id = i.id LIMIT 1)
-                            AS r"""
-                    .formatted(AGE_MICROS, WRITTEN, YOUNGER, t))) {
+                        CROSS JOIN LATERAL (SELECT * FROM %s AS r WHERE r.discriminator = ? AND r.id = i.id
+                            LIMIT 1) AS r"""
+                    .formatted(YOUNGER.replace("write_time", "r.write_time"),
+                            AGE_MICROS.replace("write_time", "r.write_time"), t))) {
                 statement.setLong(1, micros(maxAge));
                 statement.setArray(2, connection.createArrayOf("text", hashes.toArray()));
                 statement.setString(3, table.discriminator);
                 try (ResultSet resultSet = statement.executeQuery()) {
                     while (resultSet.next()) {
                         Row row = row(resultSet);
-                        boolean counts = resultSet.getBoolean(8);
-                        results.put(row.hash(), WriteResult.conflict(counts ? row : null, row.version()));
+                        rows.put(row.hash(), row);
                     }
                 }
             }
-            return results;
+            return rows;
         });
     }
 
-    @Override
-    public Map<String, Long> invalidate(Collection<String> hashes) {
-        Map<String, Long> versions = new LinkedHashMap<>();
-        try {
-            for (List<String> chunk : chunks(new ArrayList<>(new TreeSet<>(hashes)))) {
-                String sql = """
-                        WITH w AS (
-                            INSERT INTO %s AS r (discriminator, id, key, value, state, version, write_time, stamp)
-                            SELECT ?, i.id, NULL, NULL, 'TOMBSTONE', %s, now(), %s FROM unnest(?::text[]) AS i (id)
-                            ORDER BY i.id
-                            ON CONFLICT (discriminator, id) DO UPDATE SET value = NULL, state = 'TOMBSTONE',
-                                version = r.version + 1, write_time = excluded.write_time, stamp = excluded.stamp,
-                                basis = %s
-                            RETURNING r.id, r.version)
-                        SELECT w.id, w.version, pg_notify(?, 'INVALIDATED|' || w.id || '|' || w.version) FROM w"""
-                        .formatted(t, table.nextStamp(), table.nextStamp(), NO_BASIS);
-                versions.putAll(run(Kind.WRITE, connection -> {
-                    try (PreparedStatement statement = connection.prepareStatement(sql)) {
-                        statement.setString(1, table.discriminator);
-                        statement.setArray(2, connection.createArrayOf("text", chunk.toArray()));
-                        statement.setString(3, table.channel);
-                        return versions(statement);
-                    }
-                }));
-            }
-        } catch (StoreException e) {
-            throw versions.isEmpty() ? e : e.afterPartlyApplied();
-        }
-        return versions;
+    // the row r is not hidden by the control row: written after it, or there is none (Store#CONTROL_HASH); binds the
+    // discriminator. One lookup by the primary key per row
+    private String notHidden() {
+        return ("NOT EXISTS (SELECT 1 FROM %s AS c WHERE c.discriminator = ? AND c.id = '%s' "
+                + "AND r.write_time <= c.write_time)").formatted(t, CONTROL_HASH);
     }
 
     @Override
-    public Map<String, Long> invalidateIfUnchanged(Collection<Expected> expectations) {
-        Map<String, Long> expected = Expected.byHash(expectations);
-        Map<String, Long> byHash = new TreeMap<>(expected);
-        Map<String, Long> versions = new LinkedHashMap<>();
+    public VersionsResult readVersions(Collection<String> hashes, Duration maxAge) {
+        return run(Kind.READ, connection -> {
+            Map<String, Long> versions = new LinkedHashMap<>();
+            Map<String, Duration> ages = new LinkedHashMap<>();
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT r.id, r.version, %s
+                    FROM unnest(?::text[]) AS i (id)
+                        CROSS JOIN LATERAL (SELECT * FROM %s AS r WHERE r.discriminator = ? AND r.id = i.id
+                            AND r.state = 'VALUE' AND %s LIMIT 1) AS r"""
+                    .formatted(AGE_MICROS.replace("write_time", "r.write_time"), t,
+                            YOUNGER.replace("write_time", "r.write_time")))) {
+                statement.setArray(1, connection.createArrayOf("text", hashes.toArray()));
+                statement.setString(2, table.discriminator);
+                statement.setLong(3, micros(maxAge));
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    while (resultSet.next()) {
+                        versions.put(resultSet.getString(1), resultSet.getLong(2));
+                        ages.put(resultSet.getString(1), age(resultSet.getLong(3)));
+                    }
+                }
+            }
+            return new VersionsResult(versions, ages);
+        });
+    }
+
+    // writes
+
+    /**
+     * Every kind of write in one statement per chunk, so that a batch mixing them is one round trip: unconditional
+     * ones as an upsert (a), those conditioned on a version as an update matching it (u), those conditioned on no
+     * row as an insert doing nothing on a conflict (n); each one atomic step per key, in the order of the hashes. A
+     * tombstone keeps the row's key ({@code coalesce}), and has none where no row existed. The write time is the
+     * server's now(), which the control row's (Store#CONTROL_HASH) is compared with. Every row written is announced at
+     * its version in the same statement; the ids not returned conflicted.
+     */
+    @Override
+    public Set<String> write(Collection<Write> writes) {
+        Map<String, Write> byHash = new TreeMap<>();
+        writes.forEach(write -> byHash.put(write.hash(), write));
+        Set<String> conflicts = new LinkedHashSet<>();
+        boolean applied = false;
         try {
-            for (List<String> chunk : chunks(new ArrayList<>(byHash.keySet()))) {
+            for (List<Write> chunk : chunks(new ArrayList<>(byHash.values()))) {
                 String sql = """
-                        WITH i (id, expected) AS (VALUES %s),
+                        WITH i (id, key, value, version, expected) AS (VALUES %1$s),
+                        a AS (
+                            INSERT INTO %2$s AS r (discriminator, id, key, value, state, version, write_time)
+                            SELECT ?, i.id, i.key, i.value, %3$s, i.version, now() FROM i
+                            WHERE i.expected = %4$d
+                            ORDER BY i.id
+                            ON CONFLICT (discriminator, id) DO UPDATE SET key = coalesce(excluded.key, r.key),
+                                value = excluded.value, state = excluded.state, version = excluded.version,
+                                write_time = excluded.write_time
+                            RETURNING r.id, r.version, r.state),
                         u AS (
-                            UPDATE %s AS r SET value = NULL, state = 'TOMBSTONE',
-                                version = r.version + 1, write_time = now(), stamp = %s, basis = %s
-                            FROM i WHERE r.discriminator = ? AND r.id = i.id AND i.expected <> -1
+                            UPDATE %2$s AS r SET key = coalesce(i.key, r.key), value = i.value, state = %3$s,
+                                version = i.version, write_time = now()
+                            FROM i WHERE r.discriminator = ? AND r.id = i.id AND i.expected > %4$d
                                 AND r.version = i.expected
-                            RETURNING r.id, r.version),
+                            RETURNING r.id, r.version, r.state),
                         n AS (
-                            INSERT INTO %s AS r (discriminator, id, key, value, state, version, write_time, stamp)
-                            SELECT ?, i.id, NULL, NULL, 'TOMBSTONE', %s, now(), %s FROM i WHERE i.expected = -1
+                            INSERT INTO %2$s AS r (discriminator, id, key, value, state, version, write_time)
+                            SELECT ?, i.id, i.key, i.value, %3$s, i.version, now() FROM i
+                            WHERE i.expected = %5$d
                             ORDER BY i.id
                             ON CONFLICT (discriminator, id) DO NOTHING
-                            RETURNING r.id, r.version),
-                        w AS (SELECT id, version FROM u UNION ALL SELECT id, version FROM n)
-                        SELECT w.id, w.version, pg_notify(?, 'INVALIDATED|' || w.id || '|' || w.version) FROM w"""
-                        .formatted(rows(chunk.size(), "(?::text, ?::bigint)"), t, table.nextStamp(), NO_BASIS, t,
-                                table.nextStamp(), table.nextStamp());
-                versions.putAll(run(Kind.WRITE, connection -> {
+                            RETURNING r.id, r.version, r.state),
+                        w AS (SELECT * FROM a UNION ALL SELECT * FROM u UNION ALL SELECT * FROM n)
+                        SELECT w.id, pg_notify(?, CASE WHEN w.state = 'VALUE' THEN 'WRITTEN|' ELSE 'INVALIDATED|' END
+                            || w.id || '|' || w.version) FROM w"""
+                        .formatted(rows(chunk.size(), "(?::text, ?::%s, ?::%s, ?::bigint, ?::bigint)"), t,
+                                "CASE WHEN i.value IS NULL THEN 'TOMBSTONE' ELSE 'VALUE' END", Write.ANY,
+                                Write.MISSING);
+                Set<String> written = run(Kind.WRITE, connection -> {
                     try (PreparedStatement statement = connection.prepareStatement(sql)) {
-                        int index = 1;
-                        for (String hash : chunk) {
-                            statement.setString(index++, hash);
-                            statement.setLong(index++, byHash.get(hash));
-                        }
+                        int index = bindWrites(statement, chunk);
+                        statement.setString(index++, table.discriminator);
                         statement.setString(index++, table.discriminator);
                         statement.setString(index++, table.discriminator);
                         statement.setString(index, table.channel);
-                        return versions(statement);
+                        return ids(statement);
                     }
-                }));
-            }
-        } catch (StoreException e) {
-            throw versions.isEmpty() ? e : e.afterPartlyApplied();
-        }
-        return versions;
-    }
-
-    // every row of the cache gets a version of at least the sweep's time (value rows become tombstones), so every load
-    // in flight conflicts; the time is announced and returned
-    @Override
-    public long invalidateAll() {
-        String sql = """
-                WITH w AS (
-                    INSERT INTO %s AS r (discriminator, id, key, value, state, version, write_time, stamp)
-                    VALUES (?, '%s', NULL, NULL, 'CONTROL', 1, now(), %s)
-                    ON CONFLICT (discriminator, id) DO UPDATE SET version = r.version + 1, write_time = now(),
-                        stamp = excluded.stamp
-                    RETURNING %s AS written)
-                SELECT w.written, pg_notify(?, 'INVALIDATED_ALL||' || w.written) FROM w"""
-                .formatted(t, CONTROL_ID, table.nextStamp(), WRITTEN);
-        return run(Kind.WRITE, connection -> {
-            try (PreparedStatement statement = connection.prepareStatement(sql)) {
-                statement.setString(1, table.discriminator);
-                statement.setString(2, table.channel);
-                try (ResultSet resultSet = statement.executeQuery()) {
-                    resultSet.next();
-                    return resultSet.getLong(1);
+                });
+                applied = true;
+                for (Write write : chunk) {
+                    if (!written.contains(write.hash())) {
+                        conflicts.add(write.hash());
+                    }
                 }
             }
-        });
+        } catch (StoreException e) {
+            throw applied ? e.afterPartlyApplied() : e;
+        }
+        return conflicts;
     }
 
     // maintenance: idempotent on several instances at once
 
+    // neither reserved rows nor rows the control row hides (they count as missing already, and pruneTombstones deletes
+    // them)
     @Override
-    public int expire(Duration maxAge) {
+    public int expire(Duration maxAge, long version) {
         String sql = """
                 WITH w AS (
-                    UPDATE %s AS r SET value = NULL, state = 'EXPIRED', version = r.version + 1,
-                        write_time = now(), stamp = %s, basis = %s
+                    UPDATE %s AS r SET value = NULL, state = 'EXPIRED', version = ?, write_time = now()
                     WHERE r.discriminator = ? AND r.state = 'VALUE'
-                        AND r.write_time <= now() - (?::bigint * interval '1 microsecond') AND %s
+                        AND r.write_time <= now() - (?::bigint * interval '1 microsecond') AND %s AND %s
                     RETURNING r.id, r.version)
                 SELECT w.id, w.version, pg_notify(?, 'EXPIRED|' || w.id || '|' || w.version) FROM w"""
-                .formatted(t, table.nextStamp(), NO_BASIS, visible());
+                .formatted(t, NOT_RESERVED, notHidden());
         return run(Kind.WRITE, connection -> {
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
-                statement.setString(1, table.discriminator);
-                statement.setLong(2, micros(maxAge));
-                statement.setString(3, table.discriminator);
-                statement.setString(4, table.channel);
-                return versions(statement).size();
+                statement.setLong(1, version);
+                statement.setString(2, table.discriminator);
+                statement.setLong(3, micros(maxAge));
+                statement.setString(4, table.discriminator);
+                statement.setString(5, table.channel);
+                return ids(statement).size();
             }
         });
     }
 
-    // keeps the newest maxSize values (ties by hash); rows beyond that rank are the same for every instance pruning
-    // at once, so overlapping runs never prune more
+    // keeps the newest maxSize values (ties by hash), counting neither reserved rows nor rows the control row hides;
+    // rows beyond that rank are the same for every instance pruning at once, so overlapping runs never prune more
     @Override
     public int pruneToSize(long maxSize) {
         String sql = """
                 DELETE FROM %1$s WHERE discriminator = ? AND id IN (
-                    SELECT id FROM %1$s AS r WHERE discriminator = ? AND state = 'VALUE' AND %2$s
-                    ORDER BY write_time DESC, id ASC OFFSET ?)""".formatted(t, visible());
+                    SELECT id FROM %1$s AS r WHERE discriminator = ? AND state = 'VALUE' AND %2$s AND %3$s
+                    ORDER BY write_time DESC, id ASC OFFSET ?)""".formatted(t, NOT_RESERVED, notHidden());
         return run(Kind.WRITE, connection -> {
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setString(1, table.discriminator);
@@ -464,12 +293,15 @@ final class PostgresStore implements Store, ChangeFeed {
         });
     }
 
+    // tombstones and expired rows after their grace period, and every row the control row hides (invalidated by
+    // invalidateAll, so without a grace period): what invalidateAll left behind goes here, in the background; never a
+    // reserved row
     @Override
     public int pruneTombstones(Duration retention) {
         String sql = """
-                DELETE FROM %s AS r WHERE discriminator = ? AND id <> '%s' AND (NOT %s
+                DELETE FROM %s AS r WHERE discriminator = ? AND %s AND (NOT %s
                     OR state <> 'VALUE' AND write_time <= now() - (?::bigint * interval '1 microsecond'))"""
-                .formatted(t, CONTROL_ID, visible());
+                .formatted(t, NOT_RESERVED, notHidden());
         return run(Kind.WRITE, connection -> {
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setString(1, table.discriminator);
@@ -653,9 +485,14 @@ final class PostgresStore implements Store, ChangeFeed {
         byte[] key = bytes(resultSet, 2, table.keyFormat);
         State state = State.valueOf(resultSet.getString(4));
         byte[] value = state == State.VALUE ? bytes(resultSet, 3, table.valueFormat) : null;
-        long ageMicros = Math.max(0, resultSet.getLong(6));
         return new Row(hash, key == null ? new byte[0] : key, value, state, resultSet.getLong(5),
-                Duration.ofNanos(ageMicros * 1_000), resultSet.getLong(7), resultSet.getLong(9));
+                age(resultSet.getLong(6)));
+    }
+
+    // an age in microseconds; a write time after the statement's now() (written by a later transaction meanwhile)
+    // counts as 0
+    private static Duration age(long micros) {
+        return Duration.ofNanos(Math.max(0, micros) * 1_000);
     }
 
     private static byte @Nullable [] bytes(ResultSet resultSet, int column, Format format) throws SQLException {
@@ -674,20 +511,27 @@ final class PostgresStore implements Store, ChangeFeed {
         }
     }
 
-    // the VALUES rows: id, key, value and, for conditional writes, the expected version; returns the next index
-    private int bindEntries(PreparedStatement statement, int index, List<Entry> entries,
-                            @Nullable List<ExpectedEntry> expected) throws SQLException {
-        for (int i = 0; i < entries.size(); i++) {
-            Entry entry = entries.get(i);
-            statement.setString(index++, entry.hash());
-            bind(statement, index++, entry.key(), table.keyFormat);
-            bind(statement, index++, entry.value(), table.valueFormat);
-            if (expected != null) {
-                statement.setLong(index++, expected.get(i).expectedVersion());
-                statement.setLong(index++, expected.get(i).basis());
-            }
+    // the VALUES rows: id, key, value (both null for a tombstone, bound with the type the casts expect), version and
+    // expected version (or ANY, MISSING); returns the next index
+    private int bindWrites(PreparedStatement statement, List<Write> writes) throws SQLException {
+        int index = 1;
+        for (Write write : writes) {
+            statement.setString(index++, write.hash());
+            bindNullable(statement, index++, write.key(), table.keyFormat);
+            bindNullable(statement, index++, write.value(), table.valueFormat);
+            statement.setLong(index++, write.version());
+            statement.setLong(index++, write.expected());
         }
         return index;
+    }
+
+    private static void bindNullable(PreparedStatement statement, int index, byte @Nullable [] bytes, Format format)
+            throws SQLException {
+        if (bytes != null) {
+            bind(statement, index, bytes, format);
+        } else {
+            statement.setNull(index, format == Format.BINARY ? Types.BINARY : Types.VARCHAR);
+        }
     }
 
     // VALUES (...), (...) for n rows, the key and value casts filled in
@@ -698,21 +542,15 @@ final class PostgresStore implements Store, ChangeFeed {
         return String.join(", ", Collections.nCopies(count, filled));
     }
 
-    private static Map<String, Long> versions(PreparedStatement statement) throws SQLException {
-        Map<String, Long> versions = new LinkedHashMap<>();
+    // the ids a writing statement returns as its first column: those written
+    private static Set<String> ids(PreparedStatement statement) throws SQLException {
+        Set<String> ids = new LinkedHashSet<>();
         try (ResultSet resultSet = statement.executeQuery()) {
             while (resultSet.next()) {
-                versions.put(resultSet.getString(1), resultSet.getLong(2));
+                ids.add(resultSet.getString(1));
             }
         }
-        return versions;
-    }
-
-    // one entry per hash (the last wins), in the order of the hashes
-    private static List<Entry> sorted(Collection<Entry> entries) {
-        Map<String, Entry> byHash = new TreeMap<>();
-        entries.forEach(entry -> byHash.put(entry.hash(), entry));
-        return new ArrayList<>(byHash.values());
+        return ids;
     }
 
     private static <T> List<List<T>> chunks(List<T> items) {

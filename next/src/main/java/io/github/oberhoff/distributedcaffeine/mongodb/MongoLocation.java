@@ -25,14 +25,17 @@ import org.bson.json.JsonWriterSettings;
 
 import java.nio.charset.StandardCharsets;
 
-// One cache's place in MongoDB: database, collection, discriminator and formats; the document ids (a row's
-// {d, h}, the control document's {d, c} carrying the last invalidateAll's time, the schema marker's string id), and
-// the conversion of serialized keys and values to BSON per format.
+// One cache's place in MongoDB: database, collection, discriminator and formats; the document ids (a row's {d, h},
+// reserved rows such as invalidateAll's control row included; the start document's {d, c}, written once per store to
+// seed its cluster time; the schema marker's string id), and the conversion of serialized keys and values to BSON per
+// format.
 final class MongoLocation {
 
     static final String MARKER_ID = "distributed-caffeine";
-    static final String MARKER = "distributed-caffeine schema 1";
-    static final String CONTROL = "invalidate-all";
+    // schema 2: invalidateAll by the control row's write time, no stamps, bases or control document (a collection of
+    // schema 1 would show the rows its old control document hid)
+    static final String MARKER = "distributed-caffeine schema 2";
+    static final String START = "started";
     private static final JsonWriterSettings JSON = JsonWriterSettings.builder().outputMode(JsonMode.RELAXED).build();
 
     final String databaseName;
@@ -40,7 +43,7 @@ final class MongoLocation {
     final String discriminator;
     final Format keyFormat;
     final Format valueFormat;
-    final BsonDocument controlId;
+    final BsonDocument startId;
 
     MongoLocation(String databaseName, String collectionName, String discriminator, Format keyFormat,
                   Format valueFormat) {
@@ -49,7 +52,7 @@ final class MongoLocation {
         this.discriminator = discriminator;
         this.keyFormat = keyFormat;
         this.valueFormat = valueFormat;
-        this.controlId = new BsonDocument("d", new BsonString(discriminator)).append("c", new BsonString(CONTROL));
+        this.startId = new BsonDocument("d", new BsonString(discriminator)).append("c", new BsonString(START));
     }
 
     // always built in the same field order, so that equality on _id finds it

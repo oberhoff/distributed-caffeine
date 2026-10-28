@@ -15,8 +15,6 @@
  */
 package io.github.oberhoff.distributedcaffeine.mongodb;
 
-import com.mongodb.client.model.Filters;
-import com.mongodb.client.model.Updates;
 import io.github.oberhoff.distributedcaffeine.CaffeineConfigurer;
 import io.github.oberhoff.distributedcaffeine.DistributedAsyncLoadingCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCache;
@@ -25,11 +23,11 @@ import io.github.oberhoff.distributedcaffeine.DistributionMode;
 import io.github.oberhoff.distributedcaffeine.SynchronizationState;
 import io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
-import io.github.oberhoff.distributedcaffeine.spi.Entry;
-import io.github.oberhoff.distributedcaffeine.spi.Row;
+import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.testing.SilencingProxy;
 import org.bson.BsonDocument;
 import org.bson.Document;
@@ -554,23 +552,25 @@ abstract class MongoAdapterTest {
     }
 
     @Test
-    void a_document_written_before_bases_were_stored_is_maintained_as_decided_on_nothing_read() {
+    void maintenance_leaves_reserved_documents_alone_and_deletes_what_the_control_row_hides() {
         try (var store = adapter().build().createStore(StoreSettings.of(Format.TEXT, Format.TEXT))) {
-            store.invalidateAll();
-            store.put(List.of(new Entry("h", "k".getBytes(StandardCharsets.UTF_8),
-                    "v".getBytes(StandardCharsets.UTF_8))));
-            database.client.getDatabase("adapter").getCollection(collection)
-                    .updateOne(Filters.eq("_id.h", "h"), Updates.unset("b"));
+            byte[] bytes = "x".getBytes(StandardCharsets.UTF_8);
+            // any versions: the store only stores them
+            store.write(List.of(Write.value("hidden", bytes, bytes, 1)));
+            // written after it (or in the same millisecond, which also hides it: at or before)
+            store.write(List.of(Write.value(Store.CONTROL_HASH, bytes, bytes, 2)));
 
-            assertThat(store.read(List.of("h"), LONG).rows().get("h").basis()).isEqualTo(Row.NO_BASIS);
-            assertThat(store.pruneToSize(0)).as("a visible value, pruned").isOne();
+            assertThat(store.expire(Duration.ZERO, 3)).as("neither the hidden one nor the control row").isZero();
+            assertThat(store.pruneToSize(0)).as("neither counted nor deleted").isZero();
+            assertThat(store.pruneTombstones(LONG)).as("the hidden one, without a grace period").isOne();
+            assertThat(store.read(List.of("hidden", Store.CONTROL_HASH), LONG)).containsOnlyKeys(Store.CONTROL_HASH);
         }
     }
 
     // schema and names
 
     @Test
-    void the_collection_is_created_with_marker_index_and_control_document_and_reused() {
+    void the_collection_is_created_with_marker_and_index_and_reused() {
         cache(Function.identity()).put("k", "v");
         cache(Function.identity());
 
@@ -579,7 +579,8 @@ abstract class MongoAdapterTest {
                 .isEqualTo(MongoLocation.MARKER);
         assertThat(created.listIndexes().into(new ArrayList<>())).anyMatch(index ->
                 index.get("key", Document.class).equals(new Document("_id.d", 1).append("state", 1).append("writeTime", 1)));
-        assertThat(created.countDocuments(new Document("_id.c", MongoLocation.CONTROL))).isEqualTo(1);
+        assertThat(created.countDocuments(new Document("_id.c", MongoLocation.START))).as("one per discriminator")
+                .isEqualTo(1);
     }
 
     @Test

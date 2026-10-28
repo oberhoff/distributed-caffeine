@@ -45,13 +45,11 @@ public final class InMemoryDatabase {
     private final Random random;
     private final Map<String, InMemoryTable> tables = new ConcurrentHashMap<>();
     final Faults faults = new Faults();
-    // whether conditional writes refuse a basis below the cut-off (Store#checksBasis); off, as on MongoDB
-    volatile boolean checksBasis = true;
-    // the time and the stamp a delayed write took before it waited (see setCommitDelay), for the thread running it
+    // the write time a delayed write took before it waited (see setCommitDelay), for the thread running it
     private final ThreadLocal<Long> commitTime = new ThreadLocal<>();
-    private final ThreadLocal<Long> commitStamp = new ThreadLocal<>();
-    // the last stamp handed out: stamps increase strictly, also within a microsecond (Row#stamp)
-    private long stamp;
+    // the last write time handed out: write times increase strictly, also within a microsecond, so that the ages of
+    // one read order the writes as they happened (a clock that never goes backwards, Store point 2)
+    private long lastWriteTime;
 
     /**
      * Creates a database on the system clock with a random seed.
@@ -172,16 +170,6 @@ public final class InMemoryDatabase {
     }
 
     /**
-     * Sets whether conditional writes refuse a basis below the cut-off ({@code Store#checksBasis}), as PostgreSQL's
-     * do; without, they are only hidden by it, as MongoDB's are. On by default.
-     *
-     * @param checksBasis whether they refuse
-     */
-    public void setChecksBasis(boolean checksBasis) {
-        this.checksBasis = checksBasis;
-    }
-
-    /**
      * Sets the probability that a message is delivered twice.
      *
      * @param probability between 0 and 1
@@ -192,7 +180,7 @@ public final class InMemoryDatabase {
 
     /**
      * Reorders the messages of a delivered batch across keys (per key the commit order stays, and nothing moves
-     * across an {@code INVALIDATED_ALL}).
+     * across a write of the control row, {@code Store#CONTROL_HASH}).
      *
      * @param reorder whether to reorder
      */
@@ -211,9 +199,8 @@ public final class InMemoryDatabase {
 
     /**
      * Delays writes between taking their time and becoming visible, as a real store takes a write's time when the
-     * statement runs and makes it visible at commit: a delayed write gets the time and the stamp of its start (its
-     * write time and {@code Row#stamp}), waits a random duration up to the given one outside the table's monitor,
-     * and is applied then, its version taken as it is applied.
+     * statement runs and makes it visible at commit: a delayed write gets the write time of its start, waits a random
+     * duration up to the given one outside the table's monitor, and is applied then.
      *
      * @param maxDelay    the maximum delay, zero for none
      * @param probability the share of writes delayed, between 0 and 1
@@ -224,7 +211,7 @@ public final class InMemoryDatabase {
     }
 
     /**
-     * Runs a step before every conditional write ({@code putIfUnchanged}) is applied, outside the table's monitor:
+     * Runs a step before every batch with a conditional write ({@code Store#write}) is applied, outside the table's monitor:
      * between an operation's read and its write, e.g. to run an {@code invalidateAll} there.
      *
      * @param step the step, {@code null} for none
@@ -234,8 +221,9 @@ public final class InMemoryDatabase {
     }
 
     /**
-     * Runs a step after an {@code invalidateAll} took its stamp and before it becomes visible, outside the table's
-     * monitor: the window between a write's time and its commit, opened on purpose for the control row.
+     * Runs a step after a write of the control row ({@code Store#CONTROL_HASH}, the core's {@code invalidateAll}) took
+     * its write time and before it becomes visible, outside the table's monitor: the window between a write's time
+     * and its commit, opened on purpose for the control row.
      *
      * @param step the step, {@code null} for none
      */
@@ -243,20 +231,18 @@ public final class InMemoryDatabase {
         faults.beforeInvalidateAllApplies = step;
     }
 
-    // an invalidateAll: its stamp taken first, then the step, then the write with that stamp
+    // a write of the control row: its write time taken first, then the step, then the write at that time
     <T> T invalidating(Supplier<T> write) {
         Runnable step = faults.beforeInvalidateAllApplies;
         if (step == null) {
             return write(write);
         }
-        commitTime.set(nowMicros());
-        commitStamp.set(nextStamp());
+        commitTime.set(nextWriteTime());
         try {
             step.run();
             return write.get();
         } finally {
             commitTime.remove();
-            commitStamp.remove();
         }
     }
 
@@ -266,14 +252,12 @@ public final class InMemoryDatabase {
         if (maxDelay <= 0 || nextDouble() >= faults.commitDelayProbability) {
             return write.get();
         }
-        commitTime.set(nowMicros());
-        commitStamp.set(nextStamp());
+        commitTime.set(nextWriteTime());
         try {
             LockSupport.parkNanos(nextLong(maxDelay));
             return write.get();
         } finally {
             commitTime.remove();
-            commitStamp.remove();
         }
     }
 
@@ -284,26 +268,20 @@ public final class InMemoryDatabase {
         }
     }
 
-    long nowMicros() {
+    // the store's time now: never behind a write time handed out, so that no age is negative
+    synchronized long nowMicros() {
+        return Math.max(clockMicros.getAsLong(), lastWriteTime);
+    }
+
+    // the time of a write: the store's time, but above every earlier write time (a delayed write keeps the one it
+    // took before it waited)
+    synchronized long nextWriteTime() {
         Long pinned = commitTime.get();
-        return pinned != null ? pinned : clockMicros.getAsLong();
-    }
-
-    // the clock for a version, never pinned: a store computes it as it applies the write, against the row it finds
-    // (PostgreSQL in the same statement, microseconds before; pinning it to a delayed write's start would let a key
-    // recreated after a prune start below a version written meanwhile, a window real stores hardly open)
-    long versionMicros() {
-        return clockMicros.getAsLong();
-    }
-
-    // the stamp of a write: the store's time, but above every earlier stamp (a delayed write keeps the one it took)
-    synchronized long nextStamp() {
-        Long pinned = commitStamp.get();
         if (pinned != null) {
             return pinned;
         }
-        stamp = Math.max(stamp + 1, clockMicros.getAsLong());
-        return stamp;
+        lastWriteTime = Math.max(lastWriteTime + 1, clockMicros.getAsLong());
+        return lastWriteTime;
     }
 
     synchronized double nextDouble() {

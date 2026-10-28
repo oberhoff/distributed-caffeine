@@ -18,7 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.AsyncCacheLoader;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
-import io.github.oberhoff.distributedcaffeine.spi.ReadResult;
+import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import org.jspecify.annotations.Nullable;
@@ -145,7 +145,7 @@ class InternalAsyncTest {
         AtomicInteger reads = new AtomicInteger();
         DistributedAsyncCache<String, String> cache = track(builder(store -> new InternalCoreTest.DelegatingStore(store) {
             @Override
-            public ReadResult read(Collection<String> hashes, Duration maxAge) {
+            public Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
                 reads.incrementAndGet();
                 return super.read(hashes, maxAge);
             }

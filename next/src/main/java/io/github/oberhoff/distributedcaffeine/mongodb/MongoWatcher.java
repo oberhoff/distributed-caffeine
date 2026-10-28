@@ -66,8 +66,10 @@ import java.util.function.Consumer;
  * changed fields of an update: {@code TOMBSTONE} is {@code INVALIDATED}, {@code EXPIRED} is {@code EXPIRED},
  * {@code VALUE} is {@code WRITTEN}. An update leaving the state as it was names none: it is {@code WRITTEN} if it
  * wrote a value (a flag the stream computes before projecting the value out), otherwise {@code INVALIDATED} (a
- * tombstone or expired row given a new version, as by {@code invalidateAll}); the control document's time is
- * {@code INVALIDATED_ALL}. A failed stream is reported as {@code onLost()} and reopened only when a cache asks
+ * tombstone or expired row given a new version). The control row of {@code invalidateAll} is a document like any
+ * other: its writes are announced as {@code WRITTEN} of its reserved hash, which the core takes as
+ * {@code invalidateAll}; documents without a hash (the schema marker, a store's start document) announce nothing. A
+ * failed stream is reported as {@code onLost()} and reopened only when a cache asks
  * ({@code resume()}, VISION.md, "Supervision"): once per loss, whoever asks first, from the resume token, so that the
  * caches still on it miss nothing; also when a cache suspects the stream went silent (its heartbeat). The core counts
  * every resume as a gap for the cache resuming. A history the stream can no longer resume from (errors 280 and 286,
@@ -221,10 +223,6 @@ final class MongoWatcher {
         if (fields == null) {
             return null;
         }
-        if (id.asDocument().containsKey("c")) {
-            long cutoff = MongoStore.stamp(fields.get("t"));
-            return cutoff > 0 ? Change.invalidatedAll(cutoff) : null;
-        }
         BsonValue hash = id.asDocument().get("h");
         BsonValue version = fields.get("version");
         if (hash == null || !hash.isString() || version == null || !version.isNumber()) {
@@ -232,7 +230,7 @@ final class MongoWatcher {
         }
         BsonValue state = fields.get("state");
         // an update leaving the state as it was names no state: with a new value it is a value row; without, the row
-        // may be anything (a tombstone given a new version by invalidateAll, say), so it is announced as invalidated,
+        // may be anything (a tombstone or an expired row given a new version, say), so it is announced as invalidated,
         // which is never wrong (at worst, a value written again unchanged is read again on demand)
         if (state == null || !state.isString()) {
             BsonValue written = fields.get(VALUE_WRITTEN);

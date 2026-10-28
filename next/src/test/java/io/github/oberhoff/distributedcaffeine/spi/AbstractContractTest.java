@@ -23,11 +23,13 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static java.util.Objects.requireNonNull;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -124,17 +126,50 @@ public abstract class AbstractContractTest {
         return store;
     }
 
-    protected static Entry entry(String hash, String value) {
-        return new Entry(hash, ("key-" + hash).getBytes(StandardCharsets.UTF_8), value.getBytes(StandardCharsets.UTF_8));
+    // versions as the core would choose them: positive and unique, here simply counted (the store only compares them
+    // for equality, so their order means nothing to it)
+    private static final AtomicLong VERSIONS = new AtomicLong(1L << 40);
+
+    protected static long nextVersion() {
+        return VERSIONS.incrementAndGet();
     }
 
-    // a conditional write decided on nothing read (the basis tests name theirs)
-    protected static ExpectedEntry ifVersion(Entry entry, long version) {
-        return ExpectedEntry.ifVersion(entry, version, Row.NO_BASIS);
+    // an unconditional write of a value at a new version
+    protected static Write entry(String hash, String value) {
+        return Write.value(hash, ("key-" + hash).getBytes(StandardCharsets.UTF_8),
+                value.getBytes(StandardCharsets.UTF_8), nextVersion());
     }
 
-    protected static ExpectedEntry ifMissing(Entry entry) {
-        return ExpectedEntry.ifMissing(entry, Row.NO_BASIS);
+    // an unconditional tombstone at a new version
+    protected static Write tombstone(String hash) {
+        return Write.tombstone(hash, nextVersion());
+    }
+
+    // the core's invalidateAll: an unconditional write of the control row, a value row (Store#CONTROL_HASH)
+    protected static Write control() {
+        return Write.value(Store.CONTROL_HASH, new byte[0], new byte[0], nextVersion());
+    }
+
+    protected static Write ifVersion(Write write, long version) {
+        return write.ifVersion(version);
+    }
+
+    protected static Write ifMissing(Write write) {
+        return write.ifMissing();
+    }
+
+    // writes and returns the version written; the write must not conflict
+    protected static long written(Store store, Write write) {
+        Set<String> conflicts = store.write(List.of(write));
+        if (!conflicts.isEmpty()) {
+            throw new AssertionError("the write conflicted: " + write);
+        }
+        return write.version();
+    }
+
+    // whether a single write was applied
+    protected static boolean applied(Store store, Write write) {
+        return store.write(List.of(write)).isEmpty();
     }
 
     protected static String value(Row row) {
