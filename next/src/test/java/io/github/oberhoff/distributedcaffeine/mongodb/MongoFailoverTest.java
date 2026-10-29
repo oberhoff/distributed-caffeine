@@ -29,6 +29,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -64,6 +65,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * or fails as the store failed; afterwards both caches agree with the store, and no confirmed write is lost. Without
  * a majority, writes fail within the client's timeout instead of waiting, and resume once the members are back.
  */
+@NullMarked
 @Timeout(300)
 abstract class MongoFailoverTest {
 

@@ -21,6 +21,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -42,6 +43,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@code withDistributionMode}: {@code INVALIDATE} by default; {@code NONE} subscribes to nothing, so a change made
  * elsewhere reaches a local copy only through Caffeine's expiry, which defaults to the store's maximum age.
  */
+@NullMarked
 @Timeout(30)
 @SuppressWarnings("resource") // every cache and store a test opens is closed after it (@AfterEach)
 class InternalDistributionModeTest {
@@ -62,17 +64,19 @@ class InternalDistributionModeTest {
 
     private DistributedCaffeine<String, String> builder() {
         Adapter<String, String> adapter = settings ->
-                new InternalCoreTest.DelegatingStore(database.openStore("cache")) {
+                // the feed whatever the profile's change source: these tests count its subscriptions
+                new InternalCoreTest.DelegatingStore(database.openFeed("cache")) {
                     @Override
                     public ChangeSubscription subscribe(ChangeListener listener) {
                         subscriptions.incrementAndGet();
                         return super.subscribe(listener);
                     }
                 };
-        return DistributedCaffeine.newBuilder(adapter)
+        return DistributedCaffeine.newBuilder(InternalCoreTest.offered(adapter))
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> store.withMaximumAge(MAXIMUM_AGE).withMaximumSize(1_000));
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(MAXIMUM_AGE).withMaximumSize(1_000));
     }
 
     private <C extends AutoCloseable> C track(C closeable) {
@@ -133,14 +137,19 @@ class InternalDistributionModeTest {
     }
 
     @Test
-    void none_expires_copies_after_the_maximum_age_unless_an_expiry_after_write_is_configured() {
+    void every_copy_expires_at_the_maximum_age_at_the_latest() {
         DistributedCache<String, String> defaulted = none(Function.identity());
         assertThat(defaulted.policy().expireAfterWrite().orElseThrow().getExpiresAfter()).isEqualTo(MAXIMUM_AGE);
 
         DistributedCache<String, String> configured = none(builder -> builder
                 .withCaffeine(caffeine -> caffeine.expireAfterWrite(Duration.ofMinutes(5))));
         assertThat(configured.policy().expireAfterWrite().orElseThrow().getExpiresAfter())
-                .isEqualTo(Duration.ofMinutes(5));
+                .as("a shorter one is kept").isEqualTo(Duration.ofMinutes(5));
+
+        DistributedCache<String, String> longer = none(builder -> builder
+                .withCaffeine(caffeine -> caffeine.expireAfterWrite(MAXIMUM_AGE.multipliedBy(2))));
+        assertThat(longer.policy().expireAfterWrite().orElseThrow().getExpiresAfter())
+                .as("a longer one is lowered to it").isEqualTo(MAXIMUM_AGE);
 
         DistributedCache<String, String> variable = none(builder -> builder.withCaffeine(caffeine -> caffeine
                 .expireAfter(Expiry.writing((String key, String value) -> Duration.ofMinutes(2)))));
@@ -154,7 +163,8 @@ class InternalDistributionModeTest {
                 .as("access alone does not bound the age").isEqualTo(MAXIMUM_AGE);
 
         DistributedCache<String, String> distributed = track(builder().build());
-        assertThat(distributed.policy().expireAfterWrite()).as("only without distribution").isEmpty();
+        assertThat(distributed.policy().expireAfterWrite().orElseThrow().getExpiresAfter())
+                .as("with distribution too: a message dropping it may be lost").isEqualTo(MAXIMUM_AGE);
     }
 
     @Test

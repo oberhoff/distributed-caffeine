@@ -28,13 +28,23 @@ class InMemoryStoreContractTest extends StoreContractTest {
         return fixture();
     }
 
-    // shared with the change feed contract
+    // shared with the change feed contract: the store with its feed and its scan, whatever the profile's change source
     static Fixture fixture() {
         InMemoryDatabase database = new InMemoryDatabase();
         return new Fixture() {
             @Override
+            public boolean assigns(int batchSize) {
+                return database.profile().assigns(batchSize);
+            }
+
+            @Override
+            public boolean ownVersions() {
+                return database.profile().versioning() == StoreProfile.Versioning.ASSIGNING_OWN;
+            }
+
+            @Override
             public Store openStore() {
-                return database.openStore("cache");
+                return database.openFeed("cache");
             }
 
             @Override
@@ -45,7 +55,7 @@ class InMemoryStoreContractTest extends StoreContractTest {
 
             @Override
             public Store openStoreOfAnotherCache() {
-                return database.openStore("other");
+                return database.openFeed("other");
             }
 
             @Override

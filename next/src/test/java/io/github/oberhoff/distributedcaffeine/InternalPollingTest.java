@@ -24,10 +24,12 @@ import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryStore;
 import io.github.oberhoff.distributedcaffeine.testing.ScanOnlyStore;
 import java.util.Map;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -37,7 +39,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -52,6 +53,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * the cut-off; writes that may have committed too late for every poll are touched again; polls failing longer than
  * the grace period report a loss.
  */
+@NullMarked
 @Timeout(30)
 @SuppressWarnings("resource") // every cache and store a test opens is closed after it (@AfterEach)
 class InternalPollingTest {
@@ -77,7 +79,7 @@ class InternalPollingTest {
     }
 
     private DistributedCache<String, String> polled() {
-        Adapter<String, String> adapter = settings -> new ScanOnlyStore(database.openStore("cache"));
+        Adapter<String, String> adapter = settings -> new ScanOnlyStore(database.openFeed("cache"));
         return track(DistributedCaffeine.newBuilder(adapter)
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
@@ -87,27 +89,30 @@ class InternalPollingTest {
 
     // a polling store as the core builds it, on a given store, with a short overlap and grace period
     private InternalPollingStore polling(Store storage, Duration grace) {
-        InMemoryStore scanned = track(database.openStore("cache"));
+        InMemoryStore scanned = track(database.openFeed("cache"));
         return track(new InternalPollingStore(storage, scanned, POLL, Duration.ofMillis(20), grace,
                 Duration.ofMillis(20), executor));
     }
 
+    // the writer's clock: one instance writing, each version above its last
+    private static final InternalVersion CLOCK = new InternalVersion();
+
     // an unconditional write of a value at a new version, as the core writes a put
     private static Write entry(String hash, String value) {
         return Write.value(hash, hash.getBytes(StandardCharsets.UTF_8), value.getBytes(StandardCharsets.UTF_8),
-                InternalVersion.fresh());
+                CLOCK.fresh());
     }
 
-    // writes the value and returns its version
-    private static long put(Store store, String hash, String value) {
-        Write write = entry(hash, value);
-        store.write(List.of(write));
-        return write.version();
+    // writes the one key the tests write, returns its version
+    private static long put(Store store) {
+        Write write = entry("h1", "v");
+        // the version it was applied at: the store's, where it assigns one
+        return store.write(List.of(write)).version(write);
     }
 
     // the version of the one key the touch tests write
     private long version() {
-        try (InMemoryStore store = database.openStore("cache")) {
+        try (InMemoryStore store = database.openFeed("cache")) {
             return store.read(List.of("h1"), LONG).get("h1").version();
         }
     }
@@ -144,7 +149,7 @@ class InternalPollingTest {
     @Test
     void an_expiry_reaches_a_holder_although_the_value_is_older_than_a_polls_window() {
         java.util.function.Supplier<DistributedCache<String, String>> expiring = () -> {
-            Adapter<String, String> adapter = settings -> new ScanOnlyStore(database.openStore("cache"));
+            Adapter<String, String> adapter = settings -> new ScanOnlyStore(database.openFeed("cache"));
             return track(DistributedCaffeine.newBuilder(adapter)
                     .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                             .withValueSerializer(StringSerializer.ofString()))
@@ -160,13 +165,14 @@ class InternalPollingTest {
         writer.put("k", "v");
         assertThat(holder.getIfPresent("k")).isEqualTo("v");
 
-        await(() -> holder.policy().getIfPresentQuietly("k") == null);
-        assertThat(holder.distributedPolicy().stats().expiredMessageCount()).isPositive();
+        // the expiry's message arrives (the copy may have expired locally before it, at the same maximum age)
+        await(() -> holder.distributedPolicy().stats().expiredMessageCount() > 0);
+        assertThat(holder.policy().getIfPresentQuietly("k")).isNull();
     }
 
     @Test
     void a_poll_interval_above_half_the_heartbeat_interval_is_refused() {
-        Adapter<String, String> adapter = settings -> new ScanOnlyStore(database.openStore("cache"));
+        Adapter<String, String> adapter = settings -> new ScanOnlyStore(database.openFeed("cache"));
         DistributedCaffeine<String, String> builder = DistributedCaffeine.newBuilder(adapter)
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
@@ -184,15 +190,15 @@ class InternalPollingTest {
         Store slow = new io.github.oberhoff.distributedcaffeine.testing.StorageOnlyStore(track(database.openStore(
                 "cache"))) {
             @Override
-            public Set<String> write(Collection<Write> writes) {
-                Set<String> conflicts = super.write(writes);
+            public WriteResult write(Collection<Write> writes) {
+                WriteResult conflicts = super.write(writes);
                 pause(60);
                 return conflicts;
             }
         };
         InternalPollingStore store = polling(slow, LONG);
 
-        long written = put(store, "h1", "v");
+        long written = put(store);
 
         await(() -> version() != written);
     }
@@ -213,12 +219,12 @@ class InternalPollingTest {
 
     @Test
     void a_row_hidden_by_the_cut_off_is_not_touched_back() {
-        InMemoryStore other = track(database.openStore("cache"));
+        InMemoryStore other = track(database.openFeed("cache"));
         Store slow = new io.github.oberhoff.distributedcaffeine.testing.StorageOnlyStore(track(database.openStore(
                 "cache"))) {
             @Override
-            public Set<String> write(Collection<Write> writes) {
-                Set<String> conflicts = super.write(writes);
+            public WriteResult write(Collection<Write> writes) {
+                WriteResult conflicts = super.write(writes);
                 // the core's invalidateAll: the write is before the control row, its call returns after it
                 other.write(List.of(Write.value(Store.CONTROL_HASH, new byte[0], new byte[0], 1L << 41)));
                 pause(60);
@@ -227,7 +233,7 @@ class InternalPollingTest {
         };
         InternalPollingStore store = polling(slow, LONG);
 
-        long written = put(store, "h1", "v");
+        long written = put(store);
         pause(200);
 
         Map<String, Row> read = other.read(List.of("h1", Store.CONTROL_HASH), LONG);

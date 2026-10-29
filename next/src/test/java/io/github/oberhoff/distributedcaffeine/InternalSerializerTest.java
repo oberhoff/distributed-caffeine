@@ -21,6 +21,7 @@ import io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.Serializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 
@@ -30,6 +31,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+@NullMarked
 class InternalSerializerTest {
 
     record Order(String id) {
@@ -92,6 +94,7 @@ class InternalSerializerTest {
     }
 
     @Test
+    @SuppressWarnings("NullableProblems") // on purpose: a serializer breaking its contract, which must be caught
     void null_results_are_failures() {
         InternalSerializer<String> serializer = InternalSerializer.of(new StringSerializer<>() {
             @Override

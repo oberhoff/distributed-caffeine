@@ -29,13 +29,13 @@ import java.util.Arrays;
  */
 public final class DistributedStats {
 
-    private static final DistributedStats EMPTY = new DistributedStats(new long[31]);
+    private static final DistributedStats EMPTY = new DistributedStats(new long[34]);
 
     private final long[] values;
 
     DistributedStats(long[] values) {
-        if (values.length != 31) {
-            throw new IllegalArgumentException("expected 31 values");
+        if (values.length != 34) {
+            throw new IllegalArgumentException("expected 34 values");
         }
         this.values = values.clone();
     }
@@ -338,14 +338,50 @@ public final class DistributedStats {
     }
 
     /**
+     * Returns the number of writes not decided on a read (a {@code put}, an {@code invalidate}) that the store refused
+     * because it held a larger version already, written by an instance whose clock is ahead or by a racing write; each
+     * was proposed again, above it, at the cost of one more round trip. A measure of clock skew and contention.
+     *
+     * @return the count
+     */
+    public long versionRefusalCount() {
+        return values[31];
+    }
+
+    /**
+     * Returns the number of loads that returned their value without caching it: the key was invalidated or removed on
+     * some instance during each of three attempts in a row (each such removal means the loaded value may be outdated,
+     * so the load writes only if nothing happened in between, and otherwise loads again). The caller gets the value it
+     * loaded last; neither this instance nor the store keeps it. Rare unless a key is removed about as often as its
+     * load takes; a steady count shows such a key.
+     *
+     * @return the count
+     */
+    public long uncachedLoadCount() {
+        return values[32];
+    }
+
+    /**
+     * Returns the number of versions seen (in an announcement, a read, a refused write) whose time lay more than a
+     * minute ahead of this instance's clock: written by an instance or a store server whose clock runs ahead. Up to a
+     * day ahead this instance follows it (its later versions lie above it); beyond, it does not, and only a write on
+     * such a key goes above it. Correctness does not depend on it; a steady count shows a clock to fix.
+     *
+     * @return the count
+     */
+    public long clockAheadCount() {
+        return values[33];
+    }
+
+    /**
      * Returns the sum of this snapshot and another, saturating at {@code Long.MAX_VALUE}.
      *
      * @param other the other snapshot
      * @return the sum
      */
     public DistributedStats plus(DistributedStats other) {
-        long[] sum = new long[31];
-        for (int i = 0; i < 31; i++) {
+        long[] sum = new long[34];
+        for (int i = 0; i < values.length; i++) {
             long result = values[i] + other.values[i];
             sum[i] = ((values[i] ^ result) & (other.values[i] ^ result)) < 0 ? Long.MAX_VALUE : result;
         }
@@ -359,8 +395,8 @@ public final class DistributedStats {
      * @return the difference
      */
     public DistributedStats minus(DistributedStats other) {
-        long[] difference = new long[31];
-        for (int i = 0; i < 31; i++) {
+        long[] difference = new long[34];
+        for (int i = 0; i < values.length; i++) {
             difference[i] = Math.max(0, values[i] - other.values[i]);
         }
         return new DistributedStats(difference);
@@ -408,6 +444,9 @@ public final class DistributedStats {
                 + "revalidationKeptCount=" + values[27] + ", "
                 + "revalidationDroppedCount=" + values[28] + ", "
                 + "unreadableRowCount=" + values[29] + ", "
-                + "absentHitCount=" + values[30] + "}";
+                + "absentHitCount=" + values[30] + ", "
+                + "versionRefusalCount=" + values[31] + ", "
+                + "uncachedLoadCount=" + values[32] + ", "
+                + "clockAheadCount=" + values[33] + "}";
     }
 }

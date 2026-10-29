@@ -25,6 +25,7 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import org.jspecify.annotations.Nullable;
 import org.postgresql.PGConnection;
 
@@ -180,15 +181,16 @@ final class PostgresStore implements Store, ChangeFeed {
     // writes
 
     /**
-     * Every kind of write in one statement per chunk, so that a batch mixing them is one round trip: unconditional
-     * ones as an upsert (a), those conditioned on a version as an update matching it (u), those conditioned on no
-     * row as an insert doing nothing on a conflict (n); each one atomic step per key, in the order of the hashes. A
+     * Every kind of write in one statement per chunk, so that a batch mixing them is one round trip: advancing ones as
+     * an upsert that updates only a row of a smaller version (a: the version only grows; a row of a larger or equal one
+     * is not returned, a refusal), those conditioned on a version as an update matching it (u), those conditioned on
+     * no row as an insert doing nothing on a conflict (n); each one atomic step per key, in the order of the hashes. A
      * tombstone keeps the row's key ({@code coalesce}), and has none where no row existed. The write time is the
      * server's now(), which the control row's (Store#CONTROL_HASH) is compared with. Every row written is announced at
      * its version in the same statement; the ids not returned conflicted.
      */
     @Override
-    public Set<String> write(Collection<Write> writes) {
+    public WriteResult write(Collection<Write> writes) {
         Map<String, Write> byHash = new TreeMap<>();
         writes.forEach(write -> byHash.put(write.hash(), write));
         Set<String> conflicts = new LinkedHashSet<>();
@@ -205,6 +207,7 @@ final class PostgresStore implements Store, ChangeFeed {
                             ON CONFLICT (discriminator, id) DO UPDATE SET key = coalesce(excluded.key, r.key),
                                 value = excluded.value, state = excluded.state, version = excluded.version,
                                 write_time = excluded.write_time
+                                WHERE r.version < excluded.version
                             RETURNING r.id, r.version, r.state),
                         u AS (
                             UPDATE %2$s AS r SET key = coalesce(i.key, r.key), value = i.value, state = %3$s,
@@ -222,8 +225,8 @@ final class PostgresStore implements Store, ChangeFeed {
                         w AS (SELECT * FROM a UNION ALL SELECT * FROM u UNION ALL SELECT * FROM n)
                         SELECT w.id, pg_notify(?, CASE WHEN w.state = 'VALUE' THEN 'WRITTEN|' ELSE 'INVALIDATED|' END
                             || w.id || '|' || w.version) FROM w"""
-                        .formatted(rows(chunk.size(), "(?::text, ?::%s, ?::%s, ?::bigint, ?::bigint)"), t,
-                                "CASE WHEN i.value IS NULL THEN 'TOMBSTONE' ELSE 'VALUE' END", Write.ANY,
+                        .formatted(rows(chunk.size()), t,
+                                "CASE WHEN i.value IS NULL THEN 'TOMBSTONE' ELSE 'VALUE' END", Write.ADVANCE,
                                 Write.MISSING);
                 Set<String> written = run(Kind.WRITE, connection -> {
                     try (PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -245,7 +248,7 @@ final class PostgresStore implements Store, ChangeFeed {
         } catch (StoreException e) {
             throw applied ? e.afterPartlyApplied() : e;
         }
-        return conflicts;
+        return WriteResult.refused(conflicts);
     }
 
     // maintenance: idempotent on several instances at once
@@ -258,7 +261,8 @@ final class PostgresStore implements Store, ChangeFeed {
                 WITH w AS (
                     UPDATE %s AS r SET value = NULL, state = 'EXPIRED', version = ?, write_time = now()
                     WHERE r.discriminator = ? AND r.state = 'VALUE'
-                        AND r.write_time <= now() - (?::bigint * interval '1 microsecond') AND %s AND %s
+                        AND r.write_time <= now() - (?::bigint * interval '1 microsecond') AND r.version < ?
+                        AND %s AND %s
                     RETURNING r.id, r.version)
                 SELECT w.id, w.version, pg_notify(?, 'EXPIRED|' || w.id || '|' || w.version) FROM w"""
                 .formatted(t, NOT_RESERVED, notHidden());
@@ -267,27 +271,32 @@ final class PostgresStore implements Store, ChangeFeed {
                 statement.setLong(1, version);
                 statement.setString(2, table.discriminator);
                 statement.setLong(3, micros(maxAge));
-                statement.setString(4, table.discriminator);
-                statement.setString(5, table.channel);
+                // the version only grows: a row written at a larger one since (a clock ahead) is left for a later run
+                statement.setLong(4, version);
+                statement.setString(5, table.discriminator);
+                statement.setString(6, table.channel);
                 return ids(statement).size();
             }
         });
     }
 
     // keeps the newest maxSize values (ties by hash), counting neither reserved rows nor rows the control row hides;
-    // rows beyond that rank are the same for every instance pruning at once, so overlapping runs never prune more
+    // rows beyond that rank are the same for every instance pruning at once, so overlapping runs never prune more; of
+    // those, the ones younger than the minimum age stay
     @Override
-    public int pruneToSize(long maxSize) {
+    public int pruneToSize(long maxSize, Duration minAge) {
         String sql = """
-                DELETE FROM %1$s WHERE discriminator = ? AND id IN (
+                DELETE FROM %1$s WHERE discriminator = ?
+                    AND write_time <= now() - (?::bigint * interval '1 microsecond') AND id IN (
                     SELECT id FROM %1$s AS r WHERE discriminator = ? AND state = 'VALUE' AND %2$s AND %3$s
                     ORDER BY write_time DESC, id ASC OFFSET ?)""".formatted(t, NOT_RESERVED, notHidden());
         return run(Kind.WRITE, connection -> {
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setString(1, table.discriminator);
-                statement.setString(2, table.discriminator);
+                statement.setLong(2, micros(minAge));
                 statement.setString(3, table.discriminator);
-                statement.setLong(4, maxSize);
+                statement.setString(4, table.discriminator);
+                statement.setLong(5, maxSize);
                 return statement.executeUpdate();
             }
         });
@@ -489,10 +498,10 @@ final class PostgresStore implements Store, ChangeFeed {
                 age(resultSet.getLong(6)));
     }
 
-    // an age in microseconds; a write time after the statement's now() (written by a later transaction meanwhile)
-    // counts as 0
+    // an age in microseconds; negative for a write time after the statement's now() (a clock stepped back), as it is,
+    // so that the ages of the statement still compare like its rows' write times (Store#read)
     private static Duration age(long micros) {
-        return Duration.ofNanos(Math.max(0, micros) * 1_000);
+        return Duration.ofNanos(micros * 1_000);
     }
 
     private static byte @Nullable [] bytes(ResultSet resultSet, int column, Format format) throws SQLException {
@@ -534,12 +543,11 @@ final class PostgresStore implements Store, ChangeFeed {
         }
     }
 
-    // VALUES (...), (...) for n rows, the key and value casts filled in
-    private String rows(int count, String row) {
-        String filled = row.contains("%s")
-                ? row.formatted(PostgresTable.columnType(table.keyFormat), PostgresTable.columnType(table.valueFormat))
-                : row;
-        return String.join(", ", Collections.nCopies(count, filled));
+    // VALUES (...), (...) for n writes (id, key, value, version, expected), the key and value casts filled in
+    private String rows(int count) {
+        String row = "(?::text, ?::%s, ?::%s, ?::bigint, ?::bigint)".formatted(
+                PostgresTable.columnType(table.keyFormat), PostgresTable.columnType(table.valueFormat));
+        return String.join(", ", Collections.nCopies(count, row));
     }
 
     // the ids a writing statement returns as its first column: those written

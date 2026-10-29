@@ -68,6 +68,7 @@ public final class DistributedCaffeine<K, V> {
     private @Nullable Duration absentCachingExpiry;
     private Duration buildTimeout = DEFAULT_BUILD_TIMEOUT;
     private @Nullable Executor storeExecutor;
+    private int loadAttempts = InternalCore.LOAD_ATTEMPTS;
 
     private DistributedCaffeine(Adapter<K, V> adapter) {
         this.adapter = adapter;
@@ -193,7 +194,9 @@ public final class DistributedCaffeine<K, V> {
 
     /**
      * Sets the executor for the library's blocking store I/O (e.g. virtual threads on Java 21 or later). Optional:
-     * a library-owned pool of daemon threads by default. Owned and closed by the caller.
+     * a library-owned pool of daemon threads by default. Owned and closed by the caller. It must run each task on
+     * another thread than the one submitting it (not {@code Runnable::run}): some loads are started by Caffeine under
+     * its lock of the key, and their store I/O must not run under it.
      *
      * @param storeExecutor the executor
      * @return this builder
@@ -301,6 +304,18 @@ public final class DistributedCaffeine<K, V> {
         }
     }
 
+    // how long size pruning spares a row (Store#pruneToSize): at least long enough for a slower load's write on
+    // "missing" not to apply over a newer row pruned meanwhile (a fixed floor, for every change source, also without
+    // distribution); polled, also the window in which a poll can still find a write: the poll interval with its jitter
+    // and the poll's own time (rounded up to twice the interval) plus the overlap for writes committed after their
+    // time. A feed needs nothing more: its messages carry their versions, not a reference to the row (VISION.md,
+    // "In-memory store profiles", dimension 0)
+    private Duration pruneGrace(boolean polled) {
+        Duration window = store().pollInterval().multipliedBy(2).plus(InternalPollingStore.OVERLAP);
+        return polled && window.compareTo(InternalMaintenance.PRUNE_GRACE) > 0 ? window
+                : InternalMaintenance.PRUNE_GRACE;
+    }
+
     private static <T> void configure(Configurer<T> configurer, T configured) {
         requireNonNull(requireNonNull(configurer, "configurer cannot be null").apply(configured),
                 "configurer cannot return null");
@@ -332,12 +347,14 @@ public final class DistributedCaffeine<K, V> {
                         InternalMaintenance.TOMBSTONE_RETENTION.minus(InternalPollingStore.OVERLAP), store().timeout(),
                         executor);
             }
-            // without distribution, nothing else bounds how long a copy changed elsewhere is served
-            Duration defaultExpiry = distributionMode() == DistributionMode.NONE ? store().maximumAge() : null;
-            return new InternalCore<>(created, caffeine.caffeine(defaultExpiry), new InternalHasher<>(hashProvider), keySerializer,
+            // no copy outlives the store's maximum age, also where no message drops it (none sent, or one lost)
+            return new InternalCore<>(created, caffeine.caffeine(requireNonNull(store().maximumAge())),
+                    new InternalHasher<>(hashProvider), keySerializer,
                     valueSerializer, requireNonNull(store().maximumAge()), executor, caffeine.refreshAfterWrite(),
                     loaders, distributionMode(), absentCachingExpiry, store().maximumSize(),
-                    store().maintenanceInterval(), store().heartbeatInterval(), InternalStatsCounter.of(caffeine.isRecordingStats()),
+                    store().maintenanceInterval(), pruneGrace(created instanceof InternalPollingStore),
+                    store().heartbeatInterval(), loadAttempts,
+                    InternalStatsCounter.of(caffeine.isRecordingStats()),
                     () -> InternalClaims.release(adapter));
         } catch (RuntimeException | Error e) {
             if (created != null) {
@@ -414,6 +431,17 @@ public final class DistributedCaffeine<K, V> {
 
     Duration buildTimeout() {
         return buildTimeout;
+    }
+
+    // how often a load is attempted before it returns its value uncached (InternalCore#load): raised by the
+    // linearizability tests only, above the writes their scenarios hold, so that they check every case but the one
+    // documented exception; not public
+    DistributedCaffeine<K, V> withLoadAttempts(int loadAttempts) {
+        if (loadAttempts < 1) {
+            throw new IllegalArgumentException("loadAttempts must be positive");
+        }
+        this.loadAttempts = loadAttempts;
+        return this;
     }
 
     @Nullable Executor storeExecutor() {

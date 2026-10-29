@@ -19,6 +19,7 @@ import io.github.oberhoff.distributedcaffeine.DistributedCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -40,6 +41,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * database was vacuumed. On a server with a small queue (256 pages, 2 MB; PostgreSQL 17 or later,
  * {@link PostgresTopology#SINGLE_SERVER_WITH_SMALL_NOTIFY_QUEUE}), so that it fills in a moment.
  */
+@NullMarked
 @Timeout(120)
 @SuppressWarnings("SqlNoDataSourceInspection") // the SQL runs against the test container
 abstract class PostgresNotifyQueueTest {

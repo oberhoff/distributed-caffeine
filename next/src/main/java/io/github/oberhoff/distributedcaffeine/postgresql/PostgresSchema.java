@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.postgresql;
 
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
+import org.jspecify.annotations.Nullable;
 
 import javax.sql.DataSource;
 import java.lang.System.Logger;
@@ -35,7 +36,7 @@ import java.util.Objects;
 // start is refused with the DDL if the rights are missing; one without the marker is refused, or dropped and
 // recreated with withSchemaReset(). A missing index only warns.
 // the SQL runs against the user's database, unknown to the IDE; what is formatted into it are quoted names only
-@SuppressWarnings({"SqlNoDataSourceInspection", "java:S2077"})
+@SuppressWarnings({"SqlNoDataSourceInspection", "java:S2077", "SqlSourceToSinkFlow"})
 final class PostgresSchema {
 
     private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine.postgresql");
@@ -74,7 +75,8 @@ final class PostgresSchema {
         checkIndex(connection, table);
     }
 
-    private static String marker(Connection connection, PostgresTable table) throws SQLException {
+    // the table's comment: null where it has none, or does not exist
+    private static @Nullable String marker(Connection connection, PostgresTable table) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT obj_description(to_regclass(?)::oid, 'pg_class')")) {
             statement.setString(1, table.qualified);

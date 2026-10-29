@@ -93,6 +93,13 @@ final class MongoWatcher {
     private static final Set<Integer> HISTORY_LOST = Set.of(280, 286, 136);
     private static final IdentityHashMap<MongoClient, Map<String, Watcher>> WATCHERS = new IdentityHashMap<>();
 
+    // the clients being watched: none once every cache using them is closed (tests check it, a leak would show)
+    static int watchedClients() {
+        synchronized (WATCHERS) {
+            return WATCHERS.size();
+        }
+    }
+
     private MongoWatcher() {
     }
 
@@ -294,12 +301,12 @@ final class MongoWatcher {
         private final MongoDatabase database;
         private final String databaseName;
         private final Map<String, List<Registration>> scopes = new ConcurrentHashMap<>();
-        private final Map<String, CompletableFuture<Void>> barriers = new ConcurrentHashMap<>();
+        private final Map<String, CompletableFuture<@Nullable Void>> barriers = new ConcurrentHashMap<>();
         private final Set<String> wanted = new LinkedHashSet<>();
         @GuardedBy("this")
         private Set<String> covered = Set.of();
         @GuardedBy("this")
-        private @Nullable CompletableFuture<Void> widening;
+        private @Nullable CompletableFuture<@Nullable Void> widening;
         @GuardedBy("this")
         private @Nullable MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> cursor;
         @GuardedBy("this")
@@ -340,7 +347,7 @@ final class MongoWatcher {
         // returns once the stream covers the collection: opened here for the first one, reopened by the watching
         // thread from its resume token for a further one
         void cover(String collection) {
-            CompletableFuture<Void> covering;
+            CompletableFuture<@Nullable Void> covering;
             synchronized (this) {
                 wanted.add(collection);
                 if (thread == null) {
@@ -449,7 +456,7 @@ final class MongoWatcher {
                         lose(currentCursor(), new IllegalStateException("simulated: connection lost"));
                         continue;
                     }
-                    @SuppressWarnings("resource") // the stream's cursor, closed by whoever replaces or loses it
+                    // the stream's cursor, closed by whoever replaces or loses it
                     MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> current = currentCursor();
                     if (lagging || current == null) {
                         pause(); // lagging, or lost until a cache resumes the stream
@@ -460,19 +467,21 @@ final class MongoWatcher {
                     if (position != null) {
                         advanceResumeToken(current, position);
                     }
-                    OperationType type = event == null ? null : event.getOperationType();
-                    if (event != null && type == null) {
-                        dispatchOrGap(event);
-                    } else if (event != null) {
-                        switch (type) {
-                            // every document of the collection is gone, which no message announces: a gap
-                            case DROP, RENAME -> collectionGone(event);
-                            case DROP_DATABASE -> {
-                                // the invalidate event that ends the stream follows
+                    if (event != null) {
+                        OperationType type = event.getOperationType();
+                        if (type == null) {
+                            dispatchOrGap(event);
+                        } else {
+                            switch (type) {
+                                // every document of the collection is gone, which no message announces: a gap
+                                case DROP, RENAME -> collectionGone(event);
+                                case DROP_DATABASE -> {
+                                    // the invalidate event that ends the stream follows
+                                }
+                                // the stream ended and cannot be resumed; what was dropped is gone: a gap
+                                case INVALIDATE -> reopenFresh(new IllegalStateException("the database was dropped"));
+                                default -> dispatchOrGap(event);
                             }
-                            // the stream ended and cannot be resumed; what was dropped is gone: a gap
-                            case INVALIDATE -> reopenFresh(new IllegalStateException("the database was dropped"));
-                            default -> dispatchOrGap(event);
                         }
                     }
                 } catch (RuntimeException e) {
@@ -550,7 +559,7 @@ final class MongoWatcher {
                         : event.getUpdateDescription().getUpdatedFields();
                 BsonValue barrier = fields == null ? null : fields.get("barrier");
                 if (barrier != null && barrier.isString()) {
-                    CompletableFuture<Void> arrived = barriers.remove(barrier.asString().getValue());
+                    CompletableFuture<@Nullable Void> arrived = barriers.remove(barrier.asString().getValue());
                     if (arrived != null) {
                         arrived.complete(null);
                     }
@@ -564,7 +573,10 @@ final class MongoWatcher {
             }
             List<Registration> registrations = scopes.get(scope(event.getNamespace().getCollectionName(),
                     discriminator.asString().getValue()));
-            Change message = registrations == null ? null : message(event);
+            if (registrations == null) {
+                return;
+            }
+            Change message = message(event);
             if (message == null) {
                 return;
             }
@@ -699,7 +711,7 @@ final class MongoWatcher {
 
         boolean barrier(MongoLocation location) {
             String token = UUID.randomUUID().toString();
-            CompletableFuture<Void> arrived = new CompletableFuture<>();
+            CompletableFuture<@Nullable Void> arrived = new CompletableFuture<>();
             barriers.put(token, arrived);
             try {
                 database.getCollection(location.collectionName).updateOne(

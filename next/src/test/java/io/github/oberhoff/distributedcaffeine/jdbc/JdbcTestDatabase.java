@@ -20,6 +20,7 @@ import com.zaxxer.hikari.HikariDataSource;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import org.jspecify.annotations.NullMarked;
 import org.testcontainers.mariadb.MariaDBContainer;
 
 import javax.sql.DataSource;
@@ -29,6 +30,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * A MariaDB in a container for the plain JDBC adapter's tests, behind a connection pool as an application would use
  * it: one per JVM (stopped with it), a fresh table per use.
  */
+@NullMarked
 final class JdbcTestDatabase {
 
     static final String IMAGE = "mariadb:11.8";

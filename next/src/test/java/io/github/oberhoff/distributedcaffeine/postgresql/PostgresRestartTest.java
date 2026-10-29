@@ -23,6 +23,7 @@ import io.github.oberhoff.distributedcaffeine.DistributionMode;
 import io.github.oberhoff.distributedcaffeine.SynchronizationState;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -46,6 +47,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 @Timeout(300)
 // the SQL runs against the test container
+@NullMarked
 @SuppressWarnings("SqlNoDataSourceInspection")
 abstract class PostgresRestartTest {
 

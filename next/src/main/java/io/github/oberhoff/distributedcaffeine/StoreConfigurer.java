@@ -65,6 +65,10 @@ public final class StoreConfigurer {
      * Sets the maximum number of values the store keeps for this cache; the oldest writes are pruned first,
      * periodically, without notifying anyone (instances may keep their copies). Required, like the maximum age, so
      * that the store is bounded in both dimensions.
+     * <p>
+     * A value is pruned only once it is a few seconds old (four seconds; for a store polled for changes, twice the
+     * poll interval plus two seconds if that is longer): a cache turning over its whole maximum size faster than that
+     * holds more values than the maximum meanwhile.
      *
      * @param maximumSize the maximum number of values (positive)
      * @return this configurer

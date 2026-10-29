@@ -29,8 +29,11 @@ import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import java.util.Map;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
@@ -41,7 +44,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -71,6 +73,7 @@ import static java.util.Objects.requireNonNull;
  */
 @EnabledIfSystemProperty(named = "experiments", matches = "true")
 // a measurement: it prints what it measures rather than asserting it, and paces itself with pauses
+@NullMarked
 @SuppressWarnings({"java:S2699", "java:S2925"})
 public class AsyncLoadThreadsExperimentTest {
 
@@ -105,7 +108,7 @@ public class AsyncLoadThreadsExperimentTest {
         ExecutorService pool = null;
         AutoCloseable cache = null;
         try {
-            List<CompletableFuture<String>> loads = new ArrayList<>(n);
+            List<CompletableFuture<@Nullable String>> loads = new ArrayList<>(n);
             long start;
             switch (variant) {
                 case "current", "current+virtual" -> {
@@ -200,7 +203,7 @@ public class AsyncLoadThreadsExperimentTest {
         }
 
         @Override
-        public Set<String> write(Collection<Write> writes) {
+        public WriteResult write(Collection<Write> writes) {
             return slow(delegate.write(writes));
         }
 
@@ -210,8 +213,8 @@ public class AsyncLoadThreadsExperimentTest {
         }
 
         @Override
-        public int pruneToSize(long maxSize) {
-            return delegate.pruneToSize(maxSize);
+        public int pruneToSize(long maxSize, Duration minAge) {
+            return delegate.pruneToSize(maxSize, minAge);
         }
 
         @Override

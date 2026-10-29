@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Disabled;
@@ -48,6 +49,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Hazelcast and FusionCache accept it: the tests closing it are disabled until its repair; those of own values written
  * after an unannounced {@code invalidateAll} still hold.
  */
+@NullMarked
 @Timeout(30)
 @SuppressWarnings("resource") // every cache a test opens is closed after it (@AfterEach)
 class InternalInvalidateAllRaceTest {
@@ -79,7 +81,8 @@ class InternalInvalidateAllRaceTest {
         return DistributedCaffeine.newBuilder(adapter)
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000));
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(1_000));
     }
 
     private <C extends AutoCloseable> C track(C closeable) {
@@ -270,7 +273,7 @@ class InternalInvalidateAllRaceTest {
         }));
         DistributedCache<String, String> other = plain();
         source.put("k", "old");
-        CompletableFuture<String> load = CompletableFuture.supplyAsync(() -> loader.get("k"));
+        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> loader.get("k"));
         assertThat(called.await(10, TimeUnit.SECONDS)).isTrue();
         source.put("k", "new");
         AtomicBoolean once = new AtomicBoolean();

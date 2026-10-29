@@ -63,6 +63,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 @SuppressWarnings({"SqlNoDataSourceInspection", "java:S2699", "java:S2925", "java:S9142"})
 class PostgresListenerExperimentTest {
 
+    // the cache instances listening at once
+    private static final int INSTANCES = 4;
+
     private static final int KEYS = 10_000;
     private static final int WRITERS = 2;
     private static final double SECONDS = 4;
@@ -117,26 +120,26 @@ class PostgresListenerExperimentTest {
             Listener[] measured = {Listener.TAKEOVER, Listener.JDBC};
             for (int rate : new int[]{1_500, 3_000, 6_000}) {
                 for (Listener listener : measured) {
-                    out.append(run(container, listener, 4, rate, false));
+                    out.append(run(container, listener, rate, false));
                 }
             }
             for (Listener listener : measured) {
-                out.append(run(container, listener, 4, 1_500, true));
+                out.append(run(container, listener, 1_500, true));
             }
             System.out.println(out);
         }
     }
 
-    private static String run(PostgreSQLContainer container, Listener kind, int instances, int rate, boolean hotKey)
+    private static String run(PostgreSQLContainer container, Listener kind, int rate, boolean hotKey)
             throws Exception {
         int total = (int) (rate * SECONDS);
         long[] started = new long[total];
         List<long[]> latencies = new ArrayList<>();
-        CountDownLatch ready = new CountDownLatch(instances);
-        CountDownLatch stopped = new CountDownLatch(instances);
+        CountDownLatch ready = new CountDownLatch(INSTANCES);
+        CountDownLatch stopped = new CountDownLatch(INSTANCES);
         List<AutoCloseable> closeables = new ArrayList<>();
 
-        for (int instance = 0; instance < instances; instance++) {
+        for (int instance = 0; instance < INSTANCES; instance++) {
             long[] latency = new long[total];
             latencies.add(latency);
             if (kind == Listener.TAKEOVER) {
@@ -145,6 +148,7 @@ class PostgresListenerExperimentTest {
                 config.setUsername(container.getUsername());
                 config.setPassword(container.getPassword());
                 config.setMaximumPoolSize(2);
+                @SuppressWarnings("resource") // closed with the connection it hands out, at the end (closeables)
                 HikariDataSource dataSource = new HikariDataSource(config);
                 Connection connection = dataSource.getConnection();
                 try (Statement statement = connection.createStatement()) {
@@ -264,7 +268,7 @@ class PostgresListenerExperimentTest {
             closeable.close();
         }
 
-        long[] all = new long[total * instances];
+        long[] all = new long[total * INSTANCES];
         int index = 0;
         int missing = 0;
         for (long[] latency : latencies) {
@@ -278,7 +282,7 @@ class PostgresListenerExperimentTest {
         }
         Arrays.sort(all);
         return String.format("%-8s %10s %10d %10d %10.1f ms %10.1f ms %16.0f %10.0f%s%n", kind,
-                hotKey ? "1 (hot)" : "10,000", instances, rate,
+                hotKey ? "1 (hot)" : "10,000", INSTANCES, rate,
                 all[all.length / 2] / 1_000.0, all[Math.min(all.length - 1, all.length * 99 / 100)] / 1_000.0,
                 (cpuAfter - cpuBefore) / 1_000.0 / (total / 1_000.0), reached,
                 missing > 0 ? "  (" + missing + " missing)" : "");

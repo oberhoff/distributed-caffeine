@@ -23,6 +23,8 @@ import org.jetbrains.lincheck.datastructures.ModelCheckingOptions;
 import org.jetbrains.lincheck.datastructures.Operation;
 import org.jetbrains.lincheck.datastructures.Param;
 import org.jetbrains.lincheck.datastructures.StressOptions;
+import org.jetbrains.lincheck.datastructures.Validate;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
@@ -39,6 +41,7 @@ import java.util.Map;
  * them on real threads. The instance runs without background threads (no distribution, the store's and Caffeine's
  * tasks on the caller), which model checking needs; distribution and the store's faults are the property test's.
  */
+@NullMarked
 @Param(name = "key", gen = IntGen.class, conf = "1:3")
 @Param(name = "value", gen = IntGen.class, conf = "1:3")
 @SuppressWarnings("unused") // the operations and the model's methods are called by Lincheck, through reflection
@@ -51,6 +54,9 @@ public abstract class AbstractLinearizabilityTest {
 
     protected final DistributedLoadingCache<String, String> cache;
 
+    // more than the operations of a scenario (threads x actors, before and after included)
+    private static final int LOAD_ATTEMPTS = 32;
+
     @SuppressWarnings("StaticAssignmentInConstructor") // Lincheck owns the instances: only so is the last one closed
     protected AbstractLinearizabilityTest() {
         closePrevious();
@@ -62,9 +68,17 @@ public abstract class AbstractLinearizabilityTest {
                 // the key as its hash: hash4j reads bytes through VarHandles, which model checking does not support
                 .withHashProvider((key, hasher) -> key)
                 .withDistributionMode(DistributionMode.NONE)
+                // in the calling thread, against withStoreExecutor's contract (tasks on other threads): model checking
+                // needs every step in the threads it controls. Safe here, as no operation refreshes a key not held, the
+                // one load Caffeine starts under its lock of the key (InternalCore.Loader#asyncLoad)
                 .withStoreExecutor(Runnable::run)
                 .withCaffeine(caffeine -> caffeine.executor(Runnable::run))
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000).withMaintenanceInterval(LONG))
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(1_000).withMaintenanceInterval(LONG))
+                // above the writes a scenario holds, so that no load runs out of attempts: a load met by a removal on
+                // every attempt returns its value uncached (DistributedLoadingCache#get), the one documented
+                // exception, which a sequential map cannot express; it is tested on its own (InternalCoreTest)
+                .withLoadAttempts(LOAD_ATTEMPTS)
                 .build(AbstractLinearizabilityTest::load);
         previous = cache;
     }
@@ -165,11 +179,22 @@ public abstract class AbstractLinearizabilityTest {
         cache.invalidate(key(key));
     }
 
+    // after every invocation, all its operations done: no reservation left behind (a leak would grow without bound)
+    @Validate
+    public void noReservationLeft() {
+        int reserved = ((InternalDistributedCache<?, ?>) cache).core.reservedKeys();
+        if (reserved != 0) {
+            throw new IllegalStateException(reserved + " keys still reserved with nothing running");
+        }
+    }
+
     // minutes, as every invocation builds an instance through instrumented code: run on request (-Dmodelchecking=true)
     @Test
     @EnabledIfSystemProperty(named = "modelchecking", matches = "true")
     void model_checking() {
-        new ModelCheckingOptions().iterations(10).invocationsPerIteration(500).threads(3).actorsPerThread(3)
+        // more on request, to hunt a rare interleaving (-Dlincheck.iterations=…)
+        new ModelCheckingOptions().iterations(Integer.getInteger("lincheck.iterations", 10)).invocationsPerIteration(500)
+                .threads(3).actorsPerThread(3)
                 .sequentialSpecification(model()).check(getClass());
     }
 

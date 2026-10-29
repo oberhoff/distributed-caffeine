@@ -15,14 +15,18 @@
  */
 package io.github.oberhoff.distributedcaffeine.testing;
 
+import io.github.oberhoff.distributedcaffeine.spi.Store;
+import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
@@ -37,36 +41,81 @@ import static java.util.Objects.requireNonNull;
  * reordering across keys.
  * <p>
  * One table per cache (the table name plays the role of table plus discriminator). Writes are serialized per table,
- * messages are queued on commit in commit order, and every subscription delivers on a thread of its own.
+ * messages are queued on commit in commit order, and every subscription delivers on a thread of its own. How it
+ * behaves otherwise (versions, change source, clock, reads, batches) its {@link StoreProfile} says; the events a
+ * profile allows (a failover, an eviction, lost messages) are faults triggered here.
  */
 public final class InMemoryDatabase {
 
     private final LongSupplier clockMicros;
     private final Random random;
+    private final StoreProfile profile;
+    // the store's own sequence (StoreProfile.Versioning.ASSIGNING_OWN), drawn by every write: it runs ahead of every
+    // count of a key, so that a new row starts above every version an earlier row of the key had
+    private long sequence;
     private final Map<String, InMemoryTable> tables = new ConcurrentHashMap<>();
     final Faults faults = new Faults();
     // the write time a delayed write took before it waited (see setCommitDelay), for the thread running it
-    private final ThreadLocal<Long> commitTime = new ThreadLocal<>();
-    // the last write time handed out: write times increase strictly, also within a microsecond, so that the ages of
-    // one read order the writes as they happened (a clock that never goes backwards, Store point 2)
+    private final ThreadLocal<@Nullable Long> commitTime = new ThreadLocal<>();
+    // the last write time handed out by a monotonic clock (StoreProfile.Clock.MONOTONIC): write times increase
+    // strictly, also within a microsecond, so that the ages of one read order the writes as they happened
     private long lastWriteTime;
+    // how far a wall clock was stepped back (stepClockBack), in microseconds
+    private long stepBackMicros;
+    // the stores polled by the core (StoreProfile.Changes.SCAN), with the number of scans each had begun at the last
+    // commit: idle once each began two more, the second after everything committed before it
+    private final List<ScanOnlyStore> scanning = new CopyOnWriteArrayList<>();
+    private final Map<ScanOnlyStore, Long> scansAtCommit = new ConcurrentHashMap<>();
 
     /**
-     * Creates a database on the system clock with a random seed.
+     * Creates a database on the system clock with a random seed, under the profile of the system property
+     * ({@link StoreProfile#ofProperty}).
      */
     public InMemoryDatabase() {
         this(InMemoryDatabase::systemMicros, new Random().nextLong());
     }
 
     /**
-     * Creates a database.
+     * Creates a database on the system clock with a random seed, under the given profile.
+     *
+     * @param profile how the store behaves
+     */
+    public InMemoryDatabase(StoreProfile profile) {
+        this(InMemoryDatabase::systemMicros, new Random().nextLong(), profile);
+    }
+
+    /**
+     * Creates a database on a clock of the test's, under the profile of the system property with a monotonic clock: a
+     * test's clock may stand still or count coarsely, where only a store clock that orders every write keeps the
+     * test's outcome independent of the profile.
      *
      * @param clockMicros the store's clock, in microseconds since the epoch
      * @param seed        the seed for the random faults (duplicates, reordering, delays), for reproducible runs
      */
     public InMemoryDatabase(LongSupplier clockMicros, long seed) {
+        this(clockMicros, seed, StoreProfile.ofProperty().with(StoreProfile.Clock.MONOTONIC, Duration.ZERO));
+    }
+
+    /**
+     * Creates a database under the given profile.
+     *
+     * @param clockMicros the store's clock, in microseconds since the epoch
+     * @param seed        the seed for the random faults (duplicates, reordering, delays), for reproducible runs
+     * @param profile     how the store behaves
+     */
+    public InMemoryDatabase(LongSupplier clockMicros, long seed, StoreProfile profile) {
         this.clockMicros = requireNonNull(clockMicros);
         this.random = new Random(seed);
+        this.profile = requireNonNull(profile);
+    }
+
+    /**
+     * Returns how the store behaves.
+     *
+     * @return the profile
+     */
+    public StoreProfile profile() {
+        return profile;
     }
 
     /**
@@ -75,7 +124,34 @@ public final class InMemoryDatabase {
      * @param table the table of the cache
      * @return a new store, as one instance would hold it
      */
-    public InMemoryStore openStore(String table) {
+    public Store openStore(String table) {
+        InMemoryStore store = openFeed(table);
+        return switch (profile.changes()) {
+            case FEED -> store;
+            case SCAN -> {
+                ScanOnlyStore polled = new ScanOnlyStore(store) {
+                    @Override
+                    public void close() {
+                        scanning.remove(this);
+                        scansAtCommit.remove(this);
+                        super.close();
+                    }
+                };
+                scanning.add(polled);
+                yield polled;
+            }
+            case NONE -> new StorageOnlyStore(store);
+        };
+    }
+
+    /**
+     * Opens a store of a cache instance on the given table with its feed and its scan, whatever the profile says: for
+     * the contract tests of the feed and the scan, and for tests of the feed's faults.
+     *
+     * @param table the table of the cache
+     * @return a new store, as one instance would hold it
+     */
+    public InMemoryStore openFeed(String table) {
         return new InMemoryStore(tables.computeIfAbsent(table, name -> new InMemoryTable(this)));
     }
 
@@ -90,6 +166,73 @@ public final class InMemoryDatabase {
      */
     public void failNextWrites(int count, boolean outcomeUnknown) {
         faults.failNextWrites(count, outcomeUnknown);
+    }
+
+    /**
+     * Makes the next writes of several rows fail after applying part of them, as an unordered bulk write does
+     * (reported with {@link StoreException#afterPartlyApplied()}): the first half of each batch applies and announces
+     * itself, the rest does not. Only where the profile writes row by row ({@link StoreProfile.Batch#PER_ROW}); an
+     * atomic store fails the batch as a whole, before it commits. A write of one row fails before it commits.
+     *
+     * @param count how many write operations fail
+     */
+    public void failNextWritesPartly(int count) {
+        faults.failNextWritesPartly(count);
+    }
+
+    /**
+     * Steps the store's wall clock back, as NTP may: write times and ages follow it, and a later write can be stamped
+     * before an earlier one. No effect on a monotonic clock ({@link StoreProfile.Clock#MONOTONIC}).
+     *
+     * @param amount how far
+     */
+    public synchronized void stepClockBack(Duration amount) {
+        stepBackMicros += amount.toNanos() / 1_000;
+    }
+
+    /**
+     * Fails over to a replica that lacks the writes of the last window, as a store replicating asynchronously does
+     * (MongoDB with {@code w:1}, Redis): every row goes back to its state before the window (to older versions, or
+     * missing), the messages not delivered yet are lost, and every subscription is told about a gap. The store's own
+     * sequence ({@link StoreProfile.Versioning#ASSIGNING_OWN}) is not set back.
+     *
+     * @param window how long before now the lost writes reach
+     */
+    public void failover(Duration window) {
+        long since = System.nanoTime() - window.toNanos();
+        tables.values().forEach(table -> table.undoSince(since));
+        tables.values().forEach(InMemoryTable::gap);
+    }
+
+    /**
+     * Deletes a row silently, as a store evicting under memory pressure does (Redis with {@code maxmemory}): no
+     * tombstone, no message, in every table.
+     *
+     * @param hash the row's hash
+     */
+    public void evict(String hash) {
+        tables.values().forEach(table -> table.evict(hash));
+    }
+
+    /**
+     * Sets the probability that a message is lost without a gap reported, as a feed losing messages silently does
+     * (Redis pub/sub across a disconnect it did not notice).
+     *
+     * @param probability between 0 and 1
+     */
+    public void setDropProbability(double probability) {
+        faults.dropProbability = probability;
+    }
+
+    /**
+     * Runs a step between two rows of a read of several rows where the profile does not read them at one instant
+     * ({@link StoreProfile#snapshotReads()}), outside the table's monitor: a write committed there is seen by the rest
+     * of the read, as with MongoDB's {@code $in}.
+     *
+     * @param step the step, {@code null} for none
+     */
+    public void setBetweenRows(@Nullable Runnable step) {
+        faults.betweenRows = step;
     }
 
     /**
@@ -166,7 +309,8 @@ public final class InMemoryDatabase {
      * @return whether delivery is idle
      */
     public boolean isIdle() {
-        return tables.values().stream().allMatch(InMemoryTable::isIdle);
+        return tables.values().stream().allMatch(InMemoryTable::isIdle) && scanning.stream().allMatch(store ->
+                store.scans() >= scansAtCommit.getOrDefault(store, 0L) + 2);
     }
 
     /**
@@ -268,20 +412,42 @@ public final class InMemoryDatabase {
         }
     }
 
-    // the store's time now: never behind a write time handed out, so that no age is negative
-    synchronized long nowMicros() {
-        return Math.max(clockMicros.getAsLong(), lastWriteTime);
+    // a write committed: the polled stores are idle again only after two more scans
+    void committed() {
+        scanning.forEach(store -> scansAtCommit.put(store, store.scans()));
     }
 
-    // the time of a write: the store's time, but above every earlier write time (a delayed write keeps the one it
-    // took before it waited)
+    // the store's time now: a monotonic clock never behind a write time handed out, so that no age is negative; a
+    // wall clock as it reads, in its unit, where a write after the reading has a negative age
+    synchronized long nowMicros() {
+        if (profile.clock() == StoreProfile.Clock.MONOTONIC) {
+            return Math.max(clockMicros.getAsLong(), lastWriteTime);
+        }
+        return wallClock();
+    }
+
+    // the time of a write (a delayed write keeps the one it took before it waited): a monotonic clock above every
+    // earlier write time; a wall clock as it reads, repeats and steps back included
     synchronized long nextWriteTime() {
         Long pinned = commitTime.get();
         if (pinned != null) {
             return pinned;
         }
-        lastWriteTime = Math.max(lastWriteTime + 1, clockMicros.getAsLong());
-        return lastWriteTime;
+        if (profile.clock() == StoreProfile.Clock.MONOTONIC) {
+            lastWriteTime = Math.max(lastWriteTime + 1, clockMicros.getAsLong());
+            return lastWriteTime;
+        }
+        return wallClock();
+    }
+
+    private long wallClock() {
+        long micros = clockMicros.getAsLong() - stepBackMicros;
+        return profile.clock() == StoreProfile.Clock.MILLIS ? Math.floorDiv(micros, 1_000) * 1_000 : micros;
+    }
+
+    // the next value of the store's own sequence
+    synchronized long nextSequence() {
+        return ++sequence;
     }
 
     synchronized double nextDouble() {
@@ -303,6 +469,7 @@ public final class InMemoryDatabase {
     static final class Faults {
 
         private int failingWrites;
+        private int partlyFailingWrites;
         private int failingReads;
         private boolean failingOutcomeUnknown;
         volatile boolean down;
@@ -314,6 +481,20 @@ public final class InMemoryDatabase {
         volatile double commitDelayProbability;
         volatile @Nullable Runnable beforeConditionalWrite;
         volatile @Nullable Runnable beforeInvalidateAllApplies;
+        volatile @Nullable Runnable betweenRows;
+        volatile double dropProbability;
+
+        synchronized void failNextWritesPartly(int count) {
+            this.partlyFailingWrites = count;
+        }
+
+        synchronized boolean takePartialFailure() {
+            if (partlyFailingWrites == 0) {
+                return false;
+            }
+            partlyFailingWrites--;
+            return true;
+        }
 
         synchronized void failNextWrites(int count, boolean outcomeUnknown) {
             this.failingWrites = count;
@@ -333,7 +514,7 @@ public final class InMemoryDatabase {
         }
 
         // returns null if the write succeeds, otherwise whether it commits before failing
-        synchronized Boolean takeWriteFailure() {
+        synchronized @Nullable Boolean takeWriteFailure() {
             if (failingWrites == 0) {
                 return null;
             }

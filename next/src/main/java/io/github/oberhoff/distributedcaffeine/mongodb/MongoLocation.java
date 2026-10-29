@@ -25,6 +25,8 @@ import org.bson.json.JsonWriterSettings;
 
 import java.nio.charset.StandardCharsets;
 
+import static java.util.Objects.requireNonNull;
+
 // One cache's place in MongoDB: database, collection, discriminator and formats; the document ids (a row's {d, h},
 // reserved rows such as invalidateAll's control row included; the start document's {d, c}, written once per store to
 // seed its cluster time; the schema marker's string id), and the conversion of serialized keys and values to BSON per
@@ -64,7 +66,9 @@ final class MongoLocation {
         return switch (format) {
             case BINARY -> new BsonBinary(bytes);
             case TEXT -> new BsonString(new String(bytes, StandardCharsets.UTF_8));
-            case JSON -> BsonDocument.parse("{\"v\": " + new String(bytes, StandardCharsets.UTF_8) + "}").get("v");
+            // the document always has its one field v (or the parse fails)
+            case JSON -> requireNonNull(BsonDocument.parse("{\"v\": " + new String(bytes, StandardCharsets.UTF_8)
+                    + "}").get("v"));
         };
     }
 

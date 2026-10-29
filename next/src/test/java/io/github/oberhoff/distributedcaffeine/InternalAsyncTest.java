@@ -21,6 +21,8 @@ import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import io.github.oberhoff.distributedcaffeine.testing.StoreProfile;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -42,7 +44,9 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
@@ -50,6 +54,7 @@ import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.await;
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.pause;
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
@@ -57,6 +62,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * Caffeine's executor, put(key, future), the asynchronous loader, the future-valued asMap(), and the shared core with
  * synchronous().
  */
+@NullMarked
 @Timeout(30)
 @SuppressWarnings("resource") // every cache and store a test opens is closed after it (@AfterEach)
 class InternalAsyncTest {
@@ -82,11 +88,12 @@ class InternalAsyncTest {
 
     private DistributedCaffeine<String, String> builder(Function<Store, Store> wrapping) {
         Adapter<String, String> adapter = settings -> wrapping.apply(database.openStore("cache"));
-        return DistributedCaffeine.newBuilder(adapter)
+        return DistributedCaffeine.newBuilder(InternalCoreTest.offered(adapter))
                 .withCaffeine(caffeine -> caffeine.executor(userExecutor))
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000));
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(1_000));
     }
 
     private DistributedAsyncCache<String, String> cache() {
@@ -116,7 +123,44 @@ class InternalAsyncTest {
         return stored == null ? null : stored.value();
     }
 
-    private static <T> T get(CompletableFuture<T> future) throws Exception {
+    private static InternalCore<String, String> core(DistributedAsyncCache<String, String> cache) {
+        return ((InternalDistributedAsyncCache<String, String>) cache).core;
+    }
+
+    // the reservation registry: empty whenever nothing runs, or it would grow without bound
+
+    @Test
+    void a_future_put_that_never_completes_reserves_nothing() {
+        DistributedAsyncCache<String, String> cache = cache();
+
+        cache.put("k", new CompletableFuture<>());
+
+        assertThat(core(cache).reservedKeys()).isZero();
+    }
+
+    @Test
+    void a_store_executor_refusing_tasks_leaks_no_reservation() {
+        AtomicBoolean refusing = new AtomicBoolean();
+        Executor storeExecutor = task -> {
+            if (refusing.get()) {
+                throw new RejectedExecutionException("refusing");
+            }
+            userExecutor.execute(task);
+        };
+        DistributedAsyncCache<String, String> cache = track(builder(Function.identity())
+                .withStoreExecutor(storeExecutor).buildAsync());
+        CompletableFuture<String> value = new CompletableFuture<>();
+        cache.put("k", value);
+
+        refusing.set(true);
+        value.complete("v");
+
+        await(() -> core(cache).reservedKeys() == 0);
+        assertThat(stored(cache, "k")).as("written on a thread of its own").isEqualTo("v");
+        refusing.set(false);
+    }
+
+    private static <T extends @Nullable Object> T get(CompletableFuture<T> future) throws Exception {
         return future.get(10, TimeUnit.SECONDS);
     }
 
@@ -134,7 +178,7 @@ class InternalAsyncTest {
 
         assertThat(get(reader.getIfPresent("k"))).isEqualTo("v");
         assertThat(held(reader)).isEqualTo("v");
-        CompletableFuture<String> miss = reader.getIfPresent("missing");
+        CompletableFuture<@Nullable String> miss = reader.getIfPresent("missing");
         assertThat(miss).as("never null: absence is known once the store answered").isNotNull();
         assertThat(get(miss)).isNull();
         assertThat(reader.synchronous().asMap()).doesNotContainKey("missing");
@@ -152,7 +196,7 @@ class InternalAsyncTest {
         }).buildAsync());
         cache.synchronous().put("k", "v");
 
-        CompletableFuture<String> hit = cache.get("k", key -> "loaded");
+        CompletableFuture<@Nullable String> hit = cache.get("k", key -> "loaded");
         assertThat(hit).isCompletedWithValue("v");
         assertThat(cache.getIfPresent("k")).isCompletedWithValue("v");
         assertThat(reads).hasValue(0);
@@ -177,8 +221,8 @@ class InternalAsyncTest {
             return "v";
         };
 
-        CompletableFuture<String> first = cache.get("k", slow);
-        CompletableFuture<String> second = cache.get("k", slow);
+        CompletableFuture<@Nullable String> first = cache.get("k", slow);
+        CompletableFuture<@Nullable String> second = cache.get("k", slow);
         assertThat(first).isNotDone();
         assertThat(cache.getIfPresent("k")).as("the load in flight, as in Caffeine").isNotDone();
         release.countDown();
@@ -211,7 +255,7 @@ class InternalAsyncTest {
         DistributedAsyncCache<String, String> cache = cache();
         IllegalStateException failure = new IllegalStateException("source down");
 
-        CompletableFuture<String> future = cache.get("k", (key, executor) -> CompletableFuture.failedFuture(failure));
+        CompletableFuture<@Nullable String> future = cache.get("k", (key, executor) -> CompletableFuture.failedFuture(failure));
 
         assertThatThrownBy(() -> get(future)).isInstanceOf(ExecutionException.class).hasCause(failure);
         await(() -> !cache.synchronous().asMap().keySet().contains("k"));
@@ -225,7 +269,7 @@ class InternalAsyncTest {
         CountDownLatch loading = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
 
-        CompletableFuture<String> load = loader.get("k", key -> {
+        CompletableFuture<@Nullable String> load = loader.get("k", key -> {
             loading.countDown();
             try {
                 assertThat(release.await(5, TimeUnit.SECONDS)).isTrue();
@@ -245,6 +289,7 @@ class InternalAsyncTest {
 
     @Test
     void an_untrusted_held_value_is_checked_against_the_store_asynchronously() throws Exception {
+        assumeTrue(database.profile().changes() == StoreProfile.Changes.FEED, "interrupts the store's feed");
         DistributedAsyncCache<String, String> first = cache();
         DistributedAsyncCache<String, String> second = cache();
         first.synchronous().put("k", "v");
@@ -281,6 +326,7 @@ class InternalAsyncTest {
 
     @Test
     void getAll_checks_untrusted_held_values_instead_of_answering_at_once() throws Exception {
+        assumeTrue(database.profile().changes() == StoreProfile.Changes.FEED, "interrupts the store's feed");
         DistributedAsyncCache<String, String> first = cache();
         DistributedAsyncCache<String, String> second = cache();
         first.synchronous().putAll(Map.of("a", "1", "b", "2"));
@@ -328,7 +374,7 @@ class InternalAsyncTest {
                     sources.add(source);
                     return source.thenApply(value -> value + "-" + key);
                 }));
-        List<CompletableFuture<String>> loads = new ArrayList<>();
+        List<CompletableFuture<@Nullable String>> loads = new ArrayList<>();
         for (int i = 0; i < 20; i++) {
             loads.add(cache.get("k" + i));
         }
@@ -372,7 +418,7 @@ class InternalAsyncTest {
         assertThat(get(cache.get("r"))).isEqualTo("first");
 
         CompletableFuture<Map<String, String>> all = cache.getAll(List.of("a", "b"));
-        CompletableFuture<String> refreshed = cache.synchronous().refresh("r");
+        CompletableFuture<@Nullable String> refreshed = cache.synchronous().refresh("r");
         pause(100);
         assertThat(storeExecutor.running).hasValue(0);
         assertThat(all).isNotDone();
@@ -394,7 +440,7 @@ class InternalAsyncTest {
                 calls.incrementAndGet() == 1 ? first : CompletableFuture.completedFuture("fresh"));
         DistributedAsyncCache<String, String> other = cache();
 
-        CompletableFuture<String> load = cache.get("k");
+        CompletableFuture<@Nullable String> load = cache.get("k");
         await(() -> calls.get() == 1);
         other.synchronous().invalidate("k");
         first.complete("outdated");
@@ -412,7 +458,7 @@ class InternalAsyncTest {
         CompletableFuture<String> value = new CompletableFuture<>();
 
         writer.put("k", value);
-        CompletableFuture<String> seen = writer.getIfPresent("k");
+        CompletableFuture<@Nullable String> seen = writer.getIfPresent("k");
         assertThat(seen).as("readers wait on it").isNotDone();
         assertThat(stored(writer, "k")).isNull();
 
@@ -434,7 +480,7 @@ class InternalAsyncTest {
         // as in Caffeine, where the put replaces the previous value at once: a failure leaves no value anywhere
         CompletableFuture<String> failing = new CompletableFuture<>();
         cache.put("k", failing);
-        CompletableFuture<String> waiting = cache.getIfPresent("k");
+        CompletableFuture<@Nullable String> waiting = cache.getIfPresent("k");
         failing.completeExceptionally(new IllegalStateException("failed"));
         assertThatThrownBy(() -> get(waiting)).as("waiters see the failure, as in Caffeine")
                 .hasCauseInstanceOf(IllegalStateException.class);
@@ -513,6 +559,7 @@ class InternalAsyncTest {
     }
 
     @Test
+    @SuppressWarnings("NullableProblems") // a loader resolving to null: absent, as Caffeine documents, not its types
     void getAll_without_a_bulk_loader_loads_key_by_key_and_leaves_out_what_the_source_lacks() throws Exception {
         List<String> loaded = Collections.synchronizedList(new ArrayList<>());
         DistributedAsyncLoadingCache<String, String> cache = loading((key, executor) -> {

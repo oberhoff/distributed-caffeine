@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine.postgresql;
 import io.github.oberhoff.distributedcaffeine.CacheBackend;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
+import org.jspecify.annotations.NullMarked;
 
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.await;
 
@@ -25,6 +26,7 @@ import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.await;
  * The cache suites on PostgreSQL (see {@link PostgresTestDatabase}): a fresh table per backend, the shared listening
  * session. A gap is a terminated listening session, as every reconnect is one.
  */
+@NullMarked
 public final class PostgresCacheBackend implements CacheBackend {
 
     private final PostgresTestDatabase database = PostgresTestDatabase.get();

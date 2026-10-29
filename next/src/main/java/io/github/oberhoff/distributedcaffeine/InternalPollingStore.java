@@ -27,11 +27,13 @@ import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -64,6 +66,8 @@ final class InternalPollingStore implements Store, ChangeFeed {
     private final Duration grace;
     private final Duration timeout;
     private final Executor executor;
+    // the rewrite of a changed row proposes its version like a cache instance (above the row's, read just before)
+    private final InternalVersion clock = new InternalVersion();
 
     InternalPollingStore(Store store, ChangeScan scan, Duration interval, Duration overlap, Duration grace,
                          Duration timeout, Executor executor) {
@@ -89,8 +93,8 @@ final class InternalPollingStore implements Store, ChangeFeed {
     }
 
     @Override
-    public int pruneToSize(long maxSize) {
-        return store.pruneToSize(maxSize);
+    public int pruneToSize(long maxSize, Duration minAge) {
+        return store.pruneToSize(maxSize, minAge);
     }
 
     @Override
@@ -111,7 +115,7 @@ final class InternalPollingStore implements Store, ChangeFeed {
     // writes: timed, and touched again if a poll may have missed them
 
     @Override
-    public Set<String> write(Collection<Write> writes) {
+    public WriteResult write(Collection<Write> writes) {
         Set<String> hashes = new LinkedHashSet<>();
         writes.forEach(write -> hashes.add(write.hash()));
         return touchingIfLate(hashes, () -> store.write(writes));
@@ -163,8 +167,8 @@ final class InternalPollingStore implements Store, ChangeFeed {
         }
     }
 
-    // rewrites the keys as they are now, conditionally on their version and at its successor (the same incarnation, so
-    // holders of the row as it was can still order it): a newer write announces itself, a deleted
+    // rewrites the keys as they are now, conditionally on their version and at a version above it: a newer write
+    // announces itself, a deleted
     // row has nothing to announce, a row hidden by the cut-off stays hidden (rewritten, it would come back); best
     // effort, a failure only leaves what the overlap left
     @SuppressWarnings("FutureReturnValueIgnored") // the delayed touch is scheduled for its effect, never cancelled
@@ -198,7 +202,7 @@ final class InternalPollingStore implements Store, ChangeFeed {
             if (!hash.equals(Store.CONTROL_HASH) && control != null && row.age().compareTo(control.age()) >= 0) {
                 return;
             }
-            long version = InternalVersion.next(row.version());
+            long version = clock.next(row.version());
             byte[] value = row.value();
             writes.add(row.state() == State.VALUE && value != null
                     ? Write.value(hash, row.key(), value, version).ifVersion(row.version())
@@ -233,6 +237,10 @@ final class InternalPollingStore implements Store, ChangeFeed {
         store.read(List.of(Store.CONTROL_HASH), Duration.ofNanos(Long.MAX_VALUE));
     }
 
+    // a change delivered: its version, and when the poll that delivered it began (System.nanoTime)
+    private record Delivered(long version, long polled) {
+    }
+
     // one subscription: polls on the store executor, one poll at a time
     private final class Poller implements ChangeSubscription {
 
@@ -244,6 +252,12 @@ final class InternalPollingStore implements Store, ChangeFeed {
         private long polled;
         @GuardedBy("this")
         private boolean lost;
+        // guarded by this: the changes delivered while a poll can still report them again (within its overlap), by
+        // hash: the version and when the poll began. Each change is delivered once: one reported again carries
+        // nothing new, and as a message it would drop an operation in flight on its key (which cannot compare
+        // versions yet), and the control row's would make the core look at it again
+        @GuardedBy("this")
+        private final Map<String, Delivered> delivered = new HashMap<>();
         private volatile boolean closed;
 
         Poller(ChangeListener listener) {
@@ -271,7 +285,17 @@ final class InternalPollingStore implements Store, ChangeFeed {
                 long start = System.nanoTime();
                 try {
                     // the control row's change too, which the core takes as an invalidateAll
-                    messages.addAll(scan.changedWithin(Duration.ofNanos(start - polled).plus(overlap)));
+                    List<Change> changes = scan.changedWithin(Duration.ofNanos(start - polled).plus(overlap));
+                    // a change written before the last poll's start minus the overlap is outside every later window
+                    // (with twice the overlap for the clocks: the window is measured by the store's)
+                    long reportable = polled - overlap.toNanos() * 2;
+                    delivered.values().removeIf(entry -> entry.polled() - reportable < 0);
+                    for (Change change : changes) {
+                        Delivered before = delivered.put(change.hash(), new Delivered(change.version(), start));
+                        if (before == null || before.version() != change.version()) {
+                            messages.add(change);
+                        }
+                    }
                     polled = start;
                 } catch (RuntimeException e) {
                     if (Duration.ofNanos(start - polled).compareTo(grace) > 0) {

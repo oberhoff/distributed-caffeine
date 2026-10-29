@@ -21,6 +21,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Disabled;
@@ -46,6 +47,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Distribution between instances: messages applied under the version rule, population, loads in flight, and the
  * absent set.
  */
+@NullMarked
 @Timeout(30)
 @SuppressWarnings("resource") // every cache and store a test opens is closed after it (@AfterEach)
 public class InternalDistributionTest {
@@ -70,10 +72,11 @@ public class InternalDistributionTest {
 
     private DistributedCaffeine<String, String> builder(Function<Store, Store> wrapping) {
         Adapter<String, String> adapter = settings -> wrapping.apply(backend.open(settings));
-        return DistributedCaffeine.newBuilder(adapter)
+        return DistributedCaffeine.newBuilder(InternalCoreTest.offered(adapter))
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000));
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(1_000));
     }
 
     private <C extends AutoCloseable> C track(C closeable) {
@@ -169,10 +172,10 @@ public class InternalDistributionTest {
     private static final class BlockedLoad {
         final CountDownLatch called = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
-        final java.util.concurrent.atomic.AtomicReference<String> source = new java.util.concurrent.atomic.AtomicReference<>();
+        final java.util.concurrent.atomic.AtomicReference<@Nullable String> source = new java.util.concurrent.atomic.AtomicReference<>();
         final AtomicInteger calls = new AtomicInteger();
 
-        String load() throws InterruptedException {
+        @Nullable String load() throws InterruptedException {
             String value = source.get();
             if (calls.incrementAndGet() == 1) {
                 called.countDown();
@@ -188,7 +191,7 @@ public class InternalDistributionTest {
         DistributedLoadingCache<String, String> loader = track(builder(Function.identity())
                 .withAbsentCaching(Duration.ofMinutes(1)).build(key -> blocked.load()));
         DistributedCache<String, String> writer = plain();
-        CompletableFuture<String> load = CompletableFuture.supplyAsync(() -> loader.get("k"));
+        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> loader.get("k"));
         assertThat(blocked.called.await(5, TimeUnit.SECONDS)).isTrue();
 
         // drops the load's future: the write's message then finds nothing to mark
@@ -207,7 +210,7 @@ public class InternalDistributionTest {
         DistributedLoadingCache<String, String> loader = track(builder(Function.identity())
                 .withAbsentCaching(Duration.ofMinutes(1)).build(key -> blocked.load()));
         DistributedCache<String, String> writer = plain();
-        CompletableFuture<String> load = CompletableFuture.supplyAsync(() -> loader.get("k"));
+        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> loader.get("k"));
         assertThat(blocked.called.await(5, TimeUnit.SECONDS)).isTrue();
 
         // drops the load's future (the epoch stays): the write's message then finds nothing to mark
@@ -229,7 +232,7 @@ public class InternalDistributionTest {
         DistributedLoadingCache<String, String> loader = track(builder(Function.identity()).build(key -> blocked.load()));
         DistributedCache<String, String> invalidator = plain();
         DistributedCache<String, String> bystander = plain();
-        CompletableFuture<String> load = CompletableFuture.supplyAsync(() -> loader.get("k"));
+        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> loader.get("k"));
         assertThat(blocked.called.await(5, TimeUnit.SECONDS)).isTrue();
 
         // the source changes, then everything is invalidated, while the load holds the older value
@@ -242,7 +245,7 @@ public class InternalDistributionTest {
         // load, then invalidateAll"). Either way, every instance agrees
         String loaded = load.get(5, TimeUnit.SECONDS);
         assertThat(loaded).isIn("old", "new");
-        String expected = loaded.equals("new") ? "new" : null;
+        String expected = "new".equals(loaded) ? "new" : null;
 
         assertThat(invalidator.getIfPresent("k")).isEqualTo(expected);
         assertThat(bystander.getIfPresent("k")).isEqualTo(expected);
@@ -259,7 +262,7 @@ public class InternalDistributionTest {
         DistributedLoadingCache<String, String> loader = track(builder(Function.identity()).build(key -> blocked.load()));
         DistributedCache<String, String> invalidator = plain();
         invalidator.invalidate("k");
-        CompletableFuture<String> load = CompletableFuture.supplyAsync(() -> loader.get("k"));
+        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> loader.get("k"));
         assertThat(blocked.called.await(5, TimeUnit.SECONDS)).isTrue();
 
         blocked.source.set("new");
@@ -270,7 +273,7 @@ public class InternalDistributionTest {
         // refused and loaded again, or the load's own and hidden by its basis
         String loaded = load.get(5, TimeUnit.SECONDS);
         assertThat(loaded).isIn("old", "new");
-        assertThat(invalidator.getIfPresent("k")).isEqualTo(loaded.equals("new") ? "new" : null);
+        assertThat(invalidator.getIfPresent("k")).isEqualTo("new".equals(loaded) ? "new" : null);
     }
 
     @Test
@@ -281,7 +284,7 @@ public class InternalDistributionTest {
         DistributedLoadingCache<String, String> loader = track(builder(Function.identity())
                 .withAbsentCaching(Duration.ofMinutes(1)).build(key -> blocked.load()));
         DistributedCache<String, String> writer = plain();
-        CompletableFuture<String> load = CompletableFuture.supplyAsync(() -> loader.get("k"));
+        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> loader.get("k"));
         assertThat(blocked.called.await(5, TimeUnit.SECONDS)).isTrue();
 
         // the write's message is lost in a gap
@@ -336,10 +339,11 @@ public class InternalDistributionTest {
         DistributedCache<String, String> writer = plain();
         DistributedLoadingCache<String, String> loader = track(builder(store -> new InternalCoreTest.DelegatingStore(store) {
             @Override
-            public java.util.Set<String> write(Collection<io.github.oberhoff.distributedcaffeine.spi.Write> writes) {
-                java.util.Set<String> conflicts = super.write(writes);
+            public io.github.oberhoff.distributedcaffeine.spi.WriteResult write(
+                    Collection<io.github.oberhoff.distributedcaffeine.spi.Write> writes) {
+                io.github.oberhoff.distributedcaffeine.spi.WriteResult conflicts = super.write(writes);
                 if (writes.size() == 2 && writes.stream().noneMatch(
-                        io.github.oberhoff.distributedcaffeine.spi.Write::isUnconditional)) {
+                        io.github.oberhoff.distributedcaffeine.spi.Write::isAdvance)) {
                     // after the extra landed, before it is held: a newer write elsewhere, announced at once
                     writer.put("x", "newer");
                     settle();
@@ -468,7 +472,7 @@ public class InternalDistributionTest {
                 return rows;
             }
         }).build());
-        CompletableFuture<String> read = CompletableFuture.supplyAsync(() -> second.getIfPresent("k"));
+        CompletableFuture<@Nullable String> read = CompletableFuture.supplyAsync(() -> second.getIfPresent("k"));
         assertThat(readDone.await(5, TimeUnit.SECONDS)).isTrue();
 
         first.put("k", "new");
@@ -543,7 +547,7 @@ public class InternalDistributionTest {
                     return "loaded";
                 }));
         DistributedCache<String, String> second = plain();
-        CompletableFuture<String> load = CompletableFuture.supplyAsync(() -> first.get("k"));
+        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> first.get("k"));
         assertThat(loading.await(5, TimeUnit.SECONDS)).isTrue();
 
         second.put("k", "written");
@@ -563,7 +567,7 @@ public class InternalDistributionTest {
         Store maintenance = track(backend.open());
         pause(60);
 
-        assertThat(maintenance.expire(Duration.ofMillis(50), InternalVersion.fresh())).isEqualTo(1);
+        assertThat(maintenance.expire(Duration.ofMillis(50), new InternalVersion().fresh())).isEqualTo(1);
 
         await(() -> held(second, "k") == null && held(first, "k") == null);
     }

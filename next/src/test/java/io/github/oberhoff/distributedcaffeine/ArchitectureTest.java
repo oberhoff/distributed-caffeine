@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -29,6 +30,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * The boundary between the core and the adapters (VISION.md, "Coordinates, packaging and version"): an adapter
  * package uses nothing of the library but the SPI, so it can move into an artifact of its own later.
  */
+@NullMarked
 class ArchitectureTest {
 
     private static final Path SOURCES = Path.of("src/main/java/io/github/oberhoff/distributedcaffeine");

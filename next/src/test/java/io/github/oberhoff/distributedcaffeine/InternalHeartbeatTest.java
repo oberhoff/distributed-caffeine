@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.atomic.AtomicInteger;
@@ -26,15 +27,16 @@ import static org.assertj.core.api.Assertions.assertThat;
  * The heartbeat's decisions, one tick at a time: a beat whose announcement did not arrive by the next tick makes the
  * feed silent, once; the next announcement of the reserved key ends the silence, once.
  */
+@NullMarked
 class InternalHeartbeatTest {
 
     // the version of the last beat sent
     private final AtomicLong version = new AtomicLong();
     private final AtomicInteger silenced = new AtomicInteger();
     private final AtomicInteger resumed = new AtomicInteger();
-    private final InternalHeartbeat heartbeat = new InternalHeartbeat(beat -> {
+    private final InternalHeartbeat heartbeat = new InternalHeartbeat(new InternalVersion(), beat -> {
         version.set(beat);
-        return true;
+        return beat;
     }, silenced::incrementAndGet, resumed::incrementAndGet);
 
     @Test
@@ -50,33 +52,37 @@ class InternalHeartbeatTest {
     }
 
     @Test
-    void the_beats_continue_one_incarnation() {
-        heartbeat.tick();
-        long first = version.get();
-        heartbeat.tick();
+    void a_beat_counts_at_the_version_the_store_announced_it_at() {
+        // a store assigning versions of its own (a sequence): the proposal is not what is announced
+        InternalHeartbeat assigned = new InternalHeartbeat(new InternalVersion(), beat -> 7, silenced::incrementAndGet,
+                resumed::incrementAndGet);
+        assigned.tick();
+        assigned.received(7);
+        assigned.tick();
 
-        assertThat(version.get()).isEqualTo(InternalVersion.next(first));
+        assertThat(assigned.isSilent()).isFalse();
+        assertThat(silenced).hasValue(0);
     }
 
     @Test
-    void a_beat_of_another_instance_proves_nothing_about_the_own_one() {
+    void a_later_beat_of_another_instance_proves_the_own_one_arrived() {
         heartbeat.tick();
-        heartbeat.received(InternalVersion.fresh()); // another incarnation: no order against the own beat
+        heartbeat.received(version.get() + 1); // a key's versions grow in commit order: the own beat came before
+
+        heartbeat.tick();
+
+        assertThat(heartbeat.isSilent()).isFalse();
+    }
+
+    @Test
+    void an_earlier_beat_proves_nothing_about_the_own_one() {
+        heartbeat.tick();
+        heartbeat.received(version.get() - 1);
 
         heartbeat.tick();
 
         assertThat(heartbeat.isSilent()).isTrue();
         assertThat(silenced).hasValue(1);
-    }
-
-    @Test
-    void a_later_own_beat_proves_the_earlier_one_arrived() {
-        heartbeat.tick();
-        heartbeat.received(InternalVersion.next(version.get())); // per key in commit order
-
-        heartbeat.tick();
-
-        assertThat(heartbeat.isSilent()).isFalse();
     }
 
     @Test
@@ -89,7 +95,7 @@ class InternalHeartbeatTest {
         assertThat(silenced).hasValue(1);
 
         heartbeat.received(version.get());
-        heartbeat.received(InternalVersion.fresh());
+        heartbeat.received(version.get() + 1);
 
         assertThat(heartbeat.isSilent()).isFalse();
         assertThat(resumed).hasValue(1);
@@ -97,19 +103,19 @@ class InternalHeartbeatTest {
 
     @Test
     void no_beat_while_the_store_does_not_answer_and_so_no_silence() {
-        InternalHeartbeat failing = new InternalHeartbeat(beat -> {
+        InternalHeartbeat failing = new InternalHeartbeat(new InternalVersion(), beat -> {
             throw new IllegalStateException("store down");
         }, silenced::incrementAndGet, resumed::incrementAndGet);
-        InternalHeartbeat refused = new InternalHeartbeat(beat -> false, silenced::incrementAndGet,
+        InternalHeartbeat unasked = new InternalHeartbeat(new InternalVersion(), beat -> 0, silenced::incrementAndGet,
                 resumed::incrementAndGet);
 
         failing.tick();
         failing.tick();
-        refused.tick();
-        refused.tick();
+        unasked.tick();
+        unasked.tick();
 
         assertThat(failing.isSilent()).isFalse();
-        assertThat(refused.isSilent()).isFalse();
+        assertThat(unasked.isSilent()).isFalse();
         assertThat(silenced).hasValue(0);
     }
 }

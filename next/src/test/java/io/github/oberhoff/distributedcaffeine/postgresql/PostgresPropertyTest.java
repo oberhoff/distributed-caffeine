@@ -20,6 +20,7 @@ import io.github.oberhoff.distributedcaffeine.PropertyBackend;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.testing.SilencingProxy;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -44,6 +45,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * gap, as every reconnect is one), a statement rejected by the server (retried), and a connection broken during a
  * statement (the outcome unknown).
  */
+@NullMarked
 @Timeout(600)
 abstract class PostgresPropertyTest {
 

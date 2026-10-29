@@ -22,12 +22,14 @@ import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreContractTest;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import org.jspecify.annotations.NullMarked;
 
 /**
  * The storage contract on PostgreSQL, on the image and topology of the enclosing {@link PostgresIntegrationTest}
  * class: every test on a fresh table, several stores as several instances. Without a listener, as a store offering
  * only storage; the {@link PostgresChangeFeedContractTest} runs with one.
  */
+@NullMarked
 abstract class PostgresStoreContractTest extends StoreContractTest {
 
     @Override

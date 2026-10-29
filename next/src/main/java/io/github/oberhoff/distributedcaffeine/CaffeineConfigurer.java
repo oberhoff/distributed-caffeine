@@ -61,8 +61,14 @@ public final class CaffeineConfigurer<K, V> {
     private boolean recordingStats;
     private @Nullable Executor executor;
     private @Nullable Duration refreshAfterWrite;
-    // whether an expiry bounds the age of a local copy (expireAfterWrite or expireAfter), set by the user or by default
-    private boolean expiringAfterWrite;
+    // the user's expiry of a local copy, applied at build capped at the store's maximum age (see caffeine(Duration)),
+    // and checked at once against a builder of its own, so that a wrong combination fails where it is set, as in
+    // Caffeine
+    private final Caffeine<Object, Object> checked = Caffeine.newBuilder();
+    private @Nullable Duration expireAfterWrite;
+    private @Nullable Expiry<? super K, ? super V> expiry;
+    // whether the expiry was applied to the builder (once, so that the builder can build again)
+    private boolean expiryApplied;
 
     CaffeineConfigurer() {
     }
@@ -174,15 +180,16 @@ public final class CaffeineConfigurer<K, V> {
     }
 
     /**
-     * See {@link Caffeine#expireAfterWrite(Duration)}. How long this instance keeps its local copy; how old a value
-     * may get anywhere is the store's maximum age.
+     * See {@link Caffeine#expireAfterWrite(Duration)}. How long this instance keeps its local copy, at most the
+     * store's maximum age (a longer duration is lowered to it): no copy outlives the store's maximum age, also where a
+     * message dropping it was lost.
      *
      * @param duration the duration
      * @return this configurer
      */
     public CaffeineConfigurer<K, V> expireAfterWrite(Duration duration) {
-        caffeine.expireAfterWrite(duration);
-        expiringAfterWrite = true;
+        checked.expireAfterWrite(duration);
+        expireAfterWrite = duration;
         return this;
     }
 
@@ -194,8 +201,8 @@ public final class CaffeineConfigurer<K, V> {
      * @return this configurer
      */
     public CaffeineConfigurer<K, V> expireAfterWrite(long duration, TimeUnit unit) {
-        caffeine.expireAfterWrite(duration, unit);
-        expiringAfterWrite = true;
+        checked.expireAfterWrite(duration, unit);
+        expireAfterWrite = Duration.ofNanos(unit.toNanos(duration));
         return this;
     }
 
@@ -206,6 +213,7 @@ public final class CaffeineConfigurer<K, V> {
      * @return this configurer
      */
     public CaffeineConfigurer<K, V> expireAfterAccess(Duration duration) {
+        checked.expireAfterAccess(duration);
         caffeine.expireAfterAccess(duration);
         return this;
     }
@@ -218,19 +226,21 @@ public final class CaffeineConfigurer<K, V> {
      * @return this configurer
      */
     public CaffeineConfigurer<K, V> expireAfterAccess(long duration, TimeUnit unit) {
+        checked.expireAfterAccess(duration, unit);
         caffeine.expireAfterAccess(duration, unit);
         return this;
     }
 
     /**
-     * See {@link Caffeine#expireAfter(Expiry)}.
+     * See {@link Caffeine#expireAfter(Expiry)}. Every duration it returns is at most the store's maximum age (a
+     * longer one is lowered to it), as for {@link #expireAfterWrite(Duration)}.
      *
      * @param expiry the expiry
      * @return this configurer
      */
     public CaffeineConfigurer<K, V> expireAfter(Expiry<? super K, ? super V> expiry) {
-        caffeine.expireAfter(new InternalExpiry<>(requireNonNull(expiry)));
-        expiringAfterWrite = true;
+        checked.expireAfter(requireNonNull(expiry));
+        this.expiry = expiry;
         return this;
     }
 
@@ -339,17 +349,21 @@ public final class CaffeineConfigurer<K, V> {
         return statsCounter != null ? statsCounter : new InternalCaffeineStats(StatsCounter.disabledStatsCounter());
     }
 
-    // the builder of the local level
-    Caffeine<InternalKey<K>, InternalValue<V>> caffeine() {
-        return caffeine;
-    }
-
-    // the builder of the local level, expiring after write by default if nothing bounds the age of a copy
-    // (DistributionMode.NONE); applied once, so that the builder can build again
-    Caffeine<InternalKey<K>, InternalValue<V>> caffeine(@Nullable Duration defaultExpireAfterWrite) {
-        if (defaultExpireAfterWrite != null && !expiringAfterWrite) {
-            caffeine.expireAfterWrite(defaultExpireAfterWrite);
-            expiringAfterWrite = true;
+    // the builder of the local level, every copy expiring at the store's maximum age at the latest: the user's
+    // expiry lowered to it, or that age by default. A copy changed or expired in the store is dropped by its message;
+    // where that message is lost without a gap reported (a feed losing messages silently), or there are no messages
+    // (DistributionMode.NONE), this bounds how long it is served (VISION.md, "In-memory store profiles", dimension
+    // 7). Counted from the copy's install, so a copy of a row read when already old lives up to twice the maximum age
+    // after the write. Applied once, so that the builder can build again
+    Caffeine<InternalKey<K>, InternalValue<V>> caffeine(Duration maximumAge) {
+        if (!expiryApplied) {
+            if (expiry != null) {
+                caffeine.expireAfter(new InternalExpiry<>(expiry, maximumAge));
+            } else {
+                caffeine.expireAfterWrite(expireAfterWrite == null || expireAfterWrite.compareTo(maximumAge) > 0
+                        ? maximumAge : expireAfterWrite);
+            }
+            expiryApplied = true;
         }
         return caffeine;
     }

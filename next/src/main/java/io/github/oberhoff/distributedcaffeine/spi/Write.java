@@ -24,24 +24,27 @@ import static java.util.Objects.requireNonNull;
 
 /**
  * One key's write ({@link Store#write}): a value or a tombstone, at the version the core chose for it, under a
- * condition on the version the stored row has now. The store does not interpret versions: it compares them for
- * equality and stores the given one (VISION.md, "Target design: a thin SPI, versions in the core").
+ * condition on the version the stored row has now. The store compares versions and stores the given one, nothing else;
+ * a row's version only ever grows (VISION.md, "Target design: monotonic versions, proposed by the core, enforced by
+ * the store").
  *
  * @param hash     the hash of the key
  * @param key      the serialized key, in the cache's key format; {@code null} for a tombstone, which keeps the key the
  *                 row has (none for a row that does not exist yet)
  * @param value    the serialized value, in the cache's value format; {@code null} for a tombstone
  * @param version  the version the row gets: positive, unique for the key
- * @param expected the condition: {@link #ANY} (unconditional), {@link #MISSING} (no row may exist, not even a
- *                 tombstone), or the version the row must still have, whatever its state
+ * @param expected the condition: {@link #ADVANCE} (only if no row exists or its version is smaller than this write's),
+ *                 {@link #MISSING} (no row may exist, not even a tombstone), or the version the row must still have,
+ *                 whatever its state
  */
 @SuppressWarnings("ArrayRecordComponent") // equals, hashCode and toString below compare and show the contents
 public record Write(String hash, byte @Nullable [] key, byte @Nullable [] value, long version, long expected) {
 
     /**
-     * The condition of an unconditional write.
+     * The condition of a write not decided on a read (a {@code put}, a tombstone, the control row): it applies only if
+     * no row exists or the row's version is smaller than the write's, so that the version only grows.
      */
-    public static final long ANY = 0L;
+    public static final long ADVANCE = 0L;
 
     /**
      * The condition that no row exists for the key at all, not even a tombstone: what a load writes after reading
@@ -59,12 +62,12 @@ public record Write(String hash, byte @Nullable [] key, byte @Nullable [] value,
             throw new IllegalArgumentException("version must be positive");
         }
         if (expected < MISSING) {
-            throw new IllegalArgumentException("expected must be a version, ANY or MISSING");
+            throw new IllegalArgumentException("expected must be a version, ADVANCE or MISSING");
         }
     }
 
     /**
-     * Writes a value unconditionally.
+     * Writes a value, advancing the row's version.
      *
      * @param hash    the hash of the key
      * @param key     the serialized key
@@ -74,19 +77,19 @@ public record Write(String hash, byte @Nullable [] key, byte @Nullable [] value,
      */
     public static Write value(String hash, byte[] key, byte[] value, long version) {
         return new Write(hash, requireNonNull(key, "key cannot be null"), requireNonNull(value, "value cannot be null"),
-                version, ANY);
+                version, ADVANCE);
     }
 
     /**
-     * Writes a tombstone unconditionally, creating one where no row exists, so that the version reaches loads in
-     * flight.
+     * Writes a tombstone, advancing the row's version, creating one where no row exists, so that the version reaches
+     * loads in flight.
      *
      * @param hash    the hash of the key
      * @param version the version the tombstone gets
      * @return the write
      */
     public static Write tombstone(String hash, long version) {
-        return new Write(hash, null, null, version, ANY);
+        return new Write(hash, null, null, version, ADVANCE);
     }
 
     /**
@@ -112,6 +115,17 @@ public record Write(String hash, byte @Nullable [] key, byte @Nullable [] value,
     }
 
     /**
+     * Returns this write at another version, its condition kept: as applied where the store assigned the version
+     * ({@link WriteResult}).
+     *
+     * @param version the version
+     * @return the write at that version
+     */
+    public Write at(long version) {
+        return new Write(hash, key, value, version, expected);
+    }
+
+    /**
      * Returns whether this write writes a tombstone.
      *
      * @return {@code true} for a tombstone, {@code false} for a value
@@ -121,12 +135,12 @@ public record Write(String hash, byte @Nullable [] key, byte @Nullable [] value,
     }
 
     /**
-     * Returns whether this write is unconditional.
+     * Returns whether this write advances the version (not decided on a read).
      *
-     * @return {@code true} if {@link #expected()} is {@link #ANY}
+     * @return {@code true} if {@link #expected()} is {@link #ADVANCE}
      */
-    public boolean isUnconditional() {
-        return expected == ANY;
+    public boolean isAdvance() {
+        return expected == ADVANCE;
     }
 
     /**
@@ -156,7 +170,7 @@ public record Write(String hash, byte @Nullable [] key, byte @Nullable [] value,
     @Override
     public String toString() {
         return "Write[hash=" + hash + ", " + (value == null ? "tombstone" : "value of " + value.length + " bytes")
-                + ", version=" + version + ", expected=" + (expected == ANY ? "any" : expected == MISSING ? "missing"
+                + ", version=" + version + ", expected=" + (expected == ADVANCE ? "advance" : expected == MISSING ? "missing"
                 : String.valueOf(expected)) + "]";
     }
 }

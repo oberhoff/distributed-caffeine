@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.mongodb;
 
 import io.github.oberhoff.distributedcaffeine.mongodb.MongoTopologyTests.Setup;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
@@ -32,6 +33,7 @@ import static io.github.oberhoff.distributedcaffeine.testing.Topology.Tests.RUNS
  * each major version's first release and its latest. The sharded cluster and the small oplog on the latest of each
  * major version (and 4.4.0). With {@code -DrunsOnGitHub=true}, only the latest image runs.
  */
+@NullMarked
 class MongoIntegrationTest {
 
     @Nested

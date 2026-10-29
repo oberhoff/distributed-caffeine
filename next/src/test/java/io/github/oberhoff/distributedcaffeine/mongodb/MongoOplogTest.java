@@ -24,6 +24,7 @@ import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
 import io.github.oberhoff.distributedcaffeine.DistributionMode;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import org.bson.Document;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -43,6 +44,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * reading, and writes enough to truncate the oplog past its position. The stream cannot resume from there, so it
  * reopens without its token and the caches are told about a gap; what changed meanwhile is found by the revalidation.
  */
+@NullMarked
 @Timeout(300)
 @SuppressWarnings("resource") // every cache a test opens is closed after it (@AfterEach)
 abstract class MongoOplogTest {

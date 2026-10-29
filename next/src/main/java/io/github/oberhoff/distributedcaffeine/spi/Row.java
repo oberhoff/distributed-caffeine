@@ -33,7 +33,8 @@ import static java.util.Objects.requireNonNull;
  * @param state   the state of the row
  * @param version the version the row's last write carried
  * @param age     how long ago the row was written, by the store's clock; the ages of one read are measured at the
- *                same instant, so they compare like the times of the writes
+ *                same instant, so they compare like the times of the writes; negative for a row written after that
+ *                instant, as it is
  */
 @SuppressWarnings("ArrayRecordComponent") // equals, hashCode and toString below compare and show the contents
 public record Row(String hash, byte[] key, byte @Nullable [] value, State state, long version, Duration age) {

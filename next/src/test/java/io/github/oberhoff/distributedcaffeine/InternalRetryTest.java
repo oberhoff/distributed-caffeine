@@ -20,7 +20,9 @@ import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -31,7 +33,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Deque;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
@@ -44,6 +45,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * core repeats what is retryable as far as that is safe, keeps an outcome unknown once it was, and takes anything
  * else a store throws for a store failure.
  */
+@NullMarked
 @Timeout(30)
 @SuppressWarnings("resource") // every cache a test opens is closed after it (@AfterEach)
 class InternalRetryTest {
@@ -87,11 +89,11 @@ class InternalRetryTest {
                 database.openStore("cache")) {
             // the writes of values, unconditional (put) or conditional; tombstones (the heartbeat's too) pass
             @Override
-            public Set<String> write(Collection<Write> writes) {
+            public WriteResult write(Collection<Write> writes) {
                 if (writes.stream().allMatch(Write::isTombstone)) {
                     return super.write(writes);
                 }
-                if (writes.stream().allMatch(Write::isUnconditional)) {
+                if (writes.stream().allMatch(Write::isAdvance)) {
                     puts.incrementAndGet();
                 } else {
                     conditionalWrites.incrementAndGet();
@@ -99,10 +101,11 @@ class InternalRetryTest {
                 return faulty(() -> super.write(writes));
             }
         };
-        DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(adapter)
+        DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(InternalCoreTest.offered(adapter))
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000))
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(1_000))
                 .withCaffeine(CaffeineConfigurer::recordStats)
                 .build();
         closeables.add(cache);

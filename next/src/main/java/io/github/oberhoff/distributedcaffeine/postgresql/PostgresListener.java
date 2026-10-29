@@ -75,7 +75,8 @@ import java.util.concurrent.TimeoutException;
  * The session's threads only enqueue into the caches' own queues (the core's delivery), so they never call into a
  * cache's locks.
  */
-@SuppressWarnings("SqlNoDataSourceInspection") // the SQL runs against the user's database, unknown to the IDE
+// the SQL runs against the user's database, unknown to the IDE; what is formatted into it are quoted channel names
+@SuppressWarnings({"SqlNoDataSourceInspection", "java:S2077", "SqlSourceToSinkFlow"})
 final class PostgresListener {
 
     private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine.postgresql");
@@ -83,6 +84,13 @@ final class PostgresListener {
     static final long PROBE_TIMEOUT_SECONDS = 5;
     private static final int PROBE_ATTEMPTS = 3;
     private static final IdentityHashMap<DataSource, Session> SESSIONS = new IdentityHashMap<>();
+
+    // the listening sessions open: none once every cache using them is closed (tests check it, a leak would show)
+    static int openSessions() {
+        synchronized (SESSIONS) {
+            return SESSIONS.size();
+        }
+    }
     // pgjdbc's stream behind a connection: protected, with no getter; null if this pgjdbc does not have it
     private static final @Nullable Field PG_STREAM = pgStreamField();
 
@@ -257,7 +265,7 @@ final class PostgresListener {
         private final Connection connection;
         private final PGStream stream;
         // the commands sent and not yet answered, in the order sent: each ReadyForQuery answers the oldest
-        private final Queue<CompletableFuture<Void>> commands = new ConcurrentLinkedQueue<>();
+        private final Queue<CompletableFuture<@Nullable Void>> commands = new ConcurrentLinkedQueue<>();
         @GuardedBy("this")
         private boolean ended;
 
@@ -268,7 +276,7 @@ final class PostgresListener {
 
         // a simple query ('Q'), waiting for its ReadyForQuery; an error ends the session (see read)
         void execute(String sql) {
-            CompletableFuture<Void> answered = new CompletableFuture<>();
+            CompletableFuture<@Nullable Void> answered = new CompletableFuture<>();
             synchronized (this) {
                 if (ended) {
                     throw new StoreException("The PostgreSQL listener's session ended", false);
@@ -289,8 +297,9 @@ final class PostgresListener {
             try {
                 answered.get(COMMAND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
             } catch (ExecutionException e) {
-                throw new StoreException("Listening on PostgreSQL failed (" + sql + "): " + e.getCause().getMessage(),
-                        e.getCause(), false);
+                Throwable cause = e.getCause() != null ? e.getCause() : e;
+                throw new StoreException("Listening on PostgreSQL failed (" + sql + "): " + cause.getMessage(), cause,
+                        false);
             } catch (TimeoutException e) {
                 throw new StoreException("Listening on PostgreSQL failed (" + sql + "): no answer within "
                         + COMMAND_TIMEOUT.toSeconds() + " s", e, false);
@@ -301,7 +310,7 @@ final class PostgresListener {
         }
 
         void answered() {
-            CompletableFuture<Void> oldest = commands.poll();
+            CompletableFuture<@Nullable Void> oldest = commands.poll();
             if (oldest != null) {
                 oldest.complete(null);
             }
@@ -312,7 +321,7 @@ final class PostgresListener {
             synchronized (this) {
                 ended = true;
             }
-            for (CompletableFuture<Void> waiting; (waiting = commands.poll()) != null; ) {
+            for (CompletableFuture<@Nullable Void> waiting; (waiting = commands.poll()) != null; ) {
                 waiting.completeExceptionally(cause);
             }
         }
@@ -323,7 +332,7 @@ final class PostgresListener {
 
         private final DataSource listenerDataSource;
         private final Map<String, List<Registration>> channels = new ConcurrentHashMap<>();
-        private final Map<String, CompletableFuture<Void>> probes = new ConcurrentHashMap<>();
+        private final Map<String, CompletableFuture<@Nullable Void>> probes = new ConcurrentHashMap<>();
         private final String probeChannel = "dc_probe_" + UUID.randomUUID().toString().replace("-", "");
         @GuardedBy("this")
         private @Nullable Held held;
@@ -513,7 +522,7 @@ final class PostgresListener {
 
         private void dispatch(String channel, @Nullable String payload) {
             if (probeChannel.equals(channel)) {
-                CompletableFuture<Void> probe = payload == null ? null : probes.remove(payload);
+                CompletableFuture<@Nullable Void> probe = payload == null ? null : probes.remove(payload);
                 if (probe != null) {
                     probe.complete(null);
                 }
@@ -537,7 +546,7 @@ final class PostgresListener {
         // A failure to send (the store down) proves nothing about the session and counts as arrived
         private boolean probe(DataSource dataSource) {
             String token = UUID.randomUUID().toString();
-            CompletableFuture<Void> arrived = new CompletableFuture<>();
+            CompletableFuture<@Nullable Void> arrived = new CompletableFuture<>();
             probes.put(token, arrived);
             try (Connection jdbc = dataSource.getConnection()) {
                 int previousTimeout = PostgresStore.bound(jdbc, Duration.ofSeconds(PROBE_TIMEOUT_SECONDS));

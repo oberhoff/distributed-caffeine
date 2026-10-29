@@ -15,9 +15,12 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import org.jspecify.annotations.NullMarked;
+
 /**
  * Linearizability of one instance on several keys, with every operation but {@code invalidateAll}: like Caffeine's,
  * it is not atomic across keys (a reader may see it on one key and not yet on another).
  */
+@NullMarked
 public class InternalLinearizabilityTest extends AbstractLinearizabilityTest {
 }

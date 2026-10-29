@@ -28,6 +28,7 @@
         <jackson.version>3.2.4</jackson.version>
         <mongodb.version>5.13.0</mongodb.version>
         <postgresql.version>42.7.14</postgresql.version>
+        <checkerqual.version>4.3.1</checkerqual.version>
         <junit.version>6.1.3</junit.version>
         <assertj.version>3.27.7</assertj.version>
         <testcontainers.version>2.0.5</testcontainers.version>
@@ -83,6 +84,17 @@
             <artifactId>postgresql</artifactId>
             <version>${postgresql.version}</version>
             <optional>true</optional>
+        </dependency>
+        <!-- The PostgreSQL driver's class files reference these annotations, which javac reads when compiling
+             against it, while the driver itself declares them at runtime scope only - so they are absent exactly
+             where they are needed and a warning about it fails the build. Provided, so nothing of it reaches a
+             user of this library, and at any version that still has them, since the driver's class files only name
+             them - so it is kept current like every other dependency rather than at the driver's version. -->
+        <dependency>
+            <groupId>org.checkerframework</groupId>
+            <artifactId>checker-qual</artifactId>
+            <version>${checkerqual.version}</version>
+            <scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
@@ -187,6 +199,9 @@
                     <useManifestOnlyJar>false</useManifestOnlyJar>
                     <!-- Lincheck attaches its agent at run time: within the JVM, quietly (JEP 451) -->
                     <argLine>-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading</argLine>
+                    <!-- a JVM per test class: Lincheck's instrumentation has crashed the JVM (Temurin 25.0.1, SIGBUS
+                         in RedefineClasses), and in a shared fork every class after it went unrun -->
+                    <reuseForks>false</reuseForks>
                 </configuration>
             </plugin>
         </plugins>

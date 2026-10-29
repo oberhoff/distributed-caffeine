@@ -23,6 +23,8 @@ import io.github.oberhoff.distributedcaffeine.DistributionMode;
 import io.github.oberhoff.distributedcaffeine.SynchronizationState;
 import io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
+import io.github.oberhoff.distributedcaffeine.spi.Row;
+import io.github.oberhoff.distributedcaffeine.spi.State;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
@@ -31,6 +33,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.testing.SilencingProxy;
 import org.bson.BsonDocument;
 import org.bson.Document;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -56,6 +59,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * The MongoDB adapter end to end: caches distributing through it in every mode and format, the schema checks on
  * start, names, and recovery after a lost history.
  */
+@NullMarked
 @Timeout(60)
 @SuppressWarnings("resource") // every cache and store a test opens is closed after it (@AfterEach)
 abstract class MongoAdapterTest {
@@ -71,6 +75,8 @@ abstract class MongoAdapterTest {
         for (AutoCloseable closeable : closeables) {
             closeable.close();
         }
+        // every cache closed: the shared registry is empty again (a leak would grow with every cache opened)
+        assertThat(MongoWatcher.watchedClients()).as("no client watched any more").isZero();
     }
 
     private <C extends AutoCloseable> C track(C closeable) {
@@ -362,7 +368,7 @@ abstract class MongoAdapterTest {
 
         // every round trip takes most of a second: the read as a whole takes longer than the timeout, each batch not
         proxy.delayRequests(Duration.ofMillis(1_200));
-        assertThat(store.pruneToSize(100)).isEqualTo(7_900);
+        assertThat(store.pruneToSize(100, Duration.ZERO)).isEqualTo(7_900);
     }
 
     @Test
@@ -561,9 +567,40 @@ abstract class MongoAdapterTest {
             store.write(List.of(Write.value(Store.CONTROL_HASH, bytes, bytes, 2)));
 
             assertThat(store.expire(Duration.ZERO, 3)).as("neither the hidden one nor the control row").isZero();
-            assertThat(store.pruneToSize(0)).as("neither counted nor deleted").isZero();
+            assertThat(store.pruneToSize(0, Duration.ZERO)).as("neither counted nor deleted").isZero();
             assertThat(store.pruneTombstones(LONG)).as("the hidden one, without a grace period").isOne();
             assertThat(store.read(List.of("hidden", Store.CONTROL_HASH), LONG)).containsOnlyKeys(Store.CONTROL_HASH);
+        }
+    }
+
+    @Test
+    void a_bulk_write_reports_each_writes_outcome_and_a_write_on_a_pruned_version_leaves_no_value() {
+        try (var store = adapter().build().createStore(StoreSettings.of(Format.TEXT, Format.TEXT))) {
+            byte[] bytes = "x".getBytes(StandardCharsets.UTF_8);
+            byte[] newer = "y".getBytes(StandardCharsets.UTF_8);
+            store.write(List.of(Write.value("matching", bytes, bytes, 1), Write.value("other", bytes, bytes, 1),
+                    Write.value("pruned", bytes, bytes, 1), Write.value("existing", bytes, bytes, 1)));
+            // deleted under the write, as maintenance does after the read the write was decided on
+            database.client.getDatabase("adapter").getCollection(collection)
+                    .deleteOne(new Document("_id.h", "pruned"));
+
+            Set<String> conflicts = store.write(List.of(
+                    Write.value("matching", bytes, newer, 2).ifVersion(1),
+                    Write.value("other", bytes, newer, 2).ifVersion(7),
+                    Write.value("pruned", bytes, newer, 2).ifVersion(1),
+                    Write.value("fresh", bytes, newer, 2).ifMissing(),
+                    Write.value("existing", bytes, newer, 2).ifMissing())).refused();
+
+            assertThat(conflicts).as("each by its own outcome, in one bulk write")
+                    .containsExactlyInAnyOrder("other", "pruned", "existing");
+            Map<String, Row> rows = store.read(List.of("matching", "other", "pruned", "fresh"), LONG);
+            assertThat(rows.get("matching").version()).isEqualTo(2);
+            assertThat(rows.get("other").version()).as("untouched").isEqualTo(1);
+            assertThat(rows.get("pruned").state()).as("no value from a failed condition").isEqualTo(State.TOMBSTONE);
+            assertThat(rows.get("pruned").value()).isNull();
+            assertThat(rows.get("fresh").version()).isEqualTo(2);
+            assertThat(store.read(List.of("existing"), LONG).get("existing").version()).as("untouched")
+                    .isEqualTo(1);
         }
     }
 

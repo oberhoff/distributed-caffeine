@@ -26,6 +26,9 @@ import java.util.concurrent.TimeUnit;
 final class InternalMaintenance {
 
     static final Duration TOMBSTONE_RETENTION = Duration.ofMinutes(5);
+    // the least time size pruning spares a row (DistributedCaffeine#pruneGrace): a load slower than this that met
+    // the cache turning over its whole maximum size meanwhile may leave an older value, up to the maximum age
+    static final Duration PRUNE_GRACE = Duration.ofSeconds(4);
 
     private static final ScheduledExecutorService SCHEDULER = Executors.newSingleThreadScheduledExecutor(runnable -> {
         Thread thread = new Thread(runnable, "distributed-caffeine-maintenance");
@@ -34,6 +37,12 @@ final class InternalMaintenance {
     });
 
     private InternalMaintenance() {
+    }
+
+    // once, after the delay and never before it (no jitter), never cancelled
+    @SuppressWarnings("FutureReturnValueIgnored") // nothing to cancel or wait for
+    static void scheduleOnce(Runnable task, Duration delay) {
+        SCHEDULER.schedule(task, Math.max(1, delay.toNanos()), TimeUnit.NANOSECONDS);
     }
 
     // the interval with ±20 % jitter, so that instances do not prune in step; the task's future, as the scheduler

@@ -41,6 +41,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class InMemoryDatabaseFaultsTest {
 
+    // the faults at the versions written: a store applying writes at the versions proposed
+    private static final StoreProfile PROFILE = StoreProfile.JDBC;
+
     private static final Duration TIMEOUT = Duration.ofSeconds(10);
     private static final Duration QUIET = Duration.ofMillis(300);
     private static final Duration LONG = Duration.ofHours(1);
@@ -62,8 +65,8 @@ class InMemoryDatabaseFaultsTest {
 
     @Test
     void a_write_failing_before_commit_changes_and_announces_nothing() {
-        InMemoryDatabase database = new InMemoryDatabase();
-        try (InMemoryStore store = database.openStore("cache")) {
+        InMemoryDatabase database = new InMemoryDatabase(PROFILE);
+        try (InMemoryStore store = database.openFeed("cache")) {
             RecordingListener observer = new RecordingListener();
             store.subscribe(observer);
             database.failNextWrites(1, false);
@@ -80,8 +83,8 @@ class InMemoryDatabaseFaultsTest {
 
     @Test
     void a_write_with_unknown_outcome_commits_announces_and_still_fails() {
-        InMemoryDatabase database = new InMemoryDatabase();
-        try (InMemoryStore store = database.openStore("cache")) {
+        InMemoryDatabase database = new InMemoryDatabase(PROFILE);
+        try (InMemoryStore store = database.openFeed("cache")) {
             RecordingListener observer = new RecordingListener();
             store.subscribe(observer);
             database.failNextWrites(1, true);
@@ -96,8 +99,8 @@ class InMemoryDatabaseFaultsTest {
 
     @Test
     void a_store_down_refuses_everything_delivers_nothing_and_resumes_with_messages_lost_when_back() {
-        InMemoryDatabase database = new InMemoryDatabase();
-        try (InMemoryStore store = database.openStore("cache")) {
+        InMemoryDatabase database = new InMemoryDatabase(PROFILE);
+        try (InMemoryStore store = database.openFeed("cache")) {
             RecordingListener observer = new RecordingListener();
             ChangeSubscription subscription = store.subscribe(observer);
             database.pauseDelivery();
@@ -122,8 +125,8 @@ class InMemoryDatabaseFaultsTest {
 
     @Test
     void a_gap_loses_undelivered_messages() {
-        InMemoryDatabase database = new InMemoryDatabase();
-        try (InMemoryStore store = database.openStore("cache")) {
+        InMemoryDatabase database = new InMemoryDatabase(PROFILE);
+        try (InMemoryStore store = database.openFeed("cache")) {
             RecordingListener observer = new RecordingListener();
             store.subscribe(observer);
             database.pauseDelivery();
@@ -139,8 +142,8 @@ class InMemoryDatabaseFaultsTest {
 
     @Test
     void paused_delivery_queues_and_resumes_in_order() {
-        InMemoryDatabase database = new InMemoryDatabase();
-        try (InMemoryStore store = database.openStore("cache")) {
+        InMemoryDatabase database = new InMemoryDatabase(PROFILE);
+        try (InMemoryStore store = database.openFeed("cache")) {
             RecordingListener observer = new RecordingListener();
             store.subscribe(observer);
             database.pauseDelivery();
@@ -160,8 +163,8 @@ class InMemoryDatabaseFaultsTest {
 
     @Test
     void duplicates_are_delivered_next_to_their_originals() {
-        InMemoryDatabase database = new InMemoryDatabase(InMemoryDatabaseFaultsTest::micros, 42);
-        try (InMemoryStore store = database.openStore("cache")) {
+        InMemoryDatabase database = new InMemoryDatabase(InMemoryDatabaseFaultsTest::micros, 42, PROFILE);
+        try (InMemoryStore store = database.openFeed("cache")) {
             RecordingListener observer = new RecordingListener();
             store.subscribe(observer);
             database.setDuplicateProbability(1.0);
@@ -176,8 +179,8 @@ class InMemoryDatabaseFaultsTest {
 
     @Test
     void reordering_across_keys_keeps_the_order_per_key_and_around_a_write_of_the_control_row() {
-        InMemoryDatabase database = new InMemoryDatabase(InMemoryDatabaseFaultsTest::micros, 7);
-        try (InMemoryStore store = database.openStore("cache")) {
+        InMemoryDatabase database = new InMemoryDatabase(InMemoryDatabaseFaultsTest::micros, 7, PROFILE);
+        try (InMemoryStore store = database.openFeed("cache")) {
             RecordingListener observer = new RecordingListener();
             store.subscribe(observer);
             database.setReorderAcrossKeys(true);
@@ -210,8 +213,8 @@ class InMemoryDatabaseFaultsTest {
 
     @Test
     void delivery_delay_postpones_delivery() {
-        InMemoryDatabase database = new InMemoryDatabase();
-        try (InMemoryStore store = database.openStore("cache")) {
+        InMemoryDatabase database = new InMemoryDatabase(PROFILE);
+        try (InMemoryStore store = database.openFeed("cache")) {
             RecordingListener observer = new RecordingListener();
             store.subscribe(observer);
             database.setDeliveryDelay(Duration.ofMillis(200));
@@ -228,20 +231,20 @@ class InMemoryDatabaseFaultsTest {
     }
 
     @Test
-    void the_store_clock_decides_ages_and_versions_are_stored_as_given() {
+    void the_store_clock_decides_ages_and_not_the_versions() {
         AtomicLong clock = new AtomicLong(1_000_000_000L);
-        InMemoryDatabase database = new InMemoryDatabase(clock::get, 1);
-        try (InMemoryStore store = database.openStore("cache")) {
+        InMemoryDatabase database = new InMemoryDatabase(clock::get, 1, PROFILE);
+        try (InMemoryStore store = database.openFeed("cache")) {
 
             store.write(List.of(Write.value("h1", new byte[]{1}, new byte[]{1}, 77)));
             clock.addAndGet(5_000_000L);
             Duration age = store.read(List.of("h1"), LONG).get("h1").age();
             clock.addAndGet(-60_000_000L); // the clock goes backwards
-            store.write(List.of(Write.value("h1", new byte[]{1}, new byte[]{2}, 5)));
+            store.write(List.of(Write.value("h1", new byte[]{1}, new byte[]{2}, 78)));
 
             assertThat(age).isEqualTo(Duration.ofSeconds(5));
-            assertThat(store.read(List.of("h1"), LONG).get("h1").version()).as("as given, not ordered")
-                    .isEqualTo(5);
+            assertThat(store.read(List.of("h1"), LONG).get("h1").version()).as("as given, whatever the clock does")
+                    .isEqualTo(78);
         }
     }
 
@@ -249,8 +252,8 @@ class InMemoryDatabaseFaultsTest {
     void a_delayed_write_keeps_the_time_it_took_before_its_delay() {
         AtomicLong clock = new AtomicLong(1_000_000_000L);
         // every look at the clock moves it on: a write taking the time again after its delay would see a later one
-        InMemoryDatabase database = new InMemoryDatabase(() -> clock.getAndAdd(1_000_000L), 1);
-        try (InMemoryStore store = database.openStore("cache")) {
+        InMemoryDatabase database = new InMemoryDatabase(() -> clock.getAndAdd(1_000_000L), 1, PROFILE);
+        try (InMemoryStore store = database.openFeed("cache")) {
             database.setCommitDelay(Duration.ofMillis(5), 1);
 
             store.write(List.of(entry("h1", "v")));
@@ -263,8 +266,8 @@ class InMemoryDatabaseFaultsTest {
 
     @Test
     void the_step_before_a_conditional_write_runs_before_conditional_writes_only() {
-        InMemoryDatabase database = new InMemoryDatabase();
-        try (InMemoryStore store = database.openStore("cache")) {
+        InMemoryDatabase database = new InMemoryDatabase(PROFILE);
+        try (InMemoryStore store = database.openFeed("cache")) {
             AtomicLong steps = new AtomicLong();
             database.setBeforeConditionalWrite(steps::incrementAndGet);
 

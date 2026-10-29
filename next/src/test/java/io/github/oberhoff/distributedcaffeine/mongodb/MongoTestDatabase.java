@@ -20,6 +20,7 @@ import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoDatabase;
 import org.bson.Document;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
@@ -48,6 +49,7 @@ import static java.util.Objects.requireNonNull;
  *     second, and from MongoDB 5.0 no snapshot history kept).</li>
  * </ul>
  */
+@NullMarked
 final class MongoTestDatabase implements AutoCloseable {
 
     private static final AtomicInteger COLLECTIONS = new AtomicInteger();

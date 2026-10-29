@@ -17,6 +17,7 @@ package io.github.oberhoff.distributedcaffeine.mongodb;
 
 import io.github.oberhoff.distributedcaffeine.testing.Suite.Kind;
 import io.github.oberhoff.distributedcaffeine.testing.Topology;
+import org.jspecify.annotations.NullMarked;
 
 import java.util.EnumSet;
 import java.util.Set;
@@ -24,6 +25,7 @@ import java.util.Set;
 /**
  * The MongoDB topologies the suites run on (see {@link MongoTestDatabase} for how each is built).
  */
+@NullMarked
 enum MongoTopology implements Topology {
 
     SINGLE_NODE_REPLICA_SET,

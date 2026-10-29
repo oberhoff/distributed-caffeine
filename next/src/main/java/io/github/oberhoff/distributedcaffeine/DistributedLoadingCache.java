@@ -28,6 +28,15 @@ import java.util.concurrent.CompletableFuture;
  */
 public interface DistributedLoadingCache<K, V> extends DistributedCache<K, V>, LoadingCache<K, V> {
 
+    /**
+     * {@inheritDoc}
+     * <p>
+     * A loaded value is cached only if the key was neither written nor removed on any instance while it loaded;
+     * otherwise a value written meanwhile is returned instead, and after a removal the key is loaded again. After three
+     * attempts in a row each met by a removal, the last loaded value is returned without being cached, as Caffeine's
+     * asynchronous cache does with a load an invalidation discards
+     * ({@code distributedPolicy().stats().uncachedLoadCount()}).
+     */
     // a loader resolving to null caches nothing.
     // Caffeine documents a null result ("or null if the computed value is null") but cannot express it for a value
     // type that is not nullable; declaring the value type nullable would declare every other method nullable too

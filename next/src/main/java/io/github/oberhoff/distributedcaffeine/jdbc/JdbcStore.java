@@ -54,7 +54,8 @@ import java.util.Map;
 // ages of its rows against one reading of it, so that they compare with the control row's (invalidateAll). What SQL
 // does not standardise (the type of bytes and times, the time now) comes from a dialect, by the database's product
 // name. Keys and values are stored as bytes, whatever the format. Tested on MariaDB.
-@SuppressWarnings({"SqlNoDataSourceInspection", "java:S2077"}) // the SQL runs against the user's database; quoted names
+// the SQL runs against the user's database, unknown to the IDE; what is formatted into it are quoted names only
+@SuppressWarnings({"SqlNoDataSourceInspection", "java:S2077", "SqlSourceToSinkFlow"})
 final class JdbcStore extends PrimitiveStore {
 
     private static final int CHUNK = 1_000;
@@ -257,24 +258,26 @@ final class JdbcStore extends PrimitiveStore {
 
     // the age against the statement's one reading of the clock, the same for every row it returns
     private Duration age(ResultSet resultSet, int writeTime, int now) throws SQLException {
-        Duration age = Duration.between(dialect.time(resultSet, writeTime), dialect.time(resultSet, now));
-        return age.isNegative() ? Duration.ZERO : age;
+        // negative for a row written after that reading (a clock stepped back), as it is (Store#read)
+        return Duration.between(dialect.time(resultSet, writeTime), dialect.time(resultSet, now));
     }
 
     // writes: each in one transaction; whether a conditional one applied is its update count
 
-    // UPDATE, and INSERT where no row matched; one inserted meanwhile by another instance is updated after all, in
-    // the same transaction (no portable SQL upserts: MERGE is not MariaDB's, ON DUPLICATE KEY not the standard's).
-    // A null key keeps the row's key (a tombstone)
+    // UPDATE over a smaller version (the version only grows), and INSERT where no row matched; a row already there,
+    // inserted meanwhile by another instance, refuses the insert, and the update decides once more, in the same
+    // transaction (no portable SQL upserts: MERGE is not MariaDB's, ON DUPLICATE KEY not the standard's). A null key
+    // keeps the row's key (a tombstone)
     @Override
-    protected void upsertRow(String hash, byte @Nullable [] key, byte @Nullable [] value, State state, long version) {
+    protected boolean advanceRow(String hash, byte @Nullable [] key, byte @Nullable [] value, State state,
+                                 long version) {
         String update = ("UPDATE %s SET k = COALESCE(?, k), v = ?, state = ?, version = ?, write_time = %s "
-                + "WHERE discriminator = ? AND id = ?").formatted(table, dialect.now);
+                + "WHERE discriminator = ? AND id = ? AND version < ?").formatted(table, dialect.now);
         String insert = ("INSERT INTO %s (discriminator, id, k, v, state, version, write_time) VALUES "
                 + "(?, ?, ?, ?, ?, ?, %s)").formatted(table, dialect.now);
-        this.<@Nullable Void>run(Kind.WRITE, connection -> {
+        return run(Kind.WRITE, connection -> {
             if (updated(connection, update, hash, key, value, state, version)) {
-                return null;
+                return true;
             }
             try (PreparedStatement statement = prepare(connection, insert)) {
                 statement.setString(1, discriminator);
@@ -282,12 +285,13 @@ final class JdbcStore extends PrimitiveStore {
                 bind(statement, 3, key, value, state);
                 statement.setLong(6, version);
                 statement.executeUpdate();
+                return true;
             } catch (SQLException e) {
-                if (!isDuplicate(e) || !updated(connection, update, hash, key, value, state, version)) {
+                if (!isDuplicate(e)) {
                     throw e;
                 }
+                return updated(connection, update, hash, key, value, state, version);
             }
-            return null;
         });
     }
 
@@ -298,6 +302,7 @@ final class JdbcStore extends PrimitiveStore {
             statement.setLong(4, version);
             statement.setString(5, discriminator);
             statement.setString(6, hash);
+            statement.setLong(7, version);
             return statement.executeUpdate() > 0;
         }
     }
@@ -383,7 +388,7 @@ final class JdbcStore extends PrimitiveStore {
     }
 
     @FunctionalInterface
-    private interface Work<T extends @Nullable Object> {
+    private interface Work<T> {
         T run(Connection connection) throws SQLException;
     }
 
@@ -401,7 +406,7 @@ final class JdbcStore extends PrimitiveStore {
     // The connection goes back as it came: a data source that does not reset its connections would otherwise hand
     // the next caller one in a transaction never ended, whose reads may see an old snapshot. A read on a connection
     // that came without auto-commit ends its transaction too, for the same reason
-    private <T extends @Nullable Object> T run(Kind kind, Work<T> work) {
+    private <T> T run(Kind kind, Work<T> work) {
         Connection connection;
         try {
             connection = dataSource.getConnection();

@@ -24,6 +24,7 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -47,6 +48,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * The plain JDBC adapter itself, on MariaDB: its schema, its discriminators, and caches distributing through the core's
  * polls only.
  */
+@NullMarked
 @Timeout(60)
 @SuppressWarnings("resource") // every cache a test opens is closed after it (@AfterEach)
 class JdbcAdapterTest {
@@ -87,6 +89,7 @@ class JdbcAdapterTest {
     }
 
     @Test
+    @SuppressWarnings("SqlNoDataSourceInspection") // the SQL runs against the test database, unknown to the IDE
     void a_table_of_the_earlier_layout_is_refused_naming_the_remedy() throws SQLException {
         try (Connection connection = JdbcTestDatabase.DATA_SOURCE.getConnection();
              java.sql.Statement statement = connection.createStatement()) {

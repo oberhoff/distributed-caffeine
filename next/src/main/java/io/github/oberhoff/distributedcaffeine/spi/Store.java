@@ -18,7 +18,6 @@ package io.github.oberhoff.distributedcaffeine.spi;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * The store of one cache instance, created by its adapter, non-generic: keys and values travel as bytes in the
@@ -29,12 +28,15 @@ import java.util.Set;
  * {@code StoreContractTest} ({@code contractN_...}), points 8 and 9 by each adapter's own tests:
  * <ol>
  *     <li><b>Versions:</b> the version of a row is the one its last write carried ({@link Write#version()}),
- *     chosen by the core; the store stores it and compares it for equality, nothing else: no {@code +1}, no start
- *     value, no order.</li>
+ *     chosen by the core, and it only ever grows: the store compares the versions of a write's condition, stores the
+ *     given one, and computes none (no {@code +1}, no start value). A deleted row no longer defends its version
+ *     (VISION.md, "Target design: monotonic versions, proposed by the core, enforced by the store").</li>
  *     <li><b>Clock:</b> the age of a row comes from the store's clock, set by every write ({@link Row#age()}); within
  *     one read every age is measured at the same instant, so the ages of a read compare like the times of the writes
- *     (the core compares them with the age of the {@link #CONTROL_HASH control row}). A clock that never goes
- *     backwards is best; a wall clock is fine within the core's allowance for skew.</li>
+ *     (the core compares them with the age of the {@link #CONTROL_HASH control row}). An age is reported as it is,
+ *     negative for a row written after that instant (a read that is not one snapshot, a clock stepped back), never
+ *     raised to zero: two such rows would compare as equal. A clock that never goes backwards is best; a wall clock is
+ *     fine within the core's allowance for skew.</li>
  *     <li><b>Visibility and durability:</b> a read, on any instance of the cache, reflects every write that was
  *     confirmed (returned to its writer) before the read began: its version, or a later one. A confirmed write is not
  *     lost later, unless in an event (a crash, a failover) that every subscription of the change feed sees as a loss
@@ -112,38 +114,49 @@ public interface Store extends AutoCloseable {
 
     /**
      * Writes values and tombstones, each at its version and under its condition ({@link Write#expected()}),
-     * atomically per key: unconditionally, only if the row still has the expected version (whatever its state), or
-     * only if no row exists. A tombstone keeps the row's key, or has none where no row existed. Announces
+     * atomically per key: advancing (only if no row exists or its version is smaller than the write's), only if the row
+     * still has the expected version (whatever its state), or only if no row exists. A tombstone keeps the row's key, or has none where no row existed. Announces
      * {@link Change.Kind#WRITTEN} per value written and {@link Change.Kind#INVALIDATED} per tombstone written, at the
-     * write's version.
+     * version it was applied at. A conflict writes nothing and announces nothing, with one allowance: a write on a
+     * version that finds no row at all (deleted by maintenance since it was read) may leave a tombstone at the
+     * write's version, and announce it, still reported as a conflict; it reads as missing. MongoDB's bulk write needs it
+     * to report every write's outcome in one round trip (VISION.md, build plan, step 5).
+     * <p>
+     * An advancing write is applied either conditionally, at its own version and only above the stored one (refused
+     * otherwise), or by assigning: always, at a version above the stored one that the store chooses and reports in the
+     * result (VISION.md, "Target design: versions applied as well as each store can"). A store may choose per call.
      *
      * @param writes the writes, at most one per hash
-     * @return the hashes whose writes were not applied (their condition did not hold); empty if all were
+     * @return which writes were refused, and the versions the store assigned other than proposed
      */
-    Set<String> write(Collection<Write> writes);
+    WriteResult write(Collection<Write> writes);
 
     // maintenance: scheduled by the core, idempotent here
 
     /**
      * Marks value rows at least as old as the maximum age as expired, at the given version and with the store's time
-     * as the new write time, so that their grace period before {@link #pruneTombstones} counts from the expiry.
-     * Announces {@link Change.Kind#EXPIRED} per row. Neither reserved rows nor rows the control row hides are
-     * expired. Safe to run on several instances concurrently: every row is expired and announced once.
+     * as the new write time, so that their grace period before {@link #pruneTombstones} counts from the expiry; only
+     * rows whose version is smaller than the given one (the version only grows). Announces
+     * {@link Change.Kind#EXPIRED} per row. Neither reserved rows nor rows the control row hides are expired. Safe to run on several instances concurrently: every row is expired and announced once.
      *
      * @param maxAge  the maximum age
-     * @param version the version every row expired now gets, chosen by the core (one no key had before)
+     * @param version the version every row expired now gets, chosen by the core
      * @return the number of rows expired
      */
     int expire(Duration maxAge, long version);
 
     /**
-     * Deletes the oldest value rows (by write time) beyond the maximum size, silently. Neither reserved rows nor rows
-     * the control row hides count or are deleted here.
+     * Deletes the oldest value rows (by write time) beyond the maximum size, silently, but none written less than the
+     * minimum age ago: those stay until a later run, the maximum size exceeded meanwhile. The rank counts every value
+     * row; only the deleting spares the young ones. Neither reserved rows nor rows the control row hides count or are
+     * deleted here.
      *
      * @param maxSize the maximum number of value rows
+     * @param minAge  how long a row is kept at least, whatever the size (the time its write needs to reach every
+     *                instance, chosen by the core)
      * @return the number of rows deleted
      */
-    int pruneToSize(long maxSize);
+    int pruneToSize(long maxSize, Duration minAge);
 
     /**
      * Deletes tombstones and expired rows written at least the retention ago, and every row written at or before the

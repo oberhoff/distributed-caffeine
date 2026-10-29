@@ -28,6 +28,7 @@ import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -55,6 +56,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * The PostgreSQL adapter end to end: caches distributing through it in every mode and format, the schema checks on
  * start, and recovery when the listening session breaks.
  */
+@NullMarked
 @Timeout(60)
 @SuppressWarnings("resource") // every cache and store a test opens is closed after it (@AfterEach)
 abstract class PostgresAdapterTest {
@@ -70,6 +72,8 @@ abstract class PostgresAdapterTest {
         for (AutoCloseable closeable : closeables) {
             closeable.close();
         }
+        // every cache closed: the shared registry is empty again (a leak would grow with every cache opened)
+        assertThat(PostgresListener.openSessions()).as("no listening session left").isZero();
     }
 
     private <C extends AutoCloseable> C track(C closeable) {

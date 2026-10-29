@@ -15,9 +15,12 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import org.jspecify.annotations.NullMarked;
+
 /**
  * Linearizability across two instances; the hot path (a write decided on a held value, one store operation) is taken
  * where a value is held and trusted.
  */
+@NullMarked
 public class InternalLinearizabilityTwoInstancesTest extends AbstractTwoInstanceLinearizabilityTest {
 }

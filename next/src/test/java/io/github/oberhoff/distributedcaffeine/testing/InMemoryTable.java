@@ -23,12 +23,15 @@ import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.ArrayDeque;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -47,9 +50,15 @@ import static java.util.Objects.requireNonNull;
 final class InMemoryTable {
 
     private static final byte[] NO_KEY = new byte[0];
+    // the core's version format (InternalVersion): milliseconds since 2020 above 20 bits of counter and node
+    private static final long CORE_EPOCH_MILLIS = 1_577_836_800_000L;
+    private static final int CORE_TIME_SHIFT = 20;
 
     private final InMemoryDatabase database;
     private final Map<String, StoredRow> rows = new HashMap<>();
+    // every change of a row in the last seconds, oldest first, for a failover to undo (InMemoryDatabase#failover)
+    private final Deque<Undo> journal = new ArrayDeque<>();
+    private static final long JOURNAL_NANOS = 30_000_000_000L;
     private final List<InMemoryDelivery> deliveries = new CopyOnWriteArrayList<>();
 
     InMemoryTable(InMemoryDatabase database) {
@@ -64,50 +73,97 @@ final class InMemoryTable {
     private record StoredRow(byte[] key, byte @Nullable [] value, State state, long version, long writeTimeMicros) {
     }
 
-    // reads: every age of one read measured at the same instant
+    // a row as it was before a change (null: missing), and when the change happened
+    private record Undo(long nanoTime, String hash, @Nullable StoredRow previous) {
+    }
 
-    synchronized Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
-        checkUp();
-        checkRead();
-        long now = database.nowMicros();
+    // reads: every age of one read measured at the same instant; the rows at that instant too (one snapshot), or
+    // each as it is when it is read (StoreProfile#snapshotReads, MongoDB's $in), the step between rows run outside
+    // the monitor, where a write committed then is seen by the rest of the read
+
+    Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
         Map<String, Row> result = new LinkedHashMap<>();
-        for (String hash : hashes) {
-            Row row = asRead(hash, rows.get(hash), maxAge, now);
-            if (row != null) {
-                result.put(hash, row);
+        reading(hashes, (hash, row, now) -> {
+            Row read = asRead(hash, row, maxAge, now);
+            if (read != null) {
+                result.put(hash, read);
             }
-        }
+        });
         return result;
     }
 
-    synchronized VersionsResult readVersions(Collection<String> hashes, Duration maxAge) {
-        checkUp();
-        checkRead();
-        long now = database.nowMicros();
+    VersionsResult readVersions(Collection<String> hashes, Duration maxAge) {
         Map<String, Long> versions = new LinkedHashMap<>();
         Map<String, Duration> ages = new LinkedHashMap<>();
-        for (String hash : hashes) {
-            StoredRow row = rows.get(hash);
+        reading(hashes, (hash, row, now) -> {
             if (row != null && row.state == State.VALUE && younger(row, maxAge, now)) {
                 versions.put(hash, row.version);
                 ages.put(hash, age(row, now));
             }
-        }
+        });
         return new VersionsResult(versions, ages);
+    }
+
+    private interface RowReader {
+        void accept(String hash, @Nullable StoredRow row, long nowMicros);
+    }
+
+    private void reading(Collection<String> hashes, RowReader reader) {
+        long now;
+        synchronized (this) {
+            checkUp();
+            checkRead();
+            now = database.nowMicros();
+            if (database.profile().snapshotReads()) {
+                hashes.forEach(hash -> reader.accept(hash, rows.get(hash), now));
+                return;
+            }
+        }
+        boolean first = true;
+        for (String hash : hashes) {
+            Runnable step = database.faults.betweenRows;
+            if (!first && step != null) {
+                step.run();
+            }
+            first = false;
+            StoredRow row;
+            synchronized (this) {
+                row = rows.get(hash);
+            }
+            reader.accept(hash, row, now);
+        }
     }
 
     // writes
 
-    // values and tombstones at the versions given, each under its condition; returns the hashes that conflicted
-    synchronized Set<String> write(Collection<Write> writes) {
+    // values and tombstones, each under its condition, at the version proposed or, where the profile assigns, at one
+    // the store chooses (StoreProfile.Versioning)
+    synchronized WriteResult write(Collection<Write> writes) {
+        boolean assigns = database.profile().assigns(writes.size());
+        // a batch failing part way (InMemoryDatabase#failNextWritesPartly): where the store writes row by row, the
+        // first half applies, the rest does not; otherwise nothing does
+        boolean partly = writes.size() > 1 && database.faults.takePartialFailure();
+        if (partly && database.profile().batch() == StoreProfile.Batch.ATOMIC) {
+            checkUp();
+            throw new StoreException("injected failure of an atomic batch, not committed", false);
+        }
+        int applying = partly ? writes.size() / 2 : writes.size();
         return committing(() -> {
             Set<String> conflicts = new LinkedHashSet<>();
+            Map<String, Long> assigned = new LinkedHashMap<>();
             List<Change> messages = new ArrayList<>();
+            int index = 0;
             for (Write write : writes) {
+                if (index++ == applying) {
+                    return new Outcome<>(null, messages, new StoreException(
+                            "injected failure of a batch written row by row", false).afterPartlyApplied());
+                }
                 StoredRow current = rows.get(write.hash());
                 boolean matches;
-                if (write.isUnconditional()) {
-                    matches = true;
+                if (write.isAdvance()) {
+                    // assigned: always above the stored version; proposed: the version only grows, applied over a
+                    // smaller one or where no row is
+                    matches = assigns || current == null || current.version < write.version();
                 } else if (write.expectsMissing()) {
                     matches = current == null;
                 } else {
@@ -115,17 +171,41 @@ final class InMemoryTable {
                 }
                 if (!matches) {
                     conflicts.add(write.hash());
-                } else if (write.isTombstone()) {
-                    store(write.hash(), current == null ? NO_KEY : current.key, null, State.TOMBSTONE,
-                            write.version());
-                    messages.add(new Change(Change.Kind.INVALIDATED, write.hash(), write.version()));
+                    if (current == null && !write.isAdvance() && !write.expectsMissing()
+                            && database.profile().tombstoneOnPurgedRow()) {
+                        // the row was purged since it was read: the store's upsert inserts, and writes a tombstone
+                        // so that no value from a failed condition is visible (MongoDB's bulk write, step 5)
+                        store(write.hash(), NO_KEY, null, State.TOMBSTONE, write.version());
+                        messages.add(new Change(Change.Kind.INVALIDATED, write.hash(), write.version()));
+                    }
+                    continue;
+                }
+                long version = assigns ? assign(current, write.version()) : write.version();
+                if (version != write.version()) {
+                    assigned.put(write.hash(), version);
+                }
+                if (write.isTombstone()) {
+                    store(write.hash(), current == null ? NO_KEY : current.key, null, State.TOMBSTONE, version);
+                    messages.add(new Change(Change.Kind.INVALIDATED, write.hash(), version));
                 } else {
-                    store(write.hash(), requireNonNull(write.key()), write.value(), State.VALUE, write.version());
-                    messages.add(new Change(Change.Kind.WRITTEN, write.hash(), write.version()));
+                    store(write.hash(), requireNonNull(write.key()), write.value(), State.VALUE, version);
+                    messages.add(new Change(Change.Kind.WRITTEN, write.hash(), version));
                 }
             }
-            return new Outcome<>(conflicts, messages);
+            return new Outcome<>(new WriteResult(conflicts, assigned), messages, null);
         });
+    }
+
+    // the version an assigning store chooses: its own domain (a new row at the sequence, which every write draws, an
+    // existing one one above), or the core's (the largest of one above the stored version, the proposal, and the
+    // store's time in the core's format)
+    private long assign(@Nullable StoredRow current, long proposed) {
+        long sequence = database.nextSequence();
+        if (database.profile().versioning() == StoreProfile.Versioning.ASSIGNING_OWN) {
+            return current == null ? sequence : current.version + 1;
+        }
+        long floor = Math.max(0, database.nowMicros() / 1_000 - CORE_EPOCH_MILLIS) << CORE_TIME_SHIFT;
+        return Math.max(current == null ? 0 : current.version + 1, Math.max(proposed, floor));
     }
 
     // maintenance: never a reserved row; rows the control row hides are neither expired nor counted
@@ -136,42 +216,51 @@ final class InMemoryTable {
             List<Change> messages = new ArrayList<>();
             for (String hash : List.copyOf(rows.keySet())) {
                 StoredRow current = rows.get(hash);
-                if (!reserved(hash) && current.state == State.VALUE && !hidden(current)
-                        && !younger(current, maxAge, now)) {
+                boolean own = database.profile().versioning() == StoreProfile.Versioning.ASSIGNING_OWN;
+                // in a domain of the store's own the given version means nothing: every expiry assigns one above
+                if (maintained(hash) && current.state == State.VALUE && !hidden(current)
+                        && !younger(current, maxAge, now) && (own || current.version < version)) {
+                    long expired = own ? assign(current, version) : version;
                     // the write time of the expiry: its grace period before pruning counts from now
-                    store(hash, current.key, null, State.EXPIRED, version);
-                    messages.add(new Change(Change.Kind.EXPIRED, hash, version));
+                    store(hash, current.key, null, State.EXPIRED, expired);
+                    messages.add(new Change(Change.Kind.EXPIRED, hash, expired));
                 }
             }
-            return new Outcome<>(messages.size(), messages);
+            return new Outcome<>(messages.size(), messages, null);
         });
     }
 
-    synchronized int pruneToSize(long maxSize) {
+    synchronized int pruneToSize(long maxSize, Duration minAge) {
         checkUp();
+        long now = database.nowMicros();
         List<Map.Entry<String, StoredRow>> values = rows.entrySet().stream()
-                .filter(entry -> !reserved(entry.getKey()) && entry.getValue().state == State.VALUE
+                .filter(entry -> maintained(entry.getKey()) && entry.getValue().state == State.VALUE
                         && !hidden(entry.getValue()))
                 // oldest first; among equally old ones the higher hash goes first, so the lowest is kept
                 .sorted(Comparator.<Map.Entry<String, StoredRow>>comparingLong(entry -> entry.getValue().writeTimeMicros)
                         .thenComparing(Map.Entry::getKey, Comparator.reverseOrder()))
                 .toList();
+        // beyond the rank, but none younger than the minimum age
         int excess = (int) Math.max(0, values.size() - maxSize);
+        int pruned = 0;
         for (int i = 0; i < excess; i++) {
-            rows.remove(values.get(i).getKey());
+            if (!younger(values.get(i).getValue(), minAge, now)) {
+                remove(values.get(i).getKey());
+                pruned++;
+            }
         }
-        return excess;
+        return pruned;
     }
 
     synchronized int pruneTombstones(Duration retention) {
         checkUp();
         long now = database.nowMicros();
         List<String> deleted = rows.entrySet().stream()
-                .filter(entry -> !reserved(entry.getKey()) && (hidden(entry.getValue())
+                .filter(entry -> maintained(entry.getKey()) && (hidden(entry.getValue())
                         || (entry.getValue().state != State.VALUE && !younger(entry.getValue(), retention, now))))
                 .map(Map.Entry::getKey)
                 .toList();
-        deleted.forEach(rows::remove);
+        deleted.forEach(this::remove);
         return deleted.size();
     }
 
@@ -192,6 +281,24 @@ final class InMemoryTable {
             }
         });
         return changes;
+    }
+
+    // faults: a failover undoing the changes since a time, an eviction
+
+    synchronized void undoSince(long nanoTime) {
+        while (!journal.isEmpty() && journal.peekLast().nanoTime >= nanoTime) {
+            Undo undo = journal.pollLast();
+            if (undo.previous == null) {
+                rows.remove(undo.hash);
+            } else {
+                rows.put(undo.hash, undo.previous);
+            }
+        }
+        deliveries.forEach(InMemoryDelivery::dropUndelivered);
+    }
+
+    synchronized void evict(String hash) {
+        remove(hash);
     }
 
     // subscriptions
@@ -229,7 +336,8 @@ final class InMemoryTable {
 
     // internals
 
-    private record Outcome<T>(T result, List<Change> messages) {
+    // what a write did: its result, or the failure it ended with after its messages' part applied
+    private record Outcome<T>(@Nullable T result, List<Change> messages, @Nullable StoreException failure) {
     }
 
     // runs a write under the table's monitor (held by the caller), with the injected failures: before commit
@@ -243,20 +351,40 @@ final class InMemoryTable {
         Outcome<T> outcome = write.get();
         if (!outcome.messages.isEmpty()) {
             deliveries.forEach(delivery -> delivery.enqueue(outcome.messages));
+            database.committed();
         }
         if (Boolean.TRUE.equals(failure)) {
             throw new StoreException("injected failure, outcome unknown", true);
         }
-        return outcome.result;
+        if (outcome.failure != null) {
+            throw outcome.failure;
+        }
+        return requireNonNull(outcome.result);
     }
 
     // the version as the core chose it: stored, never computed here
     private void store(String hash, byte[] key, byte @Nullable [] value, State state, long version) {
-        rows.put(hash, new StoredRow(key, value, state, version, database.nextWriteTime()));
+        journal(hash, rows.put(hash, new StoredRow(key, value, state, version, database.nextWriteTime())));
     }
 
-    private static boolean reserved(String hash) {
-        return hash.startsWith("#");
+    private void remove(String hash) {
+        StoredRow removed = rows.remove(hash);
+        if (removed != null) {
+            journal(hash, removed);
+        }
+    }
+
+    private void journal(String hash, @Nullable StoredRow previous) {
+        long now = System.nanoTime();
+        journal.addLast(new Undo(now, hash, previous));
+        while (!journal.isEmpty() && now - journal.peekFirst().nanoTime > JOURNAL_NANOS) {
+            journal.pollFirst();
+        }
+    }
+
+    // an ordinary row: maintenance leaves reserved rows ('#') alone
+    private static boolean maintained(String hash) {
+        return !hash.startsWith("#");
     }
 
     // written at or before the control row: counted as missing by the core
@@ -265,8 +393,10 @@ final class InMemoryTable {
         return control != null && row.writeTimeMicros <= control.writeTimeMicros;
     }
 
+    // negative for a row written after the read's instant (a read row by row, a wall clock stepping back): the ages of
+    // one read compare as the write times do (Store#read)
     private static Duration age(StoredRow row, long nowMicros) {
-        return Duration.ofNanos(Math.max(0, nowMicros - row.writeTimeMicros) * 1_000);
+        return Duration.ofNanos((nowMicros - row.writeTimeMicros) * 1_000);
     }
 
     private static boolean younger(StoredRow row, Duration maxAge, long nowMicros) {

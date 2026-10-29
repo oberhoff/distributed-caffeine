@@ -21,6 +21,7 @@ import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import org.bson.Document;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -36,6 +37,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * would be spread over shards whose writes the version rules cannot order. On
  * {@link MongoTopology#SHARDED_CLUSTER}.
  */
+@NullMarked
 @Timeout(300)
 abstract class MongoShardedTest {
 

@@ -15,11 +15,13 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+@NullMarked
 class InternalValueTest {
 
     @Test
@@ -36,8 +38,10 @@ class InternalValueTest {
 
     @Test
     @SuppressWarnings("DataFlowIssue") // the null value is the point: it is rejected
-    void versions_must_be_positive_and_values_present() {
-        assertThatThrownBy(() -> new InternalValue<>("v", 0L, 0)).isInstanceOf(IllegalArgumentException.class);
+    void versions_cannot_be_negative_and_values_must_be_present() {
+        // 0 is the version of a value no store confirmed (InternalVersion.UNCONFIRMED)
+        assertThat(new InternalValue<>("v", InternalVersion.UNCONFIRMED, 0).version()).isZero();
+        assertThatThrownBy(() -> new InternalValue<>("v", -1L, 0)).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new InternalValue<>(null, 1L, 0)).isInstanceOf(NullPointerException.class);
     }
 }

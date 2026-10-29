@@ -23,6 +23,7 @@ import io.github.oberhoff.distributedcaffeine.DistributionMode;
 import io.github.oberhoff.distributedcaffeine.SynchronizationState;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -44,6 +45,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * primary stopped and the standby promoted. Writing resumes on the new primary, the listening session reconnects to
  * it, and what was written before is still there. On a primary with a standby, built anew after each test, which breaks it.
  */
+@NullMarked
 @Timeout(300)
 @SuppressWarnings("SqlNoDataSourceInspection") // the SQL runs against the test containers
 abstract class PostgresFailoverTest {

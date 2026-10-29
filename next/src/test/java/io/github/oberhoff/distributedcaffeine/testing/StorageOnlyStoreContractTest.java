@@ -32,13 +32,23 @@ class StorageOnlyStoreContractTest extends StoreContractTest {
         InMemoryDatabase database = new InMemoryDatabase();
         return new Fixture() {
             @Override
+            public boolean assigns(int batchSize) {
+                return database.profile().assigns(batchSize);
+            }
+
+            @Override
+            public boolean ownVersions() {
+                return database.profile().versioning() == StoreProfile.Versioning.ASSIGNING_OWN;
+            }
+
+            @Override
             public Store openStore() {
-                return new StorageOnlyStore(database.openStore("cache"));
+                return new StorageOnlyStore(database.openFeed("cache"));
             }
 
             @Override
             public Store openStoreOfAnotherCache() {
-                return new StorageOnlyStore(database.openStore("other"));
+                return new StorageOnlyStore(database.openFeed("other"));
             }
         };
     }

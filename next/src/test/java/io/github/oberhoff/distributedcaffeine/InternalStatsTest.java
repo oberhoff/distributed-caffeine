@@ -18,9 +18,14 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
+import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
+import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import io.github.oberhoff.distributedcaffeine.testing.StoreProfile;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -35,12 +40,14 @@ import java.util.function.Function;
 
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.await;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * {@code distributedPolicy().stats()}: each counter at its source; and Caffeine's {@code stats()} counted from the
  * user's view ({@code getIfPresent} a hit or a miss, never a load).
  */
+@NullMarked
 @Timeout(30)
 @SuppressWarnings("resource") // every cache and store a test opens is closed after it (@AfterEach)
 class InternalStatsTest {
@@ -66,7 +73,8 @@ class InternalStatsTest {
                 .withCaffeine(CaffeineConfigurer::recordStats)
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000));
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(1_000));
     }
 
     private DistributedCache<String, String> cache() {
@@ -80,6 +88,15 @@ class InternalStatsTest {
     private <C extends AutoCloseable> C track(C closeable) {
         closeables.add(closeable);
         return closeable;
+    }
+
+    // a store numbering its own versions: no proposal, and so no clock, reaches its rows
+    private boolean ownVersions() {
+        return database.profile().versioning() == StoreProfile.Versioning.ASSIGNING_OWN;
+    }
+
+    private static String hash(String key) {
+        return new InternalHasher<String>(null).wrap(key).hash();
     }
 
     private static DistributedStats stats(DistributedCache<String, String> cache) {
@@ -104,10 +121,53 @@ class InternalStatsTest {
     }
 
     @Test
+    void a_put_refused_by_a_version_from_a_clock_ahead_is_counted_and_then_applied_above_it() {
+        // a row written by an instance whose clock runs an hour ahead: its version is above any this instance proposes
+        long ahead = new InternalVersion().fresh() + (TimeUnit.HOURS.toMillis(1) << 20);
+        track(database.openStore("cache")).write(List.of(Write.tombstone(hash("k"), ahead)));
+        DistributedCache<String, String> cache = cache();
+
+        // a store assigning versions refuses no advance: it applies the put above the row by itself
+        long refusals = database.profile().assigns(1) ? 0 : 1;
+
+        cache.put("k", "v");
+        assertThat(stats(cache).versionRefusalCount()).as("refused once, then proposed above the row read")
+                .isEqualTo(refusals);
+        assertThat(cache().getIfPresent("k")).isEqualTo("v");
+
+        cache.put("k", "w");
+        assertThat(stats(cache).versionRefusalCount()).as("the clock has observed the version").isEqualTo(refusals);
+        assertThat(stats(cache).plus(DistributedStats.empty()).minus(DistributedStats.empty()).versionRefusalCount())
+                .as("carried by plus and minus").isEqualTo(refusals);
+        if (!ownVersions()) {
+            assertThat(stats(cache).clockAheadCount()).as("an hour ahead: seen and reported").isPositive();
+        }
+    }
+
+    @Test
+    void a_row_a_year_ahead_is_written_over_without_carrying_the_clock_along() {
+        Assumptions.assumeFalse(ownVersions(), "a store numbering its own versions takes no proposal into a row");
+        // a clock grossly wrong wrote it: followed, it would carry every version here a year ahead for good
+        long farAhead = new InternalVersion().fresh() + (TimeUnit.DAYS.toMillis(365) << 20);
+        track(database.openStore("cache")).write(List.of(Write.tombstone(hash("k"), farAhead)));
+        DistributedCache<String, String> cache = cache();
+
+        cache.put("k", "v");
+        cache.put("other", "o");
+
+        assertThat(cache().getIfPresent("k")).as("written above it").isEqualTo("v");
+        assertThat(stats(cache).clockAheadCount()).isPositive();
+        Map<String, Row> rows = track(database.openStore("cache")).read(List.of(hash("k"), hash("other")), LONG);
+        assertThat(rows.get(hash("k")).version()).isGreaterThan(farAhead);
+        assertThat(rows.get(hash("other")).version()).as("the clock not carried along").isLessThan(farAhead);
+    }
+
+    @Test
     void nothing_is_counted_unless_the_cache_records_stats() {
         Adapter<String, String> adapter = settings -> database.openStore("cache");
         DistributedCache<String, String> cache = track(DistributedCaffeine.newBuilder(adapter)
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000)).build());
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(1_000)).build());
         cache.put("k", "v");
         assertThat(cache.getIfPresent("missing")).isNull();
 
@@ -207,6 +267,7 @@ class InternalStatsTest {
 
     @Test
     void messages_count_by_kind_and_by_what_they_did_to_held_values() {
+        assumeTrue(database.profile().changes() == StoreProfile.Changes.FEED, "counts the store's feed messages");
         DistributedCache<String, String> writer = cache();
         DistributedCache<String, String> holder = cache();
         writer.putAll(Map.of("a", "1", "b", "2"));
@@ -243,9 +304,11 @@ class InternalStatsTest {
 
     @Test
     void population_reads_and_expiry_are_counted() {
+        assumeTrue(database.profile().changes() == StoreProfile.Changes.FEED, "duplicates the store's feed messages");
         DistributedCache<String, String> writer = cache();
         DistributedCache<String, String> holder = track(builder().withDistributionMode(DistributionMode.UPDATE)
-                .withStore(store -> store.withMaintenanceInterval(Duration.ofMillis(50))).build());
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaintenanceInterval(Duration.ofMillis(50))).build());
         writer.put("k", "v1");
         assertThat(holder.getIfPresent("k")).isEqualTo("v1");
 
@@ -265,6 +328,7 @@ class InternalStatsTest {
 
     @Test
     void recovery_counts_gaps_interruptions_and_revalidations() {
+        assumeTrue(database.profile().changes() == StoreProfile.Changes.FEED, "counts the store's feed messages");
         DistributedCache<String, String> writer = cache();
         DistributedCache<String, String> holder = cache();
         writer.putAll(Map.of("kept", "1", "changed", "2"));
@@ -327,7 +391,8 @@ class InternalStatsTest {
                 .withCaffeine(CaffeineConfigurer::recordStats)
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofLong()))
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000)).build());
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(1_000)).build());
         cache.put("text", "not a number");
         assertThat(reader.getIfPresent("text")).isNull();
         assertThat(reader.distributedPolicy().stats().unreadableRowCount()).isEqualTo(1);
@@ -336,13 +401,15 @@ class InternalStatsTest {
 
     @Test
     void snapshots_add_and_subtract_and_name_their_counts() {
+        assumeTrue(database.profile().changes() == StoreProfile.Changes.FEED, "counts the store's feed messages");
         DistributedCache<String, String> cache = cache();
         cache.put("a", "1");
-        await(() -> stats(cache).writtenMessageCount() == 1);
+        await(() -> stats(cache).writtenMessageCount() == 1 && database.isIdle());
         DistributedStats before = stats(cache);
         cache.put("b", "2");
-        // after its own echo, so that nothing arrives later
-        await(() -> stats(cache).writtenMessageCount() == 2);
+        // after its own echo has been applied in full (the delivery idle only once the listener returned: every count
+        // of it taken), so that nothing arrives later
+        await(() -> stats(cache).writtenMessageCount() == 2 && database.isIdle());
         DistributedStats after = stats(cache);
 
         assertThat(after.minus(before).putCount()).isEqualTo(1);

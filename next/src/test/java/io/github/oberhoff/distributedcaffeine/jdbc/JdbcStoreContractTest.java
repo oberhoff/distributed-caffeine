@@ -17,11 +17,13 @@ package io.github.oberhoff.distributedcaffeine.jdbc;
 
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreContractTest;
+import org.jspecify.annotations.NullMarked;
 
 /**
  * The store contract on the plain JDBC adapter over MariaDB: the generic store built from its primitives, a fresh table
  * per test, another cache as another discriminator in it.
  */
+@NullMarked
 class JdbcStoreContractTest extends StoreContractTest {
 
     @Override

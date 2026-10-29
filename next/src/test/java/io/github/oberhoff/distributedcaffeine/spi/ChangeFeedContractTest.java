@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine.spi;
 
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -35,6 +36,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * The change feed contract ({@link ChangeFeed}), run against every store that announces its writes: the reference
  * store and each adapter able to distribute. The storage itself is checked by the {@link StoreContractTest}.
  */
+@NullMarked
 @SuppressWarnings("resource") // every store a test opens is closed after it (@AfterEach)
 public abstract class ChangeFeedContractTest extends AbstractContractTest {
 
@@ -88,8 +90,8 @@ public abstract class ChangeFeedContractTest extends AbstractContractTest {
         subscribe(open(), observer);
 
         List<Write> writes = List.of(entry("a", "1"), entry("b", "2"), entry("c", "3"));
-        writer.write(writes);
-        Map<String, Long> versions = writes.stream().collect(Collectors.toMap(Write::hash, Write::version));
+        WriteResult result = writer.write(writes);
+        Map<String, Long> versions = writes.stream().collect(Collectors.toMap(Write::hash, result::version));
 
         observer.await(m -> m.stream().map(Change::hash).collect(Collectors.toSet()).size() == 3, TIMEOUT);
         assertThat(observer.settle(QUIET)).allMatch(m ->
@@ -105,9 +107,9 @@ public abstract class ChangeFeedContractTest extends AbstractContractTest {
 
         writer.read(List.of("h1"), LONG);
         writer.readVersions(List.of("h1"), LONG);
-        assertThat(writer.write(List.of(ifMissing(entry("h1", "v2"))))).containsExactly("h1");
+        assertThat(writer.write(List.of(ifMissing(entry("h1", "v2")))).refused()).containsExactly("h1");
         // a version the row does not have
-        assertThat(writer.write(List.of(ifVersion(tombstone("h1"), version + 1)))).containsExactly("h1");
+        assertThat(writer.write(List.of(ifVersion(tombstone("h1"), version + 1))).refused()).containsExactly("h1");
 
         assertThat(observer.settle(QUIET)).isEmpty();
     }
@@ -123,7 +125,7 @@ public abstract class ChangeFeedContractTest extends AbstractContractTest {
         subscribe(open(), observer);
         pause(5);
 
-        assertThat(writer.pruneToSize(3)).isEqualTo(7);
+        assertThat(writer.pruneToSize(3, Duration.ZERO)).isEqualTo(7);
         assertThat(writer.pruneTombstones(Duration.ZERO)).isEqualTo(10);
 
         assertThat(observer.settle(QUIET)).isEmpty();
@@ -152,12 +154,15 @@ public abstract class ChangeFeedContractTest extends AbstractContractTest {
         subscribe(open(), observer);
 
         Write onA = ifVersion(tombstone("a"), a);
-        assertThat(writer.write(List.of(onA, ifVersion(tombstone("b"), b), ifVersion(tombstone("missing"), a))))
-                .containsExactlyInAnyOrder("b", "missing");
+        Write onMissing = ifVersion(tombstone("missing"), a);
+        WriteResult result = writer.write(List.of(onA, ifVersion(tombstone("b"), b), onMissing));
+        assertThat(result.refused()).containsExactlyInAnyOrder("b", "missing");
 
+        // the write on a version that found no row may announce the tombstone it left (Store#write)
         observer.await(m -> !m.isEmpty(), TIMEOUT);
-        assertThat(observer.settle(QUIET))
-                .allMatch(m -> m.equals(new Change(Change.Kind.INVALIDATED, "a", onA.version())));
+        assertThat(observer.settle(QUIET)).allMatch(m -> m.equals(new Change(Change.Kind.INVALIDATED, "a",
+                result.version(onA))) || m.equals(new Change(Change.Kind.INVALIDATED, "missing",
+                onMissing.version())));
     }
 
     @Test
@@ -168,12 +173,11 @@ public abstract class ChangeFeedContractTest extends AbstractContractTest {
         RecordingListener observer = new RecordingListener();
         subscribe(open(), observer);
 
-        Write control = control();
-        writer.write(List.of(control));
+        long control = written(writer, control());
 
         observer.await(m -> m.stream().anyMatch(message -> Store.CONTROL_HASH.equals(message.hash())), TIMEOUT);
         assertThat(observer.settle(QUIET))
-                .containsExactly(new Change(Change.Kind.WRITTEN, Store.CONTROL_HASH, control.version()));
+                .containsExactly(new Change(Change.Kind.WRITTEN, Store.CONTROL_HASH, control));
     }
 
     @Test
@@ -187,12 +191,13 @@ public abstract class ChangeFeedContractTest extends AbstractContractTest {
         RecordingListener observer = new RecordingListener();
         subscribe(watching, observer);
 
-        long version = nextVersion();
-        assertThat(writer.expire(Duration.ofMillis(300), version)).isEqualTo(1);
+        assertThat(writer.expire(Duration.ofMillis(300), nextVersion())).isEqualTo(1);
+        // at the version given, or at one of the store's own
+        long version = writer.read(List.of("old"), LONG).get("old").version();
 
         observer.await(m -> m.stream().anyMatch(x -> x.kind() == Change.Kind.EXPIRED && "old".equals(x.hash())),
                 TIMEOUT);
-        assertThat(observer.settle(QUIET)).as("at the version given")
+        assertThat(observer.settle(QUIET)).as("at the version it was expired at")
                 .allMatch(m -> m.equals(new Change(Change.Kind.EXPIRED, "old", version)));
     }
 

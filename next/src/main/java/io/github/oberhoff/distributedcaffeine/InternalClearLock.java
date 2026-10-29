@@ -31,7 +31,10 @@ import com.google.errorprone.annotations.concurrent.GuardedBy;
  */
 final class InternalClearLock {
 
-    // the shared holds of the current thread; a thread holding any is let in again at once
+    // the shared holds of the current thread; a thread holding any is let in again at once. One small array per
+    // thread that ever used this cache, kept while the thread lives (or until the garbage collector clears it after
+    // the cache is gone): bounded by threads and caches, and not removed after every operation, which would allocate
+    // on the hot path
     private final ThreadLocal<int[]> holds = ThreadLocal.withInitial(() -> new int[1]);
     @GuardedBy("this")
     private int readers;

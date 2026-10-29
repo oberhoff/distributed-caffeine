@@ -19,6 +19,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreContractTest;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import org.jspecify.annotations.NullMarked;
 
 /**
  * The storage contract on MongoDB, on the image and topology of the enclosing {@link MongoIntegrationTest} class:
@@ -26,6 +27,7 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
  * simulated (the watcher reopens without its resume token, as after errors 280 and 286, which a test cannot provoke
  * on demand).
  */
+@NullMarked
 abstract class MongoStoreContractTest extends StoreContractTest {
 
     @Override

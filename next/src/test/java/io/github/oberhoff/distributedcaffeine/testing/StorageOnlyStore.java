@@ -19,11 +19,11 @@ import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 
 import java.time.Duration;
 import java.util.Collection;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * A store forwarding its storage to another and offering no change feed, as an adapter for a plain key-value store
@@ -49,7 +49,7 @@ public class StorageOnlyStore implements Store {
     }
 
     @Override
-    public Set<String> write(Collection<Write> writes) {
+    public WriteResult write(Collection<Write> writes) {
         return delegate.write(writes);
     }
 
@@ -59,8 +59,8 @@ public class StorageOnlyStore implements Store {
     }
 
     @Override
-    public int pruneToSize(long maxSize) {
-        return delegate.pruneToSize(maxSize);
+    public int pruneToSize(long maxSize, Duration minAge) {
+        return delegate.pruneToSize(maxSize, minAge);
     }
 
     @Override

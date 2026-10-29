@@ -57,7 +57,10 @@ final class InternalStatsCounter {
         REVALIDATION_KEPT,
         REVALIDATION_DROPPED,
         UNREADABLE_ROW,
-        ABSENT_HIT
+        ABSENT_HIT,
+        VERSION_REFUSAL,
+        UNCACHED_LOAD,
+        CLOCK_AHEAD
     }
 
     private static final InternalStatsCounter DISABLED = new InternalStatsCounter(false);

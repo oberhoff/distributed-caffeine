@@ -29,15 +29,20 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import io.github.oberhoff.distributedcaffeine.testing.ScanOnlyStore;
 import io.github.oberhoff.distributedcaffeine.testing.StorageOnlyStore;
+import io.github.oberhoff.distributedcaffeine.testing.StoreProfile;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -59,6 +64,7 @@ import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.awaitUpTo;
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.pause;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
@@ -87,6 +93,7 @@ import static org.assertj.core.api.Assertions.fail;
  * (lesson of the current generation). Threads interleave freely, so a run is not exactly reproducible; the seed fixes
  * the operations and faults chosen.
  */
+@NullMarked
 @Timeout(120)
 public class InternalPropertyTest {
 
@@ -110,7 +117,9 @@ public class InternalPropertyTest {
     // freshness oracle allows them; tokens are unique, and a later write of the key replaces such a value in the store
     private final Map<String, Set<String>> beforeInvalidateAll = new ConcurrentHashMap<>();
     // the pruning variant: a maximum size below the number of keys and maintenance every few milliseconds, so that
-    // size pruning deletes rows silently while the instances work (presence then cannot be asked for)
+    // size pruning deletes rows silently while the instances work (presence then cannot be asked for); only rows
+    // older than its grace (4 s here), so that no poll misses a write and no load's write on "missing" applies over a
+    // newer row pruned meanwhile
     private boolean pruning;
 
     private void trace(String event) {
@@ -358,6 +367,14 @@ public class InternalPropertyTest {
 
     private void check(long seed, int phase, List<DistributedLoadingCache<String, String>> instances) {
         List<String> violations = new ArrayList<>();
+        // with nothing running, the reservation registries are empty (a release runs on the store executor right
+        // after the last future completed, so waited for briefly): a leak would grow without bound
+        for (DistributedLoadingCache<String, String> instance : instances) {
+            InternalCore<?, ?> core = ((InternalDistributedCache<?, ?>) instance).core;
+            if (!awaitUpTo(() -> core.reservedKeys() == 0, Duration.ofSeconds(5), Duration.ofMillis(10))) {
+                violations.add("leak: " + core.reservedKeys() + " keys still reserved with nothing running");
+            }
+        }
         for (int key = 0; key < KEYS; key++) {
             String k = key(key);
             StoredValue<String> stored = instances.get(0).distributedPolicy().getFromStore(k);
@@ -506,7 +523,11 @@ public class InternalPropertyTest {
         }
     }
 
-    // the reference store with all its faults
+    // the reference store with all its faults, under the profile of the system property with its clock (the system's,
+    // in its unit), and the faults the profile allows that the oracles hold under: the clock stepping back within its
+    // allowance, other writes landing between the rows of a read, batches applied in part. The events that lose
+    // what the oracles ask for (a failover, an eviction, a message lost silently) are tested on their own
+    // (InternalStoreProfileTest)
     // polling: stores without a change feed, which the core polls (VISION.md, "The polling feed"); idle once every
     // store began two scans after the last heal, the second one after everything written before it
     private static final class InMemoryBackend implements PropertyBackend {
@@ -521,8 +542,8 @@ public class InternalPropertyTest {
         }
 
         InMemoryBackend(long seed, boolean polling) {
-            this.database = new InMemoryDatabase(() -> TimeUnit.MILLISECONDS.toMicros(System.currentTimeMillis()),
-                    seed);
+            this.database = new InMemoryDatabase(() -> ChronoUnit.MICROS.between(Instant.EPOCH, Instant.now()), seed,
+                    StoreProfile.ofProperty());
             this.polling = polling;
         }
 
@@ -531,7 +552,7 @@ public class InternalPropertyTest {
             if (!polling) {
                 return database.openStore("cache");
             }
-            ScanOnlyStore store = new ScanOnlyStore(database.openStore("cache"));
+            ScanOnlyStore store = new ScanOnlyStore(database.openFeed("cache"));
             scanning.add(store);
             return store;
         }
@@ -543,7 +564,22 @@ public class InternalPropertyTest {
             database.setDuplicateProbability(random.nextDouble() < 0.3 ? 0.3 : 0);
             database.setDeliveryDelay(random.nextDouble() < 0.3 ? Duration.ofMillis(2) : Duration.ZERO);
             database.setCommitDelay(random.nextDouble() < 0.3 ? Duration.ofMillis(1) : Duration.ZERO, 0.3);
+            StoreProfile profile = database.profile();
+            if (!profile.snapshotReads()) {
+                // a read row by row: other writes get a chance to land between its rows
+                database.setBetweenRows(() -> LockSupport.parkNanos(ThreadLocalRandom.current().nextLong(50_000)));
+            }
             pause(random.nextInt(5));
+            if (!profile.clockStepBack().isZero() && random.nextDouble() < 0.3) {
+                // within its allowance, while the instances work: also under writes concurrent with an invalidateAll
+                long micros = 1L + random.nextInt((int) (profile.clockStepBack().toNanos() / 1_000));
+                trace.accept("FAULT clock steps back " + micros + " us");
+                database.stepClockBack(Duration.ofNanos(micros * 1_000));
+            }
+            if (profile.batch() == StoreProfile.Batch.PER_ROW && random.nextDouble() < 0.2) {
+                trace.accept("FAULT next batch applies in part");
+                database.failNextWritesPartly(1);
+            }
             if (choice < 0.15) {
                 trace.accept("FAULT pause delivery");
                 database.pauseDelivery();
@@ -575,6 +611,7 @@ public class InternalPropertyTest {
             scanning.forEach(store -> scansAtHeal.put(store, store.scans()));
             database.failNextWrites(0, false);
             database.failNextReads(0);
+            database.failNextWritesPartly(0);
             database.resumeDelivery();
             database.resumeSubscriptions(true);
             database.setDuplicateProbability(0);
@@ -664,11 +701,11 @@ public class InternalPropertyTest {
         }
 
         @Override
-        public Set<String> write(Collection<Write> writes) {
+        public WriteResult write(Collection<Write> writes) {
             return slow("write " + writes.stream().map(write -> keysByHash.getOrDefault(write.hash(), "?") + "="
                     + (write.value() == null ? "TOMBSTONE"
                     : new String(write.value(), java.nio.charset.StandardCharsets.UTF_8)) + "@" + write.version()
-                    + (write.isUnconditional() ? "" : " if " + (write.expectsMissing() ? "missing" : write.expected())))
+                    + (write.isAdvance() ? "" : " if " + (write.expectsMissing() ? "missing" : write.expected())))
                     .toList(), () -> super.write(writes));
         }
 

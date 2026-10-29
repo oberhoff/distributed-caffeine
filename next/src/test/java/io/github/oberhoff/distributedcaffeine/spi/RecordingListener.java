@@ -15,6 +15,8 @@
  */
 package io.github.oberhoff.distributedcaffeine.spi;
 
+import org.jspecify.annotations.NullMarked;
+
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -27,6 +29,7 @@ import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.pause;
 /**
  * A listener that records what it receives, for tests.
  */
+@NullMarked
 public final class RecordingListener implements ChangeListener {
 
     private final List<Change> messages = new CopyOnWriteArrayList<>();

@@ -21,6 +21,8 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import io.github.oberhoff.distributedcaffeine.testing.StorageOnlyStore;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -32,6 +34,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+@NullMarked
 class DistributedCaffeineTest {
 
     private final InMemoryDatabase database = new InMemoryDatabase();
@@ -58,6 +61,29 @@ class DistributedCaffeineTest {
         assertThat(builder.absentCachingExpiry()).isEqualTo(Duration.ofSeconds(10));
         assertThat(builder.buildTimeout()).isEqualTo(Duration.ofSeconds(5));
         assertThat(builder.caffeine().toString()).contains("maximumSize=10");
+    }
+
+    @Test
+    @SuppressWarnings("resource") // the second build fails: there is no cache to close
+    void the_adapter_is_released_on_close_and_on_a_failed_build() {
+        InMemoryDatabase database = new InMemoryDatabase();
+        Adapter<String, String> open = settings -> database.openStore("cache");
+        DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(open)
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(StringSerializer.ofString()))
+                .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(100))
+                .build();
+        assertThat(InternalClaims.isClaimed(open)).isTrue();
+        cache.close();
+        assertThat(InternalClaims.isClaimed(open)).as("released on close").isFalse();
+
+        Adapter<String, String> failing = settings -> {
+            throw new IllegalStateException("cannot open");
+        };
+        assertThatThrownBy(() -> DistributedCaffeine.newBuilder(failing)
+                .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(100))
+                .build()).isInstanceOf(RuntimeException.class);
+        assertThat(InternalClaims.isClaimed(failing)).as("released on a failed build").isFalse();
     }
 
     @Test
@@ -195,7 +221,7 @@ class DistributedCaffeineTest {
 
     @Test
     void the_store_is_created_with_the_formats_and_the_timeout_the_cache_configured() {
-        AtomicReference<StoreSettings> received = new AtomicReference<>();
+        AtomicReference<@Nullable StoreSettings> received = new AtomicReference<>();
         Adapter<String, String> recording = settings -> {
             received.set(settings);
             return database.openStore("cache");

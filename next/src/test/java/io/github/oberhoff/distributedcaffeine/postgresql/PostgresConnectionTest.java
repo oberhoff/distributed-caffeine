@@ -30,6 +30,7 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.testing.SilencingProxy;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -62,6 +63,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 @Timeout(120)
 // every cache, store and proxy a test opens is closed after it (@AfterEach); SQL runs against the test container
+@NullMarked
 @SuppressWarnings({"resource", "SqlNoDataSourceInspection"})
 abstract class PostgresConnectionTest {
 

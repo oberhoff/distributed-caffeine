@@ -110,7 +110,7 @@ public final class PostgresAdapter<K, V> implements Adapter<K, V> {
         private boolean schemaReset;
 
         private Builder(DataSource dataSource, String schemaName, String tableName) {
-            requireDriver("org.postgresql.PGConnection", "org.postgresql:postgresql");
+            requireDriver();
             this.dataSource = requireNonNull(dataSource, "dataSource cannot be null");
             this.schemaName = checkedName(schemaName, "schemaName");
             this.tableName = checkedName(tableName, "tableName");
@@ -183,11 +183,13 @@ public final class PostgresAdapter<K, V> implements Adapter<K, V> {
             return name;
         }
 
-        private static void requireDriver(String className, String dependency) {
+        // the driver is an optional dependency of this library: a clear message where it is missing
+        private static void requireDriver() {
             try {
-                Class.forName(className, false, PostgresAdapter.class.getClassLoader());
+                Class.forName("org.postgresql.PGConnection", false, PostgresAdapter.class.getClassLoader());
             } catch (ClassNotFoundException e) {
-                throw new IllegalStateException("PostgresAdapter requires " + dependency + " on the classpath", e);
+                throw new IllegalStateException("PostgresAdapter requires org.postgresql:postgresql on the classpath",
+                        e);
             }
         }
     }

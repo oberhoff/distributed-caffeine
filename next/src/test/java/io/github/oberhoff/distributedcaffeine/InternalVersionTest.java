@@ -15,82 +15,115 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * The core's versions: ordered within an incarnation, unordered across incarnations, incarnation 0 below every
- * other, and {@link InternalVersion#ANYTHING} above every version.
+ * The core's versions, a hybrid logical clock: every version proposed is larger than every one proposed or seen
+ * before, positive, near the time; {@link InternalVersion#UNCONFIRMED} below all of them, {@link InternalVersion#ANYTHING}
+ * above.
  */
+@NullMarked
 class InternalVersionTest {
 
+    private final InternalVersion clock = new InternalVersion();
+
     @Test
-    void a_fresh_version_is_positive_and_starts_an_incarnation_of_its_own() {
-        for (int index = 0; index < 10_000; index++) {
-            long version = InternalVersion.fresh();
-            assertThat(version).isPositive().isLessThan(InternalVersion.ANYTHING);
-            assertThat(InternalVersion.incarnation(version)).isNotZero();
-            assertThat(version & ((1L << InternalVersion.COUNTER_BITS) - 1)).isEqualTo(1);
+    void every_version_proposed_is_larger_than_the_one_before() {
+        long last = 0;
+        for (int index = 0; index < 100_000; index++) {
+            long version = clock.fresh();
+            assertThat(version).isGreaterThan(last).isPositive().isLessThan(InternalVersion.ANYTHING);
+            last = version;
         }
     }
 
     @Test
-    void the_next_version_continues_the_incarnation_and_is_newer() {
-        long first = InternalVersion.fresh();
-        long second = InternalVersion.next(first);
+    void a_version_seen_is_passed_by_the_next_one_proposed() {
+        long ahead = clock.fresh() + (60_000L << 20); // a minute ahead, as from a clock ahead
+        clock.observe(ahead);
 
-        assertThat(InternalVersion.incarnation(second)).isEqualTo(InternalVersion.incarnation(first));
+        assertThat(clock.fresh()).isGreaterThan(ahead);
+        assertThat(clock.next(ahead + 5)).isGreaterThan(ahead + 5);
+    }
+
+    @Test
+    void a_version_seen_that_is_behind_changes_nothing() {
+        long before = clock.fresh();
+        clock.observe(before - (1_000L << 20));
+
+        assertThat(clock.fresh()).isGreaterThan(before);
+    }
+
+    @Test
+    void each_instance_has_a_clock_of_its_own_moved_only_by_what_it_sees() {
+        InternalVersion other = new InternalVersion();
+        long ahead = other.fresh() + (60_000L << 20);
+        other.observe(ahead);
+
+        assertThat(clock.fresh()).as("not seen here").isLessThan(ahead);
+        clock.observe(other.fresh());
+        assertThat(clock.fresh()).as("seen").isGreaterThan(ahead);
+    }
+
+    @Test
+    void a_version_more_than_a_minute_ahead_is_reported_and_followed() {
+        List<Long> reported = new ArrayList<>();
+        InternalVersion reporting = new InternalVersion(reported::add);
+        long ahead = reporting.fresh() + (TimeUnit.MINUTES.toMillis(2) << 20);
+
+        reporting.observe(ahead);
+
+        assertThat(reported).singleElement().satisfies(millis -> assertThat(millis)
+                .isBetween(TimeUnit.MINUTES.toMillis(1), TimeUnit.MINUTES.toMillis(3)));
+        assertThat(reporting.fresh()).as("followed").isGreaterThan(ahead);
+    }
+
+    @Test
+    void a_version_more_than_a_day_ahead_is_not_followed_but_a_write_on_it_goes_above() {
+        List<Long> reported = new ArrayList<>();
+        InternalVersion reporting = new InternalVersion(reported::add);
+        long farAhead = reporting.fresh() + (TimeUnit.DAYS.toMillis(365) << 20);
+
+        long onIt = reporting.next(farAhead);
+
+        assertThat(reported).as("reported").hasSize(1);
+        assertThat(onIt).as("a write decided on it goes above it").isGreaterThan(farAhead);
+        assertThat(reporting.fresh()).as("the clock stays near its own time").isLessThan(farAhead);
+    }
+
+    @Test
+    void the_end_of_the_range_is_an_error_not_a_version_repeated() {
+        // the largest version below ANYTHING: nothing lies above it
+        assertThatThrownBy(() -> clock.next(InternalVersion.ANYTHING - 1))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("end of their range");
+    }
+
+    @Test
+    void versions_are_ordered_as_numbers() {
+        long first = clock.fresh();
+        long second = clock.fresh();
+
         assertThat(InternalVersion.newer(second, first)).isTrue();
         assertThat(InternalVersion.atLeast(first, second)).isFalse();
         assertThat(InternalVersion.atLeast(first, first)).isTrue();
-    }
-
-    @Test
-    void an_exhausted_counter_starts_a_new_incarnation() {
-        long last = InternalVersion.fresh() | ((1L << InternalVersion.COUNTER_BITS) - 1);
-
-        long next = InternalVersion.next(last);
-
-        assertThat(InternalVersion.incarnation(next)).isNotEqualTo(InternalVersion.incarnation(last));
-        assertThat(InternalVersion.atLeast(next, last)).isFalse();
-        assertThat(InternalVersion.atLeast(last, next)).isFalse();
-    }
-
-    @Test
-    void two_incarnations_are_not_ordered_either_way() {
-        long one = InternalVersion.fresh();
-        long other = InternalVersion.next(InternalVersion.next(InternalVersion.fresh()));
-
-        assertThat(InternalVersion.atLeast(one, other)).isFalse();
-        assertThat(InternalVersion.atLeast(other, one)).isFalse();
-        assertThat(InternalVersion.atLeastBoth(one, other)).isEqualTo(InternalVersion.ANYTHING);
-    }
-
-    @Test
-    void the_newer_of_one_incarnation_is_at_least_both() {
-        long first = InternalVersion.fresh();
-        long second = InternalVersion.next(first);
-
         assertThat(InternalVersion.atLeastBoth(first, second)).isEqualTo(second);
-        assertThat(InternalVersion.atLeastBoth(second, first)).isEqualTo(second);
     }
 
     @Test
-    void an_unconfirmed_value_is_below_every_stored_version() {
-        long stored = InternalVersion.fresh();
+    void an_unconfirmed_value_is_below_every_version_proposed_and_anything_above() {
+        long version = clock.fresh();
 
-        assertThat(InternalVersion.atLeast(stored, InternalVersion.UNCONFIRMED)).isTrue();
-        assertThat(InternalVersion.atLeast(InternalVersion.UNCONFIRMED, stored)).isFalse();
-        assertThat(InternalVersion.atLeastBoth(InternalVersion.UNCONFIRMED, stored)).isEqualTo(stored);
-    }
-
-    @Test
-    void anything_is_above_every_version_and_nothing_is_at_least_it() {
-        long stored = InternalVersion.fresh();
-
-        assertThat(InternalVersion.atLeast(stored, InternalVersion.ANYTHING)).isFalse();
-        assertThat(InternalVersion.atLeast(InternalVersion.ANYTHING, stored)).isTrue();
-        assertThat(InternalVersion.atLeastBoth(stored, InternalVersion.ANYTHING)).isEqualTo(InternalVersion.ANYTHING);
+        assertThat(InternalVersion.atLeast(version, InternalVersion.UNCONFIRMED)).isTrue();
+        assertThat(InternalVersion.atLeast(InternalVersion.UNCONFIRMED, version)).isFalse();
+        assertThat(InternalVersion.atLeast(version, InternalVersion.ANYTHING)).isFalse();
+        assertThat(InternalVersion.atLeastBoth(version, InternalVersion.ANYTHING)).isEqualTo(InternalVersion.ANYTHING);
     }
 }

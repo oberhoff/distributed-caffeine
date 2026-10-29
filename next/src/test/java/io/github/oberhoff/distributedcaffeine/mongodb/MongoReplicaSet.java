@@ -27,6 +27,7 @@ import com.mongodb.client.MongoDatabase;
 import com.mongodb.spi.dns.InetAddressResolver;
 import io.github.oberhoff.distributedcaffeine.testing.Ports;
 import org.bson.Document;
+import org.jspecify.annotations.NullMarked;
 import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
@@ -50,6 +51,7 @@ import static java.util.stream.Collectors.joining;
  * killed; the primary can be stepped down and handed back. Elections are shortened (2 s), so that a failover takes
  * seconds rather than the default's ten or more.
  */
+@NullMarked
 final class MongoReplicaSet implements AutoCloseable {
 
     private static final Duration HEALTHY = Duration.ofMinutes(2);

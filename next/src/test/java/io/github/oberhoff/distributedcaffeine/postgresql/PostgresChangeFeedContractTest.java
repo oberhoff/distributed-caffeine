@@ -16,11 +16,13 @@
 package io.github.oberhoff.distributedcaffeine.postgresql;
 
 import io.github.oberhoff.distributedcaffeine.spi.ChangeFeedContractTest;
+import org.jspecify.annotations.NullMarked;
 
 /**
  * The change feed contract on PostgreSQL's LISTEN/NOTIFY, on the fixture of the {@link PostgresStoreContractTest}
  * with a listener, one listening session shared by the stores; a gap induced by terminating the listening backend.
  */
+@NullMarked
 abstract class PostgresChangeFeedContractTest extends ChangeFeedContractTest {
 
     @Override

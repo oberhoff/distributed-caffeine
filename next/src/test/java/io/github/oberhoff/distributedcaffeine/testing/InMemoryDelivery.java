@@ -67,6 +67,9 @@ final class InMemoryDelivery implements ChangeSubscription {
             return;
         }
         for (Change message : messages) {
+            if (database.faults.dropProbability > 0 && database.nextDouble() < database.faults.dropProbability) {
+                continue; // lost silently (InMemoryDatabase#setDropProbability)
+            }
             queue.addLast(message);
             if (database.faults.duplicateProbability > 0 && database.nextDouble() < database.faults.duplicateProbability) {
                 queue.addLast(message);

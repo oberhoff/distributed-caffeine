@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine.spi;
 
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -23,7 +24,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -32,12 +33,14 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static java.util.Objects.requireNonNull;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * What the SPI contract tests share: a fixture opening several stores on one fresh cache (as several instances
  * would), every test on a fresh cache, and the stores a test opened closed after it.
  */
+@NullMarked
 @SuppressWarnings("resource") // every cache and store a test opens is closed after it (@AfterEach)
 public abstract class AbstractContractTest {
 
@@ -82,6 +85,28 @@ public abstract class AbstractContractTest {
             return null;
         }
 
+        /**
+         * Whether the store applies the writes of a call of that size by assigning their versions (VISION.md, "Target
+         * design: versions applied as well as each store can"): an advance never refused, at a version the store
+         * chooses above the stored one. Otherwise conditionally, at the versions proposed.
+         *
+         * @param batchSize the number of writes in the call
+         * @return whether it assigns
+         */
+        default boolean assigns(int batchSize) {
+            return false;
+        }
+
+        /**
+         * Whether the store numbers versions in a domain of its own: every write assigned, the proposals and the
+         * version given to {@code expire} ignored.
+         *
+         * @return whether its versions are its own
+         */
+        default boolean ownVersions() {
+            return false;
+        }
+
         @Override
         default void close() {
         }
@@ -91,6 +116,7 @@ public abstract class AbstractContractTest {
     protected static final Duration QUIET = Duration.ofMillis(300);
     protected static final Duration LONG = Duration.ofHours(1);
 
+    @SuppressWarnings("NotNullFieldNotInitialized") // set before each test (@BeforeEach), the way JUnit sets up
     protected Fixture fixture;
     private final List<Store> stores = new ArrayList<>();
 
@@ -126,12 +152,15 @@ public abstract class AbstractContractTest {
         return store;
     }
 
-    // versions as the core would choose them: positive and unique, here simply counted (the store only compares them
-    // for equality, so their order means nothing to it)
-    private static final AtomicLong VERSIONS = new AtomicLong(1L << 40);
+    // versions as the core proposes them (InternalVersion): the time in milliseconds since 2020 above 20 bits, each
+    // above the last. Half a millisecond's worth of counter added, so that a version proposed now lies above what a
+    // store assigning in the core's domain chose for a write in this millisecond (the store's time, low bits zero)
+    private static final long CORE_EPOCH_MILLIS = 1_577_836_800_000L;
+    private static final AtomicLong VERSIONS = new AtomicLong();
 
     protected static long nextVersion() {
-        return VERSIONS.incrementAndGet();
+        long now = ((System.currentTimeMillis() - CORE_EPOCH_MILLIS) << 20) | (1L << 19);
+        return VERSIONS.updateAndGet(last -> Math.max(now, last + 1));
     }
 
     // an unconditional write of a value at a new version
@@ -158,18 +187,19 @@ public abstract class AbstractContractTest {
         return write.ifMissing();
     }
 
-    // writes and returns the version written; the write must not conflict
+    // writes and returns the version it was applied at (the store's, where it assigns one); the write must not
+    // conflict
     protected static long written(Store store, Write write) {
-        Set<String> conflicts = store.write(List.of(write));
-        if (!conflicts.isEmpty()) {
+        WriteResult result = store.write(List.of(write));
+        if (result.isRefused(write)) {
             throw new AssertionError("the write conflicted: " + write);
         }
-        return write.version();
+        return result.version(write);
     }
 
     // whether a single write was applied
     protected static boolean applied(Store store, Write write) {
-        return store.write(List.of(write)).isEmpty();
+        return store.write(List.of(write)).refused().isEmpty();
     }
 
     protected static String value(Row row) {
@@ -177,6 +207,15 @@ public abstract class AbstractContractTest {
     }
 
     // runs the operation on that many stores at once and sums the results
+    // what a write on a version that found no row may leave (Store#write): nothing, or a tombstone at its version
+    protected static void assertNothingOrItsTombstone(Map<String, Row> rows, Write write) {
+        Row row = rows.get(write.hash());
+        if (row != null) {
+            assertThat(row.state()).as(write.hash() + ": a tombstone, if anything").isEqualTo(State.TOMBSTONE);
+            assertThat(row.version()).as(write.hash() + ": at the write's version").isEqualTo(write.version());
+        }
+    }
+
     protected int race(int racers, java.util.function.ToIntFunction<Store> operation) throws Exception {
         List<Store> racing = new ArrayList<>();
         for (int i = 0; i < racers; i++) {

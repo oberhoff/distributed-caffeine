@@ -21,15 +21,22 @@ import com.github.benmanes.caffeine.cache.CacheLoader;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
+import io.github.oberhoff.distributedcaffeine.spi.Change;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeFeed;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
+import io.github.oberhoff.distributedcaffeine.spi.ChangeScan;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
+import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.State;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import io.github.oberhoff.distributedcaffeine.testing.ScanOnlyStore;
 import io.github.oberhoff.distributedcaffeine.testing.StorageOnlyStore;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
@@ -69,6 +76,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * of its own on the same table. No distribution of messages yet (a later step), so an instance only learns about a
  * change elsewhere through the store.
  */
+@NullMarked
 @Timeout(30)
 @SuppressWarnings("resource") // every cache and store a test opens is closed after it (@AfterEach)
 public class InternalCoreTest {
@@ -107,7 +115,8 @@ public class InternalCoreTest {
         return DistributedCaffeine.newBuilder(adapter(backend))
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> store.withMaximumAge(maximumAge).withMaximumSize(1_000));
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(maximumAge).withMaximumSize(1_000));
     }
 
     private DistributedLoadingCache<String, String> loading(CacheLoader<String, String> loader) {
@@ -229,10 +238,11 @@ public class InternalCoreTest {
     void an_unreadable_row_is_a_miss_and_the_load_replaces_it() {
         Assumptions.assumeTrue(backend.inMemory() != null, "a real database refuses to store the unreadable bytes");
         store().write(List.of(Write.value(hash("k"), "k".getBytes(StandardCharsets.UTF_8), new byte[]{(byte) 0xff},
-                InternalVersion.fresh())));
+                new InternalVersion().fresh())));
         DistributedCache<String, Long> cache = DistributedCaffeine.<String, Long>newBuilder(backend::open)
                 .withSerializers(serializers -> serializers.withValueSerializer(StringSerializer.ofLong()))
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(10))
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(10))
                 .build();
         closeables.add(cache);
 
@@ -254,7 +264,7 @@ public class InternalCoreTest {
         });
         ExecutorService executor = Executors.newFixedThreadPool(8);
         try {
-            List<Future<String>> futures = new ArrayList<>();
+            List<Future<@Nullable String>> futures = new ArrayList<>();
             for (int i = 0; i < 8; i++) {
                 futures.add(executor.submit(() -> cache.get("k")));
             }
@@ -278,7 +288,7 @@ public class InternalCoreTest {
             }
             return "v-" + key;
         });
-        CompletableFuture<String> slow = CompletableFuture.supplyAsync(() -> cache.get("slow"));
+        CompletableFuture<@Nullable String> slow = CompletableFuture.supplyAsync(() -> cache.get("slow"));
         pause(100);
 
         long start = System.nanoTime();
@@ -300,7 +310,7 @@ public class InternalCoreTest {
             assertThat(release.await(5, TimeUnit.SECONDS)).isTrue();
             return "v";
         });
-        CompletableFuture<String> load = CompletableFuture.supplyAsync(() -> cache.get("k"));
+        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> cache.get("k"));
         assertThat(loading.await(5, TimeUnit.SECONDS)).isTrue();
 
         long start = System.nanoTime();
@@ -328,8 +338,8 @@ public class InternalCoreTest {
 
     @Test
     void a_loader_requesting_its_own_key_fails_at_once() {
-        AtomicReference<DistributedLoadingCache<String, String>> self = new AtomicReference<>();
-        DistributedLoadingCache<String, String> cache = loading(key -> self.get().get(key));
+        AtomicReference<@Nullable DistributedLoadingCache<String, String>> self = new AtomicReference<>();
+        DistributedLoadingCache<String, String> cache = loading(key -> requireNonNull(self.get()).get(key));
         self.set(cache);
 
         assertThatThrownBy(() -> cache.get("k")).isInstanceOf(IllegalStateException.class)
@@ -341,7 +351,7 @@ public class InternalCoreTest {
         // each load asks for the other key once both loads are under way: whichever waits second would close the
         // cycle, so it loads the other key by itself instead of waiting (as the current generation does)
         CountDownLatch bothLoading = new CountDownLatch(2);
-        AtomicReference<DistributedCache<String, String>> self = new AtomicReference<>();
+        AtomicReference<@Nullable DistributedCache<String, String>> self = new AtomicReference<>();
         Function<String, String> askingForTheOther = key -> {
             bothLoading.countDown();
             try {
@@ -350,14 +360,14 @@ public class InternalCoreTest {
                 Thread.currentThread().interrupt();
             }
             String other = key.equals("a") ? "b" : "a";
-            return "outer " + key + " with " + self.get().get(other, inner -> "inner " + inner);
+            return "outer " + key + " with " + requireNonNull(self.get()).get(other, inner -> "inner " + inner);
         };
         DistributedCache<String, String> cache = plain();
         self.set(cache);
         ExecutorService threads = Executors.newFixedThreadPool(2);
         try {
-            Future<String> a = threads.submit(() -> cache.get("a", askingForTheOther));
-            Future<String> b = threads.submit(() -> cache.get("b", askingForTheOther));
+            Future<@Nullable String> a = threads.submit(() -> cache.get("a", askingForTheOther));
+            Future<@Nullable String> b = threads.submit(() -> cache.get("b", askingForTheOther));
 
             assertThat(a.get(10, TimeUnit.SECONDS)).startsWith("outer a");
             assertThat(b.get(10, TimeUnit.SECONDS)).startsWith("outer b");
@@ -390,7 +400,7 @@ public class InternalCoreTest {
 
     // while the slow load waits, every other key is answered; the slow load is released in any case
     private static void otherKeysAnsweredDuring(CountDownLatch loading, CountDownLatch release,
-                                                Function<String, String> get) throws Exception {
+                                                Function<String, @Nullable String> get) throws Exception {
         try {
             assertThat(loading.await(5, TimeUnit.SECONDS)).isTrue();
             CompletableFuture.runAsync(() -> {
@@ -416,7 +426,7 @@ public class InternalCoreTest {
             }
         };
         DistributedCache<String, String> cache = plain();
-        CompletableFuture<String> slow = CompletableFuture.supplyAsync(() -> cache.get("slow", function));
+        CompletableFuture<@Nullable String> slow = CompletableFuture.supplyAsync(() -> cache.get("slow", function));
 
         otherKeysAnsweredDuring(loading, release, key -> cache.get(key, function));
 
@@ -431,7 +441,7 @@ public class InternalCoreTest {
                 .buildAsync(slowFor(new AtomicBoolean(true), loading, release));
         closeables.add(cache);
         // started from another thread: a regression running the load inside the compute would hold this one
-        CompletableFuture<String> slow = CompletableFuture.supplyAsync(() -> cache.get("slow").join());
+        CompletableFuture<@Nullable String> slow = CompletableFuture.supplyAsync(() -> cache.get("slow").join());
 
         otherKeysAnsweredDuring(loading, release, key -> cache.get(key).join());
 
@@ -459,7 +469,7 @@ public class InternalCoreTest {
         DistributedLoadingCache<String, String> cache = loading(slowFor(armed, loading, release));
         assertThat(cache.get("slow")).isEqualTo("loaded slow");
         armed.set(true);
-        CompletableFuture<String> slow = cache.refresh("slow");
+        CompletableFuture<@Nullable String> slow = cache.refresh("slow");
 
         otherKeysAnsweredDuring(loading, release, cache::get);
 
@@ -478,7 +488,7 @@ public class InternalCoreTest {
             return "loaded, possibly outdated";
         });
         DistributedCache<String, String> second = plain();
-        CompletableFuture<String> load = CompletableFuture.supplyAsync(() -> first.get("k"));
+        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> first.get("k"));
         assertThat(loading.await(5, TimeUnit.SECONDS)).isTrue();
 
         second.put("k", "newer");
@@ -503,7 +513,7 @@ public class InternalCoreTest {
             return "fresh";
         });
         DistributedCache<String, String> second = plain();
-        CompletableFuture<String> load = CompletableFuture.supplyAsync(() -> first.get("k"));
+        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> first.get("k"));
         assertThat(loading.await(5, TimeUnit.SECONDS)).isTrue();
 
         second.invalidate("k");
@@ -517,14 +527,22 @@ public class InternalCoreTest {
     @Test
     void invalidations_on_every_attempt_return_the_last_value_uncached() {
         Store other = store();
-        DistributedLoadingCache<String, String> cache = loading(key -> {
-            other.write(List.of(Write.tombstone(hash(key), InternalVersion.fresh())));
+        InternalVersion otherClock = new InternalVersion();
+        CacheLoader<String, String> invalidatedWhileLoading = key -> {
+            // another instance, with a clock of its own: above what it finds, as its write is refused otherwise
+            Row row = other.read(List.of(hash(key)), LONG).get(hash(key));
+            other.write(List.of(Write.tombstone(hash(key), row == null ? otherClock.fresh()
+                    : otherClock.next(row.version()))));
             return "outdated";
-        });
+        };
+        DistributedLoadingCache<String, String> cache = builder(LONG).withCaffeine(CaffeineConfigurer::recordStats)
+                .build(invalidatedWhileLoading);
+        closeables.add(cache);
 
         assertThat(cache.get("k")).isEqualTo("outdated");
 
         assertThat(cache.estimatedSize()).isZero();
+        assertThat(cache.distributedPolicy().stats().uncachedLoadCount()).isOne();
         assertThat(store().read(List.of(hash("k")), LONG).get(hash("k")).state()).isEqualTo(State.TOMBSTONE);
     }
 
@@ -549,8 +567,8 @@ public class InternalCoreTest {
         CountDownLatch fastCommitted = new CountDownLatch(1);
         Adapter<String, String> delaying = settings -> new DelegatingStore(backend.open(settings)) {
             @Override
-            public Set<String> write(java.util.Collection<Write> writes) {
-                Set<String> conflicts = super.write(writes);
+            public WriteResult write(java.util.Collection<Write> writes) {
+                WriteResult conflicts = super.write(writes);
                 byte[] value = writes.iterator().next().value();
                 if (value != null && new String(value, StandardCharsets.UTF_8).equals("slow")) {
                     slowWritten.countDown();
@@ -563,9 +581,10 @@ public class InternalCoreTest {
                 return conflicts;
             }
         };
-        DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(delaying)
+        DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(offered(delaying))
                 .withSerializers(serializers -> serializers.withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(10)).build();
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(10)).build();
         closeables.add(cache);
 
         CompletableFuture<Void> slow = CompletableFuture.runAsync(() -> cache.put("k", "slow"));
@@ -575,6 +594,60 @@ public class InternalCoreTest {
         slow.get(5, TimeUnit.SECONDS);
 
         assertThat(cache.getIfPresent("k")).as("the store applied fast after slow").isEqualTo("fast");
+    }
+
+    @Test
+    void an_invalidate_never_removes_a_value_written_after_its_tombstone() throws Exception {
+        // found by Lincheck (stress): the invalidate removed whatever L1 held at its end, a newer value too, and a
+        // slower put written between the tombstone and that newer value installed its older value in the gap
+        CountDownLatch tombstoneWritten = new CountDownLatch(1);
+        CountDownLatch invalidateGoes = new CountDownLatch(1);
+        CountDownLatch slowWritten = new CountDownLatch(1);
+        CountDownLatch slowGoes = new CountDownLatch(1);
+        Adapter<String, String> pausing = settings -> new DelegatingStore(backend.open(settings)) {
+            @Override
+            public WriteResult write(java.util.Collection<Write> writes) {
+                WriteResult result = super.write(writes);
+                Write write = writes.iterator().next();
+                byte[] value = write.value();
+                if (write.isTombstone() && !write.hash().startsWith("#")) {
+                    tombstoneWritten.countDown();
+                    awaitQuietly(invalidateGoes);
+                } else if (value != null && new String(value, StandardCharsets.UTF_8).equals("slow")) {
+                    slowWritten.countDown();
+                    awaitQuietly(slowGoes);
+                }
+                return result;
+            }
+        };
+        // without distribution: no echo of the newer put, which would otherwise raise the slower put's minimum in
+        // time, mostly (the race then depends on how fast the echo comes)
+        DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(offered(pausing))
+                .withSerializers(serializers -> serializers.withValueSerializer(StringSerializer.ofString()))
+                .withDistributionMode(DistributionMode.NONE)
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(10)).build();
+        closeables.add(cache);
+
+        CompletableFuture<Void> invalidating = CompletableFuture.runAsync(() -> cache.invalidate("k"));
+        assertThat(tombstoneWritten.await(5, TimeUnit.SECONDS)).isTrue();
+        CompletableFuture<Void> slow = CompletableFuture.runAsync(() -> cache.put("k", "slow"));
+        assertThat(slowWritten.await(5, TimeUnit.SECONDS)).as("written after the tombstone").isTrue();
+        cache.put("k", "new");
+        invalidateGoes.countDown();
+        invalidating.get(5, TimeUnit.SECONDS);
+        slowGoes.countDown();
+        slow.get(5, TimeUnit.SECONDS);
+
+        assertThat(cache.getIfPresent("k")).as("the store applied new last").isEqualTo("new");
+    }
+
+    private static void awaitQuietly(CountDownLatch latch) {
+        try {
+            assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     @Test
@@ -771,7 +844,7 @@ public class InternalCoreTest {
             }
         });
         assertThat(first.get("k")).isEqualTo("initial");
-        CompletableFuture<String> refresh = first.refresh("k");
+        CompletableFuture<@Nullable String> refresh = first.refresh("k");
         assertThat(reloading.await(5, TimeUnit.SECONDS)).isTrue();
 
         plain().put("k", "newer");
@@ -874,11 +947,13 @@ public class InternalCoreTest {
     void after_close_every_operation_throws_and_the_adapter_can_be_used_again() {
         Adapter<String, String> adapter = adapter();
         DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(adapter)
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(10)).build();
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(10)).build();
         cache.put("k", "v");
 
         DistributedCaffeine<String, String> second = DistributedCaffeine.newBuilder(adapter)
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(10));
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(10));
         assertThatThrownBy(second::build).isInstanceOf(IllegalStateException.class).hasMessageContaining("adapter");
 
         cache.close();
@@ -889,7 +964,8 @@ public class InternalCoreTest {
         assertThatThrownBy(cache::estimatedSize).isInstanceOf(IllegalStateException.class);
         assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.CLOSED);
         DistributedCache<String, String> again = DistributedCaffeine.newBuilder(adapter)
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(10)).build();
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(10)).build();
         closeables.add(again);
         assertThat(again.getIfPresent("k")).isEqualTo("v");
     }
@@ -904,11 +980,13 @@ public class InternalCoreTest {
         };
 
         DistributedCaffeine<String, String> builder = DistributedCaffeine.newBuilder(failing)
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(10));
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(10));
         assertThatThrownBy(builder::build).isInstanceOf(StoreException.class);
         faults.setDown(false);
         DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(adapter())
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(10)).build();
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(10)).build();
         closeables.add(cache);
     }
 
@@ -920,7 +998,8 @@ public class InternalCoreTest {
         };
 
         DistributedCaffeine<String, String> builder = DistributedCaffeine.newBuilder(slow)
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(10))
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(10))
                 .withBuildTimeout(Duration.ofMillis(200));
         assertThatThrownBy(builder::build).isInstanceOf(StoreException.class).hasMessageContaining("did not answer");
     }
@@ -938,8 +1017,9 @@ public class InternalCoreTest {
         assertThat(cache.distributedPolicy().getAllFromStore(List.of("k", "missing"))).containsOnlyKeys("k");
     }
 
-    // a store that delegates everything, its change feed too, for wrapping single methods in tests
-    static class DelegatingStore extends StorageOnlyStore implements ChangeFeed {
+    // a store that delegates everything, its change feed and its scan too, for wrapping single methods in tests;
+    // offered as an adapter would (offered), so that a delegate without a feed is polled through the wrapper
+    static class DelegatingStore extends StorageOnlyStore implements ChangeFeed, ChangeScan {
 
         private final Store delegate;
 
@@ -953,5 +1033,21 @@ public class InternalCoreTest {
                 ChangeListener listener) {
             return ((ChangeFeed) delegate).subscribe(listener);
         }
+
+        @Override
+        public List<Change> changedWithin(Duration within) {
+            return ((ChangeScan) delegate).changedWithin(within);
+        }
+    }
+
+    // the adapter offering its stores as the store they wrap can serve: a DelegatingStore over a store without a feed
+    // (a polled profile, StoreProfile.Changes.SCAN) as storage and scan only, so that the core polls it through the
+    // wrapper; anything else as it is
+    static <K, V> Adapter<K, V> offered(Adapter<K, V> adapter) {
+        return settings -> {
+            Store store = adapter.createStore(settings);
+            return store instanceof DelegatingStore wrapper && !(wrapper.delegate instanceof ChangeFeed)
+                    ? new ScanOnlyStore(wrapper) : store;
+        };
     }
 }

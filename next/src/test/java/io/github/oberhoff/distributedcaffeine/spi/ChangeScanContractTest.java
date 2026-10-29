@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine.spi;
 
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -31,6 +32,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * The contract of {@link ChangeScan}, one test (or more) per point, named after it ({@code contractN_...}); run by
  * every store that offers a scan, against the fixture's stores.
  */
+@NullMarked
 @SuppressWarnings("resource") // every store a test opens is closed after it (@AfterEach)
 public abstract class ChangeScanContractTest extends AbstractContractTest {
 
@@ -51,8 +53,9 @@ public abstract class ChangeScanContractTest extends AbstractContractTest {
         ChangeScan scan = scanning(open());
         writer.write(List.of(entry("expired", "e")));
         pause(60);
-        long expired = nextVersion();
-        writer.expire(Duration.ofMillis(50), expired);
+        writer.expire(Duration.ofMillis(50), nextVersion());
+        // at the version given, or at one of the store's own
+        long expired = writer.read(List.of("expired"), LONG).get("expired").version();
         writer.write(List.of(entry("value", "v1")));
         long value = written(writer, entry("value", "v2"));
         long tombstone = written(writer, tombstone("tombstone"));
@@ -81,13 +84,10 @@ public abstract class ChangeScanContractTest extends AbstractContractTest {
     void contract1_a_write_of_the_control_row_is_reported_like_any_row() {
         Store writer = open();
         ChangeScan scan = scanning(open());
-        Write control = control();
-
-        writer.write(List.of(control));
+        long control = written(writer, control());
 
         assertThat(byHash(scan.changedWithin(Duration.ofSeconds(10))))
-                .containsEntry(Store.CONTROL_HASH, new Change(Change.Kind.WRITTEN, Store.CONTROL_HASH,
-                        control.version()));
+                .containsEntry(Store.CONTROL_HASH, new Change(Change.Kind.WRITTEN, Store.CONTROL_HASH, control));
     }
 
     // contract point 2: deletes report nothing
@@ -100,7 +100,7 @@ public abstract class ChangeScanContractTest extends AbstractContractTest {
         pause(2);
         writer.write(List.of(entry("kept", "v")));
         writer.write(List.of(tombstone("tombstone")));
-        assertThat(writer.pruneToSize(1)).isEqualTo(1);
+        assertThat(writer.pruneToSize(1, Duration.ZERO)).isEqualTo(1);
         assertThat(writer.pruneTombstones(Duration.ZERO)).isEqualTo(1);
 
         assertThat(byHash(scan.changedWithin(Duration.ofSeconds(10)))).containsOnlyKeys("kept");

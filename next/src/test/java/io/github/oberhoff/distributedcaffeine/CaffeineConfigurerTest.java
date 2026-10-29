@@ -20,6 +20,7 @@ import com.github.benmanes.caffeine.cache.Expiry;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.stats.ConcurrentStatsCounter;
 import com.github.benmanes.caffeine.cache.stats.StatsCounter;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -33,7 +34,11 @@ import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+@NullMarked
 class CaffeineConfigurerTest {
+
+    // the store's maximum age the core builds with: above every expiry here, so that none is lowered
+    private static final Duration MAXIMUM_AGE = Duration.ofHours(1);
 
     private static InternalKey<String> key(String key) {
         return new InternalHasher<String>(null).wrap(key);
@@ -48,7 +53,7 @@ class CaffeineConfigurerTest {
         CaffeineConfigurer<String, String> configurer = new CaffeineConfigurer<String, String>()
                 .maximumWeight(100)
                 .weigher((String key, String value) -> key.length() + value.length());
-        Cache<InternalKey<String>, InternalValue<String>> cache = configurer.caffeine().build();
+        Cache<InternalKey<String>, InternalValue<String>> cache = configurer.caffeine(MAXIMUM_AGE).build();
 
         cache.put(key("abc"), value("defgh"));
         cache.cleanUp();
@@ -63,7 +68,7 @@ class CaffeineConfigurerTest {
                 .executor(Runnable::run)
                 .removalListener((String key, String value, RemovalCause cause) -> removed.add(key + "=" + value + ":" + cause))
                 .evictionListener((String key, String value, RemovalCause cause) -> removed.add("evicted " + key));
-        Cache<InternalKey<String>, InternalValue<String>> cache = configurer.caffeine().build();
+        Cache<InternalKey<String>, InternalValue<String>> cache = configurer.caffeine(MAXIMUM_AGE).build();
 
         cache.put(key("a"), value("1"));
         cache.put(key("a"), value("2"));
@@ -95,7 +100,7 @@ class CaffeineConfigurerTest {
                         return currentDuration;
                     }
                 });
-        Cache<InternalKey<String>, InternalValue<String>> cache = configurer.caffeine().build();
+        Cache<InternalKey<String>, InternalValue<String>> cache = configurer.caffeine(MAXIMUM_AGE).build();
 
         cache.put(key("a"), value("1"));
         cache.put(key("a"), value("2"));
@@ -111,7 +116,7 @@ class CaffeineConfigurerTest {
                 .expireAfterWrite(2, TimeUnit.MINUTES)
                 .expireAfterAccess(3, TimeUnit.MINUTES);
 
-        assertThat(configurer.toString()).contains("initialCapacity=64",
+        assertThat(configurer.caffeine(MAXIMUM_AGE).toString()).contains("initialCapacity=64",
                 "expireAfterWrite=" + TimeUnit.MINUTES.toNanos(2) + "ns",
                 "expireAfterAccess=" + TimeUnit.MINUTES.toNanos(3) + "ns");
     }
@@ -121,7 +126,7 @@ class CaffeineConfigurerTest {
         StatsCounter counter = new ConcurrentStatsCounter();
         Cache<InternalKey<String>, InternalValue<String>> cache = new CaffeineConfigurer<String, String>()
                 .recordStats(() -> counter)
-                .caffeine().build();
+                .caffeine(MAXIMUM_AGE).build();
         CaffeineConfigurer.takeCreatedStatsCounter(); // as the core does after building
 
         assertThat(cache.getIfPresent(key("a"))).isNull();
@@ -138,7 +143,7 @@ class CaffeineConfigurerTest {
                     return CompletableFuture.completedFuture(null);
                 })
                 .expireAfterWrite(Duration.ofMinutes(1))
-                .caffeine().build();
+                .caffeine(MAXIMUM_AGE).build();
 
         cache.put(key("a"), value("1"));
         cache.cleanUp();
@@ -204,7 +209,7 @@ class CaffeineConfigurerTest {
                 .maximumSize(5)
                 .expireAfterAccess(Duration.ofMinutes(2))
                 .recordStats()
-                .caffeine().build();
+                .caffeine(MAXIMUM_AGE).build();
 
         assertThat(cache.policy().eviction().orElseThrow().getMaximum()).isEqualTo(5);
         assertThat(cache.policy().expireAfterAccess().orElseThrow().getExpiresAfter()).isEqualTo(Duration.ofMinutes(2));

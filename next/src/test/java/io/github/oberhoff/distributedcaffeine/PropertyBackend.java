@@ -17,6 +17,7 @@ package io.github.oberhoff.distributedcaffeine;
 
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
+import org.jspecify.annotations.NullMarked;
 
 import java.util.Random;
 import java.util.function.Consumer;
@@ -25,6 +26,7 @@ import java.util.function.Consumer;
  * The store under {@link InternalPropertyTest}: opens a store per cache instance on one cache, injects the faults it
  * can, and tells when it has nothing left to deliver.
  */
+@NullMarked
 public interface PropertyBackend extends AutoCloseable {
 
     /**

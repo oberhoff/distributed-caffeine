@@ -24,12 +24,12 @@ import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 
 import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static java.util.Objects.requireNonNull;
@@ -60,9 +60,9 @@ public final class InMemoryStore implements Store, ChangeFeed, ChangeScan {
     }
 
     @Override
-    public Set<String> write(Collection<Write> writes) {
+    public WriteResult write(Collection<Write> writes) {
         checkOpen();
-        if (requireNonNull(writes).stream().anyMatch(write -> !write.isUnconditional())) {
+        if (requireNonNull(writes).stream().anyMatch(write -> !write.isAdvance())) {
             table.database().beforeConditionalWrite();
         }
         // a write of the control row is the core's invalidateAll: its own fault window (setBeforeInvalidateAllApplies)
@@ -79,9 +79,9 @@ public final class InMemoryStore implements Store, ChangeFeed, ChangeScan {
     }
 
     @Override
-    public int pruneToSize(long maxSize) {
+    public int pruneToSize(long maxSize, Duration minAge) {
         checkOpen();
-        return table.pruneToSize(maxSize);
+        return table.pruneToSize(maxSize, requireNonNull(minAge));
     }
 
     @Override
@@ -104,10 +104,10 @@ public final class InMemoryStore implements Store, ChangeFeed, ChangeScan {
         return subscription;
     }
 
-    // the database's write times are strictly increasing: nothing to allow for
+    // the profile's clock: its unit and how far it may step back (nothing for a monotonic one)
     @Override
     public Duration clockAllowance() {
-        return Duration.ZERO;
+        return table.database().profile().clockAllowance();
     }
 
     @Override
