@@ -29,15 +29,23 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import io.github.oberhoff.distributedcaffeine.testing.ScanOnlyStore;
 import io.github.oberhoff.distributedcaffeine.testing.StorageOnlyStore;
+import io.github.oberhoff.distributedcaffeine.testing.StoreProfile;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -58,7 +66,10 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.LongStream;
+import java.util.stream.Stream;
 
+import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.awaitUpTo;
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.pause;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
@@ -87,6 +98,7 @@ import static org.assertj.core.api.Assertions.fail;
  * (lesson of the current generation). Threads interleave freely, so a run is not exactly reproducible; the seed fixes
  * the operations and faults chosen.
  */
+@NullMarked
 @Timeout(120)
 public class InternalPropertyTest {
 
@@ -110,11 +122,38 @@ public class InternalPropertyTest {
     // freshness oracle allows them; tokens are unique, and a later write of the key replaces such a value in the store
     private final Map<String, Set<String>> beforeInvalidateAll = new ConcurrentHashMap<>();
     // the pruning variant: a maximum size below the number of keys and maintenance every few milliseconds, so that
-    // size pruning deletes rows silently while the instances work (presence then cannot be asked for)
+    // size pruning deletes rows silently while the instances work (presence then cannot be asked for); only rows
+    // older than its grace (4 s here), so that no poll misses a write and no load's write on "missing" applies over a
+    // newer row pruned meanwhile
     private boolean pruning;
+    // the deterministic mode (VISION.md, "Deterministic simulation"): one thread, simulated time, choices from the seed;
+    // null in the threaded mode
+    private @Nullable SimulatedEnvironment simulation;
+    private Random choices = new Random(0);
 
     private void trace(String event) {
-        trace.add(System.nanoTime() + " " + Thread.currentThread().getName() + " " + event);
+        SimulatedEnvironment simulated = simulation;
+        trace.add((simulated == null ? System.nanoTime() : simulated.nanoTime()) + " "
+                + Thread.currentThread().getName() + " " + event);
+    }
+
+    // a wait between operations: real time in the threaded mode, simulated time (deliveries, polls, maintenance running
+    // meanwhile) in the deterministic one
+    private void idle(Duration duration) {
+        SimulatedEnvironment simulated = simulation;
+        if (simulated == null) {
+            pause(duration.toMillis());
+        } else {
+            simulated.advance(duration);
+        }
+    }
+
+    // a latency within an operation: real in the threaded mode, none in the deterministic one (time moving there would
+    // run deliveries inside the operation, on its own thread, which real threads never do)
+    private void latency(long maxNanos) {
+        if (simulation == null) {
+            LockSupport.parkNanos(ThreadLocalRandom.current().nextLong(maxNanos));
+        }
     }
 
     {
@@ -149,6 +188,52 @@ public class InternalPropertyTest {
         assertThat(run(seed, new InMemoryBackend(seed), PHASES)).as("phases checked").isEqualTo(PHASES);
     }
 
+    // the deterministic mode: the same operations, faults and oracles on one thread and simulated time, every choice
+    // from the seed, so that a failure replays from its seed alone; fast enough for many seeds. What happens within an
+    // operation, between its threads, is InternalInterleavingTest's
+    // every store profile in each run, cheap as it is: the threaded mode takes one per run (-Dinmemory.profile). Polled
+    // by the core under jdbc's; a gap or an interruption of a feed under the others' (found: on jdbc's alone, the
+    // default, no injected gap had a feed to interrupt, and a gap not revalidating went unnoticed)
+    @ParameterizedTest(name = "{0}, seed {1}")
+    @MethodSource("profilesAndSeeds")
+    void deterministically_the_store_stays_fresh_and_every_instance_converges_on_it(String profile, long seed)
+            throws Exception {
+        assertThat(runDeterministically(seed, StoreProfile.of(profile))).as("phases checked").isEqualTo(PHASES);
+    }
+
+    @ParameterizedTest(name = "{0}, seed {1}")
+    @MethodSource("profilesAndSeeds")
+    void deterministically_with_size_pruning_while_the_instances_work_too(String profile, long seed) throws Exception {
+        pruning = true;
+        assertThat(runDeterministically(seed, StoreProfile.of(profile))).as("phases checked").isEqualTo(PHASES);
+    }
+
+    // a run replayed: the same seed, the same history, event by event (a profile with a feed of its own, its faults
+    // and its deliveries)
+    @Test
+    void a_deterministic_run_replays_from_its_seed() throws Exception {
+        InternalPropertyTest first = new InternalPropertyTest();
+        InternalPropertyTest second = new InternalPropertyTest();
+        first.runDeterministically(7, StoreProfile.REDIS);
+        second.runDeterministically(7, StoreProfile.REDIS);
+
+        assertThat(List.copyOf(second.trace)).isEqualTo(List.copyOf(first.trace));
+    }
+
+    // 50 seeds per profile by default, -Dproperty.seeds for more
+    static Stream<Arguments> profilesAndSeeds() {
+        return StoreProfile.names().stream().flatMap(profile -> LongStream.rangeClosed(1,
+                Long.getLong("property.seeds", 50)).mapToObj(seed -> Arguments.of(profile, seed)));
+    }
+
+    // the store on the simulation, the caches too, then the phases driven by one thread
+    int runDeterministically(long seed, StoreProfile profile) throws Exception {
+        SimulatedEnvironment simulated = new SimulatedEnvironment(seed);
+        simulation = simulated;
+        choices = new Random(seed);
+        return run(seed, new InMemoryBackend(seed, profile, simulated), PHASES);
+    }
+
     /**
      * Runs the test on a backend (public, so that the adapters' tests run it on their stores).
      *
@@ -163,16 +248,19 @@ public class InternalPropertyTest {
         List<AutoCloseable> closeables = new ArrayList<>();
         ExecutorService threads = Executors.newCachedThreadPool();
         try {
-            // a plain instance with a small L1 and bulk loads returning an extra key, one with population and absent
+            // a plain instance with a small L1 and bulk loads returning an extra key, one with population and negative
             // caching, and an asynchronous one
             for (int key = 0; key < KEYS; key++) {
                 keysByHash.put(new InternalHasher<String>(null).wrap(key(key)).hash(), key(key));
             }
+            // a small L1 in the threaded mode only: Caffeine's admission breaks ties with ThreadLocalRandom, seeded
+            // per JVM and thread and not settable, so its evictions would differ between two deterministic runs of one
+            // seed (found: the replay failed about one run in four); the threaded mode keeps evicting
             DistributedLoadingCache<String, String> plain = builder(backend, "plain")
-                    .withCaffeine(caffeine -> caffeine.maximumSize(4))
+                    .withCaffeine(caffeine -> caffeine.maximumSize(simulation == null ? 4 : KEYS * 2))
                     .build(new BulkSourceLoader());
             DistributedLoadingCache<String, String> populated = builder(backend, "populated").withDistributionMode(DistributionMode.UPDATE)
-                    .withAbsentCaching(Duration.ofMinutes(1))
+                    .withNegativeCaching(Duration.ofMinutes(1))
                     .build(new SourceLoader());
             DistributedAsyncLoadingCache<String, String> async = builder(backend, "async")
                     .buildAsync(new SourceLoader());
@@ -183,6 +271,15 @@ public class InternalPropertyTest {
 
             Random random = new Random(seed);
             for (int phase = 0; phase < phases; phase++) {
+                SimulatedEnvironment simulated = simulation;
+                if (simulated != null) {
+                    runPhase(random, backend, instances, async, simulated);
+                    backend.heal();
+                    awaitQuiescence(backend, instances, simulated);
+                    check(seed, phase, instances);
+                    checked++;
+                    continue;
+                }
                 List<Future<?>> running = new ArrayList<>();
                 for (DistributedLoadingCache<String, String> cache : instances) {
                     long writerSeed = random.nextLong();
@@ -219,7 +316,14 @@ public class InternalPropertyTest {
             return opened instanceof ChangeScan scan && !(opened instanceof ChangeFeed)
                     ? new PolledStore(slowed, scan, label) : slowed;
         };
-        return DistributedCaffeine.newBuilder(adapter)
+        DistributedCaffeine<String, String> builder = DistributedCaffeine.newBuilder(adapter);
+        SimulatedEnvironment simulated = simulation;
+        if (simulated != null) {
+            // everything on the simulation: the core's executor and Caffeine's direct, Caffeine's clock the simulated
+            builder.withEnvironment(simulated).withStore(store -> store.withExecutor(Runnable::run))
+                    .withCaffeine(caffeine -> caffeine.executor(Runnable::run).ticker(simulated::nanoTime));
+        }
+        return builder
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
                 .withStore(store -> (pruning ? store.withMaximumAge(LONG).withMaximumSize(KEYS / 2)
@@ -232,111 +336,176 @@ public class InternalPropertyTest {
 
     private void write(DistributedLoadingCache<String, String> cache, Random random) {
         for (int i = 0; i < OPERATIONS; i++) {
-            int key = random.nextInt(KEYS);
-            double choice = random.nextDouble();
-            if (choice < 0.08) {
-                // under every key's lock: the conditional writes below update the source after the cache, and an
-                // invalidateAll in between would let a load put the old source value back
-                // the source changes broadly, then everything is invalidated: a load that read the source before
-                // must not leave its value behind
-                lockAll(() -> {
-                    source.forEach((k, value) -> beforeInvalidateAll
-                            .computeIfAbsent(k, ignored -> ConcurrentHashMap.newKeySet()).add(value));
-                    for (int changed = 0; changed < KEYS; changed++) {
-                        double change = random.nextDouble();
-                        if (change < 0.5) {
-                            setSource(key(changed), token(changed));
-                        } else if (change < 0.7) {
-                            setSource(key(changed), null);
-                        }
+            writeOnce(cache, random);
+        }
+    }
+
+    // one operation of a writer
+    private void writeOnce(DistributedLoadingCache<String, String> cache, Random random) {
+        int key = random.nextInt(KEYS);
+        double choice = random.nextDouble();
+        if (choice < 0.08) {
+            // under every key's lock: the conditional writes below update the source after the cache, and an
+            // invalidateAll in between would let a load put the old source value back
+            // the source changes broadly, then everything is invalidated: a load that read the source before
+            // must not leave its value behind
+            lockAll(() -> {
+                source.forEach((k, value) -> beforeInvalidateAll
+                        .computeIfAbsent(k, ignored -> ConcurrentHashMap.newKeySet()).add(value));
+                for (int changed = 0; changed < KEYS; changed++) {
+                    double change = random.nextDouble();
+                    if (change < 0.5) {
+                        setSource(key(changed), token(changed));
+                    } else if (change < 0.7) {
+                        setSource(key(changed), null);
                     }
-                    retry(cache::invalidateAll);
-                    confirmed.clear();
-                });
-                continue;
-            }
-            if (choice < 0.16) {
-                int other = (key + 1 + random.nextInt(KEYS - 1)) % KEYS;
-                lock(Math.min(key, other), Math.max(key, other), () -> {
-                    Map<String, String> values = Map.of(key(key), token(key), key(other), token(other));
-                    values.forEach(InternalPropertyTest.this::setSource);
-                    retry(() -> cache.putAll(values));
-                    confirmed.putAll(values);
-                });
-                continue;
-            }
-            lock(key, key, () -> {
-                String k = key(key);
-                if (choice < 0.45) {
-                    String token = token(key);
-                    setSource(k, token);
-                    retry(() -> cache.put(k, token));
-                    confirmed.put(k, token);
-                } else if (choice < 0.70) {
-                    // the source changes or loses the record, the cache is told by an invalidation
-                    if (random.nextBoolean()) {
-                        setSource(k, token(key));
-                    } else {
-                        setSource(k, null);
-                    }
-                    retry(() -> cache.invalidate(k));
-                    confirmed.remove(k);
-                } else if (choice < 0.90) {
-                    // the atomic methods decide in the store; the source changes within the decision, before the
-                    // store is written: changed after it, a load reading the source in between would put the old
-                    // value back over the new one (a race of this model, not of the cache). A decision run again
-                    // after a conflict sets it again. Only compute, which writes in every run: an operation
-                    // conditional on presence (replace, computeIfPresent) may find the key present in one run and
-                    // pruned or hidden in the next, leaving the source as the earlier run set it; those are covered
-                    // by the race and parity tests
-                    String token = token(key);
-                    retry(() -> cache.asMap().compute(k, (ignored, current) -> {
-                        setSource(k, token);
-                        return token;
-                    }));
-                    confirmed.put(k, token);
+                }
+                retry(cache::invalidateAll);
+                confirmed.clear();
+            });
+            return;
+        }
+        if (choice < 0.16) {
+            int other = (key + 1 + random.nextInt(KEYS - 1)) % KEYS;
+            lock(Math.min(key, other), Math.max(key, other), () -> {
+                Map<String, String> values = Map.of(key(key), token(key), key(other), token(other));
+                values.forEach(InternalPropertyTest.this::setSource);
+                retry(() -> cache.putAll(values));
+                confirmed.putAll(values);
+            });
+            return;
+        }
+        lock(key, key, () -> {
+            String k = key(key);
+            if (choice < 0.45) {
+                String token = token(key);
+                setSource(k, token);
+                retry(() -> cache.put(k, token));
+                confirmed.put(k, token);
+            } else if (choice < 0.70) {
+                // the source changes or loses the record, the cache is told by an invalidation
+                if (random.nextBoolean()) {
+                    setSource(k, token(key));
                 } else {
                     setSource(k, null);
-                    retry(() -> cache.asMap().remove(k));
-                    confirmed.remove(k);
                 }
-            });
-        }
+                retry(() -> cache.invalidate(k));
+                confirmed.remove(k);
+            } else if (choice < 0.90) {
+                // the atomic methods decide in the store; the source changes within the decision, before the
+                // store is written: changed after it, a load reading the source in between would put the old
+                // value back over the new one (a race of this model, not of the cache). A decision run again
+                // after a conflict sets it again. Only compute, which writes in every run: an operation
+                // conditional on presence (replace, computeIfPresent) may find the key present in one run and
+                // pruned or hidden in the next, leaving the source as the earlier run set it; those are covered
+                // by the race and parity tests
+                String token = token(key);
+                retry(() -> cache.asMap().compute(k, (ignored, current) -> {
+                    setSource(k, token);
+                    return token;
+                }));
+                confirmed.put(k, token);
+            } else {
+                setSource(k, null);
+                retry(() -> cache.asMap().remove(k));
+                confirmed.remove(k);
+            }
+        });
     }
 
     // loaders: every way of reading; results are not checked here (the phase check decides)
 
-    @SuppressWarnings({"CheckReturnValue", "ReturnValueIgnored", "ResultOfMethodCallIgnored"}) // see above
     private void load(DistributedLoadingCache<String, String> cache, DistributedAsyncLoadingCache<String, String> async,
                       Random random) {
         for (int i = 0; i < OPERATIONS; i++) {
-            String k = key(random.nextInt(KEYS));
-            double choice = random.nextDouble();
-            try {
-                if (choice < 0.30) {
-                    cache.get(k);
-                } else if (choice < 0.45) {
-                    cache.getAll(List.of(k, key(random.nextInt(KEYS)), key(random.nextInt(KEYS))));
-                } else if (choice < 0.60) {
-                    cache.getIfPresent(k);
-                } else if (choice < 0.70) {
-                    cache.refresh(k).get(10, TimeUnit.SECONDS);
-                } else if (choice < 0.78) {
-                    cache.asMap().containsKey(k);
-                } else if (choice < 0.86) {
-                    cache.get(k, ignored -> readSource(k));
-                } else if (choice < 0.93) {
-                    async.get(k).get(10, TimeUnit.SECONDS);
-                } else {
-                    async.getIfPresent(k).get(10, TimeUnit.SECONDS);
-                }
-            } catch (StoreException e) {
-                // an injected fault; the phase check decides
-            } catch (Exception e) {
-                if (!(e.getCause() instanceof StoreException)) {
-                    throw new AssertionError("load failed", e);
-                }
+            loadOnce(cache, async, random);
+        }
+    }
+
+    // one operation of a loader; its results are not checked here (the phase check decides)
+    @SuppressWarnings({"CheckReturnValue", "ReturnValueIgnored", "ResultOfMethodCallIgnored"})
+    private void loadOnce(DistributedLoadingCache<String, String> cache,
+                          DistributedAsyncLoadingCache<String, String> async, Random random) {
+        String k = key(random.nextInt(KEYS));
+        double choice = random.nextDouble();
+        try {
+            if (choice < 0.30) {
+                cache.get(k);
+            } else if (choice < 0.45) {
+                cache.getAll(List.of(k, key(random.nextInt(KEYS)), key(random.nextInt(KEYS))));
+            } else if (choice < 0.60) {
+                cache.getIfPresent(k);
+            } else if (choice < 0.70) {
+                cache.refresh(k).get(10, TimeUnit.SECONDS);
+            } else if (choice < 0.78) {
+                cache.asMap().containsKey(k);
+            } else if (choice < 0.86) {
+                cache.get(k, ignored -> readSource(k));
+            } else if (choice < 0.93) {
+                async.get(k).get(10, TimeUnit.SECONDS);
+            } else {
+                async.getIfPresent(k).get(10, TimeUnit.SECONDS);
             }
+        } catch (StoreException e) {
+            // an injected fault; the phase check decides
+        } catch (Exception e) {
+            if (!(e.getCause() instanceof StoreException)) {
+                throw new AssertionError("load failed", e);
+            }
+        }
+    }
+
+    // one phase on one thread: each instance's writer and loader take a step at a time, in an order drawn from the seed,
+    // the simulated time moving a little between steps (deliveries, polls, maintenance, resumes run there), and the
+    // fault at a step drawn too
+    private void runPhase(Random random, PropertyBackend backend, List<DistributedLoadingCache<String, String>> instances,
+                          DistributedAsyncLoadingCache<String, String> async, SimulatedEnvironment simulated) {
+        List<Runnable> steps = new ArrayList<>();
+        List<Integer> remaining = new ArrayList<>();
+        for (DistributedLoadingCache<String, String> cache : instances) {
+            Random writer = new Random(random.nextLong());
+            Random loader = new Random(random.nextLong());
+            steps.add(() -> writeOnce(cache, writer));
+            remaining.add(OPERATIONS);
+            steps.add(() -> loadOnce(cache, async, loader));
+            remaining.add(OPERATIONS);
+        }
+        Random fault = new Random(random.nextLong());
+        Random order = new Random(random.nextLong());
+        int total = steps.size() * OPERATIONS;
+        int faultAt = order.nextInt(total);
+        for (int step = 0; step < total; step++) {
+            int actor;
+            do {
+                actor = order.nextInt(steps.size());
+            } while (remaining.get(actor) == 0);
+            remaining.set(actor, remaining.get(actor) - 1);
+            steps.get(actor).run();
+            // the fault after the step, before the time moves: what the step wrote is still undelivered, so a gap or an
+            // interruption loses it (found: injected before a step, after the last advance had delivered everything,
+            // a gap lost nothing, and a gap not revalidating went unnoticed)
+            if (step == faultAt) {
+                backend.fault(fault, this::trace);
+            }
+            simulated.advance(Duration.ofMillis(order.nextInt(5)));
+        }
+    }
+
+    // on simulated time: the time moved until everything is delivered and processed, three checks in a row. Steps of
+    // 100 ms: a resume after an interruption backs off for simulated seconds, which steps of 10 ms checked a hundred
+    // times each (found: half the runs on a feed took two seconds instead of a fifth)
+    private static void awaitQuiescence(PropertyBackend backend, List<DistributedLoadingCache<String, String>> instances,
+                                        SimulatedEnvironment simulated) {
+        int quiet = 0;
+        for (int step = 0; quiet < 3; step++) {
+            if (step == 3_000) {
+                throw new AssertionError("delivery did not come to rest in 5 simulated minutes");
+            }
+            simulated.advance(Duration.ofMillis(100));
+            boolean idle = instances.stream().allMatch(cache -> cache.distributedPolicy().getSynchronizationState()
+                    == SynchronizationState.SYNCHRONIZED) && backend.isIdle() && instances.stream().allMatch(cache ->
+                    ((InternalDistributedLoadingCache<String, String>) cache).core.isQuiescent());
+            quiet = idle ? quiet + 1 : 0;
         }
     }
 
@@ -358,6 +527,15 @@ public class InternalPropertyTest {
 
     private void check(long seed, int phase, List<DistributedLoadingCache<String, String>> instances) {
         List<String> violations = new ArrayList<>();
+        // with nothing running, the reservation registries are empty (a release runs on the store executor right
+        // after the last future completed, so waited for briefly): a leak would grow without bound
+        for (DistributedLoadingCache<String, String> instance : instances) {
+            InternalCore<?, ?> core = ((InternalDistributedCache<?, ?>) instance).core;
+            if (!(simulation == null ? awaitUpTo(() -> core.reservedKeys() == 0, Duration.ofSeconds(5),
+                    Duration.ofMillis(10)) : core.reservedKeys() == 0)) {
+                violations.add("leak: " + core.reservedKeys() + " keys still reserved with nothing running");
+            }
+        }
         for (int key = 0; key < KEYS; key++) {
             String k = key(key);
             StoredValue<String> stored = instances.get(0).distributedPolicy().getFromStore(k);
@@ -382,7 +560,7 @@ public class InternalPropertyTest {
                     InternalCore<String, String> core = ((InternalDistributedLoadingCache<String, String>) instances.get(instance)).core;
                     violations.add("convergence: instance " + instance + " answers " + answer + " for " + k
                             + ", the store holds " + inStore + " (held: " + core.l1().asMap().get(core.wrap(k))
-                            + ", absent: " + core.isAbsent(k) + ")");
+                            + ", absence remembered: " + core.remembersAbsence(k) + ")");
                 }
             }
         }
@@ -448,7 +626,7 @@ public class InternalPropertyTest {
         }
     }
 
-    private static void retry(Runnable call) {
+    private void retry(Runnable call) {
         for (int attempt = 0; ; attempt++) {
             try {
                 call.run();
@@ -458,16 +636,16 @@ public class InternalPropertyTest {
                     throw e;
                 }
                 // the guard may be open after repeated faults: wait for its probe
-                pause(attempt < 3 ? 1 : 200);
+                idle(Duration.ofMillis(attempt < 3 ? 1 : 200));
             }
         }
     }
 
     private @Nullable String readSource(String key) {
-        LockSupport.parkNanos(ThreadLocalRandom.current().nextLong(SOURCE_LATENCY_NANOS));
+        latency(SOURCE_LATENCY_NANOS);
         String value = source.get(key);
         trace("loader reads " + key + " = " + value);
-        LockSupport.parkNanos(ThreadLocalRandom.current().nextLong(SOURCE_LATENCY_NANOS));
+        latency(SOURCE_LATENCY_NANOS);
         return value;
     }
 
@@ -497,7 +675,7 @@ public class InternalPropertyTest {
                     result.put(key, value);
                 }
             }
-            String extra = key(ThreadLocalRandom.current().nextInt(KEYS));
+            String extra = key((simulation == null ? ThreadLocalRandom.current() : choices).nextInt(KEYS));
             String value = readSource(extra);
             if (value != null) {
                 result.putIfAbsent(extra, value);
@@ -506,13 +684,19 @@ public class InternalPropertyTest {
         }
     }
 
-    // the reference store with all its faults
+    // the reference store with all its faults, under the profile of the system property with its clock (the system's,
+    // in its unit), and the faults the profile allows that the oracles hold under: the clock stepping back within its
+    // allowance, other writes landing between the rows of a read, batches applied in part. The events that lose what
+    // the oracles ask for, a failover, an eviction or a message lost silently, are tested on their own
+    // (InternalStoreProfileTest)
     // polling: stores without a change feed, which the core polls (VISION.md, "The polling feed"); idle once every
     // store began two scans after the last heal, the second one after everything written before it
     private static final class InMemoryBackend implements PropertyBackend {
 
         private final InMemoryDatabase database;
         private final boolean polling;
+        // the deterministic mode's simulation, null in the threaded mode
+        private final @Nullable SimulatedEnvironment simulation;
         private final List<ScanOnlyStore> scanning = new java.util.concurrent.CopyOnWriteArrayList<>();
         private final Map<ScanOnlyStore, Long> scansAtHeal = new ConcurrentHashMap<>();
 
@@ -521,9 +705,33 @@ public class InternalPropertyTest {
         }
 
         InMemoryBackend(long seed, boolean polling) {
-            this.database = new InMemoryDatabase(() -> TimeUnit.MILLISECONDS.toMicros(System.currentTimeMillis()),
-                    seed);
+            this.database = new InMemoryDatabase(() -> ChronoUnit.MICROS.between(Instant.EPOCH, Instant.now()), seed,
+                    StoreProfile.ofProperty());
             this.polling = polling;
+            this.simulation = null;
+        }
+
+        // on the simulation, under the given profile: the store's clock and its deliveries; polled where the profile has
+        // no feed. The clock follows the simulated time in microseconds
+        // and moves at least a microsecond per reading, as a real one moves between two writes: the simulated time
+        // stands still within a step, and writes stamped equal to an invalidateAll's control row would be hidden by
+        // it (found: most seeds failed so, a confirmed write hidden)
+        InMemoryBackend(long seed, StoreProfile profile, SimulatedEnvironment simulation) {
+            java.util.concurrent.atomic.AtomicLong last = new java.util.concurrent.atomic.AtomicLong();
+            this.database = new InMemoryDatabase(() -> last.updateAndGet(previous -> Math.max(previous + 1,
+                    simulation.currentTimeMillis() * 1_000 + simulation.nanoTime() / 1_000 % 1_000)), seed, profile);
+            this.database.simulate(simulation.forDatabase());
+            this.polling = false;
+            this.simulation = simulation;
+        }
+
+        // a fault held a moment: real time in the threaded mode, simulated in the deterministic one
+        private void holdBriefly() {
+            if (simulation == null) {
+                pause(5);
+            } else {
+                simulation.advance(Duration.ofMillis(5));
+            }
         }
 
         @Override
@@ -531,7 +739,7 @@ public class InternalPropertyTest {
             if (!polling) {
                 return database.openStore("cache");
             }
-            ScanOnlyStore store = new ScanOnlyStore(database.openStore("cache"));
+            ScanOnlyStore store = new ScanOnlyStore(database.openFeed("cache"));
             scanning.add(store);
             return store;
         }
@@ -543,11 +751,32 @@ public class InternalPropertyTest {
             database.setDuplicateProbability(random.nextDouble() < 0.3 ? 0.3 : 0);
             database.setDeliveryDelay(random.nextDouble() < 0.3 ? Duration.ofMillis(2) : Duration.ZERO);
             database.setCommitDelay(random.nextDouble() < 0.3 ? Duration.ofMillis(1) : Duration.ZERO, 0.3);
-            pause(random.nextInt(5));
+            StoreProfile profile = database.profile();
+            if (!profile.snapshotReads() && simulation == null) {
+                // a read row by row: other writes get a chance to land between its rows
+                database.setBetweenRows(() -> LockSupport.parkNanos(ThreadLocalRandom.current().nextLong(50_000)));
+            }
+            // a moment for the instances to go on, in the threaded mode; none in the deterministic one, where the
+            // time moving would deliver what the step before wrote, and a gap would then lose nothing (found: a gap
+            // not revalidating survived 1,000 seeds)
+            int moment = random.nextInt(5);
+            if (simulation == null) {
+                pause(moment);
+            }
+            if (!profile.clockStepBack().isZero() && random.nextDouble() < 0.3) {
+                // within its allowance, while the instances work: also under writes concurrent with an invalidateAll
+                long micros = 1L + random.nextInt((int) (profile.clockStepBack().toNanos() / 1_000));
+                trace.accept("FAULT clock steps back " + micros + " us");
+                database.stepClockBack(Duration.ofNanos(micros * 1_000));
+            }
+            if (profile.batch() == StoreProfile.Batch.PER_ROW && random.nextDouble() < 0.2) {
+                trace.accept("FAULT next batch applies in part");
+                database.failNextWritesPartly(1);
+            }
             if (choice < 0.15) {
                 trace.accept("FAULT pause delivery");
                 database.pauseDelivery();
-                pause(5);
+                holdBriefly();
                 database.resumeDelivery();
                 trace.accept("FAULT resume delivery");
             } else if (choice < 0.30) {
@@ -557,7 +786,7 @@ public class InternalPropertyTest {
                 boolean deliverMissed = random.nextBoolean();
                 trace.accept("FAULT interrupt");
                 database.interruptSubscriptions();
-                pause(5);
+                holdBriefly();
                 database.resumeSubscriptions(deliverMissed);
                 trace.accept("FAULT resume, missed delivered " + deliverMissed);
             } else if (choice < 0.55) {
@@ -575,6 +804,7 @@ public class InternalPropertyTest {
             scanning.forEach(store -> scansAtHeal.put(store, store.scans()));
             database.failNextWrites(0, false);
             database.failNextReads(0);
+            database.failNextWritesPartly(0);
             database.resumeDelivery();
             database.resumeSubscriptions(true);
             database.setDuplicateProbability(0);
@@ -624,7 +854,7 @@ public class InternalPropertyTest {
         }
 
         private <T> T slow(String call, Supplier<T> action) {
-            LockSupport.parkNanos(ThreadLocalRandom.current().nextLong(STORE_LATENCY_NANOS));
+            latency(STORE_LATENCY_NANOS);
             T result;
             try {
                 result = action.get();
@@ -633,7 +863,7 @@ public class InternalPropertyTest {
                 throw e;
             }
             trace(label + " " + call + " -> " + describe(result));
-            LockSupport.parkNanos(ThreadLocalRandom.current().nextLong(STORE_LATENCY_NANOS));
+            latency(STORE_LATENCY_NANOS);
             return result;
         }
 
@@ -664,11 +894,11 @@ public class InternalPropertyTest {
         }
 
         @Override
-        public Set<String> write(Collection<Write> writes) {
+        public WriteResult write(Collection<Write> writes) {
             return slow("write " + writes.stream().map(write -> keysByHash.getOrDefault(write.hash(), "?") + "="
                     + (write.value() == null ? "TOMBSTONE"
                     : new String(write.value(), java.nio.charset.StandardCharsets.UTF_8)) + "@" + write.version()
-                    + (write.isUnconditional() ? "" : " if " + (write.expectsMissing() ? "missing" : write.expected())))
+                    + (write.isAdvance() ? "" : " if " + (write.expectsMissing() ? "missing" : write.expected())))
                     .toList(), () -> super.write(writes));
         }
 

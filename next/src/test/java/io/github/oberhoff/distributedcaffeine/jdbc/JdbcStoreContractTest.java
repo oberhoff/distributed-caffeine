@@ -17,12 +17,14 @@ package io.github.oberhoff.distributedcaffeine.jdbc;
 
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreContractTest;
+import org.jspecify.annotations.NullMarked;
 
 /**
  * The store contract on the plain JDBC adapter over MariaDB: the generic store built from its primitives, a fresh table
  * per test, another cache as another discriminator in it.
  */
-class JdbcStoreContractTest extends StoreContractTest {
+@NullMarked
+abstract class JdbcStoreContractTest extends StoreContractTest {
 
     @Override
     protected Fixture createFixture() {
@@ -30,12 +32,18 @@ class JdbcStoreContractTest extends StoreContractTest {
         return new Fixture() {
             @Override
             public Store openStore() {
-                return JdbcTestDatabase.open(table, JdbcAdapter.DEFAULT_DISCRIMINATOR);
+                return JdbcTestDatabase.open(table, JdbcTestDatabase.DEFAULT_DISCRIMINATOR);
             }
 
             @Override
             public Store openStoreOfAnotherCache() {
                 return JdbcTestDatabase.open(table, "other");
+            }
+
+            // maintenance row by row, every change a primitive of its own (PrimitiveStore)
+            @Override
+            public boolean keepsLimit() {
+                return false;
             }
         };
     }

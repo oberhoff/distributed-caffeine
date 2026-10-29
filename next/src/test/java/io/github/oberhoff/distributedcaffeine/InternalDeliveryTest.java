@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import io.github.oberhoff.distributedcaffeine.spi.Change;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayDeque;
@@ -31,6 +32,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * A cache's delivery queue: in order, batched, and bounded; a cache that falls too far behind revalidates instead
  * of queueing without bound.
  */
+@NullMarked
 class InternalDeliveryTest {
 
     // runs what is handed to it only when asked: a store executor too busy to drain meanwhile

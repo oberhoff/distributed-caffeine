@@ -46,7 +46,7 @@ final class InternalSerializer<T> {
         if (serializer instanceof ByteArraySerializer) {
             return new InternalSerializer<>(serializer, Format.BINARY);
         }
-        if (serializer instanceof JsonSerializer<?> json && json.storeAsBinaryJson()) {
+        if (serializer instanceof JsonSerializer<?> json && json.storeAsNativeJson()) {
             return new InternalSerializer<>(serializer, Format.JSON);
         }
         if (serializer instanceof StringSerializer) {

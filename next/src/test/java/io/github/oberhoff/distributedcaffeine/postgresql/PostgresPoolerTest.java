@@ -20,6 +20,7 @@ import com.zaxxer.hikari.HikariDataSource;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -36,6 +37,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * pooler lends its server session only for a transaction, and a data source in statement mode cannot run the
  * adapter's transactions: both fail the build, naming the cause.
  */
+@NullMarked
 @Timeout(120)
 abstract class PostgresPoolerTest {
 

@@ -57,6 +57,8 @@ public @interface Suite {
         FAILOVER(false),
         /** A sharded cluster. */
         SHARDING(false),
+        /** A MongoDB server that is no replica set, refused at start. */
+        STANDALONE(false),
         /** A MongoDB oplog rolling over behind the change stream. */
         OPLOG(false),
         /** A full PostgreSQL notification queue. */

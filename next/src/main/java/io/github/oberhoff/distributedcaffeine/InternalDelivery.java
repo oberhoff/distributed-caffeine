@@ -136,42 +136,54 @@ final class InternalDelivery implements ChangeListener {
         return merged;
     }
 
-    @SuppressWarnings("unchecked")
     private void drain() {
         try {
-            while (!closed) {
-                if (overflowed.getAndSet(false)) {
-                    try {
-                        dropPending();
-                    } catch (RuntimeException e) {
-                        onGap.run();
-                    }
-                    continue;
-                }
-                Object item = queue.poll();
-                if (item == null) {
-                    break;
-                }
-                try {
-                    if (item instanceof Marker marker) {
-                        switch (marker) {
-                            case GAP -> onGap.run();
-                            case LOST -> onLost.run();
-                        }
-                    } else {
-                        List<Change> messages = (List<Change>) item;
-                        pending.addAndGet(-messages.size());
-                        onMessages.accept(merged(messages));
-                    }
-                } catch (RuntimeException e) {
-                    onGap.run();
-                }
+            boolean more = true;
+            while (!closed && more) {
+                more = drainOne();
             }
         } finally {
             draining.set(false);
         }
         if (!closed && (!queue.isEmpty() || overflowed.get())) {
             schedule();
+        }
+    }
+
+    // one step of draining: an overflow handled, or one item delivered; false once the queue is empty. A listener
+    // failing is reported as a gap
+    private boolean drainOne() {
+        if (overflowed.getAndSet(false)) {
+            try {
+                dropPending();
+            } catch (RuntimeException e) {
+                onGap.run();
+            }
+            return true;
+        }
+        Object item = queue.poll();
+        if (item == null) {
+            return false;
+        }
+        try {
+            deliver(item);
+        } catch (RuntimeException e) {
+            onGap.run();
+        }
+        return true;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void deliver(Object item) {
+        if (item instanceof Marker marker) {
+            switch (marker) {
+                case GAP -> onGap.run();
+                case LOST -> onLost.run();
+            }
+        } else {
+            List<Change> messages = (List<Change>) item;
+            pending.addAndGet(-messages.size());
+            onMessages.accept(merged(messages));
         }
     }
 }

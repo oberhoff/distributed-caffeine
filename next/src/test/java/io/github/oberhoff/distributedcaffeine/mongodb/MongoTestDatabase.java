@@ -20,6 +20,7 @@ import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoDatabase;
 import org.bson.Document;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
@@ -45,9 +46,11 @@ import static java.util.Objects.requireNonNull;
  *     change stream through the router delivers an event only once every shard moved past it, and an idle shard
  *     moves on only by its periodic no-op (every 10 s by default);</li>
  *     <li>single-node replica set with a small oplog: 1 MB, truncated as soon as MongoDB can (a checkpoint every
- *     second, and from MongoDB 5.0 no snapshot history kept).</li>
+ *     second, and from MongoDB 5.0 no snapshot history kept);</li>
+ *     <li>standalone server: a plain {@code mongod}, no replica set, which the adapter refuses.</li>
  * </ul>
  */
+@NullMarked
 final class MongoTestDatabase implements AutoCloseable {
 
     private static final AtomicInteger COLLECTIONS = new AtomicInteger();
@@ -121,6 +124,18 @@ final class MongoTestDatabase implements AutoCloseable {
                 client = MongoClients.create("mongodb://" + host + ":" + port + "/?directConnection=true");
                 initiate(client.getDatabase("admin"), new Document("_id", "rs0")
                         .append("members", List.of(new Document("_id", 0).append("host", "localhost:27017"))));
+            }
+            case STANDALONE_SERVER -> {
+                network = null;
+                replicaSet = null;
+                GenericContainer<?> container = new GenericContainer<>(image)
+                        .withExposedPorts(27017)
+                        .waitingFor(Wait.forLogMessage("(?is).*waiting for connections.*", 1));
+                containers.add(container);
+                container.start();
+                host = container.getHost();
+                port = container.getMappedPort(27017);
+                client = MongoClients.create("mongodb://" + host + ":" + port);
             }
             default -> throw new IllegalStateException(topology + " is no MongoDB topology");
         }

@@ -16,10 +16,12 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import org.jetbrains.lincheck.datastructures.Operation;
+import org.jspecify.annotations.NullMarked;
 
 /**
  * Linearizability of one instance on one key, with {@code invalidateAll}: on one key it must be atomic.
  */
+@NullMarked
 public class InternalLinearizabilityInvalidateAllTest extends AbstractLinearizabilityTest {
 
     @Override

@@ -43,8 +43,9 @@ import static java.util.Objects.requireNonNull;
  * The contract, checked through {@code StoreContractTest} and {@code ChangeScanContractTest} on the
  * implementation:
  * <ol>
- *     <li><b>Versions by the core:</b> every write stores the version it is given; conditions compare the stored
- *     version with the expected one for equality, nothing else (no {@code +1}, no start value, no order).</li>
+ *     <li><b>Versions by the core:</b> every write stores the version it is given, and a row's version only grows:
+ *     an advancing write applies only over a smaller one; conditions compare the stored version with the expected one
+ *     for equality (no {@code +1}, no start value).</li>
  *     <li><b>Write time by the store:</b> every write sets the row's write time on the store's clock; a read or a
  *     scan returns every row's age measured at one instant, so that the ages of one read or scan compare like the
  *     times of the writes.</li>
@@ -69,16 +70,17 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
     protected abstract Map<String, Row> readRows(Collection<String> hashes);
 
     /**
-     * Writes a row whatever it holds: a new one, or the next state of the existing one.
+     * Writes a row only if none exists or its version is smaller than the given one (the version only grows).
      *
      * @param hash    the hash
      * @param key     the key, as written; {@code null} keeps the row's key (a tombstone), or stores none for a new row
      * @param value   the value, {@code null} unless the state is {@link State#VALUE}
      * @param state   the state
      * @param version the version the row gets
+     * @return whether it was written; {@code false} if the row has a version at least as large
      */
-    protected abstract void upsertRow(String hash, byte @Nullable [] key, byte @Nullable [] value, State state,
-                                      long version);
+    protected abstract boolean advanceRow(String hash, byte @Nullable [] key, byte @Nullable [] value, State state,
+                                          long version);
 
     /**
      * Writes a row only if it still has the expected version.
@@ -136,6 +138,7 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
     // reads: every row as it is; which ones the control row hides is the core's to decide
 
     @Override
+    @SuppressWarnings("java:S4449") // the value is a nullable array (byte @Nullable []), which Sonar does not read
     public Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
         Map<String, Row> found = readRows(hashes);
         Map<String, Row> result = new LinkedHashMap<>();
@@ -170,40 +173,48 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
     // outcome unknown
 
     @Override
-    public Set<String> write(Collection<Write> writes) {
+    public WriteResult write(Collection<Write> writes) {
         List<Write> ordered = new ArrayList<>(writes);
         ordered.sort(Comparator.comparing(Write::hash));
         Set<String> conflicts = new LinkedHashSet<>();
         for (int i = 0; i < ordered.size(); i++) {
             Write write = ordered.get(i);
-            State state = write.isTombstone() ? State.TOMBSTONE : State.VALUE;
             try {
-                if (write.isUnconditional()) {
-                    upsertRow(write.hash(), write.key(), write.value(), state, write.version());
-                } else if (!(write.expectsMissing()
-                        ? insertRow(write.hash(), write.version(), write.key(), write.value(), state)
-                        : replaceRow(write.hash(), write.expected(), write.version(), write.key(), write.value(),
-                        state))) {
+                if (!applied(write)) {
                     conflicts.add(write.hash());
                 }
             } catch (StoreException e) {
                 throw i == 0 ? e : e.afterPartlyApplied();
             }
         }
-        return conflicts;
+        return WriteResult.refused(conflicts);
+    }
+
+    // one write by the primitive of its condition: false if the condition refused it
+    private boolean applied(Write write) {
+        State state = write.isTombstone() ? State.TOMBSTONE : State.VALUE;
+        if (write.isAdvance()) {
+            return advanceRow(write.hash(), write.key(), write.value(), state, write.version());
+        }
+        if (write.expectsMissing()) {
+            return insertRow(write.hash(), write.version(), write.key(), write.value(), state);
+        }
+        return replaceRow(write.hash(), write.expected(), write.version(), write.key(), write.value(), state);
     }
 
     // maintenance: one scan each, so that every age compares with the control row's; every change conditional on the
-    // version scanned, so instances running it at once change each row once. Reserved rows are never touched
+    // version scanned, so instances running it at once change each row once. Reserved rows are never touched. The
+    // limit is not kept: every change here is a primitive of its own already (no statement grows with the cache), and
+    // stopping at it would scan every row again for each batch
 
     @Override
-    public int expire(Duration maxAge, long version) {
+    public int expire(Duration maxAge, long version, int limit) {
         List<Head> heads = scanRows();
         Duration cutoff = cutoff(heads);
         int expired = 0;
         for (Head head : heads) {
-            if (head.state() == State.VALUE && !reserved(head) && !hidden(head, cutoff)
-                    && !younger(head.age(), maxAge)
+            if (head.state() == State.VALUE && maintained(head) && !hidden(head, cutoff)
+                    && !younger(head.age(), maxAge) && head.version() < version
                     && replaceRow(head.hash(), head.version(), version, null, null, State.EXPIRED)) {
                 expired++;
             }
@@ -212,20 +223,19 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
     }
 
     // keeps the newest maxSize values not hidden (ties by id); the rows beyond that rank are the same for every
-    // instance pruning at once
+    // instance pruning at once; of those, the ones younger than the minimum age stay
     @Override
-    public int pruneToSize(long maxSize) {
+    public int pruneToSize(long maxSize, Duration minAge, int limit) {
         List<Head> heads = scanRows();
         Duration cutoff = cutoff(heads);
-        List<Head> values = new ArrayList<>();
-        for (Head head : heads) {
-            if (head.state() == State.VALUE && !reserved(head) && !hidden(head, cutoff)) {
-                values.add(head);
-            }
-        }
-        values.sort(Comparator.comparing(Head::age).thenComparing(Head::hash));
+        List<Head> values = heads.stream()
+                .filter(head -> head.state() == State.VALUE && maintained(head) && !hidden(head, cutoff))
+                .sorted(Comparator.comparing(Head::age).thenComparing(Head::hash)).toList();
         int pruned = 0;
         for (int i = (int) Math.min(Integer.MAX_VALUE, maxSize); i < values.size(); i++) {
+            if (younger(values.get(i).age(), minAge)) {
+                continue;
+            }
             if (deleteRow(values.get(i).hash(), values.get(i).version())) {
                 pruned++;
             }
@@ -235,13 +245,13 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
 
     // rows hidden by the control row go at once, without a grace period: they count as missing already
     @Override
-    public int pruneTombstones(Duration retention) {
+    public int pruneTombstones(Duration retention, int limit) {
         List<Head> heads = scanRows();
         Duration cutoff = cutoff(heads);
         int pruned = 0;
         for (Head head : heads) {
             boolean doomed = hidden(head, cutoff) || (head.state() != State.VALUE && !younger(head.age(), retention));
-            if (!reserved(head) && doomed && deleteRow(head.hash(), head.version())) {
+            if (maintained(head) && doomed && deleteRow(head.hash(), head.version())) {
                 pruned++;
             }
         }
@@ -252,15 +262,11 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
 
     @Override
     public List<Change> changedWithin(Duration within) {
-        List<Change> changes = new ArrayList<>();
-        for (Head head : scanRowsWrittenWithin(within)) {
-            changes.add(new Change(switch (head.state()) {
-                case VALUE -> Change.Kind.WRITTEN;
-                case TOMBSTONE -> Change.Kind.INVALIDATED;
-                case EXPIRED -> Change.Kind.EXPIRED;
-            }, head.hash(), head.version()));
-        }
-        return changes;
+        return scanRowsWrittenWithin(within).stream().map(head -> new Change(switch (head.state()) {
+            case VALUE -> Change.Kind.WRITTEN;
+            case TOMBSTONE -> Change.Kind.INVALIDATED;
+            case EXPIRED -> Change.Kind.EXPIRED;
+        }, head.hash(), head.version())).toList();
     }
 
     // helpers
@@ -277,11 +283,12 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
 
     // written at or before the control row: at least as old as it, by the same scan's clock
     private static boolean hidden(Head head, @Nullable Duration cutoff) {
-        return cutoff != null && !reserved(head) && head.age().compareTo(cutoff) >= 0;
+        return cutoff != null && maintained(head) && head.age().compareTo(cutoff) >= 0;
     }
 
-    private static boolean reserved(Head head) {
-        return head.hash().startsWith("#");
+    // an ordinary row: maintenance leaves reserved rows ('#') alone
+    private static boolean maintained(Head head) {
+        return !head.hash().startsWith("#");
     }
 
     private static boolean younger(Duration age, Duration maxAge) {

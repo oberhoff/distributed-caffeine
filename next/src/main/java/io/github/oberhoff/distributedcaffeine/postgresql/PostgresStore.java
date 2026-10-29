@@ -25,6 +25,7 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import org.jspecify.annotations.Nullable;
 import org.postgresql.PGConnection;
 
@@ -54,8 +55,11 @@ import java.util.WeakHashMap;
 /**
  * The store of one cache instance on PostgreSQL (VISION.md, "PostgreSQL: statements and propagation measured"). Every
  * write is one statement that writes and notifies ({@code pg_notify} over the rows a CTE returns), so a notification
- * exists exactly when the write committed. Versions are the core's: a row gets the version its write carries, and a
- * conditional write compares the stored one for equality, nothing else.
+ * exists exactly when the write committed. Versions are the store's own (VISION.md, "Target design: versions applied as
+ * well as each store can", point 6): every write takes the next value of the table's sequence, or one above the stored
+ * version where that is larger, the version proposed ignored; written back to the core with the result. The sequence
+ * is drawn by every write, so it lies above every version of the table: a row created anew (its tombstone deleted)
+ * starts above whatever an instance still holds of it, and no clock, of an instance or the server, reaches a row.
  * Batches are written in the order of their hashes, so concurrent batches lock rows in the same order.
  * <p>
  * Failures (VISION.md, "Write retries"): one attempt each, classified for the core, which retries: a statement the
@@ -73,6 +77,9 @@ final class PostgresStore implements Store, ChangeFeed {
     // the same instant and the core can compare them (with the control row's, Store#CONTROL_HASH)
     private static final String AGE_MICROS = "(extract(epoch from (now() - write_time)) * 1000000)::bigint";
     private static final String YOUNGER = "write_time > now() - (?::bigint * interval '1 microsecond')";
+    // the same two on the row of a lookup, aliased r
+    private static final String ROW_AGE_MICROS = AGE_MICROS.replace("write_time", "r.write_time");
+    private static final String ROW_YOUNGER = YOUNGER.replace("write_time", "r.write_time");
     // the core's reserved rows (Store#CONTROL_HASH, the heartbeat's): never touched by maintenance
     private static final String NOT_RESERVED = "left(r.id, 1) <> '#'";
     // physical connections checked for not being a standby, once each (weakly held, as the pool's connections come
@@ -81,6 +88,10 @@ final class PostgresStore implements Store, ChangeFeed {
 
     private enum Kind {
         READ, WRITE
+    }
+
+    // what a maintenance batch changed, and where it ended (its cursor)
+    private record Batch<C>(int changed, @Nullable C last) {
     }
 
     private interface Work<T> {
@@ -92,6 +103,14 @@ final class PostgresStore implements Store, ChangeFeed {
     private final PostgresTable table;
     private final Duration timeout;
     private final String t;
+    // where the last full batch of expire (a write time, in microseconds since 1970) and of pruneTombstones (an id)
+    // ended, so that the next batch starts there instead of reading past the dead index entries the batches before
+    // left behind (until vacuum): from the start each time, a million rows took 30 and 27 s in batches of 10,000,
+    // against 9 and 3 s in one statement (VISION.md, "Maintenance in paced batches"). Null after a batch that was not
+    // full, so a run starts over and finds what a batch skipped (rows locked meanwhile). Only the core's maintenance
+    // calls them, one batch at a time
+    private volatile @Nullable Long expireCursor;
+    private volatile @Nullable String pruneCursor;
 
     PostgresStore(DataSource dataSource, DataSource listenerDataSource, PostgresTable table, Duration timeout) {
         this.dataSource = dataSource;
@@ -119,17 +138,16 @@ final class PostgresStore implements Store, ChangeFeed {
     // conflicts)
     @Override
     public Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
+        String sql = """
+                SELECT r.id, r.key, r.value,
+                    CASE WHEN r.state = 'VALUE' AND NOT (%s) THEN 'EXPIRED' ELSE r.state END,
+                    r.version, %s
+                FROM unnest(?::text[]) AS i (id)
+                    CROSS JOIN LATERAL (SELECT * FROM %s AS r WHERE r.discriminator = ? AND r.id = i.id
+                        LIMIT 1) AS r""".formatted(ROW_YOUNGER, ROW_AGE_MICROS, t);
         return run(Kind.READ, connection -> {
             Map<String, Row> rows = new LinkedHashMap<>();
-            try (PreparedStatement statement = connection.prepareStatement("""
-                    SELECT r.id, r.key, r.value,
-                        CASE WHEN r.state = 'VALUE' AND NOT (%s) THEN 'EXPIRED' ELSE r.state END,
-                        r.version, %s
-                    FROM unnest(?::text[]) AS i (id)
-                        CROSS JOIN LATERAL (SELECT * FROM %s AS r WHERE r.discriminator = ? AND r.id = i.id
-                            LIMIT 1) AS r"""
-                    .formatted(YOUNGER.replace("write_time", "r.write_time"),
-                            AGE_MICROS.replace("write_time", "r.write_time"), t))) {
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setLong(1, micros(maxAge));
                 statement.setArray(2, connection.createArrayOf("text", hashes.toArray()));
                 statement.setString(3, table.discriminator);
@@ -153,16 +171,15 @@ final class PostgresStore implements Store, ChangeFeed {
 
     @Override
     public VersionsResult readVersions(Collection<String> hashes, Duration maxAge) {
+        String sql = """
+                SELECT r.id, r.version, %s
+                FROM unnest(?::text[]) AS i (id)
+                    CROSS JOIN LATERAL (SELECT * FROM %s AS r WHERE r.discriminator = ? AND r.id = i.id
+                        AND r.state = 'VALUE' AND %s LIMIT 1) AS r""".formatted(ROW_AGE_MICROS, t, ROW_YOUNGER);
         return run(Kind.READ, connection -> {
             Map<String, Long> versions = new LinkedHashMap<>();
             Map<String, Duration> ages = new LinkedHashMap<>();
-            try (PreparedStatement statement = connection.prepareStatement("""
-                    SELECT r.id, r.version, %s
-                    FROM unnest(?::text[]) AS i (id)
-                        CROSS JOIN LATERAL (SELECT * FROM %s AS r WHERE r.discriminator = ? AND r.id = i.id
-                            AND r.state = 'VALUE' AND %s LIMIT 1) AS r"""
-                    .formatted(AGE_MICROS.replace("write_time", "r.write_time"), t,
-                            YOUNGER.replace("write_time", "r.write_time")))) {
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setArray(1, connection.createArrayOf("text", hashes.toArray()));
                 statement.setString(2, table.discriminator);
                 statement.setLong(3, micros(maxAge));
@@ -180,114 +197,164 @@ final class PostgresStore implements Store, ChangeFeed {
     // writes
 
     /**
-     * Every kind of write in one statement per chunk, so that a batch mixing them is one round trip: unconditional
-     * ones as an upsert (a), those conditioned on a version as an update matching it (u), those conditioned on no
-     * row as an insert doing nothing on a conflict (n); each one atomic step per key, in the order of the hashes. A
-     * tombstone keeps the row's key ({@code coalesce}), and has none where no row existed. The write time is the
-     * server's now(), which the control row's (Store#CONTROL_HASH) is compared with. Every row written is announced at
-     * its version in the same statement; the ids not returned conflicted.
+     * Every kind of write in one statement per chunk, so that a batch mixing them is one round trip: advancing ones as
+     * an upsert (a: never refused), those conditioned on a version as an update matching it (u), those conditioned on
+     * no row as an insert doing nothing on a conflict (n); each one atomic step per key, in the order of the hashes.
+     * Each applies at a version assigned under the row's lock, {@code GREATEST(stored + 1, nextval())}: the sequence
+     * alone where the store numbered every version, one above the stored one only over a row of a larger version
+     * (written by hand, or by a sequence set back). A tombstone keeps the row's key ({@code coalesce}), and has none
+     * where no row existed. The write time is the server's now(), which the control row's (Store#CONTROL_HASH) is
+     * compared with. Every row written is announced at its version in the same statement and returned with it; the ids
+     * not returned conflicted.
      */
     @Override
-    public Set<String> write(Collection<Write> writes) {
+    public WriteResult write(Collection<Write> writes) {
         Map<String, Write> byHash = new TreeMap<>();
         writes.forEach(write -> byHash.put(write.hash(), write));
         Set<String> conflicts = new LinkedHashSet<>();
+        Map<String, Long> assigned = new LinkedHashMap<>();
         boolean applied = false;
         try {
             for (List<Write> chunk : chunks(new ArrayList<>(byHash.values()))) {
                 String sql = """
-                        WITH i (id, key, value, version, expected) AS (VALUES %1$s),
+                        WITH i (id, key, value, expected) AS (VALUES %1$s),
                         a AS (
                             INSERT INTO %2$s AS r (discriminator, id, key, value, state, version, write_time)
-                            SELECT ?, i.id, i.key, i.value, %3$s, i.version, now() FROM i
+                            SELECT ?, i.id, i.key, i.value, %3$s, %6$s, now() FROM i
                             WHERE i.expected = %4$d
                             ORDER BY i.id
                             ON CONFLICT (discriminator, id) DO UPDATE SET key = coalesce(excluded.key, r.key),
-                                value = excluded.value, state = excluded.state, version = excluded.version,
-                                write_time = excluded.write_time
+                                value = excluded.value, state = excluded.state,
+                                version = GREATEST(r.version + 1, %6$s), write_time = excluded.write_time
                             RETURNING r.id, r.version, r.state),
                         u AS (
                             UPDATE %2$s AS r SET key = coalesce(i.key, r.key), value = i.value, state = %3$s,
-                                version = i.version, write_time = now()
+                                version = GREATEST(r.version + 1, %6$s), write_time = now()
                             FROM i WHERE r.discriminator = ? AND r.id = i.id AND i.expected > %4$d
                                 AND r.version = i.expected
                             RETURNING r.id, r.version, r.state),
                         n AS (
                             INSERT INTO %2$s AS r (discriminator, id, key, value, state, version, write_time)
-                            SELECT ?, i.id, i.key, i.value, %3$s, i.version, now() FROM i
+                            SELECT ?, i.id, i.key, i.value, %3$s, %6$s, now() FROM i
                             WHERE i.expected = %5$d
                             ORDER BY i.id
                             ON CONFLICT (discriminator, id) DO NOTHING
                             RETURNING r.id, r.version, r.state),
                         w AS (SELECT * FROM a UNION ALL SELECT * FROM u UNION ALL SELECT * FROM n)
-                        SELECT w.id, pg_notify(?, CASE WHEN w.state = 'VALUE' THEN 'WRITTEN|' ELSE 'INVALIDATED|' END
-                            || w.id || '|' || w.version) FROM w"""
-                        .formatted(rows(chunk.size(), "(?::text, ?::%s, ?::%s, ?::bigint, ?::bigint)"), t,
-                                "CASE WHEN i.value IS NULL THEN 'TOMBSTONE' ELSE 'VALUE' END", Write.ANY,
-                                Write.MISSING);
-                Set<String> written = run(Kind.WRITE, connection -> {
+                        SELECT w.id, w.version, pg_notify(?, CASE WHEN w.state = 'VALUE' THEN 'WRITTEN|'
+                            ELSE 'INVALIDATED|' END || w.id || '|' || w.version) FROM w"""
+                        .formatted(rows(chunk.size()), t,
+                                "CASE WHEN i.value IS NULL THEN 'TOMBSTONE' ELSE 'VALUE' END", Write.ADVANCE,
+                                Write.MISSING, table.nextVersion());
+                Map<String, Long> written = run(Kind.WRITE, connection -> {
                     try (PreparedStatement statement = connection.prepareStatement(sql)) {
                         int index = bindWrites(statement, chunk);
                         statement.setString(index++, table.discriminator);
                         statement.setString(index++, table.discriminator);
                         statement.setString(index++, table.discriminator);
                         statement.setString(index, table.channel);
-                        return ids(statement);
+                        return versions(statement);
                     }
                 });
                 applied = true;
                 for (Write write : chunk) {
-                    if (!written.contains(write.hash())) {
+                    Long version = written.get(write.hash());
+                    if (version == null) {
                         conflicts.add(write.hash());
+                    } else if (version != write.version()) {
+                        assigned.put(write.hash(), version);
                     }
                 }
             }
         } catch (StoreException e) {
             throw applied ? e.afterPartlyApplied() : e;
         }
-        return conflicts;
+        return new WriteResult(conflicts, assigned);
     }
 
     // maintenance: idempotent on several instances at once
 
     // neither reserved rows nor rows the control row hides (they count as missing already, and pruneTombstones deletes
-    // them)
+    // them); each expiry assigned a version as a write is, the given one ignored. At most the limit, by the maintenance
+    // index; rows another instance expires (or a write changes) at the same moment are skipped, not waited for: they
+    // are expired by it, or by the next batch
     @Override
-    public int expire(Duration maxAge, long version) {
+    public int expire(Duration maxAge, long version, int limit) {
         String sql = """
-                WITH w AS (
-                    UPDATE %s AS r SET value = NULL, state = 'EXPIRED', version = ?, write_time = now()
+                WITH d AS (
+                    SELECT r.id, (extract(epoch from r.write_time) * 1000000)::bigint AS micros FROM %1$s AS r
                     WHERE r.discriminator = ? AND r.state = 'VALUE'
-                        AND r.write_time <= now() - (?::bigint * interval '1 microsecond') AND %s AND %s
+                        AND r.write_time <= now() - (?::bigint * interval '1 microsecond') AND %3$s AND %4$s
+                        AND (?::bigint IS NULL
+                            OR r.write_time >= timestamptz 'epoch' + ?::bigint * interval '1 microsecond')
+                    ORDER BY r.write_time LIMIT ? FOR UPDATE OF r SKIP LOCKED),
+                w AS (
+                    UPDATE %1$s AS r SET value = NULL, state = 'EXPIRED', version = GREATEST(r.version + 1, %2$s),
+                        write_time = now()
+                    FROM d WHERE r.discriminator = ? AND r.id = d.id
                     RETURNING r.id, r.version)
-                SELECT w.id, w.version, pg_notify(?, 'EXPIRED|' || w.id || '|' || w.version) FROM w"""
-                .formatted(t, NOT_RESERVED, notHidden());
-        return run(Kind.WRITE, connection -> {
+                SELECT w.id, w.version, pg_notify(?, 'EXPIRED|' || w.id || '|' || w.version), max(d.micros) OVER ()
+                FROM w JOIN d ON d.id = w.id"""
+                .formatted(t, table.nextVersion(), NOT_RESERVED, notHidden());
+        Long cursor = expireCursor;
+        expireCursor = null; // kept only by a full batch, once committed
+        Batch<Long> batch = run(Kind.WRITE, connection -> {
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
-                statement.setLong(1, version);
-                statement.setString(2, table.discriminator);
-                statement.setLong(3, micros(maxAge));
-                statement.setString(4, table.discriminator);
-                statement.setString(5, table.channel);
-                return ids(statement).size();
+                statement.setString(1, table.discriminator);
+                statement.setLong(2, micros(maxAge));
+                statement.setString(3, table.discriminator);
+                setNullableLong(statement, 4, cursor);
+                setNullableLong(statement, 5, cursor);
+                statement.setInt(6, limit);
+                statement.setString(7, table.discriminator);
+                statement.setString(8, table.channel);
+                int expired = 0;
+                long last = 0;
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    while (resultSet.next()) {
+                        expired++;
+                        last = resultSet.getLong(4);
+                    }
+                }
+                return new Batch<>(expired, last);
             }
         });
+        if (batch.changed() >= limit) {
+            expireCursor = batch.last();
+        }
+        return batch.changed();
     }
 
-    // keeps the newest maxSize values (ties by hash), counting neither reserved rows nor rows the control row hides;
-    // rows beyond that rank are the same for every instance pruning at once, so overlapping runs never prune more
+    // keeps the newest maxSize values (ties by hash), counting neither reserved rows nor rows the control row hides.
+    // Rows beyond that rank are the same for every instance pruning at once, so overlapping runs never prune more; of
+    // those, the ones younger than the minimum age stay. At most the limit, the oldest first: the boundary (the newest
+    // row beyond the rank, b) is found by reading the index as far as the rank, then the batch from the old end up to
+    // it. Taken from the newest end beyond the rank instead, every batch read past the rows the batches before had
+    // deleted (dead until vacuumed): 26 s for a million rows in batches of 10,000, against 2 s in one statement
     @Override
-    public int pruneToSize(long maxSize) {
+    public int pruneToSize(long maxSize, Duration minAge, int limit) {
+        String values = "r.discriminator = ? AND r.state = 'VALUE' AND %s AND %s".formatted(NOT_RESERVED,
+                notHidden());
         String sql = """
-                DELETE FROM %1$s WHERE discriminator = ? AND id IN (
-                    SELECT id FROM %1$s AS r WHERE discriminator = ? AND state = 'VALUE' AND %2$s AND %3$s
-                    ORDER BY write_time DESC, id ASC OFFSET ?)""".formatted(t, NOT_RESERVED, notHidden());
+                WITH b AS (
+                    SELECT r.write_time, r.id FROM %1$s AS r WHERE %2$s
+                    ORDER BY r.write_time DESC, r.id ASC OFFSET ? LIMIT 1),
+                d AS (
+                    SELECT r.id FROM %1$s AS r, b WHERE %2$s
+                        AND (r.write_time < b.write_time OR r.write_time = b.write_time AND r.id >= b.id)
+                        AND r.write_time <= now() - (?::bigint * interval '1 microsecond')
+                    ORDER BY r.write_time ASC, r.id DESC LIMIT ?)
+                DELETE FROM %1$s AS r USING d WHERE r.discriminator = ? AND r.id = d.id""".formatted(t, values);
         return run(Kind.WRITE, connection -> {
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setString(1, table.discriminator);
                 statement.setString(2, table.discriminator);
-                statement.setString(3, table.discriminator);
-                statement.setLong(4, maxSize);
+                statement.setLong(3, maxSize);
+                statement.setString(4, table.discriminator);
+                statement.setString(5, table.discriminator);
+                statement.setLong(6, micros(minAge));
+                statement.setInt(7, limit);
+                statement.setString(8, table.discriminator);
                 return statement.executeUpdate();
             }
         });
@@ -296,20 +363,40 @@ final class PostgresStore implements Store, ChangeFeed {
     // tombstones and expired rows after their grace period, and every row the control row hides (invalidated by
     // invalidateAll, so without a grace period): what invalidateAll left behind goes here, in the background; never a
     // reserved row
+    // at most the limit, in the order of the ids (its rows are of every state); rows another instance deletes at the
+    // same moment are skipped, not waited for
     @Override
-    public int pruneTombstones(Duration retention) {
+    public int pruneTombstones(Duration retention, int limit) {
         String sql = """
-                DELETE FROM %s AS r WHERE discriminator = ? AND %s AND (NOT %s
-                    OR state <> 'VALUE' AND write_time <= now() - (?::bigint * interval '1 microsecond'))"""
+                WITH d AS (
+                    SELECT r.id FROM %1$s AS r WHERE r.discriminator = ? AND %2$s AND (NOT %3$s
+                        OR r.state <> 'VALUE' AND r.write_time <= now() - (?::bigint * interval '1 microsecond'))
+                        AND (?::text IS NULL OR r.id > ?)
+                    ORDER BY r.id LIMIT ? FOR UPDATE OF r SKIP LOCKED),
+                x AS (DELETE FROM %1$s AS r USING d WHERE r.discriminator = ? AND r.id = d.id RETURNING r.id)
+                SELECT count(*), max(x.id) FROM x"""
                 .formatted(t, NOT_RESERVED, notHidden());
-        return run(Kind.WRITE, connection -> {
+        String cursor = pruneCursor;
+        pruneCursor = null; // kept only by a full batch, once committed
+        Batch<String> batch = run(Kind.WRITE, connection -> {
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setString(1, table.discriminator);
                 statement.setString(2, table.discriminator);
                 statement.setLong(3, micros(retention));
-                return statement.executeUpdate();
+                statement.setString(4, cursor);
+                statement.setString(5, cursor);
+                statement.setInt(6, limit);
+                statement.setString(7, table.discriminator);
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    resultSet.next();
+                    return new Batch<>(resultSet.getInt(1), resultSet.getString(2));
+                }
             }
         });
+        if (batch.changed() >= limit) {
+            pruneCursor = batch.last();
+        }
+        return batch.changed();
     }
 
     @Override
@@ -327,7 +414,7 @@ final class PostgresStore implements Store, ChangeFeed {
             connection = dataSource.getConnection();
         } catch (SQLTransientConnectionException e) {
             // the pool waited for a connection for its whole timeout already: waiting again only multiplies that
-            throw new StoreException("Accessing " + table + " failed: " + e.getMessage(), e, false, false);
+            throw new StoreException(accessing() + " failed: " + e.getMessage(), e, false, false);
         } catch (SQLException e) {
             throw new StoreException("Connecting for " + table + " failed: " + e.getMessage(), e, false, true);
         }
@@ -358,8 +445,13 @@ final class PostgresStore implements Store, ChangeFeed {
         } catch (RuntimeException e) {
             // a row this store cannot read (written by hand or by another program), or a driver failing
             // unexpectedly: a store failure, not one of the caller's own
-            throw new StoreException("Accessing " + table + " failed: " + e, e, false, false);
+            throw new StoreException(accessing() + " failed: " + e, e, false, false);
         }
+    }
+
+    // how a failure message names the table
+    private String accessing() {
+        return "Accessing " + table;
     }
 
     // what a failed statement means for the core: applied or not, worth another attempt or not
@@ -367,7 +459,7 @@ final class PostgresStore implements Store, ChangeFeed {
         boolean write = kind == Kind.WRITE;
         if (rejected(e)) {
             // rolled back by the server (deadlock, serialization failure, lock not available)
-            return new StoreException("Accessing " + table + " was rejected: " + e.getMessage(), e, false, true);
+            return new StoreException(accessing() + " was rejected: " + e.getMessage(), e, false, true);
         }
         if (missing(e)) {
             // dropped under the caches: the table is the library's, changing it by hand is not supported, so it is
@@ -377,11 +469,11 @@ final class PostgresStore implements Store, ChangeFeed {
         }
         if (timedOut(e)) {
             // no answer within the timeout: another attempt would most likely wait as long again
-            return new StoreException("Accessing " + table + " got no answer within " + timeout.toMillis() + " ms"
+            return new StoreException(accessing() + " got no answer within " + timeout.toMillis() + " ms"
                     + (write ? ", the outcome unknown" : "") + ": " + e.getMessage(), e, write, false);
         }
         if (connectionLost(e)) {
-            return new StoreException("Accessing " + table + " lost its connection" + (write
+            return new StoreException(accessing() + " lost its connection" + (write
                     ? ", the outcome unknown" : "") + ": " + e.getMessage(), e, write, true);
         }
         if (notifyQueueFull(e)) {
@@ -395,7 +487,7 @@ final class PostgresStore implements Store, ChangeFeed {
                     + "refusing after that session ended, until no session listens and the database is "
                     + "vacuumed: " + e.getMessage(), e, false, false);
         }
-        return new StoreException("Accessing " + table + " failed: " + e.getMessage(), e, false, false);
+        return new StoreException(accessing() + " failed: " + e.getMessage(), e, false, false);
     }
 
     /**
@@ -489,10 +581,10 @@ final class PostgresStore implements Store, ChangeFeed {
                 age(resultSet.getLong(6)));
     }
 
-    // an age in microseconds; a write time after the statement's now() (written by a later transaction meanwhile)
-    // counts as 0
+    // an age in microseconds; negative for a write time after the statement's now() (a clock stepped back), as it is,
+    // so that the ages of the statement still compare like its rows' write times (Store#read)
     private static Duration age(long micros) {
-        return Duration.ofNanos(Math.max(0, micros) * 1_000);
+        return Duration.ofNanos(micros * 1_000);
     }
 
     private static byte @Nullable [] bytes(ResultSet resultSet, int column, Format format) throws SQLException {
@@ -511,18 +603,26 @@ final class PostgresStore implements Store, ChangeFeed {
         }
     }
 
-    // the VALUES rows: id, key, value (both null for a tombstone, bound with the type the casts expect), version and
-    // expected version (or ANY, MISSING); returns the next index
+    // the VALUES rows: id, key, value (both null for a tombstone, bound with the type the casts expect) and expected
+    // version (or ADVANCE, MISSING); returns the next index
     private int bindWrites(PreparedStatement statement, List<Write> writes) throws SQLException {
         int index = 1;
         for (Write write : writes) {
             statement.setString(index++, write.hash());
             bindNullable(statement, index++, write.key(), table.keyFormat);
             bindNullable(statement, index++, write.value(), table.valueFormat);
-            statement.setLong(index++, write.version());
             statement.setLong(index++, write.expected());
         }
         return index;
+    }
+
+    private static void setNullableLong(PreparedStatement statement, int index, @Nullable Long value)
+            throws SQLException {
+        if (value != null) {
+            statement.setLong(index, value);
+        } else {
+            statement.setNull(index, Types.BIGINT);
+        }
     }
 
     private static void bindNullable(PreparedStatement statement, int index, byte @Nullable [] bytes, Format format)
@@ -534,23 +634,22 @@ final class PostgresStore implements Store, ChangeFeed {
         }
     }
 
-    // VALUES (...), (...) for n rows, the key and value casts filled in
-    private String rows(int count, String row) {
-        String filled = row.contains("%s")
-                ? row.formatted(PostgresTable.columnType(table.keyFormat), PostgresTable.columnType(table.valueFormat))
-                : row;
-        return String.join(", ", Collections.nCopies(count, filled));
+    // VALUES (...), (...) for n writes (id, key, value, expected), the key and value casts filled in
+    private String rows(int count) {
+        String row = "(?::text, ?::%s, ?::%s, ?::bigint)".formatted(
+                PostgresTable.columnType(table.keyFormat), PostgresTable.columnType(table.valueFormat));
+        return String.join(", ", Collections.nCopies(count, row));
     }
 
-    // the ids a writing statement returns as its first column: those written
-    private static Set<String> ids(PreparedStatement statement) throws SQLException {
-        Set<String> ids = new LinkedHashSet<>();
+    // the ids a writing statement returns as its first column, those written, with the versions assigned (the second)
+    private static Map<String, Long> versions(PreparedStatement statement) throws SQLException {
+        Map<String, Long> versions = new LinkedHashMap<>();
         try (ResultSet resultSet = statement.executeQuery()) {
             while (resultSet.next()) {
-                ids.add(resultSet.getString(1));
+                versions.put(resultSet.getString(1), resultSet.getLong(2));
             }
         }
-        return ids;
+        return versions;
     }
 
     private static <T> List<List<T>> chunks(List<T> items) {

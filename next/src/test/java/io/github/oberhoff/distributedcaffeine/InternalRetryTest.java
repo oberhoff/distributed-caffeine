@@ -20,7 +20,9 @@ import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -31,7 +33,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Deque;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
@@ -44,9 +45,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * core repeats what is retryable as far as that is safe, keeps an outcome unknown once it was, and takes anything
  * else a store throws for a store failure.
  */
+@NullMarked
 @Timeout(30)
 @SuppressWarnings("resource") // every cache a test opens is closed after it (@AfterEach)
 class InternalRetryTest {
+
+    // the retries of the store guard alone, as the core's maintenance runs them
+    private static final InternalStoreGuard GUARD = new InternalStoreGuard(InternalStatsCounter.of(false),
+            InternalEnvironment.REAL);
 
     private static final Duration LONG = Duration.ofHours(1);
     private final StoreException rejected = new StoreException("rejected", null, false, true);
@@ -87,11 +93,11 @@ class InternalRetryTest {
                 database.openStore("cache")) {
             // the writes of values, unconditional (put) or conditional; tombstones (the heartbeat's too) pass
             @Override
-            public Set<String> write(Collection<Write> writes) {
+            public WriteResult write(Collection<Write> writes) {
                 if (writes.stream().allMatch(Write::isTombstone)) {
                     return super.write(writes);
                 }
-                if (writes.stream().allMatch(Write::isUnconditional)) {
+                if (writes.stream().allMatch(Write::isAdvance)) {
                     puts.incrementAndGet();
                 } else {
                     conditionalWrites.incrementAndGet();
@@ -99,10 +105,11 @@ class InternalRetryTest {
                 return faulty(() -> super.write(writes));
             }
         };
-        DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(adapter)
+        DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(InternalCoreTest.offered(adapter))
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000))
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(1_000))
                 .withCaffeine(CaffeineConfigurer::recordStats)
                 .build();
         closeables.add(cache);
@@ -124,11 +131,11 @@ class InternalRetryTest {
     @Test
     void a_retryable_failure_is_tried_again_up_to_three_times() {
         AtomicInteger calls = new AtomicInteger();
-        assertThat(InternalStoreGuard.retrying(failing(calls, rejected, rejected), Operation.PUT)).isEqualTo("done");
+        assertThat(GUARD.retrying(failing(calls, rejected, rejected), Operation.PUT)).isEqualTo("done");
         assertThat(calls).hasValue(3);
 
         AtomicInteger exhausted = new AtomicInteger();
-        assertThatThrownBy(() -> InternalStoreGuard.retrying(failing(exhausted, rejected, rejected, rejected),
+        assertThatThrownBy(() -> GUARD.retrying(failing(exhausted, rejected, rejected, rejected),
                 Operation.WRITE)).isInstanceOfSatisfying(StoreException.class,
                         e -> assertThat(e.isOutcomeUnknown()).isFalse())
                 .hasMessageContaining("after 3 attempts");
@@ -138,34 +145,34 @@ class InternalRetryTest {
     @Test
     void a_failure_that_is_not_retryable_is_not_tried_again() {
         AtomicInteger calls = new AtomicInteger();
-        assertThatThrownBy(() -> InternalStoreGuard.retrying(failing(calls, failed), Operation.READ)).isSameAs(failed);
+        assertThatThrownBy(() -> GUARD.retrying(failing(calls, failed), Operation.READ)).isSameAs(failed);
         assertThat(calls).hasValue(1);
     }
 
     @Test
     void an_unknown_outcome_ends_a_put_but_not_a_write_that_may_be_repeated_or_a_read() {
         AtomicInteger put = new AtomicInteger();
-        assertThatThrownBy(() -> InternalStoreGuard.retrying(failing(put, broken), Operation.PUT)).isSameAs(broken);
+        assertThatThrownBy(() -> GUARD.retrying(failing(put, broken), Operation.PUT)).isSameAs(broken);
         assertThat(put).hasValue(1);
 
         AtomicInteger write = new AtomicInteger();
-        assertThat(InternalStoreGuard.retrying(failing(write, broken), Operation.WRITE)).isEqualTo("done");
+        assertThat(GUARD.retrying(failing(write, broken), Operation.WRITE)).isEqualTo("done");
         assertThat(write).hasValue(2);
 
         AtomicInteger read = new AtomicInteger();
-        assertThat(InternalStoreGuard.retrying(failing(read, broken), Operation.READ)).isEqualTo("done");
+        assertThat(GUARD.retrying(failing(read, broken), Operation.READ)).isEqualTo("done");
         assertThat(read).hasValue(2);
     }
 
     @Test
     void a_write_whose_outcome_was_unknown_in_one_attempt_stays_unknown() {
         AtomicInteger calls = new AtomicInteger();
-        assertThatThrownBy(() -> InternalStoreGuard.retrying(failing(calls, broken, failed), Operation.WRITE))
+        assertThatThrownBy(() -> GUARD.retrying(failing(calls, broken, failed), Operation.WRITE))
                 .isInstanceOfSatisfying(StoreException.class, e -> assertThat(e.isOutcomeUnknown()).isTrue())
                 .hasMessageContaining("after 2 attempts");
 
         AtomicInteger read = new AtomicInteger();
-        assertThatThrownBy(() -> InternalStoreGuard.retrying(failing(read, broken, failed), Operation.READ))
+        assertThatThrownBy(() -> GUARD.retrying(failing(read, broken, failed), Operation.READ))
                 .isInstanceOfSatisfying(StoreException.class, e -> assertThat(e.isOutcomeUnknown()).isFalse());
     }
 
@@ -173,7 +180,7 @@ class InternalRetryTest {
     void anything_else_a_store_throws_is_a_store_failure_that_is_not_retried() {
         IllegalStateException bug = new IllegalStateException("a driver failing unexpectedly");
         AtomicInteger write = new AtomicInteger();
-        assertThatThrownBy(() -> InternalStoreGuard.retrying(failing(write, bug), Operation.WRITE))
+        assertThatThrownBy(() -> GUARD.retrying(failing(write, bug), Operation.WRITE))
                 .isInstanceOfSatisfying(StoreException.class, e -> {
                     assertThat(e.isOutcomeUnknown()).as("a write may have been applied").isTrue();
                     assertThat(e.isRetryable()).isFalse();
@@ -182,7 +189,7 @@ class InternalRetryTest {
         assertThat(write).hasValue(1);
 
         AtomicInteger read = new AtomicInteger();
-        assertThatThrownBy(() -> InternalStoreGuard.retrying(failing(read, bug), Operation.READ))
+        assertThatThrownBy(() -> GUARD.retrying(failing(read, bug), Operation.READ))
                 .isInstanceOfSatisfying(StoreException.class, e -> assertThat(e.isOutcomeUnknown()).isFalse());
     }
 

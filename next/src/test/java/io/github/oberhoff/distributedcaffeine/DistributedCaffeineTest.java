@@ -21,6 +21,8 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import io.github.oberhoff.distributedcaffeine.testing.StorageOnlyStore;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -32,6 +34,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+@NullMarked
 class DistributedCaffeineTest {
 
     private final InMemoryDatabase database = new InMemoryDatabase();
@@ -44,20 +47,40 @@ class DistributedCaffeineTest {
                 .withCaffeine(caffeine -> caffeine.expireAfterWrite(Duration.ofMinutes(1)))
                 .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(100)
                         .withMaintenanceInterval(Duration.ofSeconds(30)).withHeartbeatInterval(Duration.ofSeconds(5))
-                        .withTimeout(Duration.ofSeconds(3)))
+                        .withOperationTimeout(Duration.ofSeconds(3)))
                 .withDistributionMode(DistributionMode.UPDATE)
-                .withAbsentCaching(Duration.ofSeconds(10))
-                .withBuildTimeout(Duration.ofSeconds(5));
+                .withNegativeCaching(Duration.ofSeconds(10));
 
         assertThat(builder.store().maximumAge()).isEqualTo(Duration.ofHours(1));
         assertThat(builder.store().maximumSize()).isEqualTo(100);
         assertThat(builder.store().maintenanceInterval()).isEqualTo(Duration.ofSeconds(30));
         assertThat(builder.store().heartbeatInterval()).isEqualTo(Duration.ofSeconds(5));
-        assertThat(builder.store().timeout()).isEqualTo(Duration.ofSeconds(3));
+        assertThat(builder.store().operationTimeout()).isEqualTo(Duration.ofSeconds(3));
         assertThat(builder.distributionMode()).isEqualTo(DistributionMode.UPDATE);
-        assertThat(builder.absentCachingExpiry()).isEqualTo(Duration.ofSeconds(10));
-        assertThat(builder.buildTimeout()).isEqualTo(Duration.ofSeconds(5));
+        assertThat(builder.negativeCachingExpiry()).isEqualTo(Duration.ofSeconds(10));
         assertThat(builder.caffeine().toString()).contains("maximumSize=10");
+    }
+
+    @Test
+    @SuppressWarnings("resource") // the second build fails: there is no cache to close
+    void the_adapter_is_released_on_close_and_on_a_failed_build() {
+        Adapter<String, String> open = settings -> database.openStore("cache");
+        DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(open)
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(StringSerializer.ofString()))
+                .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(100))
+                .build();
+        assertThat(InternalClaims.isClaimed(open)).isTrue();
+        cache.close();
+        assertThat(InternalClaims.isClaimed(open)).as("released on close").isFalse();
+
+        Adapter<String, String> failing = settings -> {
+            throw new IllegalStateException("cannot open");
+        };
+        DistributedCaffeine<String, String> failingBuilder = DistributedCaffeine.newBuilder(failing)
+                .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(100));
+        assertThatThrownBy(failingBuilder::build).isInstanceOf(RuntimeException.class);
+        assertThat(InternalClaims.isClaimed(failing)).as("released on a failed build").isFalse();
     }
 
     @Test
@@ -67,11 +90,10 @@ class DistributedCaffeineTest {
         assertThat(builder.store().maximumSize()).isEqualTo(-1);
         assertThat(builder.store().maintenanceInterval()).isEqualTo(Duration.ofMinutes(1));
         assertThat(builder.store().heartbeatInterval()).isEqualTo(Duration.ofSeconds(10));
-        assertThat(builder.store().timeout()).isEqualTo(Duration.ofSeconds(30));
+        assertThat(builder.store().operationTimeout()).isEqualTo(Duration.ofSeconds(30));
         assertThat(builder.distributionMode()).isEqualTo(DistributionMode.INVALIDATE);
-        assertThat(builder.absentCachingExpiry()).isNull();
-        assertThat(builder.buildTimeout()).isEqualTo(Duration.ofSeconds(30));
-        assertThat(builder.storeExecutor()).isNull();
+        assertThat(builder.negativeCachingExpiry()).isNull();
+        assertThat(builder.store().executor()).isNull();
         assertThat(builder.hashProvider()).isNull();
     }
 
@@ -108,9 +130,7 @@ class DistributedCaffeineTest {
         assertThatThrownBy(() -> builder.withStore(store -> store.withMaximumSize(0)))
                 .isInstanceOf(IllegalArgumentException.class);
         Duration negative = Duration.ofSeconds(-1);
-        assertThatThrownBy(() -> builder.withAbsentCaching(negative))
-                .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> builder.withBuildTimeout(Duration.ZERO))
+        assertThatThrownBy(() -> builder.withNegativeCaching(negative))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> builder.withStore(store -> store.withMaximumAge(Duration.ofMinutes(1))
                 .withMaximumAge(Duration.ofMinutes(2)))).isInstanceOf(IllegalStateException.class);
@@ -194,8 +214,8 @@ class DistributedCaffeineTest {
     // the store's settings are the cache's: the adapter receives them
 
     @Test
-    void the_store_is_created_with_the_formats_and_the_timeout_the_cache_configured() {
-        AtomicReference<StoreSettings> received = new AtomicReference<>();
+    void the_store_is_created_with_the_formats_and_the_operation_timeout_the_cache_configured() {
+        AtomicReference<@Nullable StoreSettings> received = new AtomicReference<>();
         Adapter<String, String> recording = settings -> {
             received.set(settings);
             return database.openStore("cache");
@@ -204,19 +224,20 @@ class DistributedCaffeineTest {
                 // keys as text, values with Fory (the default), as bytes
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString()))
                 .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(100)
-                        .withTimeout(Duration.ofSeconds(7)))
+                        .withOperationTimeout(Duration.ofSeconds(7)))
                 .build()) {
             assertThat(received.get()).isEqualTo(new StoreSettings(Format.TEXT, Format.BINARY, Duration.ofSeconds(7)));
         }
     }
 
     @Test
-    void the_timeout_must_be_positive() {
+    void the_operation_timeout_must_be_positive() {
         DistributedCaffeine<String, String> builder = DistributedCaffeine.newBuilder(adapter);
 
-        assertThatThrownBy(() -> builder.withStore(store -> store.withTimeout(Duration.ZERO)))
+        assertThatThrownBy(() -> builder.withStore(store -> store.withOperationTimeout(Duration.ZERO)))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> new StoreSettings(Format.TEXT, Format.TEXT, Duration.ofSeconds(-1)))
+        Duration negative = Duration.ofSeconds(-1);
+        assertThatThrownBy(() -> new StoreSettings(Format.TEXT, Format.TEXT, negative))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 }

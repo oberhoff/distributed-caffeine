@@ -27,11 +27,13 @@ import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -41,19 +43,26 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 import static java.util.Objects.requireNonNull;
 
 // A store without a change feed of its own but with a ChangeScan, made into one by the core (VISION.md, "The polling
 // feed"). Every poll interval it reads the changes written since its last poll plus an overlap (a write takes its time
 // before it becomes visible), the control row of invalidateAll among them. A poll failing for longer than the
-// grace period of tombstones minus the overlap may have missed deletes, so delivery is reported lost; shorter failures
-// lose nothing, the next poll reads from the same point. A write of this instance that may have committed too late
+// grace period of tombstones minus the overlap may have missed deletes, so delivery is reported lost. A shorter
+// failure is reported as a gap once a poll succeeds again: the next poll reads from the same point, but a store that
+// failed over meanwhile may have lost writes the caches learned of, which no scan of the new primary can report (a
+// key it has no row of at all), so what is held is checked against the store (found with MySQL's asynchronous
+// replication, VISION.md "MariaDB and MySQL"); a store noticing another server answering fails its scan once for
+// that reason. A write of this instance that may have committed too late
 // for every poll (its call slower than the overlap, or its outcome unknown) is touched again: its keys rewritten as
 // they are, conditionally on their version, so that a poll finds them. Every other call passes through.
 final class InternalPollingStore implements Store, ChangeFeed {
 
-    static final Duration OVERLAP = Duration.ofSeconds(2);
+    private static final System.Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine");
+
+    static final Duration POLL_OVERLAP = Duration.ofSeconds(2);
 
     private final Store store;
     private final ChangeScan scan;
@@ -64,9 +73,15 @@ final class InternalPollingStore implements Store, ChangeFeed {
     private final Duration grace;
     private final Duration timeout;
     private final Executor executor;
+    private final InternalEnvironment environment;
+    // the rewrite of a changed row proposes its version like a cache instance (above the row's, read just before)
+    private final InternalVersion clock;
 
+    // environment: the timing of polls and the scheduling of the next one
+    // each a setting of its own, all given by the builder: an object would only group them
+    @SuppressWarnings("java:S107")
     InternalPollingStore(Store store, ChangeScan scan, Duration interval, Duration overlap, Duration grace,
-                         Duration timeout, Executor executor) {
+                         Duration timeout, Executor executor, InternalEnvironment environment) {
         this.store = store;
         this.scan = scan;
         this.interval = interval;
@@ -74,6 +89,9 @@ final class InternalPollingStore implements Store, ChangeFeed {
         this.grace = grace;
         this.timeout = timeout;
         this.executor = executor;
+        this.environment = environment;
+        this.clock = new InternalVersion(environment, ignored -> {
+        });
     }
 
     // reads and maintenance without announcements: as they are
@@ -89,13 +107,13 @@ final class InternalPollingStore implements Store, ChangeFeed {
     }
 
     @Override
-    public int pruneToSize(long maxSize) {
-        return store.pruneToSize(maxSize);
+    public int pruneToSize(long maxSize, Duration minAge, int limit) {
+        return store.pruneToSize(maxSize, minAge, limit);
     }
 
     @Override
-    public int pruneTombstones(Duration retention) {
-        return store.pruneTombstones(retention);
+    public int pruneTombstones(Duration retention, int limit) {
+        return store.pruneTombstones(retention, limit);
     }
 
     @Override
@@ -111,7 +129,7 @@ final class InternalPollingStore implements Store, ChangeFeed {
     // writes: timed, and touched again if a poll may have missed them
 
     @Override
-    public Set<String> write(Collection<Write> writes) {
+    public WriteResult write(Collection<Write> writes) {
         Set<String> hashes = new LinkedHashSet<>();
         writes.forEach(write -> hashes.add(write.hash()));
         return touchingIfLate(hashes, () -> store.write(writes));
@@ -119,11 +137,11 @@ final class InternalPollingStore implements Store, ChangeFeed {
 
     // which rows it expired is not returned: if late, the expired rows of the window are touched
     @Override
-    public int expire(Duration maxAge, long version) {
-        long start = System.nanoTime();
+    public int expire(Duration maxAge, long version, int limit) {
+        long start = environment.nanoTime();
         try {
-            int expired = store.expire(maxAge, version);
-            Duration took = Duration.ofNanos(System.nanoTime() - start);
+            int expired = store.expire(maxAge, version, limit);
+            Duration took = Duration.ofNanos(environment.nanoTime() - start);
             if (took.compareTo(overlap) > 0) {
                 touchLater(Duration.ZERO, () -> expiredWithin(took.plus(overlap)));
             }
@@ -138,20 +156,15 @@ final class InternalPollingStore implements Store, ChangeFeed {
     }
 
     private Set<String> expiredWithin(Duration window) {
-        Set<String> hashes = new LinkedHashSet<>();
-        for (Change change : scan.changedWithin(window)) {
-            if (change.kind() == Change.Kind.EXPIRED) {
-                hashes.add(requireNonNull(change.hash()));
-            }
-        }
-        return hashes;
+        return scan.changedWithin(window).stream().filter(change -> change.kind() == Change.Kind.EXPIRED)
+                .map(change -> requireNonNull(change.hash())).collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
     private <T> T touchingIfLate(Set<String> hashes, Supplier<T> write) {
-        long start = System.nanoTime();
+        long start = environment.nanoTime();
         try {
             T result = write.get();
-            if (System.nanoTime() - start > overlap.toNanos()) {
+            if (environment.nanoTime() - start > overlap.toNanos()) {
                 touchLater(Duration.ZERO, () -> hashes); // returned: committed, but maybe after a poll's window
             }
             return result;
@@ -163,8 +176,8 @@ final class InternalPollingStore implements Store, ChangeFeed {
         }
     }
 
-    // rewrites the keys as they are now, conditionally on their version and at its successor (the same incarnation, so
-    // holders of the row as it was can still order it): a newer write announces itself, a deleted
+    // rewrites the keys as they are now, conditionally on their version and at a version above it: a newer write
+    // announces itself, a deleted
     // row has nothing to announce, a row hidden by the cut-off stays hidden (rewritten, it would come back); best
     // effort, a failure only leaves what the overlap left
     @SuppressWarnings("FutureReturnValueIgnored") // the delayed touch is scheduled for its effect, never cancelled
@@ -179,7 +192,7 @@ final class InternalPollingStore implements Store, ChangeFeed {
         if (delay.isZero()) {
             execute(touch);
         } else {
-            InternalMaintenance.schedule(() -> execute(touch), delay);
+            InternalMaintenance.schedule(environment, () -> execute(touch), delay);
         }
     }
 
@@ -198,7 +211,7 @@ final class InternalPollingStore implements Store, ChangeFeed {
             if (!hash.equals(Store.CONTROL_HASH) && control != null && row.age().compareTo(control.age()) >= 0) {
                 return;
             }
-            long version = InternalVersion.next(row.version());
+            long version = clock.next(row.version());
             byte[] value = row.value();
             writes.add(row.state() == State.VALUE && value != null
                     ? Write.value(hash, row.key(), value, version).ifVersion(row.version())
@@ -228,32 +241,42 @@ final class InternalPollingStore implements Store, ChangeFeed {
         return poller;
     }
 
-    // one read of the control row: whether the store answers (it fails otherwise)
-    private void probe() {
-        store.read(List.of(Store.CONTROL_HASH), Duration.ofNanos(Long.MAX_VALUE));
-    }
-
     // one subscription: polls on the store executor, one poll at a time
-    private final class Poller implements ChangeSubscription {
+    final class Poller implements ChangeSubscription {
 
         private final ChangeListener listener;
         private final AtomicReference<@Nullable ScheduledFuture<?>> task = new AtomicReference<>();
-        // guarded by this: when the last successful poll began (System.nanoTime), and whether delivery was reported lost
-        // (no further polls until resumed)
+        // guarded by this: when the last successful poll began (the environment's nanoTime), and whether delivery was
+        // reported lost (no further polls until resumed)
         @GuardedBy("this")
         private long polled;
         @GuardedBy("this")
         private boolean lost;
+        // guarded by this: whether a poll failed since the last successful one (a gap to report)
+        @GuardedBy("this")
+        private boolean failed;
+        // guarded by this: the changes delivered while a poll can still report them again (within its overlap), by
+        // hash: the version and when the poll began. Each change is delivered once: one reported again carries
+        // nothing new, and as a message it would drop an operation in flight on its key (which cannot compare
+        // versions yet), and the control row's would make the core look at it again
+        @GuardedBy("this")
+        private final Map<String, Delivered> delivered = new HashMap<>();
         private volatile boolean closed;
 
         Poller(ChangeListener listener) {
             this.listener = listener;
-            this.polled = System.nanoTime();
+            this.polled = environment.nanoTime();
+        }
+
+        // whether the latest poll failed: changes may be missed until one succeeds (and reports the gap); the core
+        // shows it as DEGRADED, also on an instance that neither reads nor writes through the store meanwhile
+        synchronized boolean isFailing() {
+            return failed;
         }
 
         void schedule() {
             if (!closed) {
-                task.set(InternalMaintenance.schedule(() -> {
+                task.set(InternalMaintenance.schedule(environment, () -> {
                     if (!execute(this::poll)) {
                         closed = true;
                     }
@@ -264,25 +287,53 @@ final class InternalPollingStore implements Store, ChangeFeed {
         private void poll() {
             List<Change> messages = new ArrayList<>();
             Throwable failure = null;
+            // the failure that began a run of failed polls, logged once, as the poll succeeding again is
+            RuntimeException began = null;
+            boolean gap = false;
             synchronized (this) {
                 if (closed || lost) {
                     return;
                 }
-                long start = System.nanoTime();
+                long start = environment.nanoTime();
                 try {
                     // the control row's change too, which the core takes as an invalidateAll
-                    messages.addAll(scan.changedWithin(Duration.ofNanos(start - polled).plus(overlap)));
+                    List<Change> changes = scan.changedWithin(Duration.ofNanos(start - polled).plus(overlap));
+                    // a change written before the last poll's start minus the overlap is outside every later window
+                    // (with twice the overlap for the clocks: the window is measured by the store's)
+                    long reportable = polled - overlap.toNanos() * 2;
+                    delivered.values().removeIf(entry -> entry.polled() - reportable < 0);
+                    for (Change change : changes) {
+                        Delivered before = delivered.put(change.hash(), new Delivered(change.version(), start));
+                        if (before == null || before.version() != change.version()) {
+                            messages.add(change);
+                        }
+                    }
                     polled = start;
+                    gap = failed;
+                    failed = false;
                 } catch (RuntimeException e) {
+                    if (!failed) {
+                        began = e;
+                    }
+                    failed = true;
                     if (Duration.ofNanos(start - polled).compareTo(grace) > 0) {
                         lost = true;
                         failure = e;
                     }
                 }
             }
+            if (began != null) {
+                LOGGER.log(System.Logger.Level.WARNING, "Polling the store for changes failed; changes may be missed "
+                        + "until a poll succeeds: " + began.getMessage());
+            }
             if (failure != null) {
                 listener.onLost(failure);
                 return;
+            }
+            if (gap) {
+                LOGGER.log(System.Logger.Level.INFO, "Polling the store for changes succeeded again; revalidating what "
+                        + "is held");
+                listener.onGap();
             }
             if (!messages.isEmpty()) {
                 listener.onChanges(messages);
@@ -301,7 +352,7 @@ final class InternalPollingStore implements Store, ChangeFeed {
             synchronized (this) {
                 restart = lost;
                 lost = false;
-                polled = System.nanoTime();
+                polled = environment.nanoTime();
             }
             if (restart) {
                 schedule();
@@ -315,6 +366,15 @@ final class InternalPollingStore implements Store, ChangeFeed {
             if (scheduled != null) {
                 scheduled.cancel(false);
             }
+        }
+
+        // a change delivered: its version, and when the poll that delivered it began (the environment's nanoTime)
+        private record Delivered(long version, long polled) {
+        }
+
+        // one read of the control row: whether the store answers (it fails otherwise)
+        private void probe() {
+            store.read(List.of(Store.CONTROL_HASH), Duration.ofNanos(Long.MAX_VALUE));
         }
     }
 }

@@ -13,7 +13,7 @@
     <name>Distributed Caffeine (next generation)</name>
 
     <description>Next generation of Distributed Caffeine: a local Caffeine cache read through a shared store
-        (MongoDB, PostgreSQL), with invalidation and optional population distribution.
+        (MongoDB, PostgreSQL, Redis), with invalidation and optional population distribution.
     </description>
 
     <properties>
@@ -28,15 +28,33 @@
         <jackson.version>3.2.4</jackson.version>
         <mongodb.version>5.13.0</mongodb.version>
         <postgresql.version>42.7.14</postgresql.version>
+        <lettuce.version>7.9.0.RELEASE</lettuce.version>
+        <jedis.version>8.0.2</jedis.version>
+        <redisson.version>4.8.0</redisson.version>
+        <checkerqual.version>4.3.1</checkerqual.version>
         <junit.version>6.1.3</junit.version>
         <assertj.version>3.27.7</assertj.version>
         <testcontainers.version>2.0.5</testcontainers.version>
         <hikaricp.version>7.1.0</hikaricp.version>
         <mariadb.version>3.5.11</mariadb.version>
+        <mysql.version>26.10.0</mysql.version>
         <lincheck.version>3.7</lincheck.version>
         <jmh.version>1.37</jmh.version>
         <slf4j.version>2.0.20</slf4j.version>
     </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Jedis (optional) brings slf4j-api 1.7, which would win over the tests' SLF4J 2 bridge and break it
+                 (NoSuchMethodError on Logger.isEnabledForLevel); SLF4J 2's API serves Jedis's 1.7 calls. Only this
+                 build: a user's own build resolves its own version -->
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-api</artifactId>
+                <version>${slf4j.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
         <dependency>
@@ -85,6 +103,35 @@
             <optional>true</optional>
         </dependency>
         <dependency>
+            <groupId>io.lettuce</groupId>
+            <artifactId>lettuce-core</artifactId>
+            <version>${lettuce.version}</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>redis.clients</groupId>
+            <artifactId>jedis</artifactId>
+            <version>${jedis.version}</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.redisson</groupId>
+            <artifactId>redisson</artifactId>
+            <version>${redisson.version}</version>
+            <optional>true</optional>
+        </dependency>
+        <!-- The PostgreSQL driver's class files reference these annotations, which javac reads when compiling
+             against it, while the driver itself declares them at runtime scope only - so they are absent exactly
+             where they are needed and a warning about it fails the build. Provided, so nothing of it reaches a
+             user of this library, and at any version that still has them, since the driver's class files only name
+             them - so it is kept current like every other dependency rather than at the driver's version. -->
+        <dependency>
+            <groupId>org.checkerframework</groupId>
+            <artifactId>checker-qual</artifactId>
+            <version>${checkerqual.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
             <version>${junit.version}</version>
@@ -124,6 +171,18 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>testcontainers-mariadb</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <version>${mysql.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-mysql</artifactId>
             <version>${testcontainers.version}</version>
             <scope>test</scope>
         </dependency>
@@ -187,6 +246,9 @@
                     <useManifestOnlyJar>false</useManifestOnlyJar>
                     <!-- Lincheck attaches its agent at run time: within the JVM, quietly (JEP 451) -->
                     <argLine>-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading</argLine>
+                    <!-- a JVM per test class: Lincheck's instrumentation has crashed the JVM (Temurin 25.0.1, SIGBUS
+                         in RedefineClasses), and in a shared fork every class after it went unrun -->
+                    <reuseForks>false</reuseForks>
                 </configuration>
             </plugin>
         </plugins>

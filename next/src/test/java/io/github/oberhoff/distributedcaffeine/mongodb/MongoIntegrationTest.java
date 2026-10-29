@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.mongodb;
 
 import io.github.oberhoff.distributedcaffeine.mongodb.MongoTopologyTests.Setup;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
@@ -23,6 +24,7 @@ import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
 import static io.github.oberhoff.distributedcaffeine.mongodb.MongoTopology.SHARDED_CLUSTER;
 import static io.github.oberhoff.distributedcaffeine.mongodb.MongoTopology.SINGLE_NODE_REPLICA_SET;
 import static io.github.oberhoff.distributedcaffeine.mongodb.MongoTopology.SINGLE_NODE_REPLICA_SET_WITH_SMALL_OPLOG;
+import static io.github.oberhoff.distributedcaffeine.mongodb.MongoTopology.STANDALONE_SERVER;
 import static io.github.oberhoff.distributedcaffeine.mongodb.MongoTopology.THREE_NODE_REPLICA_SET;
 import static io.github.oberhoff.distributedcaffeine.mongodb.MongoTopology.THREE_NODE_REPLICA_SET_WITH_ARBITER;
 import static io.github.oberhoff.distributedcaffeine.testing.Topology.Tests.RUNS_ON_GITHUB;
@@ -30,8 +32,10 @@ import static io.github.oberhoff.distributedcaffeine.testing.Topology.Tests.RUNS
 /**
  * Every MongoDB image and topology the suites run on, one at a time: from 4.4, the oldest supported, to the latest,
  * each major version's first release and its latest. The sharded cluster and the small oplog on the latest of each
- * major version (and 4.4.0). With {@code -DrunsOnGitHub=true}, only the latest image runs.
+ * major version (and 4.4.0). A standalone server on 4.4.0 (asked with {@code isMaster}) and the latest (asked with
+ * {@code hello}). With {@code -DrunsOnGitHub=true}, only the latest image runs.
  */
+@NullMarked
 class MongoIntegrationTest {
 
     @Nested
@@ -67,6 +71,13 @@ class MongoIntegrationTest {
     @Setup(image = "mongo:4.4.0", topology = SINGLE_NODE_REPLICA_SET_WITH_SMALL_OPLOG)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
     class Mongo_4_4_0__Single_Node_Replica_Set_with_Small_Oplog extends MongoTopologyTests {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 4.4.0 (Standalone Server)")
+    @Setup(image = "mongo:4.4.0", topology = STANDALONE_SERVER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    class Mongo_4_4_0__Standalone_Server extends MongoTopologyTests {
     }
 
     @Nested
@@ -377,5 +388,11 @@ class MongoIntegrationTest {
     @DisplayName("MongoDB 9 latest (Single-Node Replica Set with Small Oplog)")
     @Setup(image = "mongo:9", topology = SINGLE_NODE_REPLICA_SET_WITH_SMALL_OPLOG)
     class Mongo_9_latest__Single_Node_Replica_Set_with_Small_Oplog extends MongoTopologyTests {
+    }
+
+    @Nested
+    @DisplayName("MongoDB 9 latest (Standalone Server)")
+    @Setup(image = "mongo:9", topology = STANDALONE_SERVER)
+    class Mongo_9_latest__Standalone_Server extends MongoTopologyTests {
     }
 }

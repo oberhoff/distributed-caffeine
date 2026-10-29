@@ -16,7 +16,8 @@
 package io.github.oberhoff.distributedcaffeine.serializer;
 
 /**
- * Interface to use when implementing a serializer with JSON representation (encoded as String or BSON).
+ * Interface to use when implementing a serializer with JSON representation (stored as text, or in the store's own JSON
+ * type where it has one).
  *
  * @param <T> the type of the object to serialize
  * @author Andreas Oberhoff
@@ -24,9 +25,19 @@ package io.github.oberhoff.distributedcaffeine.serializer;
 public interface JsonSerializer<T> extends StringSerializer<T> {
 
     /**
-     * Indicates whether the JSON representation should be encoded as BSON or as string.
+     * Indicates whether values are stored in the store's own JSON type, where it has one, so that they can be queried
+     * there; otherwise, and on a store without one, as text. Reading them back is the same either way:
+     * <table>
+     *     <caption>What each store does</caption>
+     *     <tr><th>Store</th><th>{@code true}</th><th>{@code false}</th></tr>
+     *     <tr><td>MongoDB</td><td>a BSON document (queryable)</td><td>a string</td></tr>
+     *     <tr><td>PostgreSQL</td><td>{@code jsonb} (queryable)</td><td>{@code text}</td></tr>
+     *     <tr><td>Redis, Valkey, Dragonfly</td><td colspan="2">UTF-8 text either way (their JSON types are kept for
+     *     querying values on the server, which a cache does not need)</td></tr>
+     *     <tr><td>plain JDBC (MariaDB)</td><td colspan="2">UTF-8 text either way, as bytes</td></tr>
+     * </table>
      *
-     * @return {@code true} for BSON encoding or {@code false} for string encoding
+     * @return {@code true} for the store's own JSON type, {@code false} for text
      */
-    boolean storeAsBinaryJson();
+    boolean storeAsNativeJson();
 }

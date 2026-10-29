@@ -17,6 +17,7 @@ package io.github.oberhoff.distributedcaffeine.postgresql;
 
 import io.github.oberhoff.distributedcaffeine.testing.Suite.Kind;
 import io.github.oberhoff.distributedcaffeine.testing.Topology;
+import org.jspecify.annotations.NullMarked;
 
 import java.util.EnumSet;
 import java.util.Set;
@@ -24,6 +25,7 @@ import java.util.Set;
 /**
  * The PostgreSQL topologies the suites run on (see {@link PostgresTestDatabase} for how each is built).
  */
+@NullMarked
 enum PostgresTopology implements Topology {
 
     SINGLE_SERVER,

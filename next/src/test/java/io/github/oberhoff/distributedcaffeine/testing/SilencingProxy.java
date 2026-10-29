@@ -36,8 +36,9 @@ import java.util.concurrent.Executors;
 public final class SilencingProxy implements AutoCloseable {
 
     private final ServerSocket serverSocket;
-    private final String targetHost;
-    private final int targetPort;
+    // where new connections go; changed by retarget, as a failover behind a proxy or a virtual address does
+    private volatile String targetHost;
+    private volatile int targetPort;
     private final ExecutorService executor = Executors.newCachedThreadPool(runnable -> {
         Thread thread = new Thread(runnable, "silencing-proxy");
         thread.setDaemon(true);
@@ -70,6 +71,23 @@ public final class SilencingProxy implements AutoCloseable {
      */
     public int port() {
         return serverSocket.getLocalPort();
+    }
+
+    /**
+     * Carries new connections to another target from now on, and closes every open one: what a client sees when a
+     * failover moves the address it uses (a proxy, a virtual IP) to another server.
+     *
+     * @param host the new target's host
+     * @param port the new target's port
+     */
+    public void retarget(String host, int port) {
+        targetHost = host;
+        targetPort = port;
+        for (Socket socket : sockets) {
+            closeQuietly(socket);
+        }
+        sockets.clear();
+        clients.clear();
     }
 
     /**

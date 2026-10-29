@@ -29,8 +29,10 @@ import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -48,6 +50,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
@@ -64,6 +68,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * or fails as the store failed; afterwards both caches agree with the store, and no confirmed write is lost. Without
  * a majority, writes fail within the client's timeout instead of waiting, and resume once the members are back.
  */
+@NullMarked
 @Timeout(300)
 abstract class MongoFailoverTest {
 
@@ -158,6 +163,72 @@ abstract class MongoFailoverTest {
             replicaSet.start(0);
             replicaSet.handBack();
         });
+    }
+
+    // a batch cut off by the primary dying: the driver may carry it over to the new primary (a retryable write) or
+    // fail it, with its outcome unknown; either way every key ends with its old or its new value in the store, and no
+    // cache holds anything else than the store
+    @Test
+    void a_batch_the_primary_dies_under_leaves_every_key_old_or_new_and_both_caches_consistent() throws Exception {
+        MongoClient client = client(Duration.ofSeconds(30));
+        DistributedCache<String, String> writer = cache(client, 100_000, LONG);
+        DistributedCache<String, String> holder = cache(client, 100_000, LONG);
+        List<String> keys = IntStream.range(0, 20_000).mapToObj(index -> "k" + index).toList();
+        writer.putAll(keys.stream().collect(Collectors.toMap(key -> key, key -> "old")));
+        // the holder holds every 40th key, so that a message (or its absence) matters for it
+        List<String> held = IntStream.range(0, keys.size()).filter(index -> index % 40 == 0).mapToObj(keys::get)
+                .toList();
+        for (String key : held) {
+            assertThat(holder.getIfPresent(key)).isEqualTo("old");
+        }
+
+        CompletableFuture<@Nullable Throwable> batch = CompletableFuture.supplyAsync(() -> {
+            try {
+                writer.putAll(keys.stream().collect(Collectors.toMap(key -> key, key -> "new")));
+                return null;
+            } catch (RuntimeException e) {
+                return e;
+            }
+        });
+        pause(100);
+        assertThat(batch).as("the batch still under way when the primary dies").isNotDone();
+        Throwable failure;
+        try {
+            replicaSet.killPreferred();
+            failure = batch.get(2, TimeUnit.MINUTES);
+            replicaSet.awaitFailover();
+        } finally {
+            replicaSet.start(0);
+            replicaSet.handBack();
+        }
+
+        if (failure != null) {
+            assertThat(failure).as("failing as the store failed, the outcome unknown").isInstanceOfSatisfying(
+                    StoreException.class, e -> assertThat(e.isOutcomeUnknown()).isTrue());
+        }
+        boolean allNew = failure == null;
+        assertThat(awaitUpTo(() -> {
+            for (String key : held) {
+                StoredValue<String> stored;
+                try {
+                    stored = writer.distributedPolicy().getFromStore(key);
+                } catch (StoreException e) {
+                    return false;
+                }
+                String value = stored == null ? null : stored.value();
+                if (!(allNew ? List.of("new") : List.of("old", "new")).contains(value)) {
+                    return false;
+                }
+                for (DistributedCache<String, String> cache : List.of(writer, holder)) {
+                    String copy = cache.policy().getIfPresentQuietly(key);
+                    if (copy != null && !copy.equals(value)) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }, CONVERGENCE, Duration.ofMillis(500))).as("every key old or new in the store, both caches agreeing with it"
+                + (allNew ? ", the batch applied in full" : ", the batch failed: " + failure)).isTrue();
     }
 
     @Test
@@ -255,6 +326,8 @@ abstract class MongoFailoverTest {
 
     @Test
     void a_write_a_rollback_undoes_is_held_by_no_cache() {
+        Assumptions.assumeTrue(replicaSet.resumesReplication(),
+                "MongoDB 4.4.0's secondaries may not resume replicating after the fail point (MongoReplicaSet)");
         MongoClient client = client(Duration.ofSeconds(3));
         DistributedCache<String, String> writer = cache(client);
         DistributedCache<String, String> holder = cache(client);
@@ -273,14 +346,22 @@ abstract class MongoFailoverTest {
             replicaSet.stopReplication(1, false);
             replicaSet.stopReplication(2, false);
             replicaSet.awaitFailover();
-            assertThat(awaitUpTo(() -> {
+            AtomicReference<@Nullable StoreException> lastFailure = new AtomicReference<>();
+            boolean written = awaitUpTo(() -> {
                 try {
                     writer.put("k", "after");
                     return true;
                 } catch (StoreException e) {
+                    lastFailure.set(e);
                     return false;
                 }
-            }, CONVERGENCE, Duration.ofMillis(500))).as("writing on the new primary").isTrue();
+            }, CONVERGENCE, Duration.ofMillis(500));
+            assertThat(written).as(() -> {
+                StoreException failure = lastFailure.get();
+                return "writing on the new primary; last failure: "
+                        + (failure == null ? "none" : failure + " caused by " + failure.getCause()) + "; "
+                        + replicaSet.describe();
+            }).isTrue();
         } finally {
             replicaSet.unpausePreferred();
         }
@@ -351,8 +432,11 @@ abstract class MongoFailoverTest {
         // written by the writer alone and read once it is done
         Map<String, String> lastWritten = new HashMap<>();
         Set<String> inDoubt = new HashSet<>();
+        // goes on until the disruption is over and every key was written at least once: under load (found in the full
+        // matrix, writes of 50-150 ms) the window alone covered as few as 13 keys, and the check of what the store
+        // and the caches agree on never ran
         CompletableFuture<Void> writer = CompletableFuture.runAsync(() -> {
-            for (int index = 0; writing.get(); index++) {
+            for (int index = 0; writing.get() || index < keys.size(); index++) {
                 String key = keys.get(index % keys.size());
                 if (inDoubt.contains(key)) {
                     continue;

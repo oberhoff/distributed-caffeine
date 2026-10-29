@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.postgresql;
 
 import io.github.oberhoff.distributedcaffeine.postgresql.PostgresTopologyTests.Setup;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
@@ -34,6 +35,7 @@ import static io.github.oberhoff.distributedcaffeine.testing.Topology.Tests.RUNS
  * queue from 17 on (where it can be configured), on the latest of a major version. With {@code -DrunsOnGitHub=true},
  * only the latest image runs.
  */
+@NullMarked
 class PostgresIntegrationTest {
 
     @Nested

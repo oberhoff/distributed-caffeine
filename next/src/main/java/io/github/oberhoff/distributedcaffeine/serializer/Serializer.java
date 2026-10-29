@@ -20,7 +20,8 @@ package io.github.oberhoff.distributedcaffeine.serializer;
  * <ul>
  *      <li>{@link ByteArraySerializer} for serializing an object to a byte array representation</li>
  *      <li>{@link StringSerializer} for serializing an object to a string representation</li>
- *      <li>{@link JsonSerializer} for serializing an object to a JSON representation (encoded as String or BSON)</li>
+ *      <li>{@link JsonSerializer} for serializing an object to a JSON representation (stored as text, or in the
+ *      store's own JSON type)</li>
  * </ul>
  *
  * @param <T> the type of the object to serialize

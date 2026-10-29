@@ -38,4 +38,9 @@ final class InternalClaims {
     static void release(Object adapter) {
         CLAIMED.remove(adapter);
     }
+
+    // whether an open cache holds the adapter (tests check that closing and failed builds release it)
+    static boolean isClaimed(Object adapter) {
+        return CLAIMED.contains(adapter);
+    }
 }

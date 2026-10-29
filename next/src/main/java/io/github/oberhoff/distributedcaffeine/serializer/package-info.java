@@ -31,7 +31,7 @@
  *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.StringSerializer} for serializing an object to a
  *      string representation</li>
  *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer} for serializing an object to a JSON
- *      representation (encoded as String or BSON)</li>
+ *      representation (stored as text, or in the store's own JSON type)</li>
  * </ul>
  *
  * @author Andreas Oberhoff

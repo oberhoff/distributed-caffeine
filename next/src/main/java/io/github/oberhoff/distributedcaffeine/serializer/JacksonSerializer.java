@@ -23,7 +23,8 @@ import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Implementation of a serializer with JSON representation (encoded as String or BSON) based on <i>Jackson</i>.
+ * Implementation of a serializer with JSON representation (stored as text, or in the store's own JSON type where it
+ * has one, see {@link JsonSerializer#storeAsNativeJson()}) based on <i>Jackson</i>.
  *
  * @param <T> the type of the object to serialize
  * @author Andreas Oberhoff
@@ -34,7 +35,7 @@ public class JacksonSerializer<T> implements JsonSerializer<T> {
     private final JsonMapper jsonMapper;
     private final @Nullable Class<T> typeClass;
     private final @Nullable TypeReference<T> typeReference;
-    private final boolean storeAsBinaryJson;
+    private final boolean storeAsNativeJson;
 
     /**
      * Constructs a serializer with JSON representation based on <i>Jackson</i> along with class-based type
@@ -42,10 +43,11 @@ public class JacksonSerializer<T> implements JsonSerializer<T> {
      * can be used instead.
      *
      * @param typeClass         the class of the object to serialize
-     * @param storeAsBinaryJson {@code true} for BSON encoding or {@code false} for string encoding
+     * @param storeAsNativeJson whether to store values in the store's own JSON type, where it has one (see
+     *                          {@link JsonSerializer#storeAsNativeJson()}), or as text
      */
-    public JacksonSerializer(Class<T> typeClass, boolean storeAsBinaryJson) {
-        this(JsonMapper.builder().build(), typeClass, storeAsBinaryJson);
+    public JacksonSerializer(Class<T> typeClass, boolean storeAsNativeJson) {
+        this(JsonMapper.builder().build(), typeClass, storeAsNativeJson);
     }
 
     /**
@@ -54,10 +56,11 @@ public class JacksonSerializer<T> implements JsonSerializer<T> {
      * {@link #JacksonSerializer(JsonMapper, TypeReference, boolean)} can be used instead.
      *
      * @param typeReference     the type reference of the object to serialize
-     * @param storeAsBinaryJson {@code true} for BSON encoding or {@code false} for string encoding
+     * @param storeAsNativeJson whether to store values in the store's own JSON type, where it has one (see
+     *                          {@link JsonSerializer#storeAsNativeJson()}), or as text
      */
-    public JacksonSerializer(TypeReference<T> typeReference, boolean storeAsBinaryJson) {
-        this(JsonMapper.builder().build(), typeReference, storeAsBinaryJson);
+    public JacksonSerializer(TypeReference<T> typeReference, boolean storeAsNativeJson) {
+        this(JsonMapper.builder().build(), typeReference, storeAsNativeJson);
     }
 
     /**
@@ -67,13 +70,14 @@ public class JacksonSerializer<T> implements JsonSerializer<T> {
      *
      * @param jsonMapper        the customized JSON mapper
      * @param typeClass         the class of the object to serialize
-     * @param storeAsBinaryJson {@code true} for BSON encoding or {@code false} for string encoding
+     * @param storeAsNativeJson whether to store values in the store's own JSON type, where it has one (see
+     *                          {@link JsonSerializer#storeAsNativeJson()}), or as text
      */
-    public JacksonSerializer(JsonMapper jsonMapper, Class<T> typeClass, boolean storeAsBinaryJson) {
+    public JacksonSerializer(JsonMapper jsonMapper, Class<T> typeClass, boolean storeAsNativeJson) {
         this.jsonMapper = requireNonNull(jsonMapper, "jsonMapper cannot be null");
         this.typeClass = requireNonNull(typeClass, "typeClass cannot be null");
         this.typeReference = null;
-        this.storeAsBinaryJson = storeAsBinaryJson;
+        this.storeAsNativeJson = storeAsNativeJson;
     }
 
     /**
@@ -83,13 +87,14 @@ public class JacksonSerializer<T> implements JsonSerializer<T> {
      *
      * @param jsonMapper        the customized JSON mapper
      * @param typeReference     the type reference of the object to serialize
-     * @param storeAsBinaryJson {@code true} for BSON encoding or {@code false} for string encoding
+     * @param storeAsNativeJson whether to store values in the store's own JSON type, where it has one (see
+     *                          {@link JsonSerializer#storeAsNativeJson()}), or as text
      */
-    public JacksonSerializer(JsonMapper jsonMapper, TypeReference<T> typeReference, boolean storeAsBinaryJson) {
+    public JacksonSerializer(JsonMapper jsonMapper, TypeReference<T> typeReference, boolean storeAsNativeJson) {
         this.jsonMapper = requireNonNull(jsonMapper, "jsonMapper cannot be null");
         this.typeClass = null;
         this.typeReference = requireNonNull(typeReference, "typeReference cannot be null");
-        this.storeAsBinaryJson = storeAsBinaryJson;
+        this.storeAsNativeJson = storeAsNativeJson;
     }
 
     @Override
@@ -107,7 +112,7 @@ public class JacksonSerializer<T> implements JsonSerializer<T> {
     }
 
     @Override
-    public boolean storeAsBinaryJson() {
-        return storeAsBinaryJson;
+    public boolean storeAsNativeJson() {
+        return storeAsNativeJson;
     }
 }
