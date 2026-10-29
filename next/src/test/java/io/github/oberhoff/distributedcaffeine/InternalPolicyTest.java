@@ -21,6 +21,7 @@ import com.github.benmanes.caffeine.cache.Policy;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -43,6 +44,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code policy()}: L1's policy translated to the user's keys and values, local to the instance; the writes of
  * {@code VarExpiration} go through L2.
  */
+@NullMarked
 @Timeout(30)
 class InternalPolicyTest {
 
@@ -63,7 +65,8 @@ class InternalPolicyTest {
         return DistributedCaffeine.newBuilder(adapter)
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000));
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(1_000));
     }
 
     private <C extends AutoCloseable> C track(C closeable) {

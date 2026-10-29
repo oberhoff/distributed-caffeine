@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine.testing;
 
+import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.github.oberhoff.distributedcaffeine.spi.Change;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
@@ -22,6 +23,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import org.jspecify.annotations.Nullable;
 
+import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -34,7 +36,8 @@ import java.util.function.Consumer;
 
 // One subscription: a queue filled on commit, in commit order, and a daemon thread delivering what has accumulated
 // as one batch, with the faults of the database applied. A gap marker in the queue becomes an onGap() call at its
-// position.
+// position. On a simulation (InMemoryDatabase#simulate) no thread: each batch is a task of the simulation, after the
+// same delay drawn from the seed, run where the simulation runs it.
 final class InMemoryDelivery implements ChangeSubscription {
 
     private enum Marker {
@@ -45,7 +48,9 @@ final class InMemoryDelivery implements ChangeSubscription {
     private final ChangeListener listener;
     private final Consumer<InMemoryDelivery> onClose;
     private final Deque<Object> queue = new ArrayDeque<>();
-    private final Thread thread;
+    private final @Nullable Thread thread;
+    // on a simulation: whether a batch is scheduled already
+    private boolean scheduled;
     private boolean closed;
     private boolean interrupted;
     // whether an interrupted subscription can be resumed now, and whether what queued meanwhile is delivered then;
@@ -57,9 +62,48 @@ final class InMemoryDelivery implements ChangeSubscription {
         this.database = database;
         this.listener = listener;
         this.onClose = onClose;
-        this.thread = new Thread(this::run, "in-memory-delivery");
-        this.thread.setDaemon(true);
-        this.thread.start();
+        if (database.simulation() == null) {
+            Thread started = new Thread(this::run, "in-memory-delivery");
+            started.setDaemon(true);
+            started.start();
+            this.thread = started;
+        } else {
+            this.thread = null;
+        }
+    }
+
+    // on a simulation: the next batch scheduled, unless one is (each run schedules the next while messages remain)
+    @GuardedBy("this")
+    private void scheduleBatch() {
+        InMemoryDatabase.Simulation simulation = database.simulation();
+        if (simulation == null || scheduled || closed) {
+            return;
+        }
+        scheduled = true;
+        simulation.runAfter(this::runScheduled, Duration.ofNanos(database.nextLong(database.faults.maxDelayNanos)));
+    }
+
+    private void runScheduled() {
+        List<Object> batch;
+        synchronized (this) {
+            scheduled = false;
+            if (closed || queue.isEmpty() || database.faults.paused || interrupted) {
+                return; // what wakes delivery (resume, a resumed pause, a message) schedules it again
+            }
+            batch = new ArrayList<>(queue);
+            queue.clear();
+            delivering = true;
+        }
+        try {
+            deliver(batch);
+        } finally {
+            synchronized (this) {
+                delivering = false;
+                if (!queue.isEmpty()) {
+                    scheduleBatch();
+                }
+            }
+        }
     }
 
     synchronized void enqueue(List<Change> messages) {
@@ -67,12 +111,16 @@ final class InMemoryDelivery implements ChangeSubscription {
             return;
         }
         for (Change message : messages) {
+            if (database.faults.dropProbability > 0 && database.nextDouble() < database.faults.dropProbability) {
+                continue; // lost silently (InMemoryDatabase#setDropProbability)
+            }
             queue.addLast(message);
             if (database.faults.duplicateProbability > 0 && database.nextDouble() < database.faults.duplicateProbability) {
                 queue.addLast(message);
             }
         }
         notifyAll();
+        scheduleBatch();
     }
 
     synchronized void gap() {
@@ -82,6 +130,7 @@ final class InMemoryDelivery implements ChangeSubscription {
         queue.clear();
         queue.addLast(Marker.GAP);
         notifyAll();
+        scheduleBatch();
     }
 
     synchronized void dropUndelivered() {
@@ -97,7 +146,7 @@ final class InMemoryDelivery implements ChangeSubscription {
             interrupted = true;
             resumable = null;
         }
-        listener.onLost(new IllegalStateException("injected: delivery interrupted"));
+        listener.onLost(InMemoryDatabase.injected(new IllegalStateException("injected: delivery interrupted")));
     }
 
     // the store reachable again (the fault healed): what queued meanwhile is delivered after resume(), or lost (both
@@ -114,7 +163,7 @@ final class InMemoryDelivery implements ChangeSubscription {
             return; // an in-memory delivery has no connection to re-establish
         }
         if (resumable == null) {
-            throw new StoreException("injected: the store is not reachable", null, false, true);
+            throw InMemoryDatabase.injected(new StoreException("injected: the store is not reachable", null, false, true));
         }
         boolean deliverMissed = resumable;
         interrupted = false;
@@ -123,10 +172,12 @@ final class InMemoryDelivery implements ChangeSubscription {
             queue.clear();
         }
         notifyAll();
+        scheduleBatch();
     }
 
     synchronized void wake() {
         notifyAll();
+        scheduleBatch();
     }
 
     // nothing queued and no batch on its way to the listener
@@ -146,7 +197,7 @@ final class InMemoryDelivery implements ChangeSubscription {
             notifyAll();
         }
         onClose.accept(this);
-        if (Thread.currentThread() != thread) {
+        if (thread != null && Thread.currentThread() != thread) {
             try {
                 thread.join(TimeUnit.SECONDS.toMillis(5));
             } catch (InterruptedException e) {

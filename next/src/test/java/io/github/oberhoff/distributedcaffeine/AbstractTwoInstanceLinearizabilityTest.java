@@ -23,6 +23,8 @@ import org.jetbrains.lincheck.datastructures.ModelCheckingOptions;
 import org.jetbrains.lincheck.datastructures.Operation;
 import org.jetbrains.lincheck.datastructures.Param;
 import org.jetbrains.lincheck.datastructures.StressOptions;
+import org.jetbrains.lincheck.datastructures.Validate;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
@@ -51,6 +53,7 @@ import java.util.Map;
 @Param(name = "value", gen = IntGen.class, conf = "1:3")
 // unused: the operations and the model's methods are called by Lincheck, through reflection; resource: the caches
 // are closed by the next instance, or after the test (closePrevious)
+@NullMarked
 @SuppressWarnings({"unused", "resource"})
 public abstract class AbstractTwoInstanceLinearizabilityTest {
 
@@ -77,9 +80,13 @@ public abstract class AbstractTwoInstanceLinearizabilityTest {
                 // the key as its hash: hash4j reads bytes through VarHandles, which model checking does not support
                 .withHashProvider((key, hasher) -> key)
                 .withDistributionMode(DistributionMode.NONE)
-                .withStoreExecutor(Runnable::run)
+                // in the calling thread, against the store executor's contract (tasks on other threads): model checking
+                // needs every step in the threads it controls. Safe here, as no operation refreshes a key not held, the
+                // one load Caffeine starts under its lock of the key (InternalCore.Loader#asyncLoad)
+                .withStore(store -> store.withExecutor(Runnable::run))
                 .withCaffeine(caffeine -> caffeine.executor(Runnable::run))
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000).withMaintenanceInterval(LONG))
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(1_000).withMaintenanceInterval(LONG))
                 .build();
     }
 
@@ -92,6 +99,17 @@ public abstract class AbstractTwoInstanceLinearizabilityTest {
 
     private DistributedCache<String, String> on(int instance) {
         return caches.get(instance);
+    }
+
+    // after every invocation, all its operations done: no reservation left behind on either instance
+    @Validate
+    public void noReservationLeft() {
+        for (DistributedCache<String, String> instance : caches) {
+            int reserved = ((InternalDistributedCache<?, ?>) instance).core.reservedKeys();
+            if (reserved != 0) {
+                throw new IllegalStateException(reserved + " keys still reserved with nothing running");
+            }
+        }
     }
 
     private static String key(int key) {
@@ -185,6 +203,7 @@ public abstract class AbstractTwoInstanceLinearizabilityTest {
     /**
      * The sequential specification: what one plain map does, whichever instance an operation runs on.
      */
+    @SuppressWarnings("java:S1172") // Lincheck matches each method to its operation by signature, instance included
     public static final class Model {
 
         private final Map<String, String> map = new HashMap<>();

@@ -21,6 +21,7 @@ import com.github.dockerjava.api.model.Ports.Binding;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import io.github.oberhoff.distributedcaffeine.testing.Ports;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.postgresql.ds.PGSimpleDataSource;
 import org.testcontainers.DockerClientFactory;
@@ -64,6 +65,7 @@ import static java.util.Objects.requireNonNull;
  * A failover suite breaks its topology on purpose; {@link #ensureIntact()} builds it anew before the next test.
  */
 // the SQL runs against the test containers; containers and the shared Docker client are closed with the store
+@NullMarked
 @SuppressWarnings({"SqlNoDataSourceInspection", "resource"})
 final class PostgresTestDatabase implements AutoCloseable {
 
@@ -84,6 +86,7 @@ final class PostgresTestDatabase implements AutoCloseable {
     private final int major;
     private final List<GenericContainer<?>> containers = new ArrayList<>();
     private Network network;
+    @SuppressWarnings("NotNullFieldNotInitialized") // set when the servers start (startServers), before any use
     private GenericContainer<?> primary;
     private @Nullable GenericContainer<?> standby;
     private @Nullable GenericContainer<?> pooler;
@@ -307,6 +310,7 @@ final class PostgresTestDatabase implements AutoCloseable {
                 + LISTENER_APPLICATION + "'");
     }
 
+    @SuppressWarnings("SqlSourceToSinkFlow") // the tests' own SQL
     void execute(String sql) {
         try (Connection connection = DriverManager.getConnection(jdbcUrl(), USER, PASSWORD);
              Statement statement = connection.createStatement()) {

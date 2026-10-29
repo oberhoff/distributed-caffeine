@@ -30,6 +30,7 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.testing.SilencingProxy;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -62,6 +63,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 @Timeout(120)
 // every cache, store and proxy a test opens is closed after it (@AfterEach); SQL runs against the test container
+@NullMarked
 @SuppressWarnings({"resource", "SqlNoDataSourceInspection"})
 abstract class PostgresConnectionTest {
 
@@ -197,7 +199,7 @@ abstract class PostgresConnectionTest {
         HikariDataSource pool = track(new HikariDataSource(config));
         DistributedCache<String, String> cache = track(strings(PostgresAdapter.newBuilder(pool, "connection", table)
                 .withListenerDataSource(database.listener).build())
-                .withStore(store -> store.withTimeout(Duration.ofSeconds(2)))
+                .withStore(store -> store.withOperationTimeout(Duration.ofSeconds(2)))
                 .build());
         cache.put("k", "before");
 
@@ -460,8 +462,9 @@ abstract class PostgresConnectionTest {
 
         try (Connection held = pool.getConnection()) {
             assertThat(held.isValid(1)).isTrue();
+            List<String> hashes = List.of("h");
             long started = System.nanoTime();
-            assertThatThrownBy(() -> store.read(List.of("h"), LONG)).isInstanceOf(StoreException.class);
+            assertThatThrownBy(() -> store.read(hashes, LONG)).isInstanceOf(StoreException.class);
             assertThat(Duration.ofNanos(System.nanoTime() - started)).as("one wait for the pool, not three")
                     .isLessThan(Duration.ofSeconds(2));
         }
@@ -509,10 +512,9 @@ abstract class PostgresConnectionTest {
                     case "createStatement" -> {
                         Statement statement = (Statement) invoke(real, method, args);
                         yield Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Statement.class},
-                                (p, m, a) -> m.getName().equals("executeQuery")
+                                (p, m, a) -> invoke(statement, m, m.getName().equals("executeQuery")
                                         && ((String) a[0]).contains("pg_is_in_recovery")
-                                        ? invoke(statement, m, new Object[]{"SELECT true"})
-                                        : invoke(statement, m, a));
+                                        ? new Object[]{"SELECT true"} : a));
                     }
                     default -> invoke(real, method, args);
                 });

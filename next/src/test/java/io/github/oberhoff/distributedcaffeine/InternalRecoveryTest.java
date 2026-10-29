@@ -23,6 +23,12 @@ import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import java.nio.charset.StandardCharsets;
+import org.jspecify.annotations.NullMarked;
+import org.junit.jupiter.api.Assumptions;
+import io.github.oberhoff.distributedcaffeine.testing.StoreProfile;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
+import io.github.oberhoff.distributedcaffeine.spi.Write;
 import java.util.Map;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
@@ -46,6 +52,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * Revalidation after gaps, the subscription interrupted, the store down (store guard), and maintenance.
  */
+@NullMarked
 @Timeout(60)
 @SuppressWarnings("resource") // every cache and store a test opens is closed after it (@AfterEach)
 public class InternalRecoveryTest {
@@ -94,15 +101,17 @@ public class InternalRecoveryTest {
             }
 
             @Override
-            public java.util.Set<String> write(Collection<io.github.oberhoff.distributedcaffeine.spi.Write> writes) {
+            public io.github.oberhoff.distributedcaffeine.spi.WriteResult write(
+                    Collection<io.github.oberhoff.distributedcaffeine.spi.Write> writes) {
                 storeCalls.incrementAndGet();
                 return super.write(writes);
             }
         };
-        return DistributedCaffeine.newBuilder(adapter)
+        return DistributedCaffeine.newBuilder(InternalCoreTest.offered(adapter))
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> store.withMaximumAge(maximumAge).withMaximumSize(maximumSize)
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(maximumAge).withMaximumSize(maximumSize)
                         .withMaintenanceInterval(maintenance));
     }
 
@@ -112,10 +121,11 @@ public class InternalRecoveryTest {
 
     private DistributedCache<String, String> other() {
         Adapter<String, String> adapter = backend::open;
-        return track(DistributedCaffeine.newBuilder(adapter)
+        return track(DistributedCaffeine.newBuilder(InternalCoreTest.offered(adapter))
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000).withMaintenanceInterval(LONG))
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(1_000).withMaintenanceInterval(LONG))
                 .build());
     }
 
@@ -149,6 +159,7 @@ public class InternalRecoveryTest {
 
     @Test
     void after_a_gap_an_unchanged_held_value_is_kept_by_a_version_read_only() {
+        backend.requireFeed();
         DistributedCache<String, String> cache = holder();
         cache.put("k", "v");
         backend.induceGap();
@@ -167,10 +178,11 @@ public class InternalRecoveryTest {
 
     private DistributedCache<String, String> beating(Duration interval) {
         Adapter<String, String> adapter = backend::open;
-        return track(DistributedCaffeine.newBuilder(adapter)
+        return track(DistributedCaffeine.newBuilder(InternalCoreTest.offered(adapter))
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000).withMaintenanceInterval(LONG)
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(1_000).withMaintenanceInterval(LONG)
                         .withHeartbeatInterval(interval))
                 .withCaffeine(CaffeineConfigurer::recordStats)
                 .build());
@@ -178,6 +190,7 @@ public class InternalRecoveryTest {
 
     @Test
     void a_silent_feed_is_noticed_by_the_heartbeat_and_nothing_held_is_trusted_until_it_delivers_again() {
+        backend.requireFeed();
         // the in-memory store's faults: skipped on a real database before anything is set up
         InMemoryDatabase faults = backend.faults();
         DistributedCache<String, String> cache = beating(Duration.ofMillis(200));
@@ -208,10 +221,11 @@ public class InternalRecoveryTest {
     @Test
     void the_reserved_hash_of_the_heartbeat_is_refused_as_a_key_hash() {
         Adapter<String, String> adapter = backend::open;
-        DistributedCache<String, String> cache = track(DistributedCaffeine.newBuilder(adapter)
+        DistributedCache<String, String> cache = track(DistributedCaffeine.newBuilder(InternalCoreTest.offered(adapter))
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000))
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(1_000))
                 .withHashProvider((key, hasher) -> key)
                 .build());
 
@@ -269,6 +283,7 @@ public class InternalRecoveryTest {
 
     @Test
     void while_the_subscription_is_down_every_access_checks_the_store() {
+        backend.requireFeed();
         // the in-memory store's faults: skipped on a real database before anything is set up
         InMemoryDatabase faults = backend.faults();
         DistributedCache<String, String> cache = holder();
@@ -332,6 +347,32 @@ public class InternalRecoveryTest {
         assertThatThrownBy(() -> cache.put("k", "v")).isInstanceOf(StoreException.class);
         assertThatThrownBy(() -> cache.invalidate("held")).isInstanceOf(StoreException.class);
         assertThat(held(cache, "held")).as("dropped locally anyway").isNull();
+    }
+
+    @Test
+    void a_value_loaded_while_the_store_was_down_is_never_confirmed_by_a_stored_version() {
+        Assumptions.assumeTrue(backend.inMemory() != null, "needs a store numbering its own versions");
+        // a store with versions of its own (a sequence): its first row is at version 1, which the version of a value
+        // no store confirmed must never equal, or a read or a message would confirm the wrong value
+        InMemoryDatabase database = new InMemoryDatabase(StoreProfile.POSTGRESQL);
+        Adapter<String, String> adapter = settings -> database.openStore("cache");
+        DistributedLoadingCache<String, String> cache = track(DistributedCaffeine.newBuilder(InternalCoreTest.offered(adapter))
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(StringSerializer.ofString()))
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(1_000).withMaintenanceInterval(LONG))
+                .build(key -> "source"));
+        Store other = track(database.openStore("cache"));
+        database.setDown(true);
+        assertThat(cache.get("k")).as("from the source alone, unconfirmed").isEqualTo("source");
+        database.setDown(false);
+
+        Write stored = Write.value(new InternalHasher<String>(null).wrap("k").hash(),
+                "k".getBytes(StandardCharsets.UTF_8), "stored".getBytes(StandardCharsets.UTF_8), 99);
+        WriteResult result = other.write(List.of(stored));
+
+        assertThat(result.version(stored)).as("the store's first version").isOne();
+        await(() -> "stored".equals(cache.get("k")));
     }
 
     @Test

@@ -42,11 +42,14 @@ final class InternalValue<V> {
     // the user key of the entry holding this value: Caffeine's unbounded cache reports a removal with the key the
     // caller passed, which for a message is a lookup key holding the hash only
     private final AtomicReference<@Nullable Object> key = new AtomicReference<>();
+    // when a user's Expiry must let this copy go at the latest (InternalExpiry): its install plus the store's maximum
+    // age, by Caffeine's ticker, so that no read lengthens it beyond
+    private volatile long latestExpiry = Long.MAX_VALUE;
 
     InternalValue(V value, long version, int epoch) {
         this.value = requireNonNull(value, "value cannot be null");
-        if (version <= 0) {
-            throw new IllegalArgumentException("version must be positive");
+        if (version < 0) {
+            throw new IllegalArgumentException("version cannot be negative (0: unconfirmed)");
         }
         this.version = version;
         this.epoch = epoch;
@@ -87,6 +90,14 @@ final class InternalValue<V> {
                 epoch = confirmedEpoch;
             }
         }
+    }
+
+    long latestExpiry() {
+        return latestExpiry;
+    }
+
+    void latestExpiry(long ticks) {
+        latestExpiry = ticks;
     }
 
     // binds the user key of the entry this value is held under; a lookup key binds nothing

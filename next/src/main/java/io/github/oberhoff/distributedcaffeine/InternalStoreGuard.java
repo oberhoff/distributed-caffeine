@@ -18,7 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 
-import java.util.concurrent.ThreadLocalRandom;
+import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
@@ -45,6 +45,7 @@ final class InternalStoreGuard {
     }
 
     private final InternalStatsCounter stats;
+    private final InternalEnvironment environment;
     @GuardedBy("this")
     private int failures;
     @GuardedBy("this")
@@ -54,8 +55,10 @@ final class InternalStoreGuard {
     @GuardedBy("this")
     private long openedAt;
 
-    InternalStoreGuard(InternalStatsCounter stats) {
+    // environment: the timing of calls, the suspension and the back-off
+    InternalStoreGuard(InternalStatsCounter stats, InternalEnvironment environment) {
         this.stats = stats;
+        this.environment = environment;
     }
 
     // a read call (values or versions), timed and counted
@@ -76,7 +79,7 @@ final class InternalStoreGuard {
     private <T> T call(Supplier<T> call, Operation operation) {
         admit();
         boolean write = operation != Operation.READ;
-        long start = System.nanoTime();
+        long start = environment.nanoTime();
         T result;
         try {
             result = retrying(call, operation);
@@ -90,7 +93,7 @@ final class InternalStoreGuard {
         } finally {
             stats.increment(write ? InternalStatsCounter.Counter.STORE_WRITE : InternalStatsCounter.Counter.STORE_READ);
             stats.add(write ? InternalStatsCounter.Counter.STORE_WRITE_TIME : InternalStatsCounter.Counter.STORE_READ_TIME,
-                    System.nanoTime() - start);
+                    environment.nanoTime() - start);
         }
         success();
         return result;
@@ -98,7 +101,7 @@ final class InternalStoreGuard {
 
     // the call with the retries, unguarded (maintenance calls the store this way: it is how the guard learns that the
     // store answers again)
-    static <T> T retrying(Supplier<T> call, Operation operation) {
+    <T> T retrying(Supplier<T> call, Operation operation) {
         boolean unknown = false;
         for (int attempt = 1; ; attempt++) {
             StoreException failure;
@@ -124,9 +127,9 @@ final class InternalStoreGuard {
         }
     }
 
-    private static void backoff(int attempt, boolean unknown) {
+    private void backoff(int attempt, boolean unknown) {
         try {
-            Thread.sleep(BACKOFF_MILLIS * attempt + ThreadLocalRandom.current().nextLong(BACKOFF_MILLIS));
+            environment.sleep(Duration.ofMillis(BACKOFF_MILLIS * attempt + environment.random(BACKOFF_MILLIS)));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new StoreException("Interrupted while waiting to retry", e, unknown, false);
@@ -147,10 +150,10 @@ final class InternalStoreGuard {
         failures++;
         probing = false;
         if (open) {
-            openedAt = System.nanoTime();
+            openedAt = environment.nanoTime();
         } else if (failures >= THRESHOLD) {
             open = true;
-            openedAt = System.nanoTime();
+            openedAt = environment.nanoTime();
             stats.increment(InternalStatsCounter.Counter.GUARD_OPEN);
         }
     }
@@ -160,7 +163,7 @@ final class InternalStoreGuard {
             if (!open) {
                 return;
             }
-            if (!probing && System.nanoTime() - openedAt >= SUSPENSION_NANOS) {
+            if (!probing && environment.nanoTime() - openedAt >= SUSPENSION_NANOS) {
                 probing = true;
                 return;
             }

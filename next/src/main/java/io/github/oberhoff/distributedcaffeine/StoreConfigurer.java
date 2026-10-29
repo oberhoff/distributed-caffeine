@@ -19,11 +19,17 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
+import java.util.concurrent.Executor;
 
 import static java.util.Objects.requireNonNull;
 
 /**
- * The bounds of the shared store, in which every value carries its write time.
+ * The shared store and how the cache works with it: its bounds (maximum age and size, measured by the write time
+ * every value carries), how operations reach it (operation timeout, executor), and the background work on it
+ * (maintenance, heartbeat, polling).
+ * <p>
+ * Required: the maximum age and the maximum size; every other setting is optional, with a default that suits most
+ * uses. The optional ones follow here by how often they matter.
  */
 public final class StoreConfigurer {
 
@@ -33,10 +39,11 @@ public final class StoreConfigurer {
 
     private @Nullable Duration maximumAge;
     private long maximumSize = -1;
+    private Duration operationTimeout = StoreSettings.DEFAULT_OPERATION_TIMEOUT;
+    private @Nullable Executor executor;
     private Duration maintenanceInterval = DEFAULT_MAINTENANCE_INTERVAL;
     private Duration heartbeatInterval = DEFAULT_HEARTBEAT_INTERVAL;
     private Duration pollInterval = DEFAULT_POLL_INTERVAL;
-    private Duration timeout = StoreSettings.DEFAULT_TIMEOUT;
 
     StoreConfigurer() {
     }
@@ -65,6 +72,10 @@ public final class StoreConfigurer {
      * Sets the maximum number of values the store keeps for this cache; the oldest writes are pruned first,
      * periodically, without notifying anyone (instances may keep their copies). Required, like the maximum age, so
      * that the store is bounded in both dimensions.
+     * <p>
+     * A value is pruned only once it is a few seconds old (four seconds; for a store polled for changes, twice the
+     * poll interval plus two seconds if that is longer): a cache turning over its whole maximum size faster than that
+     * holds more values than the maximum meanwhile.
      *
      * @param maximumSize the maximum number of values (positive)
      * @return this configurer
@@ -77,6 +88,45 @@ public final class StoreConfigurer {
             throw new IllegalStateException("maximumSize was already set to " + this.maximumSize);
         }
         this.maximumSize = maximumSize;
+        return this;
+    }
+
+    /**
+     * Sets how long an operation of the store waits for the store before it fails as the store: without a bound, a
+     * client waits for good on a network that silently stopped carrying. It is the latency budget of the calling
+     * thread wherever an operation reaches the store (a local miss, a write, a load writing back). A read that times
+     * out fails, a write fails with its outcome unknown, and neither is retried (it waited its whole time already).
+     * The adapter applies it to every operation and to its checks when the cache is built, so a store that does not
+     * answer fails {@code build} within a few timeouts (one per check); each adapter's documentation says how. It is
+     * set per cache, also where caches share a client or data source. The store's change feed, which no caller waits
+     * for, bounds its own operations. With a JDBC data source (PostgreSQL, MariaDB, MySQL), the wait for a
+     * pooled connection is the pool's (such as HikariCP's {@code connectionTimeout}, 30 seconds by default): set it
+     * no higher than this timeout, or an exhausted pool keeps callers waiting longer. MongoDB's timeout covers that
+     * wait itself. Optional: 30 seconds by default.
+     *
+     * @param operationTimeout the timeout (positive)
+     * @return this configurer
+     */
+    public StoreConfigurer withOperationTimeout(Duration operationTimeout) {
+        requireNonNull(operationTimeout, "operationTimeout cannot be null");
+        if (operationTimeout.isNegative() || operationTimeout.isZero()) {
+            throw new IllegalArgumentException("operationTimeout must be positive");
+        }
+        this.operationTimeout = operationTimeout;
+        return this;
+    }
+
+    /**
+     * Sets the executor for the library's blocking store I/O (e.g. virtual threads on Java 21 or later). Optional:
+     * a library-owned pool of daemon threads by default. Owned and closed by the caller. It must run each task on
+     * another thread than the one submitting it (not {@code Runnable::run}): some loads are started by Caffeine under
+     * its lock of the key, and their store I/O must not run under it.
+     *
+     * @param executor the executor
+     * @return this configurer
+     */
+    public StoreConfigurer withExecutor(Executor executor) {
+        this.executor = requireNonNull(executor, "executor cannot be null");
         return this;
     }
 
@@ -116,12 +166,13 @@ public final class StoreConfigurer {
     }
 
     /**
-     * Sets how often each instance polls the store for changes, where the adapter's store has no change feed of its
-     * own but offers a {@code ChangeScan} (VISION.md, "The polling feed"): every interval it reads the changes since
-     * its last poll, so changes elsewhere reach it within about an interval. Must be at most half the heartbeat
-     * interval, checked when the cache is built, so that the heartbeat does not take the pause between polls for a
-     * silent feed. Ignored where the store has a change feed, and without distribution. Optional: one second by
-     * default.
+     * Sets how often each instance polls the store for changes, for adapters whose store cannot push them
+     * ({@code MariaDbAdapter}, {@code MySqlAdapter}): every interval it reads the changes since its last poll, so
+     * changes made by other instances reach it within about an interval. The MongoDB, PostgreSQL and Redis adapters
+     * push changes and ignore it, as does a cache without distribution ({@code DistributionMode.NONE}). Must be at
+     * most half the heartbeat interval, checked when the cache is built, so that the heartbeat does not take the
+     * pause between polls for a silent feed. A shorter interval delivers changes sooner, at one store query per
+     * interval and instance. Optional: one second by default.
      *
      * @param pollInterval the interval (positive)
      * @return this configurer
@@ -135,32 +186,20 @@ public final class StoreConfigurer {
         return this;
     }
 
-    /**
-     * Sets how long an operation of the store waits for the store before it fails as the store: without a bound, a
-     * client waits for good on a network that silently stopped carrying. A read that times out fails, a write fails
-     * with its outcome unknown, and neither is retried (it waited its whole time already). The adapter applies it to
-     * every operation and to its checks when the cache is built (MongoDB: the client-side operation timeout, unless
-     * the client sets its own, the connection string option timeoutMS; PostgreSQL: the network timeout of the connection per
-     * statement). Optional: 30 seconds by default.
-     *
-     * @param timeout the timeout (positive)
-     * @return this configurer
-     */
-    public StoreConfigurer withTimeout(Duration timeout) {
-        requireNonNull(timeout, "timeout cannot be null");
-        if (timeout.isNegative() || timeout.isZero()) {
-            throw new IllegalArgumentException("timeout must be positive");
-        }
-        this.timeout = timeout;
-        return this;
-    }
-
     @Nullable Duration maximumAge() {
         return maximumAge;
     }
 
     long maximumSize() {
         return maximumSize;
+    }
+
+    Duration operationTimeout() {
+        return operationTimeout;
+    }
+
+    @Nullable Executor executor() {
+        return executor;
     }
 
     Duration maintenanceInterval() {
@@ -173,9 +212,5 @@ public final class StoreConfigurer {
 
     Duration pollInterval() {
         return pollInterval;
-    }
-
-    Duration timeout() {
-        return timeout;
     }
 }

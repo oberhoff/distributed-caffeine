@@ -27,6 +27,7 @@ import com.mongodb.client.MongoDatabase;
 import com.mongodb.spi.dns.InetAddressResolver;
 import io.github.oberhoff.distributedcaffeine.testing.Ports;
 import org.bson.Document;
+import org.jspecify.annotations.NullMarked;
 import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
@@ -50,6 +51,7 @@ import static java.util.stream.Collectors.joining;
  * killed; the primary can be stepped down and handed back. Elections are shortened (2 s), so that a failover takes
  * seconds rather than the default's ten or more.
  */
+@NullMarked
 final class MongoReplicaSet implements AutoCloseable {
 
     private static final Duration HEALTHY = Duration.ofMinutes(2);
@@ -61,8 +63,10 @@ final class MongoReplicaSet implements AutoCloseable {
     private final List<GenericContainer<?>> members = new ArrayList<>();
     private final List<Integer> ports;
     private final DockerClient docker = DockerClientFactory.instance().client();
+    private final String image;
 
     MongoReplicaSet(String image, boolean withArbiter) {
+        this.image = image;
         ports = Ports.startOnFree(3, chosen -> start(image, chosen));
         List<Document> configurations = new ArrayList<>();
         for (int index = 0; index < 3; index++) {
@@ -277,6 +281,44 @@ final class MongoReplicaSet implements AutoCloseable {
 
     private static List<Document> status(MongoDatabase admin) {
         return admin.runCommand(new Document("replSetGetStatus", 1)).getList("members", Document.class);
+    }
+
+    /**
+     * Whether a secondary resumes replicating once {@link #stopReplication} lets it go on. MongoDB 4.4.0's may not:
+     * found 2026-11-02 in about one run in four, alone as well as under load, a secondary stayed at its last optime
+     * for over a minute while naming the new primary as its healthy sync source, so no write reached a majority.
+     * Every later release tested resumes.
+     *
+     * @return whether it resumes
+     */
+    boolean resumesReplication() {
+        return !image.endsWith(":4.4.0");
+    }
+
+    /**
+     * Each member's view, as far as it answers: its state, sync source and last applied optime per member it sees,
+     * for a failure's message.
+     *
+     * @return the description
+     */
+    String describe() {
+        StringBuilder described = new StringBuilder();
+        for (int index = 0; index < members.size(); index++) {
+            described.append("member").append(index).append(": ");
+            try (MongoClient direct = direct(index)) {
+                Document status = direct.getDatabase("admin").runCommand(new Document("replSetGetStatus", 1));
+                described.append("sync source ").append(status.get("syncSourceHost")).append(", sees [");
+                for (Document member : status.getList("members", Document.class)) {
+                    described.append(member.get("name")).append(' ').append(member.get("stateStr")).append(' ')
+                            .append(member.get("optime") instanceof Document optime ? optime.get("ts") : "-")
+                            .append("; ");
+                }
+                described.append("]; ");
+            } catch (MongoException e) {
+                described.append(e.getClass().getSimpleName()).append("; ");
+            }
+        }
+        return described.toString();
     }
 
     private static void require(BooleanSupplier condition, String what) {

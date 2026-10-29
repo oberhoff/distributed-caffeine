@@ -16,10 +16,12 @@
 package io.github.oberhoff.distributedcaffeine.mongodb;
 
 import io.github.oberhoff.distributedcaffeine.spi.ChangeFeedContractTest;
+import org.jspecify.annotations.NullMarked;
 
 /**
  * The change feed contract on MongoDB's change streams, on the fixture of the {@link MongoStoreContractTest}.
  */
+@NullMarked
 abstract class MongoChangeFeedContractTest extends ChangeFeedContractTest {
 
     @Override

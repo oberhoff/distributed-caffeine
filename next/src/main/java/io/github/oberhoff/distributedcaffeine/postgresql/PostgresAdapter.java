@@ -36,6 +36,10 @@ import static java.util.Objects.requireNonNull;
  * One adapter per cache: {@code build()} of a second cache with the same adapter object fails while the first is
  * open.
  * <p>
+ * The cache's operation timeout ({@code StoreConfigurer.withOperationTimeout}) becomes the network timeout of each
+ * connection borrowed for an operation, restored before the connection goes back, so caches sharing a data source
+ * may have different ones.
+ * <p>
  * Listening (every distribution mode but {@code DistributionMode.NONE}) holds one connection of the data source for
  * as long as a cache listens through it: one per data source, shared by every cache using the same data source
  * object. A pool's leak detection (such as HikariCP's {@code leakDetectionThreshold}) reports it as a leak, which it
@@ -88,8 +92,8 @@ public final class PostgresAdapter<K, V> implements Adapter<K, V> {
     public Store createStore(StoreSettings settings) {
         PostgresTable table = new PostgresTable(schemaName, tableName, discriminator, settings.keyFormat(),
                 settings.valueFormat());
-        PostgresSchema.ensure(dataSource, table, schemaReset, settings.timeout());
-        return new PostgresStore(dataSource, listenerDataSource, table, settings.timeout());
+        PostgresSchema.ensure(dataSource, table, schemaReset, settings.operationTimeout());
+        return new PostgresStore(dataSource, listenerDataSource, table, settings.operationTimeout());
     }
 
     @Override
@@ -110,7 +114,7 @@ public final class PostgresAdapter<K, V> implements Adapter<K, V> {
         private boolean schemaReset;
 
         private Builder(DataSource dataSource, String schemaName, String tableName) {
-            requireDriver("org.postgresql.PGConnection", "org.postgresql:postgresql");
+            requireDriver();
             this.dataSource = requireNonNull(dataSource, "dataSource cannot be null");
             this.schemaName = checkedName(schemaName, "schemaName");
             this.tableName = checkedName(tableName, "tableName");
@@ -183,11 +187,13 @@ public final class PostgresAdapter<K, V> implements Adapter<K, V> {
             return name;
         }
 
-        private static void requireDriver(String className, String dependency) {
+        // the driver is an optional dependency of this library: a clear message where it is missing
+        private static void requireDriver() {
             try {
-                Class.forName(className, false, PostgresAdapter.class.getClassLoader());
+                Class.forName("org.postgresql.PGConnection", false, PostgresAdapter.class.getClassLoader());
             } catch (ClassNotFoundException e) {
-                throw new IllegalStateException("PostgresAdapter requires " + dependency + " on the classpath", e);
+                throw new IllegalStateException("PostgresAdapter requires org.postgresql:postgresql on the classpath",
+                        e);
             }
         }
     }

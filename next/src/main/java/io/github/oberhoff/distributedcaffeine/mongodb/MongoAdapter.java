@@ -36,6 +36,11 @@ import static java.util.Objects.requireNonNull;
  * open. The library's own operations use read preference primary, read concern majority and write concern majority
  * with journaling, whatever the client's defaults; change streams are shared per client and database.
  * <p>
+ * The cache's operation timeout ({@code StoreConfigurer.withOperationTimeout}) becomes the client-side operation
+ * timeout of this cache's own operations only, so caches sharing a client may have different ones. Where the client
+ * sets one itself (the connection string option {@code timeoutMS}), the client's applies to every cache on it
+ * instead.
+ * <p>
  * Requires {@code org.mongodb:mongodb-driver-sync} and MongoDB 4.4 or later as a replica set (change streams and
  * majority reads); sharded collections are refused.
  *
@@ -82,8 +87,8 @@ public final class MongoAdapter<K, V> implements Adapter<K, V> {
     public Store createStore(StoreSettings settings) {
         MongoLocation location = new MongoLocation(databaseName, collectionName, discriminator, settings.keyFormat(),
                 settings.valueFormat());
-        MongoSchema.ensure(client, location, schemaReset, settings.timeout());
-        MongoStore store = new MongoStore(client, location, settings.timeout());
+        MongoSchema.ensure(client, location, schemaReset, settings.operationTimeout());
+        MongoStore store = new MongoStore(client, location, settings.operationTimeout());
         store.seedClusterTime();
         return store;
     }

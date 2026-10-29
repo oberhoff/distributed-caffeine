@@ -23,6 +23,7 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 
 import javax.sql.DataSource;
@@ -49,6 +50,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * after a part of it was written has its outcome unknown. And the retries through a cache: the store tries once, the
  * core again.
  */
+@NullMarked
 abstract class PostgresRetryTest {
 
     private static final Duration LONG = Duration.ofHours(1);

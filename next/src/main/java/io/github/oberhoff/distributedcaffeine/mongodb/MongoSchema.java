@@ -37,7 +37,7 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
 // On start (VISION.md, "Adapter setup" and "Migration"): a replica set with majority reads is required, sharded
 // collections are refused; a collection with the schema marker of this version is used, a missing one is created
@@ -48,8 +48,10 @@ final class MongoSchema {
 
     private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine.mongodb");
     private static final int COMMAND_NOT_FOUND = 59;
+    // the hash last, so that pruning to size ranks by the index alone (write time, ties by hash): without it, every
+    // batch sorted all the cache's values in memory (a million in 194 s, measured)
     private static final BsonDocument INDEX = new BsonDocument("_id.d", new BsonInt32(1))
-            .append("state", new BsonInt32(1)).append("writeTime", new BsonInt32(1));
+            .append("state", new BsonInt32(1)).append("writeTime", new BsonInt32(1)).append("_id.h", new BsonInt32(1));
 
     private MongoSchema() {
     }
@@ -103,7 +105,7 @@ final class MongoSchema {
 
     // hello, or isMaster on servers that do not know it yet (MongoDB 4.4.0 and 4.4.1): the same answer for what is
     // read of it (msg, setName, localTime)
-    static Document hello(Function<Document, Document> command) {
+    static Document hello(UnaryOperator<Document> command) {
         try {
             return command.apply(new Document("hello", 1));
         } catch (MongoCommandException e) {
@@ -151,8 +153,8 @@ final class MongoSchema {
                 return;
             }
         }
-        LOGGER.log(Level.WARNING, "Collection {0} has no index on (_id.d, state, writeTime); expiry and pruning will "
-                + "be slow. Create it with: db.{1}.createIndex('{'\"_id.d\": 1, state: 1, writeTime: 1'}')", location,
-                location.collectionName);
+        LOGGER.log(Level.WARNING, "Collection {0} has no index on (_id.d, state, writeTime, _id.h); expiry and pruning "
+                + "will be slow. Create it with: db.{1}.createIndex('{'\"_id.d\": 1, state: 1, writeTime: 1, "
+                + "\"_id.h\": 1'}')", location, location.collectionName);
     }
 }

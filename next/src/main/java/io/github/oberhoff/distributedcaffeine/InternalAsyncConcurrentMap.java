@@ -131,7 +131,7 @@ final class InternalAsyncConcurrentMap<K, V> extends AbstractMap<K, CompletableF
     // like AsyncCache.get(key, function): does not wait, and completes with null when the value is absent, which
     // Caffeine's types cannot express for a value type that is not nullable
     @Override
-    @SuppressWarnings("NullAway")
+    @SuppressWarnings({"NullAway", "NullableProblems"})
     public CompletableFuture<V> computeIfAbsent(K key,
                                                 Function<? super K, ? extends CompletableFuture<V>> mappingFunction) {
         requireNonNull(mappingFunction, "mappingFunction cannot be null");

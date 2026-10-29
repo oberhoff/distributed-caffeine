@@ -17,26 +17,34 @@ package io.github.oberhoff.distributedcaffeine.mongodb;
 
 import com.mongodb.ClientSessionOptions;
 import com.mongodb.ErrorCategory;
+import com.mongodb.MongoBulkWriteException;
+import com.mongodb.MongoCommandException;
 import com.mongodb.MongoConnectionPoolClearedException;
 import com.mongodb.MongoException;
 import com.mongodb.MongoExecutionTimeoutException;
 import com.mongodb.MongoNodeIsRecoveringException;
 import com.mongodb.MongoNotPrimaryException;
-import com.mongodb.MongoServerException;
 import com.mongodb.MongoSocketException;
 import com.mongodb.MongoSocketOpenException;
 import com.mongodb.MongoTimeoutException;
 import com.mongodb.MongoWriteConcernException;
+import com.mongodb.MongoWriteException;
+import com.mongodb.bulk.BulkWriteError;
+import com.mongodb.bulk.BulkWriteResult;
 import com.mongodb.client.ClientSession;
 import com.mongodb.client.FindIterable;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoCursor;
 import com.mongodb.client.cursor.TimeoutMode;
+import com.mongodb.client.model.BulkWriteOptions;
 import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.FindOneAndUpdateOptions;
 import com.mongodb.client.model.Projections;
+import com.mongodb.client.model.ReturnDocument;
 import com.mongodb.client.model.Sorts;
+import com.mongodb.client.model.UpdateOneModel;
 import com.mongodb.client.model.UpdateOptions;
-import com.mongodb.client.result.UpdateResult;
 import com.mongodb.client.model.Updates;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeFeed;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
@@ -47,6 +55,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import org.bson.BsonArray;
 import org.bson.BsonDateTime;
 import org.bson.BsonDocument;
@@ -61,31 +70,27 @@ import org.jspecify.annotations.Nullable;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
-import java.util.List;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 import static java.util.Objects.requireNonNull;
 
-
 /**
- * The store of one cache instance on MongoDB. Every write is an update pipeline setting the version the core chose
- * (compared only for equality here) and the write time ({@code $$NOW}); a write announces itself through its change
- * event. One {@code updateOne} per key: unconditional as an upsert, conditional on a version as a filter on it (no
- * match is a conflict), and on "missing" as an upsert filtered on a missing version, so that an existing document
- * makes it a duplicate key, a conflict.
+ * The store of one cache instance on MongoDB. Every write is an update pipeline setting the version and the write time
+ * ({@code $$NOW}); a write announces itself through its change event. A single write assigns its version under the
+ * document's lock and returns it ({@code findOneAndUpdate}, see {@link #writeOne}), so that a racing advance is never
+ * refused; a batch of writes is one unordered bulk write, one round trip, at the versions the core proposed, with an
+ * upsert per key whose outcome MongoDB reports per write (see {@link #bulkWrite}). Both write versions in the core's
+ * format, so the two paths stay comparable on one key (VISION.md, "Target design: versions applied as well as each
+ * store can", point 6).
  * <p>
  * The control row of {@code invalidateAll} ({@link Store#CONTROL_HASH}) is a document like any other here: the core
  * writes it and reads it with the keys, and compares the ages of one read (all from one {@code $$NOW}). Maintenance
@@ -109,20 +114,17 @@ final class MongoStore implements Store, ChangeFeed {
     private static final BsonDocument AGE = Document.parse("{$subtract: ['$$NOW', '$writeTime']}").toBsonDocument();
     private static final String NOW = "$$NOW";
     private static final String SUBTRACT = "$subtract";
+    private static final String COND = "$cond";
     private static final String FIELD_DISCRIMINATOR = "_id.d";
     private static final int CHUNK = 1_000;
-    // the per-key calls of a batch in flight at a time (the driver's pool has 100 connections per server by default).
-    // Measured on a single-node replica set, a put of 100: 45.5 ms one after another, 27.2 ms with 4, 13.6 ms with 16,
-    // 9.4 ms with 64 on the store alone; with the instances' change streams open, 28 ms with 16 and worse with 64
-    private static final int CONCURRENCY = 16;
-    private static final AtomicInteger WRITER_THREADS = new AtomicInteger();
-    // idle threads end after 60 s
-    private static final ExecutorService WRITERS = Executors.newCachedThreadPool(runnable -> {
-        Thread thread = new Thread(runnable, "distributed-caffeine-mongodb-" + WRITER_THREADS.incrementAndGet());
-        thread.setDaemon(true);
-        return thread;
-    });
     private static final int DUPLICATE_KEY = 11000;
+    private static final UpdateOptions BY_ID = new UpdateOptions().hint(new BsonDocument("_id", new BsonInt64(1)));
+    // the core's version format (InternalVersion): milliseconds since 2020 above 20 bits of counter and node
+    private static final long CORE_EPOCH_MILLIS = 1_577_836_800_000L;
+    private static final long CORE_TIME_FACTOR = 1L << 20;
+    // how far ahead of the server's clock a proposal may move a document's version (InternalVersion#WARN_AHEAD_MILLIS):
+    // so that no instance's clock far ahead carries the key's versions with it
+    private static final long PROPOSAL_AHEAD_MILLIS = 60_000;
 
     // causal consistency: see MongoClusterTime
     private static final ClientSessionOptions CAUSAL = ClientSessionOptions.builder().causallyConsistent(true).build();
@@ -192,47 +194,179 @@ final class MongoStore implements Store, ChangeFeed {
 
     // writes
 
-    // one updateOne per key, in the order of the hashes, so that concurrent batches meet in the same order
+    // a single write assigning, a batch one updateOne per key, in the order of the hashes, so that concurrent batches
+    // meet in the same order
     @Override
-    public Set<String> write(Collection<Write> writes) {
+    public WriteResult write(Collection<Write> writes) {
         Map<String, Write> byHash = new TreeMap<>();
         writes.forEach(write -> byHash.put(write.hash(), write));
         List<Write> sorted = new ArrayList<>(byHash.values());
-        List<Boolean> applied = concurrently(sorted, write -> run(Kind.WRITE, session -> apply(session, write)));
+        if (sorted.isEmpty()) {
+            return WriteResult.allApplied();
+        }
+        if (sorted.size() == 1) {
+            return run(Kind.WRITE, session -> writeOne(session, sorted.get(0)));
+        }
+        List<UpdateOneModel<BsonDocument>> models = new ArrayList<>();
+        sorted.forEach(write -> models.add(model(write)));
+        return WriteResult.refused(run(Kind.WRITE, session -> conflicts(sorted, bulkWrite(session, sorted, models))));
+    }
+
+    /**
+     * One write, assigning its version under the document's lock and returning it, or refused where its condition
+     * did not hold: the largest of one above the stored version, the server's time in the core's format (the floor, so
+     * that a document created anew, its tombstone deleted, starts above every version the server issued while its
+     * clock went forward) and the proposal, bounded to a minute ahead of that time. Its filter is its condition:
+     * <ul>
+     *     <li>advancing: the id alone, so it always applies (a concurrent insert of the same id is retried by the
+     *     server, the filter being the id's equality);</li>
+     *     <li>on "missing": the id and a missing version; an existing document makes the insert fail on the duplicate
+     *     key, the conflict;</li>
+     *     <li>on a version: the id and that version, without an upsert, so that a document with another one, or none
+     *     (pruned since it was read), is not written at all, the conflict.</li>
+     * </ul>
+     */
+    private WriteResult writeOne(ClientSession session, Write write) {
+        Bson id = Filters.eq("_id", location.id(write.hash()));
+        boolean onVersion = !write.isAdvance() && !write.expectsMissing();
+        Bson filter = id;
+        if (!write.isAdvance()) {
+            filter = Filters.and(id, write.expectsMissing() ? Filters.exists(FIELD_VERSION, false)
+                    : Filters.eq(FIELD_VERSION, write.expected()));
+        }
+        BsonValue version = assigned(write.version());
+        List<Bson> pipeline = write.isTombstone() ? tombstonePipeline(version) : valuePipeline(write, version, false);
+        try {
+            BsonDocument written = collection.findOneAndUpdate(session, filter, pipeline,
+                    new FindOneAndUpdateOptions().upsert(!onVersion).returnDocument(ReturnDocument.AFTER)
+                            .projection(Projections.include(FIELD_VERSION)));
+            if (written == null) {
+                return WriteResult.refused(Set.of(write.hash()));
+            }
+            long applied = written.getInt64(FIELD_VERSION).getValue();
+            return applied == write.version() ? WriteResult.allApplied()
+                    : new WriteResult(Set.of(), Map.of(write.hash(), applied));
+        } catch (MongoCommandException e) {
+            if (isDuplicateKey(e.getErrorCode())) {
+                return WriteResult.refused(Set.of(write.hash()));
+            }
+            throw e;
+        } catch (MongoWriteException e) {
+            if (isDuplicateKey(e.getError().getCode())) {
+                return WriteResult.refused(Set.of(write.hash()));
+            }
+            throw e;
+        }
+    }
+
+    // max(stored + 1, floor, min(proposed, floor + bound)), the floor the server's time in the core's format
+    private static BsonDocument assigned(long proposed) {
+        BsonDocument floor = new BsonDocument("$multiply", new BsonArray(List.of(
+                new BsonDocument(SUBTRACT, new BsonArray(List.of(
+                        new BsonDocument("$toLong", new BsonString(NOW)), new BsonInt64(CORE_EPOCH_MILLIS)))),
+                new BsonInt64(CORE_TIME_FACTOR))));
+        BsonDocument above = new BsonDocument("$add", new BsonArray(List.of(
+                new BsonDocument("$ifNull", new BsonArray(List.of(new BsonString("$" + FIELD_VERSION),
+                        new BsonInt64(0)))), new BsonInt64(1))));
+        BsonDocument bounded = new BsonDocument("$min", new BsonArray(List.of(literal(new BsonInt64(proposed)),
+                new BsonDocument("$add", new BsonArray(List.of(floor,
+                        new BsonInt64(PROPOSAL_AHEAD_MILLIS * CORE_TIME_FACTOR)))))));
+        return new BsonDocument("$max", new BsonArray(List.of(above, floor, bounded)));
+    }
+
+    // what one bulk write reports per write: the indexes of those that failed on the duplicate key (a document already
+    // there: a conflict for a write on "missing" or on a version), and of those that upserted (no document there: for a
+    // write on a version, a conflict, written as a tombstone by its pipeline)
+    private record Outcome(Set<Integer> duplicates, Set<Integer> upserted) {
+    }
+
+    /**
+     * Every write of a batch in one round trip: one unordered bulk write of single-document upserts, whose outcome
+     * MongoDB reports per write by its index, so that no conflict needs a read (VISION.md, build plan, step 5):
+     * <ul>
+     *     <li>advancing: an upsert filtered on the id and a smaller version; a document of a larger or equal one makes
+     *     the insert fail on the duplicate key, the refusal (the version only grows);</li>
+     *     <li>on "missing": an upsert filtered on the id and a missing version; an existing document has a version, so
+     *     the filter misses it and the insert fails on the duplicate key, the conflict;</li>
+     *     <li>on a version: an upsert filtered on the id and that version; a document with another one makes the
+     *     insert fail on the duplicate key, the conflict; no document at all (pruned since it was read) makes it
+     *     insert, reported as an upsert: a conflict too, and the pipeline, finding none of a stored document's fields,
+     *     writes it as a tombstone, so that no value from a failed condition is ever visible.</li>
+     * </ul>
+     * Unordered, so that one key's conflict does not stop the others; a failure other than a conflict leaves the
+     * batch's outcome unknown if another write of it applied.
+     */
+    private Outcome bulkWrite(ClientSession session, List<Write> sorted, List<UpdateOneModel<BsonDocument>> models) {
+        try {
+            BulkWriteResult result = collection.bulkWrite(session, models, new BulkWriteOptions().ordered(false));
+            return new Outcome(Set.of(), upserted(result));
+        } catch (MongoBulkWriteException e) {
+            Set<Integer> duplicates = new HashSet<>();
+            List<BulkWriteError> failures = new ArrayList<>();
+            for (BulkWriteError error : e.getWriteErrors()) {
+                if (isDuplicateKey(error.getCode())) {
+                    duplicates.add(error.getIndex());
+                } else {
+                    failures.add(error);
+                }
+            }
+            BulkWriteResult result = e.getWriteResult();
+            boolean applied = result.getMatchedCount() > 0 || !result.getUpserts().isEmpty()
+                    || duplicates.size() < sorted.size() - failures.size();
+            if (e.getWriteConcernError() != null) {
+                // applied on the primary, not confirmed by the majority: the outcome of every write unknown
+                throw new StoreException("Writing to " + location + " was not confirmed, the outcome unknown: "
+                        + e.getMessage(), e, true, true);
+            }
+            if (!failures.isEmpty()) {
+                // every duplicate key is a conflict or a refusal (above); any other failure of a write is the store's
+                StoreException failure = new StoreException("Writing to " + location + " failed: " + e.getMessage(),
+                        e, false, false);
+                throw applied ? failure.afterPartlyApplied() : failure;
+            }
+            return new Outcome(duplicates, upserted(result));
+        }
+    }
+
+    private static Set<Integer> upserted(BulkWriteResult result) {
+        Set<Integer> upserted = new HashSet<>();
+        result.getUpserts().forEach(upsert -> upserted.add(upsert.getIndex()));
+        return upserted;
+    }
+
+    private static Set<String> conflicts(List<Write> sorted, Outcome outcome) {
         Set<String> conflicting = new LinkedHashSet<>();
-        for (int i = 0; i < sorted.size(); i++) {
-            if (!applied.get(i)) {
-                conflicting.add(sorted.get(i).hash());
+        for (int index = 0; index < sorted.size(); index++) {
+            Write write = sorted.get(index);
+            boolean versioned = !write.isAdvance() && !write.expectsMissing();
+            if (outcome.duplicates().contains(index) || (versioned && outcome.upserted().contains(index))) {
+                conflicting.add(write.hash());
             }
         }
         return conflicting;
     }
 
-    // whether the write applied: unconditional always; on a version, if the document still had it; on "missing", an
-    // upsert that may only insert: an existing document has a version, so the filter misses it and the insert fails on
-    // the duplicate key
-    private boolean apply(ClientSession session, Write write) {
+    private static boolean isDuplicateKey(int code) {
+        return code == DUPLICATE_KEY || ErrorCategory.fromErrorCode(code) == ErrorCategory.DUPLICATE_KEY;
+    }
+
+    // the upsert of one write, its filter by its condition (see bulkWrite)
+    private UpdateOneModel<BsonDocument> model(Write write) {
         Bson id = Filters.eq("_id", location.id(write.hash()));
-        List<Bson> pipeline = write.isTombstone() ? tombstonePipeline(write.version()) : valuePipeline(write);
-        if (write.isUnconditional()) {
-            collection.updateOne(session, id, pipeline, new UpdateOptions().upsert(true));
-            return true;
+        BsonValue proposed = literal(new BsonInt64(write.version()));
+        Bson filter;
+        List<Bson> pipeline;
+        if (write.isAdvance()) {
+            filter = Filters.and(id, Filters.lt(FIELD_VERSION, write.version()));
+            pipeline = write.isTombstone() ? tombstonePipeline(proposed) : valuePipeline(write, proposed, false);
+        } else if (write.expectsMissing()) {
+            filter = Filters.and(id, Filters.exists(FIELD_VERSION, false));
+            pipeline = write.isTombstone() ? tombstonePipeline(proposed) : valuePipeline(write, proposed, false);
+        } else {
+            filter = Filters.and(id, Filters.eq(FIELD_VERSION, write.expected()));
+            pipeline = write.isTombstone() ? tombstonePipeline(proposed) : valuePipeline(write, proposed, true);
         }
-        if (!write.expectsMissing()) {
-            UpdateResult result = collection.updateOne(session, Filters.and(id,
-                    Filters.eq(FIELD_VERSION, write.expected())), pipeline);
-            return result.getMatchedCount() > 0;
-        }
-        try {
-            collection.updateOne(session, Filters.and(id, Filters.exists(FIELD_VERSION, false)), pipeline,
-                    new UpdateOptions().upsert(true));
-            return true;
-        } catch (MongoServerException e) {
-            if (e.getCode() == DUPLICATE_KEY || ErrorCategory.fromErrorCode(e.getCode()) == ErrorCategory.DUPLICATE_KEY) {
-                return false;
-            }
-            throw e;
-        }
+        return new UpdateOneModel<>(filter, pipeline, new UpdateOptions().upsert(true));
     }
 
     // maintenance's view of the cache for expiry and size pruning: its own rows, no reserved ones, and none the
@@ -254,33 +388,70 @@ final class MongoStore implements Store, ChangeFeed {
 
     // maintenance: idempotent on several instances at once
 
+    // each expiry assigned as a single write is (assigned), the given version the proposal: a document written at a
+    // larger one than it (by the server's floor, a clock ahead of the maintaining instance) is expired all the same
+    // instead of waiting for that instance's clock. At most the limit: their ids found first, then updated under the
+    // same filter, so that a document written meanwhile is left as it is; in chunks, as a million ids in one filter
+    // exceed the 16 MB of a command (measured), each by the ids' index: the planner took the maintenance index for the
+    // filter's other conditions and read every due document per chunk (a million in 565 s instead of 13)
     @Override
-    public int expire(Duration maxAge, long version) {
-        return run(Kind.WRITE, session -> (int) collection.updateMany(session, Filters.and(maintained(session),
-                        Filters.eq(FIELD_STATE, State.VALUE.name()),
-                        Filters.expr(new Document("$lte", List.of(WRITE_TIME,
-                                new Document(SUBTRACT, List.of(NOW, maxAge.toMillis())))))),
-                List.of(new BsonDocument("$set", new BsonDocument(FIELD_STATE, new BsonString(State.EXPIRED.name()))
-                                .append(FIELD_VERSION, literal(new BsonInt64(version)))
-                                .append(FIELD_WRITE_TIME, new BsonString(NOW))),
-                        new BsonDocument("$unset", new BsonString(FIELD_VALUE))))
-                .getModifiedCount());
+    public int expire(Duration maxAge, long version, int limit) {
+        return run(Kind.WRITE, session -> {
+            Bson due = Filters.and(maintained(session), Filters.eq(FIELD_STATE, State.VALUE.name()),
+                    Filters.expr(new Document("$lte", List.of(WRITE_TIME,
+                            new Document(SUBTRACT, List.of(NOW, maxAge.toMillis()))))));
+            List<BsonValue> ids = new ArrayList<>();
+            find(session, due).limit(limit).projection(Projections.include("_id"))
+                    .forEach(document -> ids.add(document.get("_id")));
+            List<Bson> expiry = List.of(
+                    new BsonDocument("$set", new BsonDocument(FIELD_STATE, new BsonString(State.EXPIRED.name()))
+                            .append(FIELD_VERSION, assigned(version))
+                            .append(FIELD_WRITE_TIME, new BsonString(NOW))),
+                    new BsonDocument("$unset", new BsonString(FIELD_VALUE)));
+            int expired = 0;
+            for (int from = 0; from < ids.size(); from += CHUNK) {
+                expired += (int) collection.updateMany(session, Filters.and(Filters.in("_id",
+                        ids.subList(from, Math.min(ids.size(), from + CHUNK))), due), expiry, BY_ID).getModifiedCount();
+            }
+            return expired;
+        });
     }
 
-    // keeps the newest maxSize values (ties by hash); the documents beyond that rank are the same for every instance
-    // pruning at once, so overlapping runs never prune more; a document rewritten since it was found is kept
+    // keeps the newest maxSize values (ties by hash, the highest kept: the maintenance index read backwards); the
+    // documents beyond that rank are the same for every instance pruning at once, so overlapping runs never prune more;
+    // of those, the ones younger than the minimum age stay (by the server's clock: the age projected with them); a
+    // document rewritten since it was found is kept. At most the limit, the oldest first: the boundary (the newest
+    // document beyond the rank) by reading the index backwards as far as the rank, then the batch from its old end.
+    // Every sort is the index's own order: a tie broken the other way, or a sort the index does not have, made MongoDB
+    // sort all the cache's values in memory for every batch (a million in 194 s, the longest batch 3.9 s, against 44 s
+    // in one call)
     @Override
-    public int pruneToSize(long maxSize) {
-        return run(Kind.WRITE, session -> deleteUnchanged(session, find(session, Filters.and(maintained(session),
-                        Filters.eq(FIELD_STATE, State.VALUE.name())))
-                .sort(Sorts.orderBy(Sorts.descending(FIELD_WRITE_TIME), Sorts.ascending("_id.h")))
-                .skip((int) Math.min(Integer.MAX_VALUE, maxSize))));
+    public int pruneToSize(long maxSize, Duration minAge, int limit) {
+        return run(Kind.WRITE, session -> {
+            Bson values = Filters.and(maintained(session), Filters.eq(FIELD_STATE, State.VALUE.name()));
+            BsonDocument boundary = find(session, values)
+                    .sort(Sorts.descending(FIELD_WRITE_TIME, FIELD_HASH))
+                    .skip((int) Math.min(Integer.MAX_VALUE, maxSize)).limit(1)
+                    .projection(Projections.include(FIELD_WRITE_TIME)).first();
+            if (boundary == null) {
+                return 0;
+            }
+            BsonValue time = boundary.get(FIELD_WRITE_TIME);
+            String hash = boundary.getDocument("_id").getString("h").getValue();
+            Bson beyond = Filters.or(Filters.lt(FIELD_WRITE_TIME, time),
+                    Filters.and(Filters.eq(FIELD_WRITE_TIME, time), Filters.lte(FIELD_HASH, hash)));
+            return deleteUnchanged(session, find(session, Filters.and(values, beyond))
+                            .sort(Sorts.ascending(FIELD_WRITE_TIME, FIELD_HASH))
+                            .projection(Projections.fields(Projections.include(FIELD_VERSION),
+                                    new BsonDocument("age", AGE))),
+                    document -> age(document).compareTo(minAge) >= 0, limit);
+        });
     }
 
     // found first, then deleted: MongoDB before 5.0 refuses $$NOW in the filter of a delete (error 51144); with the
-    // rows written at or before the control row (any state), never a reserved one
+    // rows written at or before the control row (any state), never a reserved one; at most the limit
     @Override
-    public int pruneTombstones(Duration retention) {
+    public int pruneTombstones(Duration retention, int limit) {
         return run(Kind.WRITE, session -> {
             BsonDateTime control = controlTime(session);
             Bson old = Filters.and(Filters.in(FIELD_STATE, State.TOMBSTONE.name(), State.EXPIRED.name()),
@@ -289,16 +460,29 @@ final class MongoStore implements Store, ChangeFeed {
             Bson doomed = control == null ? old : Filters.or(old, Filters.lte(FIELD_WRITE_TIME, control));
             return deleteUnchanged(session, find(session, Filters.and(
                     Filters.eq(FIELD_DISCRIMINATOR, location.discriminator), Filters.exists(FIELD_HASH),
-                    Filters.not(Filters.regex(FIELD_HASH, "^#")), doomed)));
+                    Filters.not(Filters.regex(FIELD_HASH, "^#")), doomed)).limit(limit));
         });
     }
 
     // deletes the documents found, each only if not rewritten since (its version unchanged), in chunks
     private int deleteUnchanged(ClientSession session, FindIterable<BsonDocument> found) {
-        List<Bson> doomed = found.projection(Projections.include(FIELD_VERSION))
-                .map(document -> Filters.and(Filters.eq("_id", document.get("_id")),
-                        Filters.eq(FIELD_VERSION, document.getInt64(FIELD_VERSION).getValue())))
-                .into(new ArrayList<>());
+        return deleteUnchanged(session, found.projection(Projections.include(FIELD_VERSION)), document -> true,
+                Integer.MAX_VALUE);
+    }
+
+    // the same for the documents found that the condition accepts (found with their version), at most the limit
+    private int deleteUnchanged(ClientSession session, FindIterable<BsonDocument> found,
+                                Predicate<BsonDocument> accepted, int limit) {
+        List<Bson> doomed = new ArrayList<>();
+        try (MongoCursor<BsonDocument> cursor = found.iterator()) {
+            while (doomed.size() < limit && cursor.hasNext()) {
+                BsonDocument document = cursor.next();
+                if (accepted.test(document)) {
+                    doomed.add(Filters.and(Filters.eq("_id", document.get("_id")),
+                            Filters.eq(FIELD_VERSION, document.getInt64(FIELD_VERSION).getValue())));
+                }
+            }
+        }
         int deleted = 0;
         for (int from = 0; from < doomed.size(); from += CHUNK) {
             deleted += (int) collection.deleteMany(session, Filters.or(doomed.subList(from,
@@ -380,20 +564,31 @@ final class MongoStore implements Store, ChangeFeed {
 
     // documents
 
-    private List<Bson> valuePipeline(Write write) {
+    // onVersion: a write on a version, which upserts where no document is (pruned since it was read): there, with no
+    // write time yet (only the filter's fields), it writes a tombstone instead, the write being a conflict
+    private List<Bson> valuePipeline(Write write, BsonValue version, boolean onVersion) {
+        BsonValue value = literal(MongoLocation.toBson(requireNonNull(write.value()), location.valueFormat));
+        BsonValue state = new BsonString(State.VALUE.name());
+        if (onVersion) {
+            BsonDocument isNew = new BsonDocument("$eq", new BsonArray(List.of(
+                    new BsonDocument("$type", new BsonString(WRITE_TIME)), new BsonString("missing"))));
+            value = new BsonDocument(COND, new BsonArray(List.of(isNew, new BsonString("$$REMOVE"), value)));
+            state = new BsonDocument(COND, new BsonArray(List.of(isNew,
+                    new BsonString(State.TOMBSTONE.name()), state)));
+        }
         return List.of(new BsonDocument("$set", new BsonDocument()
                 .append("key", literal(MongoLocation.toBson(requireNonNull(write.key()), location.keyFormat)))
-                .append(FIELD_VALUE, literal(MongoLocation.toBson(requireNonNull(write.value()), location.valueFormat)))
-                .append(FIELD_STATE, new BsonString(State.VALUE.name()))
-                .append(FIELD_VERSION, literal(new BsonInt64(write.version())))
+                .append(FIELD_VALUE, value)
+                .append(FIELD_STATE, state)
+                .append(FIELD_VERSION, version)
                 .append(FIELD_WRITE_TIME, new BsonString(NOW))));
     }
 
-    // keeps the document's key; a new tombstone has none
-    private static List<Bson> tombstonePipeline(long version) {
+    // keeps the document's key; a new tombstone has none. The version a literal or an expression (writeOne)
+    private static List<Bson> tombstonePipeline(BsonValue version) {
         return List.of(new BsonDocument("$set", new BsonDocument()
                         .append(FIELD_STATE, new BsonString(State.TOMBSTONE.name()))
-                        .append(FIELD_VERSION, literal(new BsonInt64(version)))
+                        .append(FIELD_VERSION, version)
                         .append(FIELD_WRITE_TIME, new BsonString(NOW))),
                 new BsonDocument("$unset", new BsonString(FIELD_VALUE)));
     }
@@ -405,7 +600,7 @@ final class MongoStore implements Store, ChangeFeed {
 
     // a value only if younger than the maximum age (row() reads a value document without one as expired)
     private static BsonDocument projection(Duration maxAge) {
-        BsonDocument youngValue = new BsonDocument("$cond", new BsonArray(List.of(
+        BsonDocument youngValue = new BsonDocument(COND, new BsonArray(List.of(
                 new Document("$gt", List.of(WRITE_TIME, new Document(SUBTRACT, List.of(NOW, maxAge.toMillis()))))
                         .toBsonDocument(), new BsonString("$" + FIELD_VALUE), new BsonString("$$REMOVE"))));
         return new BsonDocument("key", new BsonInt64(1)).append(FIELD_VALUE, youngValue)
@@ -415,7 +610,9 @@ final class MongoStore implements Store, ChangeFeed {
 
     private static Duration age(BsonDocument document) {
         BsonValue age = document.get("age");
-        return Duration.ofMillis(age != null && age.isNumber() ? Math.max(0, age.asNumber().longValue()) : 0);
+        // negative for a document written after the query's $$NOW (the query reads document by document), as it is,
+        // so that the ages of one query still compare like the write times (Store#read)
+        return Duration.ofMillis(age != null && age.isNumber() ? age.asNumber().longValue() : 0);
     }
 
     private static Bson younger(Duration maxAge) {
@@ -429,59 +626,17 @@ final class MongoStore implements Store, ChangeFeed {
         State stored = State.valueOf(document.getString(FIELD_STATE).getValue());
         BsonValue key = document.get("key");
         BsonValue value = document.get(FIELD_VALUE);
+        byte[] bytes = stored == State.VALUE && value != null
+                ? MongoLocation.fromBson(value, location.valueFormat) : null;
         // a value projected away as too old: expired, at its version
-        State state = stored == State.VALUE && value == null ? State.EXPIRED : stored;
+        State state = stored == State.VALUE && bytes == null ? State.EXPIRED : stored;
         return new Row(hash, key == null || key.isNull() ? new byte[0] : MongoLocation.fromBson(key, location.keyFormat),
-                state == State.VALUE && value != null ? MongoLocation.fromBson(value, location.valueFormat) : null,
-                state, document.getInt64(FIELD_VERSION).getValue(), age(document));
+                bytes, state, document.getInt64(FIELD_VERSION).getValue(), age(document));
     }
 
     private List<BsonValue> ids(Collection<String> hashes) {
         List<BsonValue> ids = new ArrayList<>();
         hashes.forEach(hash -> ids.add(location.id(hash)));
         return ids;
-    }
-
-    // the per-key calls of a batch, concurrently: MongoDB writes one document per call, so one after another a batch
-    // cost a round trip per key (100 keys: 46 ms, measured; VISION.md, "Performance"). At most CONCURRENCY at a time,
-    // each its own round trip and session, on threads of their own (the calls block). Returns each call's result in
-    // the order of the items, whether each applied (false: a conflict). A failure leaves the batch's outcome unknown
-    // if another call applied, as a failure partway did one after another; otherwise it is thrown as it is
-    private static <I> List<Boolean> concurrently(List<I> items, Function<I, Boolean> call) {
-        if (items.size() <= 1) {
-            return items.isEmpty() ? List.of() : Collections.singletonList(call.apply(items.get(0)));
-        }
-        Semaphore slots = new Semaphore(CONCURRENCY);
-        List<CompletableFuture<Boolean>> calls = new ArrayList<>();
-        for (I item : items) {
-            slots.acquireUninterruptibly();
-            calls.add(CompletableFuture.supplyAsync(() -> {
-                try {
-                    return call.apply(item);
-                } finally {
-                    slots.release();
-                }
-            }, WRITERS));
-        }
-        List<Boolean> results = new ArrayList<>();
-        @Nullable StoreException failure = null;
-        boolean applied = false;
-        for (CompletableFuture<Boolean> pending : calls) {
-            try {
-                boolean result = pending.join();
-                applied |= result;
-                results.add(result);
-            } catch (CompletionException e) {
-                if (!(e.getCause() instanceof StoreException storeException)) {
-                    throw e;
-                }
-                failure = failure == null ? storeException : failure;
-                results.add(false);
-            }
-        }
-        if (failure != null) {
-            throw applied ? failure.afterPartlyApplied() : failure;
-        }
-        return results;
     }
 }

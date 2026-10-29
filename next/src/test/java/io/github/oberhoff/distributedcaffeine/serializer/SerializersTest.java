@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine.serializer;
 
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 import tools.jackson.core.type.TypeReference;
 
@@ -25,6 +26,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+@NullMarked
 class SerializersTest {
 
     record Order(String id, List<String> items) implements Serializable {
@@ -102,8 +104,8 @@ class SerializersTest {
         JacksonSerializer<Order> asJson = new JacksonSerializer<>(Order.class, true);
         Order order = new Order("o1", List.of("a"));
 
-        assertThat(asText.storeAsBinaryJson()).isFalse();
-        assertThat(asJson.storeAsBinaryJson()).isTrue();
+        assertThat(asText.storeAsNativeJson()).isFalse();
+        assertThat(asJson.storeAsNativeJson()).isTrue();
         assertThat(asJson.deserialize(asJson.serialize(order))).isEqualTo(order);
         assertThat(asJson.serialize(order)).contains("\"id\":\"o1\"");
     }

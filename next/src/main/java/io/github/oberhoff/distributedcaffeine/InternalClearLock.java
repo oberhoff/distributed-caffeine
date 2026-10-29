@@ -31,7 +31,11 @@ import com.google.errorprone.annotations.concurrent.GuardedBy;
  */
 final class InternalClearLock {
 
-    // the shared holds of the current thread; a thread holding any is let in again at once
+    // the shared holds of the current thread; a thread holding any is let in again at once. One small array per
+    // thread that ever used this cache, kept while the thread lives (or until the garbage collector clears it after
+    // the cache is gone): bounded by threads and caches, and not removed after every operation, which would allocate
+    // on the hot path
+    @SuppressWarnings("java:S5164")
     private final ThreadLocal<int[]> holds = ThreadLocal.withInitial(() -> new int[1]);
     @GuardedBy("this")
     private int readers;
@@ -97,9 +101,11 @@ final class InternalClearLock {
         notifyAll();
     }
 
-    // waits for a change; true if interrupted meanwhile (the wait goes on, the interrupt is restored by the caller)
+    // waits for a change; true if interrupted in the meantime (the wait goes on, the interrupt is restored by the
+    // caller)
     @GuardedBy("this")
-    @SuppressWarnings("WaitNotInLoop") // every caller loops on its condition
+    // every caller loops on its condition, holds the monitor (@GuardedBy) and restores the interrupt
+    @SuppressWarnings({"WaitNotInLoop", "java:S2273", "java:S2274", "java:S2142"})
     private boolean await() {
         try {
             wait();

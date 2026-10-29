@@ -24,6 +24,7 @@ import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -66,6 +67,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * (L1 expires on Caffeine's ticker, L2 on the store's clock); the documented deviations are normalized where they
  * apply: an {@code AsyncCache.getIfPresent} future completing with {@code null} counts as Caffeine's {@code null}.
  */
+@NullMarked
 @Timeout(300)
 public class CaffeineParityTest {
 
@@ -180,8 +182,10 @@ public class CaffeineParityTest {
         };
     }
 
-    // the null arguments are the point (both sides reject them), and so are the views (keySet().remove)
-    @SuppressWarnings({"NullArgumentForNonNullParameter", "DataFlowIssue", "RedundantCollectionOperation"})
+    // the null arguments and results are the point (both sides reject or skip them), and so are the views
+    // (keySet().remove)
+    @SuppressWarnings({"NullArgumentForNonNullParameter", "DataFlowIssue", "RedundantCollectionOperation",
+            "NullableProblems"})
     private static List<Operation> syncOperations(boolean withLocal) {
         List<Operation> operations = new ArrayList<>(List.of(
                 // Cache / LoadingCache
@@ -454,7 +458,8 @@ public class CaffeineParityTest {
         return operations;
     }
 
-    @SuppressWarnings("FutureReturnValueIgnored") // the futures are returned to outcome(), which waits for them
+    // the futures are returned to outcome(), which waits for them; the null results are the point, as above
+    @SuppressWarnings({"FutureReturnValueIgnored", "NullableProblems"})
     private static List<Operation> asyncOperations(boolean withLocal) {
         List<Operation> operations = new ArrayList<>(List.of(
                 global("async.getIfPresent", random -> {
@@ -620,7 +625,9 @@ public class CaffeineParityTest {
         Pair(CacheBackend backend, boolean bulkLoader, int instanceCount, DistributionMode mode, boolean async) {
             this.backend = backend;
             Removals caffeineRemovals = new Removals();
-            Caffeine<Object, Object> builder = Caffeine.newBuilder().recordStats().executor(Runnable::run);
+            // expiring at the store's maximum age, as every copy of a distributed cache does (no step lasts that long)
+            Caffeine<Object, Object> builder = Caffeine.newBuilder().recordStats().executor(Runnable::run)
+                    .expireAfterWrite(Duration.ofHours(1));
             RemovalListener<String, String> caffeineListener = (key, value, cause) ->
                     caffeineRemovals.add(cause + " " + key + "=" + value);
             Loader caffeineLoader = new Loader(bulkLoader);
@@ -638,7 +645,8 @@ public class CaffeineParityTest {
                 DistributedCaffeine<String, String> distributed = DistributedCaffeine.newBuilder(adapter)
                         .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                                 .withValueSerializer(StringSerializer.ofString()))
-                        .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(10_000))
+                        .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                                .withMaximumAge(Duration.ofHours(1)).withMaximumSize(10_000))
                         .withDistributionMode(mode)
                         .withCaffeine(configurer -> configurer.recordStats().executor(Runnable::run)
                                 .removalListener((key, value, cause) ->

@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.Caffeine;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
@@ -33,6 +34,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * the same name and parameter types, returning the configurer. A method Caffeine adds fails this test until it is
  * followed.
  */
+@NullMarked
 class CaffeineConfigurerParityTest {
 
     @Test

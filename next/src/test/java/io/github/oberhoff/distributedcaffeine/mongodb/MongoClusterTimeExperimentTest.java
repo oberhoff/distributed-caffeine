@@ -29,6 +29,8 @@ import com.mongodb.client.model.ReturnDocument;
 import org.bson.BsonDocument;
 import org.bson.BsonTimestamp;
 import org.bson.Document;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -49,6 +51,7 @@ import static java.util.Objects.requireNonNull;
  */
 @EnabledIfSystemProperty(named = "experiments", matches = "true")
 // a measurement: it prints what it measures rather than asserting it
+@NullMarked
 @SuppressWarnings("java:S2699")
 class MongoClusterTimeExperimentTest {
 
@@ -76,7 +79,7 @@ class MongoClusterTimeExperimentTest {
     }
 
     // per round: read (the read's time), invalidateAll (T), write (the write's version), as the store would
-    private static void rounds(String label, MongoClient client, MongoReplicaSet replicaSet) {
+    private static void rounds(String label, MongoClient client, @Nullable MongoReplicaSet replicaSet) {
         MongoCollection<Document> rows = client.getDatabase("ct").withReadConcern(ReadConcern.MAJORITY)
                 .withWriteConcern(WriteConcern.MAJORITY.withJournal(true))
                 .withReadPreference(ReadPreference.primary()).getCollection("rows");
@@ -124,7 +127,8 @@ class MongoClusterTimeExperimentTest {
                 readNotAboveWrite);
     }
 
-    @SuppressWarnings("BusyWait") // the pause is the backoff while a new primary is elected, not a wait for a condition
+    // the pause is the backoff while a new primary is elected, not a wait for a condition
+    @SuppressWarnings({"BusyWait", "java:S2925"})
     private static <T> T retrying(java.util.function.Supplier<T> call) {
         for (int attempt = 1; ; attempt++) {
             try {

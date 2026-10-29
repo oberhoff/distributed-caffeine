@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.mongodb;
 
 import io.github.oberhoff.distributedcaffeine.EndToEndBenchmark;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
@@ -24,8 +25,10 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
  * The end-to-end benchmark (see {@link EndToEndBenchmark}) on MongoDB 9, a single-node replica set in a container.
  * Run with {@code -Dexperiments=true}.
  */
+@NullMarked
 @EnabledIfSystemProperty(named = "experiments", matches = "true")
 @Timeout(1_800)
+@SuppressWarnings("java:S2699") // an experiment reports what it measures, it asserts nothing
 class MongoBenchmarkExperimentTest {
 
     @Test

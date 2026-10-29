@@ -21,7 +21,10 @@ import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import io.github.oberhoff.distributedcaffeine.testing.StoreProfile;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -49,12 +52,14 @@ import java.util.function.Function;
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.await;
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.pause;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * {@code asMap()}: one-key methods through L2, the conditional methods atomic across instances, the views local with
  * global removals; and the write paths' ordering against messages announced while a write is in flight.
  */
+@NullMarked
 @Timeout(30)
 @SuppressWarnings("resource") // every cache and store a test opens is closed after it (@AfterEach)
 class InternalMapTest {
@@ -74,10 +79,11 @@ class InternalMapTest {
 
     private DistributedCaffeine<String, String> builder(Function<Store, Store> wrapping) {
         Adapter<String, String> adapter = settings -> wrapping.apply(database.openStore("cache"));
-        return DistributedCaffeine.newBuilder(adapter)
+        return DistributedCaffeine.newBuilder(InternalCoreTest.offered(adapter))
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000));
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(1_000));
     }
 
     private DistributedCache<String, String> cache() {
@@ -151,6 +157,7 @@ class InternalMapTest {
 
     @Test
     void containsKey_checks_an_untrusted_held_value_against_the_store() {
+        assumeTrue(database.profile().changes() == StoreProfile.Changes.FEED, "interrupts the store's feed");
         DistributedCache<String, String> first = cache();
         DistributedCache<String, String> second = cache();
         first.put("k", "v");
@@ -171,9 +178,9 @@ class InternalMapTest {
         DistributedCache<String, String> other = cache();
         DistributedCache<String, String> remover = track(builder(store -> new InternalCoreTest.DelegatingStore(store) {
             @Override
-            public Set<String> write(Collection<Write> writes) {
+            public WriteResult write(Collection<Write> writes) {
                 // before the conditional removal is applied
-                if (writes.stream().anyMatch(write -> write.isTombstone() && !write.isUnconditional())
+                if (writes.stream().anyMatch(write -> write.isTombstone() && !write.isAdvance())
                         && interfere.getAndSet(false)) {
                     other.put("k", "newer");
                 }
@@ -201,7 +208,7 @@ class InternalMapTest {
 
     @Test
     void remove_without_a_value_still_defeats_a_load_in_flight() throws Exception {
-        java.util.concurrent.atomic.AtomicReference<String> source = new java.util.concurrent.atomic.AtomicReference<>("old");
+        java.util.concurrent.atomic.AtomicReference<@Nullable String> source = new java.util.concurrent.atomic.AtomicReference<>("old");
         CountDownLatch called = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         AtomicInteger calls = new AtomicInteger();
@@ -214,7 +221,7 @@ class InternalMapTest {
             return value;
         }));
         DistributedCache<String, String> remover = cache();
-        CompletableFuture<String> load = CompletableFuture.supplyAsync(() -> loader.get("k"));
+        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> loader.get("k"));
         assertThat(called.await(5, TimeUnit.SECONDS)).isTrue();
 
         // the record is deleted after the loader read it; the store holds no value, so remove finds nothing
@@ -248,7 +255,7 @@ class InternalMapTest {
         ExecutorService executor = Executors.newFixedThreadPool(8);
         try {
             CountDownLatch start = new CountDownLatch(1);
-            List<Future<String>> results = new ArrayList<>();
+            List<Future<@Nullable String>> results = new ArrayList<>();
             for (int i = 0; i < 16; i++) {
                 ConcurrentMap<String, String> map = (i % 2 == 0 ? first : second).asMap();
                 String value = "v" + i;
@@ -260,7 +267,7 @@ class InternalMapTest {
             }
             start.countDown();
             Set<String> winners = new HashSet<>();
-            for (Future<String> result : results) {
+            for (Future<@Nullable String> result : results) {
                 String winner = result.get(10, TimeUnit.SECONDS);
                 if (winner != null) {
                     winners.add(winner);
@@ -491,8 +498,8 @@ class InternalMapTest {
         DistributedCache<String, String> other = cache();
         DistributedCache<String, String> writer = track(builder(store -> new InternalCoreTest.DelegatingStore(store) {
             @Override
-            public Set<String> write(Collection<Write> writes) {
-                Set<String> conflicts = super.write(writes);
+            public WriteResult write(Collection<Write> writes) {
+                WriteResult conflicts = super.write(writes);
                 if (writes.stream().anyMatch(write -> !write.isTombstone()) && interfere.getAndSet(false)) {
                     // a newer write elsewhere, announced to the writer before it commits its own to L1
                     other.put("k", "newer");
@@ -514,8 +521,8 @@ class InternalMapTest {
         DistributedCache<String, String> other = cache();
         DistributedCache<String, String> writer = track(builder(store -> new InternalCoreTest.DelegatingStore(store) {
             @Override
-            public Set<String> write(Collection<Write> writes) {
-                Set<String> conflicts = super.write(writes);
+            public WriteResult write(Collection<Write> writes) {
+                WriteResult conflicts = super.write(writes);
                 if (writes.stream().anyMatch(write -> !write.isTombstone()) && interfere.getAndSet(false)) {
                     other.invalidateAll();
                     settle();

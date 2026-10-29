@@ -22,7 +22,6 @@ import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeFeed;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeScan;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
-import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import org.jspecify.annotations.Nullable;
 
@@ -30,13 +29,10 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 import static java.util.Objects.requireNonNull;
-import static java.util.Objects.requireNonNullElse;
+import static java.util.Objects.requireNonNullElseGet;
 
 /**
  * The builder of a distributed cache: a Caffeine cache per instance, read through a shared store.
@@ -56,7 +52,6 @@ import static java.util.Objects.requireNonNullElse;
  */
 public final class DistributedCaffeine<K, V> {
 
-    static final Duration DEFAULT_BUILD_TIMEOUT = Duration.ofSeconds(30);
     private static final String LOADER_CANNOT_BE_NULL = "loader cannot be null";
 
     private final Adapter<K, V> adapter;
@@ -65,9 +60,9 @@ public final class DistributedCaffeine<K, V> {
     private final SerializersConfigurer<K, V> serializers = new SerializersConfigurer<>();
     private @Nullable HashProvider<K> hashProvider;
     private @Nullable DistributionMode distributionMode;
-    private @Nullable Duration absentCachingExpiry;
-    private Duration buildTimeout = DEFAULT_BUILD_TIMEOUT;
-    private @Nullable Executor storeExecutor;
+    private @Nullable Duration negativeCachingExpiry;
+    private int loadAttempts = InternalCore.LOAD_ATTEMPTS;
+    private InternalEnvironment environment = InternalEnvironment.REAL;
 
     private DistributedCaffeine(Adapter<K, V> adapter) {
         this.adapter = adapter;
@@ -110,6 +105,23 @@ public final class DistributedCaffeine<K, V> {
     }
 
     /**
+     * Sets how instances learn about changes made elsewhere; {@link DistributionMode#INVALIDATE} by default. With
+     * {@link DistributionMode#NONE} and no {@code expireAfterWrite} or {@code expireAfter}, local copies expire after
+     * the store's maximum age.
+     *
+     * @param distributionMode the distribution mode
+     * @return this builder
+     */
+    public DistributedCaffeine<K, V> withDistributionMode(DistributionMode distributionMode) {
+        requireNonNull(distributionMode, "distributionMode cannot be null");
+        if (this.distributionMode != null) {
+            throw new IllegalStateException("distributionMode was already set");
+        }
+        this.distributionMode = distributionMode;
+        return this;
+    }
+
+    /**
      * Configures how keys and values are serialized for the store; Fory for both by default (see
      * {@link SerializersConfigurer}, also for hardening).
      *
@@ -139,67 +151,26 @@ public final class DistributedCaffeine<K, V> {
     }
 
     /**
-     * Sets how instances learn about changes made elsewhere; {@link DistributionMode#INVALIDATE} by default. With
-     * {@link DistributionMode#NONE} and no {@code expireAfterWrite} or {@code expireAfter}, local copies expire after
-     * the store's maximum age.
-     *
-     * @param distributionMode the distribution mode
-     * @return this builder
-     */
-    public DistributedCaffeine<K, V> withDistributionMode(DistributionMode distributionMode) {
-        requireNonNull(distributionMode, "distributionMode cannot be null");
-        if (this.distributionMode != null) {
-            throw new IllegalStateException("distributionMode was already set");
-        }
-        this.distributionMode = distributionMode;
-        return this;
-    }
-
-    /**
-     * Remembers keys whose load found nothing, for the given time, in a small local set, so that repeated requests
-     * for a key that does not exist reach neither the store nor the source. A value written through the cache
-     * anywhere ends the absence at once; a value appearing only in the source is found after this time.
+     * Remembers keys whose load found nothing (negative caching), for the given time, in a small local set, so that
+     * repeated requests for a key that does not exist reach neither the store nor the source. A value written
+     * through the cache anywhere ends the absence at once (without distribution, {@code DistributionMode.NONE}, only
+     * a write through this instance does); a value appearing only in the source, or without distribution through
+     * another instance, is found after this time. At most 100,000 keys are remembered per instance; beyond that the
+     * least useful are forgotten, which costs loads, never a wrong answer. Optional: off by default, like Caffeine,
+     * which never caches a missing value.
      *
      * @param expiry how long an absence is remembered (positive; keep it short)
      * @return this builder
      */
-    public DistributedCaffeine<K, V> withAbsentCaching(Duration expiry) {
+    public DistributedCaffeine<K, V> withNegativeCaching(Duration expiry) {
         requireNonNull(expiry, "expiry cannot be null");
         if (expiry.isNegative() || expiry.isZero()) {
             throw new IllegalArgumentException("expiry must be positive");
         }
-        if (absentCachingExpiry != null) {
-            throw new IllegalStateException("absent caching was already configured");
+        if (negativeCachingExpiry != null) {
+            throw new IllegalStateException("negative caching was already configured");
         }
-        this.absentCachingExpiry = expiry;
-        return this;
-    }
-
-    /**
-     * Sets how long {@code build} may take to connect and check the store before it fails. Optional: 30 seconds by
-     * default.
-     *
-     * @param buildTimeout the timeout (positive)
-     * @return this builder
-     */
-    public DistributedCaffeine<K, V> withBuildTimeout(Duration buildTimeout) {
-        requireNonNull(buildTimeout, "buildTimeout cannot be null");
-        if (buildTimeout.isNegative() || buildTimeout.isZero()) {
-            throw new IllegalArgumentException("buildTimeout must be positive");
-        }
-        this.buildTimeout = buildTimeout;
-        return this;
-    }
-
-    /**
-     * Sets the executor for the library's blocking store I/O (e.g. virtual threads on Java 21 or later). Optional:
-     * a library-owned pool of daemon threads by default. Owned and closed by the caller.
-     *
-     * @param storeExecutor the executor
-     * @return this builder
-     */
-    public DistributedCaffeine<K, V> withStoreExecutor(Executor storeExecutor) {
-        this.storeExecutor = requireNonNull(storeExecutor, "storeExecutor cannot be null");
+        this.negativeCachingExpiry = expiry;
         return this;
     }
 
@@ -301,22 +272,37 @@ public final class DistributedCaffeine<K, V> {
         }
     }
 
+    // how long size pruning spares a row (Store#pruneToSize): at least long enough for a slower load's write on
+    // "missing" not to apply over a newer row pruned in the meantime (a fixed floor, for every change source, also
+    // without distribution); polled, also the window in which a poll can still find a write: the poll interval with its
+    // jitter and the poll's own time (rounded up to twice the interval) plus the overlap for writes committed after
+    // their time. A feed needs nothing more: its messages carry their versions, not a reference to the row (VISION.md,
+    // "In-memory store profiles", dimension 0)
+    private Duration pruneGrace(boolean polled) {
+        Duration window = store().pollInterval().multipliedBy(2).plus(InternalPollingStore.POLL_OVERLAP);
+        return polled && window.compareTo(InternalMaintenance.PRUNE_GRACE) > 0 ? window
+                : InternalMaintenance.PRUNE_GRACE;
+    }
+
     private static <T> void configure(Configurer<T> configurer, T configured) {
         requireNonNull(requireNonNull(configurer, "configurer cannot be null").apply(configured),
                 "configurer cannot return null");
     }
 
-    // connects to the store (within the build timeout) and builds the core; a failure leaves nothing behind
-    @SuppressWarnings("java:S1181") // whatever fails, what was claimed is released before it is rethrown
+    // creates the store (each of its operations bounded by the operation timeout) and builds the core; a failure
+    // leaves nothing behind
+    // whatever fails, what was claimed is released before it is rethrown; created is the adapter's store once
+    // assigned, which Sonar does not take as non-null
+    @SuppressWarnings({"java:S1181", "java:S4449"})
     private InternalCore<K, V> core(InternalCore.@Nullable Loaders<K, V> loaders) {
         InternalClaims.claim(adapter);
         Store created = null;
         try {
             InternalSerializer<K> keySerializer = serializers.keySerializer();
             InternalSerializer<V> valueSerializer = serializers.valueSerializer();
-            Executor executor = storeExecutor != null ? storeExecutor : InternalExecutors.defaultStoreExecutor();
-            created = createStore(new StoreSettings(keySerializer.format(), valueSerializer.format(),
-                    store().timeout()), executor);
+            Executor executor = requireNonNullElseGet(store().executor(), InternalExecutors::defaultStoreExecutor);
+            created = adapter.createStore(new StoreSettings(keySerializer.format(), valueSerializer.format(),
+                    store().operationTimeout()));
             if (distributionMode() != DistributionMode.NONE && !(created instanceof ChangeFeed)) {
                 if (!(created instanceof ChangeScan scan)) {
                     throw new IllegalStateException(adapter + " offers no change feed and no change scan, so it "
@@ -328,47 +314,26 @@ public final class DistributedCaffeine<K, V> {
                             + "most half the heartbeat interval " + store().heartbeatInterval()
                             + ", or the heartbeat takes the pause between polls for a silent feed");
                 }
-                created = new InternalPollingStore(created, scan, store().pollInterval(), InternalPollingStore.OVERLAP,
-                        InternalMaintenance.TOMBSTONE_RETENTION.minus(InternalPollingStore.OVERLAP), store().timeout(),
-                        executor);
+                Duration overlap = InternalPollingStore.POLL_OVERLAP;
+                created = new InternalPollingStore(created, scan, store().pollInterval(), overlap,
+                        InternalMaintenance.TOMBSTONE_RETENTION.minus(overlap), store().operationTimeout(), executor,
+                        environment);
             }
-            // without distribution, nothing else bounds how long a copy changed elsewhere is served
-            Duration defaultExpiry = distributionMode() == DistributionMode.NONE ? store().maximumAge() : null;
-            return new InternalCore<>(created, caffeine.caffeine(defaultExpiry), new InternalHasher<>(hashProvider), keySerializer,
+            // no copy outlives the store's maximum age, also where no message drops it (none sent, or one lost)
+            return new InternalCore<>(created, caffeine.caffeine(requireNonNull(store().maximumAge())),
+                    new InternalHasher<>(hashProvider), keySerializer,
                     valueSerializer, requireNonNull(store().maximumAge()), executor, caffeine.refreshAfterWrite(),
-                    loaders, distributionMode(), absentCachingExpiry, store().maximumSize(),
-                    store().maintenanceInterval(), store().heartbeatInterval(), InternalStatsCounter.of(caffeine.isRecordingStats()),
-                    () -> InternalClaims.release(adapter));
+                    loaders, distributionMode(), negativeCachingExpiry, store().maximumSize(),
+                    store().maintenanceInterval(), pruneGrace(created instanceof InternalPollingStore),
+                    store().heartbeatInterval(), loadAttempts,
+                    InternalStatsCounter.of(caffeine.isRecordingStats()),
+                    () -> InternalClaims.release(adapter), environment);
         } catch (RuntimeException | Error e) {
             if (created != null) {
                 created.close();
             }
             InternalClaims.release(adapter);
             throw e;
-        }
-    }
-
-    @SuppressWarnings("FutureReturnValueIgnored") // the callback closing a late store is attached for its side effect
-    private Store createStore(StoreSettings settings, Executor executor) {
-        CompletableFuture<Store> future = CompletableFuture.supplyAsync(
-                () -> adapter.createStore(settings), executor);
-        try {
-            return future.get(buildTimeout.toNanos(), TimeUnit.NANOSECONDS);
-        } catch (TimeoutException e) {
-            future.whenComplete((late, failure) -> {
-                if (late != null) {
-                    late.close();
-                }
-            });
-            throw new StoreException("The store did not answer within " + buildTimeout, e, false);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new StoreException("Interrupted while connecting to the store", e, false);
-        } catch (ExecutionException e) {
-            if (e.getCause() instanceof RuntimeException runtime) {
-                throw runtime;
-            }
-            throw new StoreException("Connecting to the store failed", requireNonNullElse(e.getCause(), e), false);
         }
     }
 
@@ -408,15 +373,25 @@ public final class DistributedCaffeine<K, V> {
         return distributionMode != null ? distributionMode : DistributionMode.INVALIDATE;
     }
 
-    @Nullable Duration absentCachingExpiry() {
-        return absentCachingExpiry;
+    @Nullable Duration negativeCachingExpiry() {
+        return negativeCachingExpiry;
     }
 
-    Duration buildTimeout() {
-        return buildTimeout;
+    // the time, sleeping, scheduling and randomness of the cache (InternalEnvironment): a simulation of the tests', whose
+    // time they move, for the paths that wait for time; not public
+    DistributedCaffeine<K, V> withEnvironment(InternalEnvironment environment) {
+        this.environment = requireNonNull(environment, "environment cannot be null");
+        return this;
     }
 
-    @Nullable Executor storeExecutor() {
-        return storeExecutor;
+    // how often a load is attempted before it returns its value uncached (InternalCore#load): raised by the
+    // linearizability tests only, above the writes their scenarios hold, so that they check every case but the one
+    // documented exception; not public
+    DistributedCaffeine<K, V> withLoadAttempts(int loadAttempts) {
+        if (loadAttempts < 1) {
+            throw new IllegalArgumentException("loadAttempts must be positive");
+        }
+        this.loadAttempts = loadAttempts;
+        return this;
     }
 }

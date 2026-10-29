@@ -19,6 +19,8 @@ import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import io.github.oberhoff.distributedcaffeine.testing.StoreProfile;
+import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Assumptions;
 
@@ -26,6 +28,7 @@ import org.junit.jupiter.api.Assumptions;
  * The store the cache suites run on: the in-memory store, whose faults a test can inject, or a real database. One
  * backend is one fresh cache (a table, a collection); every store it opens is one more instance on it.
  */
+@NullMarked
 public interface CacheBackend extends AutoCloseable {
 
     /**
@@ -77,6 +80,28 @@ public interface CacheBackend extends AutoCloseable {
             return Assumptions.abort("needs the in-memory store's faults");
         }
         return database;
+    }
+
+    /**
+     * Skips a test that needs the store's own change feed (its faults, or its messages counted one by one) where the
+     * in-memory store's profile is polled by the core or offers no changes at all; a real database has its feed.
+     */
+    default void requireFeed() {
+        InMemoryDatabase database = inMemory();
+        if (database != null && database.profile().changes() != StoreProfile.Changes.FEED) {
+            Assumptions.abort("needs the store's change feed, not " + database.profile().changes());
+        }
+    }
+
+    /**
+     * Returns how many entries a test of batches far larger than one statement writes: beyond the chunks of every
+     * store and what one PostgreSQL statement may bind (65,535 parameters). A store writing one row per transaction
+     * takes fewer, still beyond its chunks, so that the test finishes in minutes.
+     *
+     * @return the number of entries
+     */
+    default int largeBatch() {
+        return 25_000;
     }
 
     @Override

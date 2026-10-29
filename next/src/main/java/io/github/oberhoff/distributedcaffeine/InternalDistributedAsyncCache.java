@@ -86,7 +86,7 @@ class InternalDistributedAsyncCache<K, V> implements DistributedAsyncCache<K, V>
     }
 
     @Override
-    public void put(K key, CompletableFuture<? extends V> valueFuture) {
+    public void put(K key, CompletableFuture<? extends @Nullable V> valueFuture) {
         core.putAsync(key, valueFuture);
     }
 

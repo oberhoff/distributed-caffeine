@@ -24,6 +24,8 @@ import io.github.oberhoff.distributedcaffeine.testing.Suite;
 import io.github.oberhoff.distributedcaffeine.testing.Suite.Kind;
 import io.github.oberhoff.distributedcaffeine.testing.SuiteCondition;
 import io.github.oberhoff.distributedcaffeine.testing.Topology;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Nested;
@@ -41,6 +43,7 @@ import static java.util.Objects.requireNonNull;
  * The suites on one PostgreSQL image and topology ({@link Setup} on the subclass): the store is started before the
  * suites and stopped after them, and each suite runs where the topology hosts it ({@link PostgresTopology}).
  */
+@NullMarked
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @ExtendWith(SuiteCondition.class)
 abstract class PostgresTopologyTests implements Topology.Tests {
@@ -57,7 +60,7 @@ abstract class PostgresTopologyTests implements Topology.Tests {
         PostgresTopology topology();
     }
 
-    private PostgresTestDatabase database;
+    private @Nullable PostgresTestDatabase database;
 
     @Override
     public PostgresTopology topology() {

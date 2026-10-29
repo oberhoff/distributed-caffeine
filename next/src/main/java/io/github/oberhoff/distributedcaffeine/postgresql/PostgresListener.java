@@ -75,14 +75,26 @@ import java.util.concurrent.TimeoutException;
  * The session's threads only enqueue into the caches' own queues (the core's delivery), so they never call into a
  * cache's locks.
  */
-@SuppressWarnings("SqlNoDataSourceInspection") // the SQL runs against the user's database, unknown to the IDE
+// the SQL runs against the user's database, unknown to the IDE; what is formatted into it are quoted channel names
+@SuppressWarnings({"SqlNoDataSourceInspection", "java:S2077", "SqlSourceToSinkFlow"})
 final class PostgresListener {
 
     private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine.postgresql");
+    // fixed, unlike a cache's operation timeout: no caller waits for the listening session, which is shared by caches
+    // with different timeouts, and its failures are recovered (or noticed by the heartbeat) by the library, so the
+    // bounds follow from its own commands (LISTEN, UNLISTEN, the probe of a notification), not from anyone's latency
+    // budget
     private static final Duration COMMAND_TIMEOUT = Duration.ofSeconds(10);
     static final long PROBE_TIMEOUT_SECONDS = 5;
     private static final int PROBE_ATTEMPTS = 3;
     private static final IdentityHashMap<DataSource, Session> SESSIONS = new IdentityHashMap<>();
+
+    // the listening sessions open: none once every cache using them is closed (tests check it, a leak would show)
+    static int openSessions() {
+        synchronized (SESSIONS) {
+            return SESSIONS.size();
+        }
+    }
     // pgjdbc's stream behind a connection: protected, with no getter; null if this pgjdbc does not have it
     private static final @Nullable Field PG_STREAM = pgStreamField();
 
@@ -193,28 +205,6 @@ final class PostgresListener {
         return "LISTEN " + PostgresTable.quote(channel);
     }
 
-    // aborted, not closed: the stream was taken over, so the connection must never be used again, and a pool must not
-    // hand it out again. Closed after that, which hands it back to a pool as broken (HikariCP evicts it, failing to
-    // reset its state). On a thread of its own: a broken connection must hold nothing up, and is released under the
-    // session's lock
-    @SuppressWarnings("java:S1166") // a connection being let go of fails as it pleases
-    private static void release(Connection connection) {
-        Thread closer = new Thread(() -> {
-            try {
-                connection.abort(Runnable::run);
-            } catch (SQLException | RuntimeException ignored) {
-                // closed already
-            }
-            try {
-                connection.close();
-            } catch (SQLException | RuntimeException ignored) {
-                // a pool finding it broken
-            }
-        }, "distributed-caffeine-postgresql-release");
-        closer.setDaemon(true);
-        closer.start();
-    }
-
     private static final class Registration implements ChangeSubscription {
 
         private final Session session;
@@ -257,7 +247,7 @@ final class PostgresListener {
         private final Connection connection;
         private final PGStream stream;
         // the commands sent and not yet answered, in the order sent: each ReadyForQuery answers the oldest
-        private final Queue<CompletableFuture<Void>> commands = new ConcurrentLinkedQueue<>();
+        private final Queue<CompletableFuture<@Nullable Void>> commands = new ConcurrentLinkedQueue<>();
         @GuardedBy("this")
         private boolean ended;
 
@@ -268,7 +258,7 @@ final class PostgresListener {
 
         // a simple query ('Q'), waiting for its ReadyForQuery; an error ends the session (see read)
         void execute(String sql) {
-            CompletableFuture<Void> answered = new CompletableFuture<>();
+            CompletableFuture<@Nullable Void> answered = new CompletableFuture<>();
             synchronized (this) {
                 if (ended) {
                     throw new StoreException("The PostgreSQL listener's session ended", false);
@@ -289,8 +279,9 @@ final class PostgresListener {
             try {
                 answered.get(COMMAND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
             } catch (ExecutionException e) {
-                throw new StoreException("Listening on PostgreSQL failed (" + sql + "): " + e.getCause().getMessage(),
-                        e.getCause(), false);
+                Throwable cause = e.getCause() != null ? e.getCause() : e;
+                throw new StoreException("Listening on PostgreSQL failed (" + sql + "): " + cause.getMessage(), cause,
+                        false);
             } catch (TimeoutException e) {
                 throw new StoreException("Listening on PostgreSQL failed (" + sql + "): no answer within "
                         + COMMAND_TIMEOUT.toSeconds() + " s", e, false);
@@ -301,7 +292,7 @@ final class PostgresListener {
         }
 
         void answered() {
-            CompletableFuture<Void> oldest = commands.poll();
+            CompletableFuture<@Nullable Void> oldest = commands.poll();
             if (oldest != null) {
                 oldest.complete(null);
             }
@@ -312,7 +303,7 @@ final class PostgresListener {
             synchronized (this) {
                 ended = true;
             }
-            for (CompletableFuture<Void> waiting; (waiting = commands.poll()) != null; ) {
+            for (CompletableFuture<@Nullable Void> waiting; (waiting = commands.poll()) != null; ) {
                 waiting.completeExceptionally(cause);
             }
         }
@@ -323,7 +314,7 @@ final class PostgresListener {
 
         private final DataSource listenerDataSource;
         private final Map<String, List<Registration>> channels = new ConcurrentHashMap<>();
-        private final Map<String, CompletableFuture<Void>> probes = new ConcurrentHashMap<>();
+        private final Map<String, CompletableFuture<@Nullable Void>> probes = new ConcurrentHashMap<>();
         private final String probeChannel = "dc_probe_" + UUID.randomUUID().toString().replace("-", "");
         @GuardedBy("this")
         private @Nullable Held held;
@@ -419,7 +410,9 @@ final class PostgresListener {
 
         // takes a connection of the data source over and listens on every channel; fails with a StoreException
         @GuardedBy("this")
-        @SuppressWarnings("java:S2095") // the connection is held until the session lets go of it (release)
+        // the connection is held until the session lets go of it (release); LISTEN one channel at a time, so that a
+        // failure is the channel's own, not a batch's
+        @SuppressWarnings({"java:S2095", "java:S6912"})
         private void connect() {
             Connection connection;
             try {
@@ -513,7 +506,7 @@ final class PostgresListener {
 
         private void dispatch(String channel, @Nullable String payload) {
             if (probeChannel.equals(channel)) {
-                CompletableFuture<Void> probe = payload == null ? null : probes.remove(payload);
+                CompletableFuture<@Nullable Void> probe = payload == null ? null : probes.remove(payload);
                 if (probe != null) {
                     probe.complete(null);
                 }
@@ -537,7 +530,7 @@ final class PostgresListener {
         // A failure to send (the store down) proves nothing about the session and counts as arrived
         private boolean probe(DataSource dataSource) {
             String token = UUID.randomUUID().toString();
-            CompletableFuture<Void> arrived = new CompletableFuture<>();
+            CompletableFuture<@Nullable Void> arrived = new CompletableFuture<>();
             probes.put(token, arrived);
             try (Connection jdbc = dataSource.getConnection()) {
                 int previousTimeout = PostgresStore.bound(jdbc, Duration.ofSeconds(PROBE_TIMEOUT_SECONDS));
@@ -638,6 +631,28 @@ final class PostgresListener {
                 release(held.connection);
                 held = null;
             }
+        }
+
+        // aborted, not closed: the stream was taken over, so the connection must never be used again, and a pool must
+        // not hand it out again. Closed after that, which hands it back to a pool as broken (HikariCP evicts it,
+        // failing to reset its state). On a thread of its own: a broken connection must hold nothing up, and is
+        // released under the session's lock
+        @SuppressWarnings("java:S1166") // a connection being let go of fails as it pleases
+        private static void release(Connection connection) {
+            Thread closer = new Thread(() -> {
+                try {
+                    connection.abort(Runnable::run);
+                } catch (SQLException | RuntimeException ignored) {
+                    // closed already
+                }
+                try {
+                    connection.close();
+                } catch (SQLException | RuntimeException ignored) {
+                    // a pool finding it broken
+                }
+            }, "distributed-caffeine-postgresql-release");
+            closer.setDaemon(true);
+            closer.start();
         }
     }
 }

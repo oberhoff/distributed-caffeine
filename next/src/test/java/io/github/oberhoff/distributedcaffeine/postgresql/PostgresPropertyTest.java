@@ -20,6 +20,7 @@ import io.github.oberhoff.distributedcaffeine.PropertyBackend;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.testing.SilencingProxy;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -44,6 +45,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * gap, as every reconnect is one), a statement rejected by the server (retried), and a connection broken during a
  * statement (the outcome unknown).
  */
+@NullMarked
 @Timeout(600)
 abstract class PostgresPropertyTest {
 
@@ -126,7 +128,7 @@ abstract class PostgresPropertyTest {
         private DataSource faulty() {
             DataSource real = database.dataSource;
             return (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class},
-                    (proxy, method, args) -> {
+                    (self, method, args) -> {
                         Object result = invoke(real, method, args);
                         return method.getName().equals("getConnection") ? connection((Connection) result) : result;
                     });
@@ -134,7 +136,7 @@ abstract class PostgresPropertyTest {
 
         private Connection connection(Connection real) {
             return (Connection) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
-                    (proxy, method, args) -> {
+                    (self, method, args) -> {
                         Object result = invoke(real, method, args);
                         if (method.getName().equals("prepareStatement") && ((String) args[0]).contains("discriminator")) {
                             PreparedStatement statement = (PreparedStatement) result;

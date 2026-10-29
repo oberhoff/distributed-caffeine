@@ -23,13 +23,14 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 
 // One cache's place in PostgreSQL: the quoted table, the discriminator, the column types of its formats, and the
-// derived names (index, notification channel), shortened with a hash where PostgreSQL's 63-byte limit
+// derived names (index, version sequence, notification channel), shortened with a hash where PostgreSQL's 63-byte limit
 // requires it.
 final class PostgresTable {
 
     static final int MAXIMUM_NAME_BYTES = 63;
-    // 2: without the stamp column, its sequence and the basis column (step 3, VISION.md)
-    static final String MARKER = "distributed-caffeine schema 2";
+    // 2: without the stamp column, its sequence and the basis column (step 3, VISION.md); 3: with the version sequence
+    // (step 6b), as the versions of a table of 2 are the core's, which a new row at the sequence would fall below
+    static final String MARKER = "distributed-caffeine schema 3";
 
     final String schemaName;
     final String tableName;
@@ -39,6 +40,8 @@ final class PostgresTable {
     // "schema"."table", quoted, so case is kept
     final String qualified;
     final String indexName;
+    // "schema"."table_versions", quoted: the floor of every version the store assigns (PostgresStore#write)
+    final String sequence;
     final String channel;
 
     PostgresTable(String schemaName, String tableName, String discriminator, Format keyFormat, Format valueFormat) {
@@ -49,6 +52,7 @@ final class PostgresTable {
         this.valueFormat = valueFormat;
         this.qualified = quote(schemaName) + "." + quote(tableName);
         this.indexName = derivedName(tableName + "_maintenance");
+        this.sequence = quote(schemaName) + "." + quote(derivedName(tableName + "_versions"));
         this.channel = derivedName("dc_" + schemaName + "." + tableName + "." + discriminator);
     }
 
@@ -91,9 +95,15 @@ final class PostgresTable {
         }
     }
 
+    // the next value of the version sequence, as an SQL expression
+    String nextVersion() {
+        return "nextval('" + sequence.replace("'", "''") + "')";
+    }
+
     // the complete DDL, also for a migration tool or a DBA
     String ddl() {
         return """
+                CREATE SEQUENCE IF NOT EXISTS %6$s;
                 CREATE TABLE %1$s (
                     discriminator text NOT NULL,
                     id text NOT NULL,
@@ -103,9 +113,10 @@ final class PostgresTable {
                     version bigint NOT NULL,
                     write_time timestamptz NOT NULL,
                     PRIMARY KEY (discriminator, id));
+                ALTER SEQUENCE %6$s OWNED BY %1$s.version;
                 CREATE INDEX %4$s ON %1$s (discriminator, state, write_time);
                 COMMENT ON TABLE %1$s IS '%5$s';""".formatted(qualified, columnType(keyFormat),
-                columnType(valueFormat), quote(indexName), MARKER);
+                columnType(valueFormat), quote(indexName), MARKER, sequence);
     }
 
     @Override

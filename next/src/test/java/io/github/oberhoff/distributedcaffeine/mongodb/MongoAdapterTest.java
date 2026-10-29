@@ -23,6 +23,11 @@ import io.github.oberhoff.distributedcaffeine.DistributionMode;
 import io.github.oberhoff.distributedcaffeine.SynchronizationState;
 import io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
+import io.github.oberhoff.distributedcaffeine.spi.ChangeFeed;
+import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
+import io.github.oberhoff.distributedcaffeine.spi.RecordingListener;
+import io.github.oberhoff.distributedcaffeine.spi.Row;
+import io.github.oberhoff.distributedcaffeine.spi.State;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
@@ -31,6 +36,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.testing.SilencingProxy;
 import org.bson.BsonDocument;
 import org.bson.Document;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -56,6 +62,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * The MongoDB adapter end to end: caches distributing through it in every mode and format, the schema checks on
  * start, names, and recovery after a lost history.
  */
+@NullMarked
 @Timeout(60)
 @SuppressWarnings("resource") // every cache and store a test opens is closed after it (@AfterEach)
 abstract class MongoAdapterTest {
@@ -71,6 +78,8 @@ abstract class MongoAdapterTest {
         for (AutoCloseable closeable : closeables) {
             closeable.close();
         }
+        // every cache closed: the shared registry is empty again (a leak would grow with every cache opened)
+        assertThat(MongoWatcher.watchedClients()).as("no client watched any more").isZero();
     }
 
     private <C extends AutoCloseable> C track(C closeable) {
@@ -362,7 +371,7 @@ abstract class MongoAdapterTest {
 
         // every round trip takes most of a second: the read as a whole takes longer than the timeout, each batch not
         proxy.delayRequests(Duration.ofMillis(1_200));
-        assertThat(store.pruneToSize(100)).isEqualTo(7_900);
+        assertThat(store.pruneToSize(100, Duration.ZERO, Integer.MAX_VALUE)).isEqualTo(7_900);
     }
 
     @Test
@@ -389,6 +398,39 @@ abstract class MongoAdapterTest {
                 == io.github.oberhoff.distributedcaffeine.SynchronizationState.SYNCHRONIZED);
     }
 
+    // a cache suspecting the stream silent reopens it on a new connection; the old cursor's read, waiting on the silent
+    // one, fails when its timeout ends. That failure is the replaced cursor's, not the stream's: taken for the current
+    // one, it lost the stream just reopened and told every cache on it (found 2026-10-31)
+    @Test
+    void the_read_of_a_cursor_replaced_by_a_resume_failing_later_loses_nothing() throws Exception {
+        SilencingProxy proxy = track(new SilencingProxy(database.host(), database.port()));
+        // idle pooled connections are not reused after 200 ms: silenced too, they would fail the reopen itself, which
+        // a cache then repeats; here only the stream's connection stays silent, its read stuck on it
+        com.mongodb.client.MongoClient proxied = track(com.mongodb.client.MongoClients.create(
+                "mongodb://127.0.0.1:" + proxy.port() + "/?directConnection=true&maxIdleTimeMS=200"));
+        MongoAdapter<String, String> adapter = MongoAdapter.newBuilder(proxied, "adapter", collection).build();
+        Store writer = track(adapter().build().createStore(StoreSettings.of(Format.TEXT, Format.TEXT)));
+        RecordingListener resuming = new RecordingListener();
+        RecordingListener other = new RecordingListener();
+        ChangeSubscription subscription = track(((ChangeFeed) track(adapter.createStore(
+                StoreSettings.of(Format.TEXT, Format.TEXT)))).subscribe(resuming));
+        track(((ChangeFeed) track(adapter.createStore(StoreSettings.of(Format.TEXT, Format.TEXT))))
+                .subscribe(other));
+
+        proxy.silenceOpenConnections();
+        pause(500); // the stream's read waits on its silent connection, the other ones idle out
+        subscription.resume(); // suspected silent: reopened on a new connection
+        // the old cursor's read gives up on the silent connection meanwhile
+        pause(TimeUnit.SECONDS.toMillis(MongoWatcher.OPERATION_TIMEOUT_SECONDS + 5));
+
+        assertThat(resuming.losses()).as("the resuming subscription").isZero();
+        assertThat(other.losses()).as("another subscription on the stream").isZero();
+        byte[] bytes = "v".getBytes(StandardCharsets.UTF_8);
+        writer.write(List.of(Write.value("h", bytes, bytes, 1)));
+        other.await(messages -> messages.stream().anyMatch(message -> "h".equals(message.hash())),
+                Duration.ofSeconds(10));
+    }
+
     @Test
     void a_store_call_on_a_silent_connection_fails_within_the_timeout_instead_of_hanging() throws Exception {
         SilencingProxy proxy = track(new SilencingProxy(database.host(),
@@ -397,7 +439,7 @@ abstract class MongoAdapterTest {
         com.mongodb.client.MongoClient proxied = track(com.mongodb.client.MongoClients.create(
                 "mongodb://127.0.0.1:" + proxy.port() + "/?directConnection=true"));
         DistributedCache<String, String> cache = track(strings(MongoAdapter.newBuilder(proxied, "adapter", collection)
-                .build()).withStore(store -> store.withTimeout(Duration.ofSeconds(2)))
+                .build()).withStore(store -> store.withOperationTimeout(Duration.ofSeconds(2)))
                 .withDistributionMode(DistributionMode.NONE).build());
         cache.put("k", "before");
 
@@ -546,7 +588,8 @@ abstract class MongoAdapterTest {
         await(() -> holder.policy().getIfPresentQuietly("k") == null);
         assertThat(holder.getIfPresent("k")).isEqualTo("new");
         try (var store = adapter().build().createStore(StoreSettings.of(Format.TEXT, Format.TEXT))) {
-            assertThatThrownBy(() -> store.read(List.of("foreign"), LONG)).isInstanceOf(StoreException.class)
+            List<String> foreign = List.of("foreign");
+            assertThatThrownBy(() -> store.read(foreign, LONG)).isInstanceOf(StoreException.class)
                     .hasMessageContaining("UNKNOWN");
         }
     }
@@ -560,10 +603,41 @@ abstract class MongoAdapterTest {
             // written after it (or in the same millisecond, which also hides it: at or before)
             store.write(List.of(Write.value(Store.CONTROL_HASH, bytes, bytes, 2)));
 
-            assertThat(store.expire(Duration.ZERO, 3)).as("neither the hidden one nor the control row").isZero();
-            assertThat(store.pruneToSize(0)).as("neither counted nor deleted").isZero();
-            assertThat(store.pruneTombstones(LONG)).as("the hidden one, without a grace period").isOne();
+            assertThat(store.expire(Duration.ZERO, 3, Integer.MAX_VALUE)).as("neither the hidden one nor the control row").isZero();
+            assertThat(store.pruneToSize(0, Duration.ZERO, Integer.MAX_VALUE)).as("neither counted nor deleted").isZero();
+            assertThat(store.pruneTombstones(LONG, Integer.MAX_VALUE)).as("the hidden one, without a grace period").isOne();
             assertThat(store.read(List.of("hidden", Store.CONTROL_HASH), LONG)).containsOnlyKeys(Store.CONTROL_HASH);
+        }
+    }
+
+    @Test
+    void a_bulk_write_reports_each_writes_outcome_and_a_write_on_a_pruned_version_leaves_no_value() {
+        try (var store = adapter().build().createStore(StoreSettings.of(Format.TEXT, Format.TEXT))) {
+            byte[] bytes = "x".getBytes(StandardCharsets.UTF_8);
+            byte[] newer = "y".getBytes(StandardCharsets.UTF_8);
+            store.write(List.of(Write.value("matching", bytes, bytes, 1), Write.value("other", bytes, bytes, 1),
+                    Write.value("pruned", bytes, bytes, 1), Write.value("existing", bytes, bytes, 1)));
+            // deleted under the write, as maintenance does after the read the write was decided on
+            database.client.getDatabase("adapter").getCollection(collection)
+                    .deleteOne(new Document("_id.h", "pruned"));
+
+            Set<String> conflicts = store.write(List.of(
+                    Write.value("matching", bytes, newer, 2).ifVersion(1),
+                    Write.value("other", bytes, newer, 2).ifVersion(7),
+                    Write.value("pruned", bytes, newer, 2).ifVersion(1),
+                    Write.value("fresh", bytes, newer, 2).ifMissing(),
+                    Write.value("existing", bytes, newer, 2).ifMissing())).refused();
+
+            assertThat(conflicts).as("each by its own outcome, in one bulk write")
+                    .containsExactlyInAnyOrder("other", "pruned", "existing");
+            Map<String, Row> rows = store.read(List.of("matching", "other", "pruned", "fresh"), LONG);
+            assertThat(rows.get("matching").version()).isEqualTo(2);
+            assertThat(rows.get("other").version()).as("untouched").isEqualTo(1);
+            assertThat(rows.get("pruned").state()).as("no value from a failed condition").isEqualTo(State.TOMBSTONE);
+            assertThat(rows.get("pruned").value()).isNull();
+            assertThat(rows.get("fresh").version()).isEqualTo(2);
+            assertThat(store.read(List.of("existing"), LONG).get("existing").version()).as("untouched")
+                    .isEqualTo(1);
         }
     }
 
@@ -578,7 +652,8 @@ abstract class MongoAdapterTest {
         assertThat(requireNonNull(created.find(new Document("_id", MongoLocation.MARKER_ID)).first()).getString("schema"))
                 .isEqualTo(MongoLocation.MARKER);
         assertThat(created.listIndexes().into(new ArrayList<>())).anyMatch(index ->
-                index.get("key", Document.class).equals(new Document("_id.d", 1).append("state", 1).append("writeTime", 1)));
+                index.get("key", Document.class).equals(new Document("_id.d", 1).append("state", 1).append("writeTime", 1)
+                        .append("_id.h", 1)));
         assertThat(created.countDocuments(new Document("_id.c", MongoLocation.START))).as("one per discriminator")
                 .isEqualTo(1);
     }

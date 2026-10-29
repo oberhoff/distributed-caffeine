@@ -17,6 +17,7 @@ package io.github.oberhoff.distributedcaffeine.mongodb;
 
 import io.github.oberhoff.distributedcaffeine.testing.Suite.Kind;
 import io.github.oberhoff.distributedcaffeine.testing.Topology;
+import org.jspecify.annotations.NullMarked;
 
 import java.util.EnumSet;
 import java.util.Set;
@@ -24,6 +25,7 @@ import java.util.Set;
 /**
  * The MongoDB topologies the suites run on (see {@link MongoTestDatabase} for how each is built).
  */
+@NullMarked
 enum MongoTopology implements Topology {
 
     SINGLE_NODE_REPLICA_SET,
@@ -31,7 +33,9 @@ enum MongoTopology implements Topology {
     THREE_NODE_REPLICA_SET_WITH_ARBITER,
     SHARDED_CLUSTER,
     // an oplog of 1 MB truncated as soon as MongoDB can: no other suite would survive it
-    SINGLE_NODE_REPLICA_SET_WITH_SMALL_OPLOG;
+    SINGLE_NODE_REPLICA_SET_WITH_SMALL_OPLOG,
+    // a server that is no replica set: only the refusal at start runs on it
+    STANDALONE_SERVER;
 
     @Override
     public Set<Kind> suites() {
@@ -42,6 +46,7 @@ enum MongoTopology implements Topology {
             case THREE_NODE_REPLICA_SET_WITH_ARBITER -> EnumSet.of(Kind.STORE_CONTRACT, Kind.CHANGE_FEED_CONTRACT);
             case SHARDED_CLUSTER -> EnumSet.of(Kind.STORE_CONTRACT, Kind.CHANGE_FEED_CONTRACT, Kind.SHARDING);
             case SINGLE_NODE_REPLICA_SET_WITH_SMALL_OPLOG -> EnumSet.of(Kind.OPLOG);
+            case STANDALONE_SERVER -> EnumSet.of(Kind.STANDALONE);
         };
     }
 }

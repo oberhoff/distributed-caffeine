@@ -27,7 +27,8 @@ public enum SynchronizationState {
 
     /**
      * The store does not answer (held values are served unconfirmed, misses go to the loader, writes are refused),
-     * or only the subscription is down (every access checks the held version first). The reason is logged.
+     * or only the subscription is down (every access checks the held version first), or, for a store whose changes
+     * are polled, the latest poll failed. The reason is logged.
      */
     DEGRADED,
 

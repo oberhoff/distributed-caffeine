@@ -60,6 +60,15 @@ public interface DistributedCache<K, V> extends Cache<K, V>, AutoCloseable {
     @Override
     Map<K, V> getAllPresent(Iterable<? extends K> keys);
 
+    /**
+     * {@inheritDoc}
+     * <p>
+     * A computed value is cached only if the key was neither written nor removed on any instance while it was
+     * computed; otherwise a value written meanwhile is returned instead, and after a removal the mapping function is
+     * called again. After three attempts in a row each met by a removal, the last computed value is returned without
+     * being cached, as Caffeine's asynchronous cache does with a computation an invalidation discards
+     * ({@code distributedPolicy().stats().uncachedLoadCount()}).
+     */
     // a mapping function resolving to null is accepted (as by ConcurrentMap.computeIfAbsent) and caches nothing.
     // Caffeine documents a null result ("or null if the computed value is null") but cannot express it for a value
     // type that is not nullable; declaring the value type nullable would declare every other method nullable too

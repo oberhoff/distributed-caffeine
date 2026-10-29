@@ -81,17 +81,28 @@ import java.util.function.Consumer;
 final class MongoWatcher {
 
     private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine.mongodb");
+    private static final String LISTENER_FAILED = "A listener failed";
     private static final long MAX_AWAIT_MILLIS = 100;
     // the flag of an update that wrote a value, in its changed fields (a name no document field has)
     private static final String VALUE_WRITTEN = "valueWritten";
     // every operation of the watcher answers within this (the client's own timeout aside): a getMore that waits
     // longer, on a network that silently stopped carrying or a server that does not answer, fails and the stream is
     // resumed or reopened, instead of blocking the watching thread for good while the caches believe they are
-    // synchronized (the getMores themselves wait at most MAX_AWAIT_MILLIS for events)
+    // synchronized (the getMores themselves wait at most MAX_AWAIT_MILLIS for events). Fixed, unlike a cache's
+    // operation timeout: no caller waits for the watcher, which is shared by caches with different timeouts, and its
+    // failures are recovered (or noticed by the heartbeat) by the library, so the right bound follows from the
+    // stream's own waits, not from anyone's latency budget
     static final long OPERATION_TIMEOUT_SECONDS = 10;
     private static final long JOIN_TIMEOUT_SECONDS = 10;
     private static final Set<Integer> HISTORY_LOST = Set.of(280, 286, 136);
     private static final IdentityHashMap<MongoClient, Map<String, Watcher>> WATCHERS = new IdentityHashMap<>();
+
+    // the clients being watched: none once every cache using them is closed (tests check it, a leak would show)
+    static int watchedClients() {
+        synchronized (WATCHERS) {
+            return WATCHERS.size();
+        }
+    }
 
     private MongoWatcher() {
     }
@@ -113,7 +124,7 @@ final class MongoWatcher {
             registration = watcher.register(location, listener, since, clusterTime);
         }
         try {
-            watcher.cover(location.collectionName);
+            watcher.cover(location.collectionName, registration);
         } catch (RuntimeException | Error e) {
             registration.close();
             throw e;
@@ -294,12 +305,12 @@ final class MongoWatcher {
         private final MongoDatabase database;
         private final String databaseName;
         private final Map<String, List<Registration>> scopes = new ConcurrentHashMap<>();
-        private final Map<String, CompletableFuture<Void>> barriers = new ConcurrentHashMap<>();
+        private final Map<String, CompletableFuture<@Nullable Void>> barriers = new ConcurrentHashMap<>();
         private final Set<String> wanted = new LinkedHashSet<>();
         @GuardedBy("this")
         private Set<String> covered = Set.of();
         @GuardedBy("this")
-        private @Nullable CompletableFuture<Void> widening;
+        private @Nullable CompletableFuture<@Nullable Void> widening;
         @GuardedBy("this")
         private @Nullable MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> cursor;
         @GuardedBy("this")
@@ -331,16 +342,15 @@ final class MongoWatcher {
             Registration registration = new Registration(this,
                     scope(location.collectionName, location.discriminator), listener, since, clusterTime);
             scopes.computeIfAbsent(registration.scope, ignored -> new CopyOnWriteArrayList<>()).add(registration);
-            synchronized (this) {
-                registration.generation = generation;
-            }
             return registration;
         }
 
         // returns once the stream covers the collection: opened here for the first one, reopened by the watching
-        // thread from its resume token for a further one
-        void cover(String collection) {
-            CompletableFuture<Void> covering;
+        // thread from its resume token for a further one. The registration is delivered on the stream that covers
+        // it: taken before, its generation predated the stream opened for it, and its first resume suspecting the
+        // stream silent took that for a reopen by another cache and did nothing (found 2026-10-31)
+        void cover(String collection, Registration registration) {
+            CompletableFuture<@Nullable Void> covering;
             synchronized (this) {
                 wanted.add(collection);
                 if (thread == null) {
@@ -353,6 +363,7 @@ final class MongoWatcher {
                     thread = new Thread(this::run, "distributed-caffeine-mongodb-" + databaseName);
                     thread.setDaemon(true);
                     thread.start();
+                    registration.generation = generation;
                     return;
                 }
                 if (cursor == null) {
@@ -360,6 +371,7 @@ final class MongoWatcher {
                     reopen();
                 }
                 if (covered.contains(collection)) {
+                    registration.generation = generation;
                     return;
                 }
                 if (widening == null) {
@@ -376,6 +388,9 @@ final class MongoWatcher {
             } catch (ExecutionException | TimeoutException e) {
                 throw new StoreException("The change stream on " + databaseName + " did not take collection "
                         + collection + " in time", e, false);
+            }
+            synchronized (this) {
+                registration.generation = generation;
             }
         }
 
@@ -437,6 +452,8 @@ final class MongoWatcher {
         @SuppressWarnings({"java:S3776", "java:S135"}) // the watching loop: each way out of a read is a case of its own
         private void watch() {
             while (!closed) {
+                // the cursor being read, whose failure is the one to report
+                MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> reading = null;
                 try {
                     reopenIfAsked();
                     if (historyLost) {
@@ -449,37 +466,40 @@ final class MongoWatcher {
                         lose(currentCursor(), new IllegalStateException("simulated: connection lost"));
                         continue;
                     }
-                    @SuppressWarnings("resource") // the stream's cursor, closed by whoever replaces or loses it
+                    // the stream's cursor, closed by whoever replaces or loses it
                     MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> current = currentCursor();
                     if (lagging || current == null) {
                         pause(); // lagging, or lost until a cache resumes the stream
                         continue;
                     }
+                    reading = current;
                     ChangeStreamDocument<BsonDocument> event = current.tryNext();
                     BsonDocument position = current.getResumeToken();
                     if (position != null) {
                         advanceResumeToken(current, position);
                     }
-                    OperationType type = event == null ? null : event.getOperationType();
-                    if (event != null && type == null) {
-                        dispatchOrGap(event);
-                    } else if (event != null) {
-                        switch (type) {
-                            // every document of the collection is gone, which no message announces: a gap
-                            case DROP, RENAME -> collectionGone(event);
-                            case DROP_DATABASE -> {
-                                // the invalidate event that ends the stream follows
+                    if (event != null) {
+                        OperationType type = event.getOperationType();
+                        if (type == null) {
+                            dispatchOrGap(event);
+                        } else {
+                            switch (type) {
+                                // every document of the collection is gone, which no message announces: a gap
+                                case DROP, RENAME -> collectionGone(event);
+                                case DROP_DATABASE -> {
+                                    // the invalidate event that ends the stream follows
+                                }
+                                // the stream ended and cannot be resumed; what was dropped is gone: a gap
+                                case INVALIDATE -> reopenFresh(new IllegalStateException("the database was dropped"));
+                                default -> dispatchOrGap(event);
                             }
-                            // the stream ended and cannot be resumed; what was dropped is gone: a gap
-                            case INVALIDATE -> reopenFresh(new IllegalStateException("the database was dropped"));
-                            default -> dispatchOrGap(event);
                         }
                     }
                 } catch (RuntimeException e) {
                     if (closed) {
                         return;
                     }
-                    failed(e);
+                    failed(reading, e);
                 }
             }
         }
@@ -497,7 +517,7 @@ final class MongoWatcher {
                         try {
                             registration.listener.onGap();
                         } catch (RuntimeException e) {
-                            LOGGER.log(Level.WARNING, "A listener failed", e);
+                            LOGGER.log(Level.WARNING, LISTENER_FAILED, e);
                         }
                     }
                 }
@@ -550,7 +570,7 @@ final class MongoWatcher {
                         : event.getUpdateDescription().getUpdatedFields();
                 BsonValue barrier = fields == null ? null : fields.get("barrier");
                 if (barrier != null && barrier.isString()) {
-                    CompletableFuture<Void> arrived = barriers.remove(barrier.asString().getValue());
+                    CompletableFuture<@Nullable Void> arrived = barriers.remove(barrier.asString().getValue());
                     if (arrived != null) {
                         arrived.complete(null);
                     }
@@ -564,7 +584,10 @@ final class MongoWatcher {
             }
             List<Registration> registrations = scopes.get(scope(event.getNamespace().getCollectionName(),
                     discriminator.asString().getValue()));
-            Change message = registrations == null ? null : message(event);
+            if (registrations == null) {
+                return;
+            }
+            Change message = message(event);
             if (message == null) {
                 return;
             }
@@ -584,10 +607,19 @@ final class MongoWatcher {
         }
 
         // a read failed: a history the stream cannot resume from is a gap (reopened without the token at once);
-        // anything else loses the stream until a cache resumes it. A failure of a stream replaced meanwhile (reopened
-        // by a resume) is not this one's
-        private void failed(RuntimeException failure) {
-            MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> failedCursor = currentCursor();
+        // anything else loses the stream until a cache resumes it. A failure of a cursor replaced meanwhile is not the
+        // stream's: a resume suspecting the stream silent reopens it on a cache's thread and closes the old cursor
+        // under the watching thread's read, which then fails. Taken for the current one, that failure lost the stream
+        // just reopened and told every cache on it (found 2026-10-31). A failure outside a read (reopening for a join)
+        // is the current cursor's
+        @SuppressWarnings("ReferenceEquality") // only the cursor that failed counts
+        private void failed(@Nullable MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> reading,
+                            RuntimeException failure) {
+            MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> failedCursor = reading != null ? reading
+                    : currentCursor();
+            if (failedCursor != null && failedCursor != currentCursor()) {
+                return; // replaced meanwhile: the next round reads the new one
+            }
             if (isHistoryLost(failure)) {
                 reopenFresh(failure);
             } else {
@@ -665,15 +697,7 @@ final class MongoWatcher {
         @GuardedBy("this")
         private void reopen() {
             try {
-                try {
-                    open(new LinkedHashSet<>(wanted), resumeToken);
-                } catch (RuntimeException e) {
-                    if (!isHistoryLost(e)) {
-                        throw e;
-                    }
-                    resumeToken = null;
-                    open(new LinkedHashSet<>(wanted), null);
-                }
+                openResuming();
                 joined(null);
                 LOGGER.log(Level.INFO, "The change stream on {0} reopened", databaseName);
             } catch (MongoException e) {
@@ -682,11 +706,25 @@ final class MongoWatcher {
             }
         }
 
+        // from the token, or without it if the history is lost; the caller holds the lock
+        @GuardedBy("this")
+        private void openResuming() {
+            try {
+                open(new LinkedHashSet<>(wanted), resumeToken);
+            } catch (RuntimeException e) {
+                if (!isHistoryLost(e)) {
+                    throw e;
+                }
+                resumeToken = null;
+                open(new LinkedHashSet<>(wanted), null);
+            }
+        }
+
         private static void notify(Runnable call) {
             try {
                 call.run();
             } catch (RuntimeException e) {
-                LOGGER.log(Level.WARNING, "A listener failed", e);
+                LOGGER.log(Level.WARNING, LISTENER_FAILED, e);
             }
         }
 
@@ -699,7 +737,7 @@ final class MongoWatcher {
 
         boolean barrier(MongoLocation location) {
             String token = UUID.randomUUID().toString();
-            CompletableFuture<Void> arrived = new CompletableFuture<>();
+            CompletableFuture<@Nullable Void> arrived = new CompletableFuture<>();
             barriers.put(token, arrived);
             try {
                 database.getCollection(location.collectionName).updateOne(
@@ -722,7 +760,7 @@ final class MongoWatcher {
                     try {
                         action.accept(registration);
                     } catch (RuntimeException e) {
-                        LOGGER.log(Level.WARNING, "A listener failed", e);
+                        LOGGER.log(Level.WARNING, LISTENER_FAILED, e);
                     }
                 }
             }

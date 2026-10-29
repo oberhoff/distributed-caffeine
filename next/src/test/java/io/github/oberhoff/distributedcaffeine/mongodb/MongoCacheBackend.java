@@ -19,6 +19,7 @@ import io.github.oberhoff.distributedcaffeine.CacheBackend;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import org.jspecify.annotations.NullMarked;
 
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.await;
 
@@ -26,6 +27,7 @@ import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.await;
  * The cache suites on MongoDB (see {@link MongoTestDatabase}): a fresh collection per backend, one shared change
  * stream. A gap is simulated (the watcher reopens without its resume token, as after errors 280 and 286).
  */
+@NullMarked
 public final class MongoCacheBackend implements CacheBackend {
 
     private static final String DATABASE = "suite";

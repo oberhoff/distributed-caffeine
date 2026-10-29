@@ -23,6 +23,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.testing.SilencingProxy;
+import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -41,6 +42,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * events through the shared change stream, and as fault a lost history (simulated: the watcher reopens without its
  * resume token and reports a gap).
  */
+@NullMarked
 @Timeout(600)
 abstract class MongoPropertyTest {
 

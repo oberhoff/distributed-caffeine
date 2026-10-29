@@ -46,7 +46,10 @@ public interface ChangeScan {
      *
      * @param within how far back, by the store's clock
      * @return the changes, in no particular order
-     * @throws StoreException if the store cannot be read now; the core polls again
+     * @throws StoreException if the store cannot be read now; the core polls again, and once a poll succeeds treats
+     *                        changes as possibly missed (a gap: what the caches hold is checked against the store). A
+     *                        store may fail a scan for that purpose alone, when it notices that writes may have been
+     *                        lost (another server answering after a failover)
      */
     List<Change> changedWithin(Duration within);
 }

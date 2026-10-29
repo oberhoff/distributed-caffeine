@@ -17,12 +17,14 @@ package io.github.oberhoff.distributedcaffeine.jdbc;
 
 import io.github.oberhoff.distributedcaffeine.spi.ChangeScanContractTest;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
+import org.jspecify.annotations.NullMarked;
 
 /**
  * The change scan contract on the plain JDBC adapter over MariaDB: the generic store built from its primitives, a fresh
  * table per test, another cache as another discriminator in it.
  */
-class JdbcChangeScanContractTest extends ChangeScanContractTest {
+@NullMarked
+abstract class JdbcChangeScanContractTest extends ChangeScanContractTest {
 
     @Override
     protected Fixture createFixture() {
@@ -30,7 +32,7 @@ class JdbcChangeScanContractTest extends ChangeScanContractTest {
         return new Fixture() {
             @Override
             public Store openStore() {
-                return JdbcTestDatabase.open(table, JdbcAdapter.DEFAULT_DISCRIMINATOR);
+                return JdbcTestDatabase.open(table, JdbcTestDatabase.DEFAULT_DISCRIMINATOR);
             }
 
             @Override
