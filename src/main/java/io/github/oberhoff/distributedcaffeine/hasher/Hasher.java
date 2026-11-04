@@ -34,7 +34,7 @@ import java.util.UUID;
 import java.util.function.ToLongFunction;
 
 /**
- * Hasher for computing a hash for an object using appropriate values.
+ * Computes a key's hash from its parts: put each value that {@code equals} compares, then call {@link #getHash()}.
  *
  * @author Andreas Oberhoff
  */
@@ -392,9 +392,10 @@ public final class Hasher implements HashSink {
     }
 
     /**
-     * Returns the computed hash.
+     * Returns the hash of the values put so far.
      *
      * @return the hash
+     * @throws IllegalStateException if no value was put
      */
     public String getHash() {
         if (!hasData) {

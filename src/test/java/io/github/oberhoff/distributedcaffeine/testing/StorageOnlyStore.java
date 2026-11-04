@@ -1,0 +1,82 @@
+/*
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.oberhoff.distributedcaffeine.testing;
+
+import io.github.oberhoff.distributedcaffeine.spi.Row;
+import io.github.oberhoff.distributedcaffeine.spi.Store;
+import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
+import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
+
+import java.time.Duration;
+import java.util.Collection;
+import java.util.Map;
+
+/**
+ * A store forwarding its storage to another and offering no change feed, as an adapter for a plain key-value store
+ * without notifications would: caches on it support only {@code DistributionMode.NONE}. Subclasses wrap single
+ * methods.
+ *
+ * @author Andreas Oberhoff
+ */
+public class StorageOnlyStore implements Store {
+
+    private final Store delegate;
+
+    public StorageOnlyStore(Store delegate) {
+        this.delegate = delegate;
+    }
+
+    @Override
+    public Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
+        return delegate.read(hashes, maxAge);
+    }
+
+    @Override
+    public VersionsResult readVersions(Collection<String> hashes, Duration maxAge) {
+        return delegate.readVersions(hashes, maxAge);
+    }
+
+    @Override
+    public WriteResult write(Collection<Write> writes) {
+        return delegate.write(writes);
+    }
+
+    @Override
+    public int expire(Duration maxAge, long version, int limit) {
+        return delegate.expire(maxAge, version, limit);
+    }
+
+    @Override
+    public int pruneToSize(long maxSize, Duration minAge, int limit) {
+        return delegate.pruneToSize(maxSize, minAge, limit);
+    }
+
+    @Override
+    public int pruneTombstones(Duration retention, int limit) {
+        return delegate.pruneTombstones(retention, limit);
+    }
+
+    @Override
+    public Duration clockAllowance() {
+        return delegate.clockAllowance();
+    }
+
+    @Override
+    public void close() {
+        delegate.close();
+    }
+}

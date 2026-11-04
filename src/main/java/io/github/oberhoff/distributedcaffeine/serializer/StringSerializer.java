@@ -16,7 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.serializer;
 
 /**
- * Interface to use when implementing a serializer with string representation.
+ * A serializer whose values the store holds as text, readable there.
  *
  * @param <T> the type of the object to serialize
  * @author Andreas Oberhoff
@@ -30,4 +30,40 @@ public interface StringSerializer<T> extends Serializer<T, String> {
     @SuppressWarnings("RedundantThrows")
     @Override
     T deserialize(String value) throws Exception;
+
+    /**
+     * Returns a serializer storing strings as they are, readable in the store.
+     *
+     * @return the serializer
+     */
+    static StringSerializer<String> ofString() {
+        return BuiltInSerializers.STRING;
+    }
+
+    /**
+     * Returns a serializer storing {@code Long}s as decimal text, readable in the store.
+     *
+     * @return the serializer
+     */
+    static StringSerializer<Long> ofLong() {
+        return BuiltInSerializers.LONG;
+    }
+
+    /**
+     * Returns a serializer storing {@code Integer}s as decimal text, readable in the store.
+     *
+     * @return the serializer
+     */
+    static StringSerializer<Integer> ofInteger() {
+        return BuiltInSerializers.INTEGER;
+    }
+
+    /**
+     * Returns a serializer storing {@code UUID}s in their canonical text form, readable in the store.
+     *
+     * @return the serializer
+     */
+    static StringSerializer<java.util.UUID> ofUUID() {
+        return BuiltInSerializers.UUID;
+    }
 }

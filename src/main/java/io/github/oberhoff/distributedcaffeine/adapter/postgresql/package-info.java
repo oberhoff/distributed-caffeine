@@ -14,10 +14,10 @@
  * limitations under the License.
  */
 /**
- * This package contains an adapter based on PostgreSQL.
+ * A store adapter for PostgreSQL: the store, its change feed through LISTEN/NOTIFY (a listening session per data
+ * source), and the schema of its table.
  *
  * @author Andreas Oberhoff
- * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
  */
 @NullMarked
 package io.github.oberhoff.distributedcaffeine.adapter.postgresql;

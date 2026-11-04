@@ -14,31 +14,11 @@
  * limitations under the License.
  */
 /**
- * This package contains the main classes and interfaces for configuring, constructing and using Distributed Caffeine
- * cache instances.
- * <p>
- * {@link io.github.oberhoff.distributedcaffeine.DistributedCaffeine} is the starting point for configuring and
- * constructing cache instances using a builder pattern instance returned by
- * {@link io.github.oberhoff.distributedcaffeine.DistributedCaffeine#newBuilder(Adapter)}.
- * <p>
- * Cache instances can be of type {@link io.github.oberhoff.distributedcaffeine.DistributedCache} (extends
- * {@link com.github.benmanes.caffeine.cache.Cache}) or of type
- * {@link io.github.oberhoff.distributedcaffeine.DistributedLoadingCache} (extends
- * {@link com.github.benmanes.caffeine.cache.LoadingCache}).
- * <p>
- * <b>Attention:</b> To ensure the integrity of distributed synchronization between cache instances, the following
- * minor restrictions apply:
- * <ul>
- *      <li>Reference-based eviction using Caffeine's weak or soft references for keys or values is not supported. Even
- *      for the use of Caffeine (stand-alone), it is advised to use the more predictable size- or time-based eviction
- *      instead.</li>
- * </ul>
+ * Distributed Caffeine: a Caffeine cache whose instances share a store, built with {@link DistributedCaffeine}.
  *
  * @author Andreas Oberhoff
- * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
  */
 @NullMarked
 package io.github.oberhoff.distributedcaffeine;
 
-import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
 import org.jspecify.annotations.NullMarked;

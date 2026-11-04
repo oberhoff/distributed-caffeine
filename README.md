@@ -5,10 +5,14 @@
 
 # Distributed Caffeine
 
-Distributed Caffeine is a [Caffeine](https://github.com/ben-manes/caffeine)-based distributed cache that keeps cache
-instances synchronized in near real time, with optional persistence — through
-[MongoDB change streams](https://www.mongodb.com/docs/manual/changeStreams),
-[PostgreSQL LISTEN/NOTIFY](https://www.postgresql.org/docs/current/sql-notify.html), or custom adapters.
+Distributed Caffeine adds distribution and a shared second level to [Caffeine](https://github.com/ben-manes/caffeine),
+through a store the application may already use: MongoDB, PostgreSQL, Redis (also Valkey, Dragonfly, Kvrocks), MariaDB
+or MySQL.
+
+* **Distribution:** a change on one instance reaches all others within moments.
+* **Second level:** misses are read from the shared store before the source is called.
+* **Consistency:** versions keep racing writes and late messages from bringing back outdated values.
+* **Compatibility:** a drop-in replacement for Caffeine's caches.
 
 ## Table of contents
 
@@ -20,148 +24,167 @@ instances synchronized in near real time, with optional persistence — through
 
 ## Introduction
 
-Distributed Caffeine takes advantage of Caffeine's famous
-[near optimal](https://github.com/ben-manes/caffeine/wiki/Efficiency) cache implementation and additionally provides
-synchronization between multiple cache instances by distributing cache operations for
-[population](https://github.com/ben-manes/caffeine/wiki/Population)
-([manual](https://github.com/ben-manes/caffeine/wiki/Population#manual) or
-[loading](https://github.com/ben-manes/caffeine/wiki/Population#loading)),
-[invalidation](https://github.com/ben-manes/caffeine/wiki/Removal#explicit-removals) (explicit removal) and
-[eviction](https://github.com/ben-manes/caffeine/wiki/Eviction) (size- or time-based removal), optionally combined with
-persistence of cache entries in an underlying store.
+Each instance of a cache has a local Caffeine cache of its own (first level, L1): a hit is answered locally, and
+Caffeine's eviction keeps a [near optimal](https://github.com/ben-manes/caffeine/wiki/Efficiency) hit ratio. Behind it,
+all instances share a store (second level, L2):
 
-Without configured persistence (the default), an adapter only distributes cache operations between cache instances for
-synchronization; no cache entries are retained in an underlying store. A fresh cache instance therefore starts empty,
-but takes part in synchronization immediately. Which cache operations are distributed, and which are deliberately not,
-is decided by the configured distribution mode.
+* A read that finds nothing in the local cache reads the store, and if the store holds nothing either, the loader or
+  mapping function, if any.
+* A write goes to the store first, then into the local cache.
+* A change made on one instance — a write, an invalidation or an expiry — makes the other instances drop or replace
+  their copy of the key, or leaves it alone, depending on the
+  [distribution mode](#configuration-of-the-distribution-mode).
 
-With configured persistence, cache entries are retained in an underlying store, separately configurable for cached and
-evicted entries: cached entries can warm up a fresh cache instance, and evicted entries remain available after eviction
-(passivation) and can be reloaded on demand (activation). Combined as needed, both provide an adjustable mix of
-in-memory (first-level, L1 or client-side) and database (second-level, L2 or server-side) caching.
+Every write carries a version, so a slow load, a late message or a racing write never overwrites a newer value. With
+distribution on, no instance serves an outdated copy for longer than distributing the change takes. If distribution
+stops, an instance notices within about two heartbeat intervals and checks its copies against the store. The store is
+bounded by a maximum age and a maximum size, and no instance keeps a copy beyond the maximum age.
 
-To summarize some advantages: Distributed Caffeine combines established and widely used technologies that many
-developers are already familiar with or that are already in the tech stack of many applications. This combination
-effectively enables distributed caching and the implementation of many common use cases without the overhead of usually
-more complex or more expensive tools with comparable features.
+If the store stops answering, the instances keep serving what they hold and loads go straight to the source, while
+writes fail; they recover by themselves once the store answers again. Changes that may have been missed meanwhile make
+the instances check what they hold against the store.
 
 ## Usage
 
 ### Adapters
 
-An adapter must be configured before a cache instance is built: it provides synchronization and optional persistence,
-and keeps the cache itself independent of which adapter is used. The built-in `MongoAdapter` for MongoDB and
-`PostgresAdapter` for PostgreSQL can be used, or custom adapters can be implemented against the `Adapter` interface.
+An adapter tells a cache where it lives in the store. Each store has one, and each supports every distribution mode, via
+the store's own way of announcing changes or by polling:
 
-Note: An adapter instance belongs to exactly one cache instance and cannot be shared between them.
+| Store                                   | Adapter                          | Distribution via                 | Details                                                                                                   |
+|-----------------------------------------|----------------------------------|----------------------------------|-----------------------------------------------------------------------------------------------------------|
+| MongoDB                                 | `MongoAdapter`                   | change streams                   | [MongoDB adapter](src/main/java/io/github/oberhoff/distributedcaffeine/adapter/mongodb/README.md)         |
+| PostgreSQL                              | `PostgresAdapter`                | `LISTEN`/`NOTIFY`                | [PostgreSQL adapter](src/main/java/io/github/oberhoff/distributedcaffeine/adapter/postgresql/README.md)   |
+| Redis (also Valkey, Dragonfly, Kvrocks) | `RedisAdapter`                   | Redis Streams                    | [Redis adapter](src/main/java/io/github/oberhoff/distributedcaffeine/adapter/redis/README.md)             |
+| MariaDB, MySQL                          | `MariaDbAdapter`, `MySqlAdapter` | polling (each second by default) | [MariaDB and MySQL adapters](src/main/java/io/github/oberhoff/distributedcaffeine/adapter/jdbc/README.md) |
 
-#### Configuration of an adapter for MongoDB
-
-The configuration of the MongoDB-based adapter always starts with a builder returned by invoking the
-`MongoAdapter.newBuilder(mongoClient, databaseName, collectionName)` method and ends with finalizing the builder by
-invoking the `build()` method to construct the adapter instance. The `mongoClient`, `databaseName` and `collectionName`
-parameters refer to the MongoDB client, database name and collection name used for distributed synchronization and
-persistence. Optionally, a discriminator can be specified (using the `withDiscriminator(...)` method) to distinguish
-between cache entries from different caches that share a collection.
-
-The adapter works with any MongoDB client connected to a replica set (directly or through a sharded cluster) and relies
-on the client's defaults. Starting synchronization fails right away with an explanation if the setup cannot support it.
-The [MongoDB adapter details](src/main/java/io/github/oberhoff/distributedcaffeine/adapter/mongodb/README.md) cover
-watcher sharing, read concern, broken connections, failovers and sharded clusters.
+Every adapter is built from the client or data source the application already uses, and a name for the place of the
+cache (a collection, a table or a keyspace). Several caches can share that place, told apart by a discriminator. The
+collection, table or keys are created as needed, and a setup that cannot work is refused right away with an explanation.
 
 ```java
 MongoAdapter<Key, Value> adapter = MongoAdapter.newBuilder(mongoClient, databaseName, collectionName)
-        .withDiscriminator("discriminator") // optional (used if different caches share a collection)
-        .withWatcherSharingMode(WatcherSharingMode.DATABASE) // optional (used for connection sharing)
+        .withDiscriminator(discriminator) // optional (used if different caches share a collection)
         .build();
 ```
-
-#### Configuration of an adapter for PostgreSQL
-
-The configuration of the PostgreSQL-based adapter always starts with a builder returned by invoking the
-`PostgresAdapter.newBuilder(dataSource, schemaName, tableName)` method and ends with finalizing the builder by invoking
-the `build()` method to construct the adapter instance. The `dataSource`, `schemaName` and `tableName` parameters refer
-to the data source, schema name and table name used for distributed synchronization and persistence. Optionally, a
-discriminator can be specified (using the `withDiscriminator(...)` method) to distinguish between cache entries from
-different caches that share a table.
-
-The adapter works with any data source that reaches the primary (directly or through a server-side connection pooler).
-Starting synchronization fails right away with an explanation if the setup cannot support it, for example listening
-through a pooler in transaction mode, which needs a direct or session-mode connection specified using
-`withListenerDataSource(...)`. The
-[PostgreSQL adapter details](src/main/java/io/github/oberhoff/distributedcaffeine/adapter/postgresql/README.md) cover
-listener sharing, server-side connection poolers, standby servers, broken connections, failovers, server timeouts and
-managed and cloud databases.
 
 ```java
 PostgresAdapter<Key, Value> adapter = PostgresAdapter.newBuilder(dataSource, schemaName, tableName)
-        .withDiscriminator("discriminator") // optional (used if different caches share a table)
-        .withListenerSharingMode(ListenerSharingMode.DATABASE) // optional (used for connection sharing)
-        .withListenerDataSource(listenerDataSource) // optional (used if the data source cannot be listened on)
-        .build();
-```
-
-### Distributed Caffeine Caches
-
-Distributed Caffeine cache instances are represented by `DistributedCache` and `DistributedLoadingCache` interfaces
-which are derived from Caffeine's `Cache` and `LoadingCache` interfaces and therefore offer almost the same usage and
-integration options (drop-in replacement possible). Please refer to the official
-[Caffeine documentation](https://github.com/ben-manes/caffeine/wiki) for more details on use and integration.
-
-#### Minimal configurations of distributed (loading) caches
-
-The configuration of a cache always starts with a builder returned by invoking the
-`DistributedCaffeine.newBuilder(adapter)` method and ends with finalizing the builder by invoking one of the
-`build(...)` methods to construct the cache instance. The `adapter` parameter refers to the adapter instance build like
-described above.
-
-```java
-DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(adapter)
+        .withDiscriminator(discriminator) // optional (used if different caches share a table)
         .build();
 ```
 
 ```java
-DistributedLoadingCache<Key, Value> distributedLoadingCache = DistributedCaffeine.newBuilder(adapter)
+// with LettuceRedis, JedisRedis or RedissonRedis, whichever client library is in use
+RedisAdapter<Key, Value> adapter = RedisAdapter.newBuilder(LettuceRedis.of(redisClient), keyspaceName)
+        .withDiscriminator(discriminator) // optional (used if different caches share a keyspace)
+        .build();
+```
+
+```java
+MariaDbAdapter<Key, Value> adapter = MariaDbAdapter.newBuilder(dataSource, tableName) // or MySqlAdapter
+        .withDiscriminator(discriminator) // optional (used if different caches share a table)
+        .build();
+```
+
+Note: An adapter belongs to exactly one cache: building a second cache with it fails while the first is open.
+
+The key and value types of a cache come from the adapter's variable, as above, or from the variable the cache is
+assigned to, so an adapter can also be built inline within `DistributedCaffeine.newBuilder(...)`. A hash provider or
+serializers that work with the key or value type need the typed adapter variable.
+
+### Distributed Caffeine caches
+
+The caches are represented by `DistributedCache`, `DistributedLoadingCache`, `DistributedAsyncCache` and
+`DistributedAsyncLoadingCache`, which extend Caffeine's `Cache`, `LoadingCache`, `AsyncCache` and `AsyncLoadingCache`
+and offer the same usage: a built cache can replace a plain Caffeine cache wherever one is used (drop-in replacement).
+Where a method behaves differently, its Javadoc says so. Please refer to the official
+[Caffeine documentation](https://github.com/ben-manes/caffeine/wiki) for use and integration.
+
+#### Minimal configuration
+
+A cache is configured with a builder returned by `DistributedCaffeine.newBuilder(adapter)` and built by one of its
+`build(...)` or `buildAsync(...)` methods. The store's maximum age and maximum size are required.
+
+```java
+DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
+        .withStore(store -> store
+                .withMaximumAge(Duration.ofHours(1))
+                .withMaximumSize(1_000_000))
         .build(key -> loadExpensiveValue(key));
 ```
 
-#### Configuration of the Caffeine cache used internally
+Building connects to the store and checks it, so a misconfiguration fails at once. A cache is closed with `close()`,
+which releases its connections.
 
-The configuration of the Caffeine cache used internally also starts with a builder returned by invoking its own
-`Caffeine.newBuilder()` method, however the builder is not finalized by invoking one of its own `build(...)` methods
-(this construction is done internally by the outer `build(...)` methods instead). If the configuration of the Caffeine
-cache is skipped, a default (empty) configuration is used. Please refer to the official
-[Caffeine documentation](https://github.com/ben-manes/caffeine/wiki) for more details on configuration.
+#### Configuration of the local cache
+
+Caffeine's builder methods configure each instance's local cache and keep their meaning. They apply to the copies of
+this instance only; the store has its own bounds. No copy is kept longer than the store's maximum age, whatever its
+expiry.
 
 ```java
-DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(adapter)
-        .withCaffeine(Caffeine.newBuilder()
+DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
+        .withCaffeine(caffeine -> caffeine
                 .maximumSize(10_000)
-                .expireAfterWrite(Duration.ofMinutes(10)))
+                .expireAfterWrite(Duration.ofMinutes(10))
+                .refreshAfterWrite(Duration.ofMinutes(5))
+                .recordStats())
+        .withStore(store -> store
+                .withMaximumAge(Duration.ofHours(1))
+                .withMaximumSize(1_000_000))
+        .build(key -> loadExpensiveValue(key));
+```
+
+#### Configuration of the store
+
+Besides the required maximum age and maximum size, the store's settings have defaults that suit most uses:
+
+* `withOperationTimeout(...)`: how long a call waits for the store before it fails (30 seconds).
+* `withExecutor(...)`: the executor of the blocking store calls, such as virtual threads (a pool of daemon threads).
+* `withMaintenanceInterval(...)`: how often values beyond the maximum age or size are removed (one minute).
+* `withHeartbeatInterval(...)`: how often an instance checks that distribution still works (ten seconds).
+* `withPollInterval(...)`: how often an instance polls MariaDB or MySQL for changes (one second).
+
+#### Configuration of the distribution mode
+
+The distribution mode decides what a change made elsewhere does to the copies of an instance:
+
+* `INVALIDATE`: The copy is dropped, and the next read gets the value from the store. This is the default distribution
+  mode.
+* `UPDATE`: A write replaces the copy at once, which saves the next read a round trip, at one store read per write and
+  instance holding the key; an invalidation or an expiry still drops it.
+* `NONE`: No distribution; a change elsewhere reaches an instance only when its copy expires or is evicted.
+
+```java
+DistributedCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
+        .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(1_000_000))
+        .withDistributionMode(DistributionMode.UPDATE)
         .build();
 ```
 
-#### Configuration of hashing (for keys of cache entries)
+Note: No mode adds a key to an instance that does not hold it.
 
-Cache entries need to be identifiable during distributed synchronization and for persistence by a hash computed for
-their keys. Keys of type `String`, `Long`, `Integer` or `UUID` are hashed out of the box. For other types of keys two
-ways for computation of hashes are supported.
+#### Configuration of hashing (for keys)
 
-If the implementation of the key class cannot or should not be changed, a hash provider can be configured. The supplied
-hasher can be used to compute and return a hash based on values of the given key.
+Keys are identified across instances by a hash. Keys of type `String`, `Long`, `Integer` or `UUID` are hashed out of the
+box. For other types of keys two ways are supported.
+
+If the key class cannot or should not be changed, a hash provider can be configured. The supplied hasher computes the
+hash from the values of the key.
 
 ```java
-DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(adapter)
+DistributedCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
         .withHashProvider((key, hasher) -> hasher.get()
                 .putUUID(key.getId())
                 .putLong(key.getVersion())
                 .putString(key.getName())
                 .getHash())
+        .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(1_000_000))
         .build();
 ```
 
-Alternatively, the key class can implement the `Hashable` interface and override the `getHash(hasher)` method. The
-supplied hasher can be used to compute and return a hash based on values of the key object.
+Alternatively, the key class can implement the `Hashable` interface.
 
 ```java
 public class Key implements Hashable {
@@ -176,124 +199,86 @@ public class Key implements Hashable {
 }
 ```
 
-Note: Hashing must be equivalent to key equality (`equals()`-semantics) and stable across cache instances, so all values
-relevant for key equality (and only those) should be put into a hasher. A specified hash provider always takes
-precedence over the alternatives listed above.
-
-#### Configuration of the distribution mode
-
-Distribution modes include/exclude different types of cache operations (population, invalidation, eviction) which are
-then considered or not considered for distributed synchronization between cache instances. The following distribution
-modes are provided:
-
-* `POPULATION_AND_INVALIDATION_AND_EVICTION`: Includes population (manual or loading), invalidation (explicit removal)
-  and eviction (size- or time-based removal). This is the default distribution mode.
-* `POPULATION_AND_INVALIDATION`: Includes population (manual or loading) and invalidation (explicit removal), but
-  excludes eviction (size- or time-based removal).
-* `INVALIDATION_AND_EVICTION`: Includes invalidation (explicit removal) and eviction (size- or time-based removal), but
-  excludes population (manual or loading).
-* `INVALIDATION`: Includes invalidation (explicit removal), but excludes population (manual or loading) and eviction
-  (size- or time-based removal).
-
-```java
-DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(adapter)
-        .withDistributionMode(DistributionMode.POPULATION_AND_INVALIDATION_AND_EVICTION)
-        .build();
-```
-
-Note: Invalidations are distributed to other cache instances independently of what the invalidating cache instance
-holds.
-
-#### Configuration of persistence
-
-Persistence can retain cache entries in the underlying store beyond what distributed synchronization itself requires. It
-is configured separately for cached and evicted entries.
-
-Persistence of cached entries either retains (unless invalidated or evicted) all of them for as long as they are cached
-(configuring cache residency) or is limited by size and time, which can be combined with each other but not with cache
-residency. Retained cache entries are synchronized back into a cache instance as warm-up, unless a cold start is
-configured explicitly, which cache residency does not allow. Persistence of cached entries requires a distribution mode
-including population, and including eviction as well if cache residency is combined with an eviction policy.
-
-Persistence of evicted entries retains (unless invalidated) recently evicted cache entries and is limited by size and
-time, which is also required for enabling loading strategies. Using the loading strategy for mapping function means that
-a mapping function provided to `get(...)` or `getAll(...)` is only applied to obtain missing cache entries if these
-could not be reloaded from the underlying store beforehand, which works for any cache instance but does not extend to
-the computing methods of the map view returned by `asMap()`. Likewise, the loading strategy for cache loader means that
-a provided cache loader is only invoked to obtain missing cache entries if these could not be reloaded from the
-underlying store beforehand, which requires the cache to be built as a loading cache. Persistence of evicted entries
-requires at least one eviction policy, but works regardless of whether the distribution mode includes eviction.
-
-Alternatively, the `getFromStore(...)` or `getAllFromStore(...)` methods (via `cacheInstance.distributedPolicy()`) can
-be used to load retained cache entries directly from the underlying store bypassing the cache instance.
-
-```java
-DistributedLoadingCache<Key, Value> distributedLoadingCache = DistributedCaffeine.newBuilder(adapter)
-        .withCaffeine(Caffeine.newBuilder()
-                .maximumSize(10_000)
-                .expireAfterWrite(Duration.ofMinutes(10)))
-        .withPersistence(configurer -> configurer
-                .withCachedEntries(cachedEntries -> cachedEntries
-                        .withCacheResidency()) // as long as cached (mutual exclusive with size and/or time limits)
-                        //.withMaxiumumSize(1_000) // limited by size
-                        //.withMaximumTime(Duration.ofDays(1)) // limited by time
-                        //.withColdStart() // no warm-up (mutual exclusive with cache residency)
-                .withEvictedEntries(evictedEntries -> evictedEntries
-                        .withMaximumSize(1_000_000) // limited by size
-                        .withMaximumTime(Duration.ofDays(10)) // limited by time
-                        .withLoadingStrategies(MAPPING_FUNCTION, CACHE_LOADER))) // loading strategies
-        .build(key -> loadExpensiveValue(key)); // cache loader
-```
-
-Note: No persistence is used unless configured.
+Note: Hashing must be equivalent to key equality (`equals()`-semantics) and stable across instances, so all values
+relevant for key equality (and only those) should be put into the hasher. A hash provider takes precedence over
+`Hashable`.
 
 #### Configuration of serialization
 
-Keys and values of cache entries must be serialized for storing and deserialized when loaded back into the cache
-instances. Already built-in serializers are `ForySerializer` (default, no explicit configuration needed, stores objects
-in binary format using [Apache Fory](https://github.com/apache/fory)), `JavaObjectSerializer` (stores objects in binary
-format using classic
-[Java Object Serialization](https://docs.oracle.com/en/java/javase/17/docs/specs/serialization/index.html)) and
-`JacksonSerializer` (stores objects as JSON or BSON for better readability/accessibility using
-[Jackson](https://github.com/FasterXML/jackson)). Serialization can be customized by extending the aforementioned
-built-in serializers or by implementing one of the `ByteArraySerializer`, `StringSerializer` or `JsonSerializer`
-interfaces.
+Keys and values are serialized for the store. `ForySerializer` is the default for both: it handles every type without
+configuration and stores bytes, using [Apache Fory](https://github.com/apache/fory). `JacksonSerializer` stores JSON, as
+text or, on MongoDB and PostgreSQL, in the store's own JSON type, using [Jackson](https://github.com/FasterXML/jackson).
+`JavaObjectSerializer` uses
+[Java Object Serialization](https://docs.oracle.com/en/java/javase/17/docs/specs/serialization/index.html), and
+`StringSerializer.ofString()`, `ofLong()`, `ofInteger()` and `ofUUID()` store those types readably. A serializer of
+one's own implements `ByteArraySerializer`, `StringSerializer` or `JsonSerializer`.
 
 ```java
-DistributedCache<Key, Value> distributedCache = DistributedCaffeine.newBuilder(adapter)
-        .withSerializers(configurer -> configurer
-                .withKeySerializer(new JacksonSerializer<>(Key.class, storeAsBinaryJson))
-                .withValueSerializer(new JacksonSerializer<>(Value.class, storeAsBinaryJson)))
+DistributedCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
+        .withSerializers(serializers -> serializers
+                .withKeySerializer(new JacksonSerializer<>(Key.class, false)) // as text
+                .withValueSerializer(new JacksonSerializer<>(Value.class, true))) // as the store's JSON type, if any
+        .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(1_000_000))
         .build();
 ```
 
+Note: Values come from a shared store, so with the default serializer whoever can write to the store can make every
+instance deserialize classes of their choice. If the store's access cannot be trusted, use
+`ForySerializer.requiringRegistration(...)` or `JavaObjectSerializer.allowing(...)`, which accept only the listed
+classes.
+
+#### Configuration of negative caching
+
+Negative caching remembers, for a short time, keys whose load found nothing, so that repeated requests for a missing key
+reach neither the store nor the source. A value written through any instance ends the absence at once (without
+distribution, only through the same instance). It is off by default, as Caffeine caches no missing value.
+
+```java
+DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
+        .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(1_000_000))
+        .withNegativeCaching(Duration.ofSeconds(30))
+        .build(key -> loadExpensiveValue(key));
+```
+
+#### The distributed policy
+
+`distributedPolicy()` gives access to the distributed side of a cache instance: its synchronization state
+(`SYNCHRONIZED`, `DEGRADED` or `CLOSED`), its stats of store and synchronization activity (recorded with
+`recordStats()`), and `getFromStore(...)` and `getAllFromStore(...)`, which read the store directly, bypassing the
+instance's copies.
+
 ## Remarks
 
-* Distributed Caffeine only supports the
-  [synchronous variants](https://github.com/ben-manes/caffeine/wiki/Population#manual) of Caffeine, the
-  [asynchronous variants](https://github.com/ben-manes/caffeine/wiki/Population#asynchronous-manual) are not supported.
+* All instances of a cache must be configured alike, in particular the serializers, the hashing and the store's bounds.
+* Changing the key or value classes, their serializers or the hashing can make the stored values unusable: remove them
+  first (`invalidateAll()`), or give the cache a new place. A serializer that stores another format (bytes, text or
+  JSON) needs a new table on PostgreSQL.
 * Reference-based eviction using Caffeine's
-  [weak or soft references for keys or values](https://github.com/ben-manes/caffeine/wiki/Eviction#reference-based) is
-  not supported. Even when using Caffeine (stand-alone), it is advisable to use the more predictable size- or time-based
-  eviction instead.
-* Related cache instances — those whose adapters are specified identically — must be configured in the same way to
-  prevent unpredictable behavior or even the loss of cache entries.
-* Changing key or value objects, their serializers, key hashing or retained cache entries directly can make existing
-  data unusable, which should be cleaned up or migrated beforehand.
-* Synchronization runs in background threads of the application. Cloud platforms that allocate CPU to the application
-  only during requests, as is common for serverless deployments, should allocate it permanently instead, otherwise
-  cache instances fall behind while idle.
+  [weak or soft references](https://github.com/ben-manes/caffeine/wiki/Eviction#reference-based) is not supported.
+* `refreshAfterWrite` counts from when an instance got its copy, and a value read from the store that is already older
+  is refreshed at once, so a value is refreshed by an age of at most twice the duration.
+* The store is the cache's bound: there is no eviction across instances, and the first read of a key on each instance
+  reads the store.
+* Synchronization runs in background threads of the application. Platforms that allocate CPU only while a request is
+  handled, as is common for serverless deployments, should allocate it permanently, otherwise instances fall behind
+  while idle.
 
 ## Requirements
 
 * Java 17 or newer.
-* MongoDB 4.2 or newer if `MongoAdapter` is used, configured to run as a replica set (a single node replica set is
-  sufficient; more members might slow down writes, and a sharded cluster delays synchronization).
-* PostgreSQL 9.5 or newer if `PostgresAdapter` is used, accessed through a data source, preferably with a connection
-  pool (and an additional direct data source if listening behind a server-side pooler in transaction mode).
+* One of the stores, with its Java driver on the classpath (the drivers are optional dependencies, so only the one in
+  use is needed):
+    * MongoDB 4.4 or newer, as a replica set or a sharded cluster, with `org.mongodb:mongodb-driver-sync`.
+    * PostgreSQL 9.6 or newer, through a data source, with `org.postgresql:postgresql`.
+    * Redis 6.2 or newer, Valkey 7.2 or newer, Dragonfly 1.4 or newer, or Kvrocks 2.16 or newer, with
+      `io.lettuce:lettuce-core`, `redis.clients:jedis` (8 or newer) or `org.redisson:redisson`.
+    * MariaDB 10.2 or newer with `org.mariadb.jdbc:mariadb-java-client`, or MySQL 5.7 or newer with
+      `com.mysql:mysql-connector-j` or `org.mariadb.jdbc:mariadb-java-client`.
+* `tools.jackson.core:jackson-databind` if `JacksonSerializer` is used.
 
 ## Installation
 
 Go to
 [Distributed Caffeine on Maven Central](https://central.sonatype.com/artifact/io.github.oberhoff.distributed-caffeine/distributed-caffeine),
 select your preferred build tool, copy the snippet provided and paste it into your project at the appropriate location.
+Then add the driver of your store (see [Requirements](#requirements)).
