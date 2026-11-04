@@ -15,521 +15,824 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
 
-import com.mongodb.MongoCommandException;
-import com.mongodb.MongoNamespace;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
+import com.mongodb.ClientSessionOptions;
+import com.mongodb.MongoException;
+import com.mongodb.MongoServerException;
 import com.mongodb.client.ChangeStreamIterable;
+import com.mongodb.client.ClientSession;
 import com.mongodb.client.MongoChangeStreamCursor;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoDatabase;
-import com.mongodb.client.model.Aggregates;
 import com.mongodb.client.model.Filters;
-import com.mongodb.client.model.Projections;
+import com.mongodb.client.model.Updates;
 import com.mongodb.client.model.changestream.ChangeStreamDocument;
-import com.mongodb.client.model.changestream.FullDocument;
-import dev.failsafe.Failsafe;
-import dev.failsafe.RetryPolicy;
-import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Field;
+import com.mongodb.client.model.changestream.OperationType;
+import io.github.oberhoff.distributedcaffeine.spi.Change;
+import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
+import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
+import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import org.bson.BsonDocument;
-import org.bson.Document;
-import org.bson.conversions.Bson;
+import org.bson.BsonTimestamp;
+import org.bson.BsonValue;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
-import java.util.Queue;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
-
-import static com.mongodb.client.model.changestream.OperationType.INSERT;
-import static com.mongodb.client.model.changestream.OperationType.UPDATE;
-import static io.github.oberhoff.distributedcaffeine.adapter.DiscriminatorAware.DISCRIMINATOR_FIELD;
-import static java.lang.Math.min;
-import static java.lang.String.format;
-import static java.util.Objects.isNull;
-import static java.util.Objects.nonNull;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 
 /**
- * One change stream cursor, shared by the cache instances that subscribe to it.
+ * Watching MongoDB (VISION.md, "Distribution: messages carry no values" and "Connection sharing"): one change stream
+ * per client (by identity) and database, shared by every cache instance using them, filtered on the server to the
+ * subscribed collections and to inserts, updates and replaces (deletes carry no meaning), with the values projected
+ * out. A cache joining with a collection not covered yet reopens the stream from its resume token, so nothing is lost;
+ * when the last cache of a collection leaves, the watching thread reopens it the same way without that collection.
  * <p>
- * The cursor is held by a thread of its own for as long as anybody subscribes, and that thread does nothing but keep
- * the cursor alive and hand what arrives to the subscribers it is meant for. What a subscriber does with it -
- * reading the cache entries out of the documents, applying them to its cache instance - happens on the
- * subscriber's side, so that one cache instance being slow or failing never holds up the others or the cursor.
+ * The kind of an event comes from the state in the document ({@code fullDocument} of an insert or replace) or in the
+ * changed fields of an update: {@code TOMBSTONE} is {@code INVALIDATED}, {@code EXPIRED} is {@code EXPIRED},
+ * {@code VALUE} is {@code WRITTEN}. An update leaving the state as it was names none: it is {@code WRITTEN} if it
+ * wrote a value (a flag the stream computes before projecting the value out), otherwise {@code INVALIDATED} (a
+ * tombstone or expired row given a new version). The control row of {@code invalidateAll} is a document like any
+ * other: its writes are announced as {@code WRITTEN} of its reserved hash, which the core takes as
+ * {@code invalidateAll}; documents without a hash (the schema marker, a store's start document) announce nothing. A
+ * failed stream is reported as {@code onLost()} and reopened only when a cache asks
+ * ({@code resume()}, VISION.md, "Supervision"): once per loss, whoever asks first, from the resume token, so that the
+ * caches still on it miss nothing; also when a cache suspects the stream went silent (its heartbeat). The core counts
+ * every resume as a gap for the cache resuming. A history the stream can no longer resume from (errors 280 and 286,
+ * e.g. after a rollback or a too short oplog) is a gap: reopened at once without the token ({@code onGap()}), or, if
+ * that fails, lost.
  * <p>
- * Which documents the cursor delivers is decided by its pipeline, which is fixed once the cursor is opened. A
- * subscriber whose collection the pipeline does not cover yet is therefore served by reopening the cursor with a
- * wider pipeline, resuming where the narrower one left off - which delivers everything written in between, so nobody
- * misses anything for it. A subscriber whose collection is covered already is served right away, without the cursor
- * having to do anything. A subscriber leaving never narrows it: what nobody subscribes to any more finds nobody to be
- * handed to, and is dropped.
- * <p>
- * A shared cursor does not select by discriminator, only by collection: the discriminator is matched on the server
- * only after the full document has been looked up, so selecting by it saves the server nothing, while it would make
- * every subscriber of a new discriminator reopen the cursor. What no subscriber is interested in is dropped here
- * instead. A cursor of one subscriber alone, which nobody can join, does select by discriminator, because it never
- * has to be reopened for it.
+ * The watching thread only enqueues into the caches' own queues, so it never calls into a cache's locks.
+ *
+ * @author Andreas Oberhoff
  */
 final class MongoWatcher {
 
-    private static final Logger LOGGER = System.getLogger(MongoWatcher.class.getName());
+    private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine.adapter.mongodb");
+    private static final String LISTENER_FAILED = "A listener failed";
+    private static final long MAX_AWAIT_MILLIS = 100;
+    // the flag of an update that wrote a value, in its changed fields (a name no document field has)
+    private static final String VALUE_WRITTEN = "valueWritten";
+    // every operation of the watcher answers within this (the client's own timeout aside): a getMore that waits
+    // longer, on a network that silently stopped carrying or a server that does not answer, fails and the stream is
+    // resumed or reopened, instead of blocking the watching thread for good while the caches believe they are
+    // synchronized (the getMores themselves wait at most MAX_AWAIT_MILLIS for events). Fixed, unlike a cache's
+    // operation timeout: no caller waits for the watcher, which is shared by caches with different timeouts, and its
+    // failures are recovered (or noticed by the heartbeat) by the library, so the right bound follows from the
+    // stream's own waits, not from anyone's latency budget
+    static final long OPERATION_TIMEOUT_SECONDS = 10;
+    private static final long JOIN_TIMEOUT_SECONDS = 10;
+    private static final Set<Integer> HISTORY_LOST = Set.of(280, 286, 136);
+    private static final IdentityHashMap<MongoClient, Map<String, Watcher>> WATCHERS = new IdentityHashMap<>();
 
-    private static final Duration RETRY_INTERVAL = Duration.ofSeconds(1);
-    // How long the server waits for something to arrive before answering a poll empty, for a cursor that others may
-    // join: a subscriber joining waits for the poll under way to be over, and a poll cannot be cut short from here.
-    // A cursor nobody can join keeps the server's default, which polls less often
-    private static final Duration SHARED_POLL_TIMEOUT = Duration.ofMillis(100);
-    // documents already buffered by the cursor are taken along together, bounded so that a backlog is handed over
-    // in portions rather than all at once
-    private static final int MAXIMUM_BATCH_SIZE = 100;
-    // "ChangeStreamHistoryLost": the resume position has fallen out of the oplog and never becomes valid again
-    private static final int CHANGE_STREAM_HISTORY_LOST = 286;
-    private static final String DOCUMENT_KEY = "documentKey";
-    private static final String CLUSTER_TIME = "clusterTime";
-    private static final String OPERATION_TYPE = "operationType";
-    private static final String FULL_DOCUMENT = "fullDocument";
-    private static final String NAMESPACE = "ns";
-    private static final String NAMESPACE_COLLECTION = "ns.coll";
+    // the clients being watched: none once every cache using them is closed (tests check it, a leak would show)
+    static int watchedClients() {
+        synchronized (WATCHERS) {
+            return WATCHERS.size();
+        }
+    }
+
+    private MongoWatcher() {
+    }
 
     /**
-     * Who a cursor hands what arrives to.
+     * Subscribes a cache instance: returns once the change stream covers its collection, so every write committed
+     * afterwards is delivered (contract point 4).
      */
-    interface Subscriber {
-
-        String getCollectionName();
-
-        String getDiscriminator();
-
-        String getIdentifier();
-
-        // called on the watching thread, so it hands the documents over rather than acting on them
-        void receiveDocuments(List<Document> documents);
-
-        // called on the watching thread as well: the cursor failed and is back, and whatever happened in the
-        // meantime may not be delivered
-        void receiveRestart();
-    }
-
-    private enum State {
-
-        /**
-         * Watching has not begun yet. A failure in this state is final, and fails everybody waiting to subscribe.
-         */
-        STARTING,
-
-        /**
-         * Watching has begun. Kept while a failed cursor is being replaced, so that a failure is retried.
-         */
-        STARTED,
-
-        /**
-         * Starting failed. Whoever subscribes is refused, and the registry replaces the watcher.
-         */
-        FAILED,
-
-        /**
-         * Nobody subscribes any more, and the cursor is given up.
-         */
-        CLOSED
-    }
-
-    private record Request(Subscriber subscriber, @Nullable CompletableFuture<@Nullable Void> subscribed) {
-    }
-
-    // what a subscriber is told apart by - the collection is part of it because a cursor may watch a whole database
-    private record Scope(String collectionName, String discriminator) {
-    }
-
-    private final MongoDatabase mongoDatabase;
-    // the collection watched, or nothing for a cursor that watches the whole database
-    private final @Nullable String collectionName;
-    private final boolean shared;
-    private final @Nullable Duration pollTimeout;
-    private final AtomicReference<State> state = new AtomicReference<>(State.STARTING);
-    private final AtomicBoolean started = new AtomicBoolean(false);
-    private final Queue<Request> requests = new ConcurrentLinkedQueue<>();
-    // named in what is logged, which happens outside the watching thread
-    private final Set<String> identifiers = ConcurrentHashMap.newKeySet();
-    // Marks how far the change stream has been consumed, so that watching can be resumed there after a failure - and
-    // after reopening with a wider pipeline. A resume token is used rather than an operation time because the
-    // server reports one for every batch polled, including empty ones (post-batch resume token), so a position is
-    // available while nothing happens at all. An operation time can only be taken from an event that actually
-    // arrived, which leaves no resume position until the first one does - and a cursor failing before that resumes
-    // at "now", silently losing everything written in the meantime
-    private final AtomicReference<@Nullable BsonDocument> resumeToken = new AtomicReference<>();
-    // Concurrent, because a subscriber whose collection the open cursor covers already registers itself, from its
-    // own thread, while the watching thread hands documents over
-    private final Map<Scope, Set<Subscriber>> subscribersByScope = new ConcurrentHashMap<>();
-    // who has been told that it is subscribed, and so has to be told when the cursor it relies on failed
-    private final Set<Subscriber> confirmed = ConcurrentHashMap.newKeySet();
-    private final Map<Subscriber, CompletableFuture<@Nullable Void>> unconfirmed = new ConcurrentHashMap<>();
-    // What the pipeline of the open cursor covers, and whether a cursor is open at all - guarded by this, so that a
-    // subscriber registering itself and the watching thread replacing the cursor agree on what is covered
-    private final Set<String> watchedCollectionNames = new HashSet<>();
-    private final Set<String> watchedDiscriminators = new HashSet<>();
-    private boolean watching;
-    // counted by the registry, under its lock
-    int references;
-
-    // Every operation of watching is limited to the given timeout, polls included. A poll returns within the time the
-    // server waits for something to arrive, so one that does not return within the timeout is on a connection that
-    // died without being reset - a failover moving the server's address, a NAT entry expiring on an idle path - and
-    // would otherwise only fail once TCP keepalive gives up on the connection, after minutes, the driver setting no
-    // read limit of its own. Failing it is what has the cursor replaced, resuming where it was and reconciling, as
-    // after any other failure. Limited here only, so that the client's own operations keep whatever limit its owner
-    // gave them
-    MongoWatcher(MongoClient mongoClient, String databaseName, @Nullable String collectionName, boolean shared,
-                 Duration operationTimeout) {
-        this.mongoDatabase = mongoClient.getDatabase(databaseName)
-                .withTimeout(operationTimeout.toMillis(), TimeUnit.MILLISECONDS);
-        this.collectionName = collectionName;
-        this.shared = shared;
-        this.pollTimeout = shared ? SHARED_POLL_TIMEOUT : null;
-    }
-
-    // Started by whoever subscribed first, after subscribing, so that the first cursor already covers its first
-    // subscriber rather than being opened empty and reopened at once. Starting again does nothing.
-    // Nothing waits for the cursor to be given up, and how it ended is dealt with where it ends rather than by
-    // whoever would otherwise hold on to its future
-    @SuppressWarnings("FutureReturnValueIgnored")
-    void start() {
-        if (!started.compareAndSet(false, true)) {
-            return;
+    @SuppressWarnings("java:S1181") // whatever fails, the registration is released before it is rethrown
+    static ChangeSubscription subscribe(MongoClient client, MongoLocation location, ChangeListener listener,
+                                        MongoClusterTime clusterTime) {
+        // a read, so outside the lock every cache of the JVM takes to subscribe and to leave
+        BsonTimestamp since = majorityTime(client, MongoSchema.database(client, location), location.collectionName);
+        Watcher watcher;
+        Registration registration;
+        synchronized (WATCHERS) {
+            watcher = WATCHERS.computeIfAbsent(client, ignored -> new java.util.HashMap<>())
+                    .computeIfAbsent(location.databaseName, name -> new Watcher(client, location));
+            registration = watcher.register(location, listener, since, clusterTime);
         }
-        RetryPolicy<Void> retryPolicy = RetryPolicy.<Void>builder()
-                // abort unless watching had already begun: a failure while starting up (for example a read concern
-                // that does not support change streams) is final and must fail fast, whereas a failure after that is
-                // treated as transient and retried
-                .abortOn(throwable -> state.get() != State.STARTED)
-                .withMaxAttempts(-1)
-                .withDelay(RETRY_INTERVAL)
-                .withDelayFnOn(context -> RETRY_INTERVAL.multipliedBy(min(context.getAttemptCount(), 10)),
-                        Throwable.class)
-                .onRetryScheduled(event -> Optional.ofNullable(event.getLastException())
-                        .ifPresent(throwable -> LOGGER.log(Level.WARNING,
-                                format("Watching change streams failed for %s. Retrying...", describe()),
-                                throwable)))
-                .build();
-        ExecutorService executorService = Executors.newSingleThreadExecutor();
-        Failsafe.with(retryPolicy)
-                .with(executorService)
-                .runAsync(this::watch)
-                .whenComplete((result, throwable) -> {
-                    if (nonNull(throwable)) {
-                        fail(throwable);
+        try {
+            watcher.cover(location.collectionName, registration);
+        } catch (RuntimeException | Error e) {
+            registration.close();
+            throw e;
+        }
+        return registration;
+    }
+
+    /**
+     * Whether the watcher of the location's database has delivered everything written before this call (tests): a
+     * change of the schema marker made now must arrive through it; events arrive in oplog order.
+     */
+    static boolean barrier(MongoClient client, MongoLocation location) {
+        Watcher watcher;
+        synchronized (WATCHERS) {
+            Map<String, Watcher> byDatabase = WATCHERS.get(client);
+            watcher = byDatabase == null ? null : byDatabase.get(location.databaseName);
+        }
+        return watcher == null || watcher.barrier(location);
+    }
+
+    /**
+     * Makes the watcher of the location's database lose its history (tests): it reopens without its resume token and
+     * reports a gap, as after errors 280 and 286, which a test cannot provoke on demand.
+     */
+    static void simulateHistoryLost(MongoClient client, MongoLocation location) {
+        synchronized (WATCHERS) {
+            Map<String, Watcher> byDatabase = WATCHERS.get(client);
+            Watcher watcher = byDatabase == null ? null : byDatabase.get(location.databaseName);
+            if (watcher != null) {
+                watcher.historyLost = true;
+            }
+        }
+    }
+
+    /**
+     * Makes the watcher of the location's database lose its stream (tests): it reports the loss, as after a network
+     * failure, and reopens from its resume token when a cache resumes it.
+     */
+    static void simulateInterruption(MongoClient client, MongoLocation location) {
+        synchronized (WATCHERS) {
+            Map<String, Watcher> byDatabase = WATCHERS.get(client);
+            Watcher watcher = byDatabase == null ? null : byDatabase.get(location.databaseName);
+            if (watcher != null) {
+                watcher.interrupted = true;
+            }
+        }
+    }
+
+    /**
+     * Holds the watching threads of the client back from reading their cursors, or lets them go on (tests): events
+     * pile up unread while joins and leaves still reopen the streams, which then have to resume from the token behind
+     * them.
+     */
+    static void simulateLag(MongoClient client, boolean lagging) {
+        synchronized (WATCHERS) {
+            WATCHERS.getOrDefault(client, Map.of()).values().forEach(watcher -> watcher.lagging = lagging);
+        }
+    }
+
+    /**
+     * The collections the change streams of the client filter on now (tests).
+     */
+    static Set<String> coveredCollections(MongoClient client) {
+        List<Watcher> watchers;
+        synchronized (WATCHERS) {
+            watchers = List.copyOf(WATCHERS.getOrDefault(client, Map.of()).values());
+        }
+        Set<String> covered = new HashSet<>();
+        watchers.forEach(watcher -> covered.addAll(watcher.covered()));
+        return covered;
+    }
+
+    /**
+     * The time of the majority snapshot now: a majority read in a causally consistent session reports it as its
+     * operation time. Every write outside the snapshot has a later time, so a stream started at it delivers it,
+     * and every write inside is visible to the majority reads that follow. Not the latest applied time (a fresh
+     * stream's default start, and {@code hello}'s operation time): a write applied but not yet majority-committed
+     * would then be neither in the stream nor in the reads (measured on MongoDB 4.4 by the property test).
+     */
+    private static @Nullable BsonTimestamp majorityTime(MongoClient client, MongoDatabase database,
+                                                        String collection) {
+        try (ClientSession session = client.startSession(ClientSessionOptions.builder().causallyConsistent(true)
+                .build())) {
+            database.getCollection(collection, BsonDocument.class).find(session).limit(1).first();
+            return session.getOperationTime();
+        } catch (MongoException e) {
+            return null;
+        }
+    }
+
+    // the fields an event carries: the whole document (insert, replace) or the updated ones
+    private static @Nullable BsonDocument changedFields(ChangeStreamDocument<BsonDocument> event) {
+        if (event.getFullDocument() != null) {
+            return event.getFullDocument();
+        }
+        return event.getUpdateDescription() != null ? event.getUpdateDescription().getUpdatedFields() : null;
+    }
+
+    // the message of an event, or null if it carries none for a cache
+    static @Nullable Change message(ChangeStreamDocument<BsonDocument> event) {
+        BsonDocument key = event.getDocumentKey();
+        BsonValue id = key == null ? null : key.get("_id");
+        if (id == null || !id.isDocument()) {
+            return null;
+        }
+        BsonDocument fields = changedFields(event);
+        if (fields == null) {
+            return null;
+        }
+        BsonValue hash = id.asDocument().get("h");
+        BsonValue version = fields.get("version");
+        if (hash == null || !hash.isString() || version == null || !version.isNumber()) {
+            return null;
+        }
+        BsonValue state = fields.get("state");
+        // an update leaving the state as it was names no state: with a new value it is a value row; without, the row
+        // may be anything (a tombstone or an expired row given a new version, say), so it is announced as invalidated,
+        // which is never wrong (at worst, a value written again unchanged is read again on demand)
+        if (state == null || !state.isString()) {
+            BsonValue written = fields.get(VALUE_WRITTEN);
+            Change.Kind kind = written != null && written.isBoolean() && written.asBoolean().getValue()
+                    ? Change.Kind.WRITTEN : Change.Kind.INVALIDATED;
+            return new Change(kind, hash.asString().getValue(), version.asNumber().longValue());
+        }
+        Change.Kind kind = switch (state.asString().getValue()) {
+            case "TOMBSTONE" -> Change.Kind.INVALIDATED;
+            case "EXPIRED" -> Change.Kind.EXPIRED;
+            case "VALUE" -> Change.Kind.WRITTEN;
+            default -> null; // a document of no cache
+        };
+        return kind == null ? null : new Change(kind, hash.asString().getValue(), version.asNumber().longValue());
+    }
+
+    private static final class Registration implements ChangeSubscription {
+
+        private final Watcher watcher;
+        private final String scope;
+        private final ChangeListener listener;
+        // the cluster time when it subscribed: a shared stream may still carry events of earlier writes
+        private final @Nullable BsonTimestamp since;
+        // the store's, advanced by every event before its message is handed on
+        private final MongoClusterTime clusterTime;
+        // guarded by the watcher (not expressible as @GuardedBy): the stream it was last delivered on, and whether it
+        // was told that delivery stopped
+        private long generation;
+        private boolean lost;
+        private volatile boolean closed;
+
+        Registration(Watcher watcher, String scope, ChangeListener listener, @Nullable BsonTimestamp since,
+                     MongoClusterTime clusterTime) {
+            this.watcher = watcher;
+            this.scope = scope;
+            this.listener = listener;
+            this.since = since;
+            this.clusterTime = clusterTime;
+        }
+
+        @Override
+        public void resume() {
+            if (!closed) {
+                watcher.resume(this);
+            }
+        }
+
+        @Override
+        public void close() {
+            if (!closed) {
+                closed = true;
+                watcher.unregister(this);
+            }
+        }
+    }
+
+    // one change stream; the cursor belongs to the watching thread, joins hand it the collections to cover
+    private static final class Watcher {
+
+        private final MongoClient client;
+        private final MongoDatabase database;
+        private final String databaseName;
+        private final Map<String, List<Registration>> scopes = new ConcurrentHashMap<>();
+        private final Map<String, CompletableFuture<@Nullable Void>> barriers = new ConcurrentHashMap<>();
+        private final Set<String> wanted = new LinkedHashSet<>();
+        @GuardedBy("this")
+        private Set<String> covered = Set.of();
+        @GuardedBy("this")
+        private @Nullable CompletableFuture<@Nullable Void> widening;
+        @GuardedBy("this")
+        private @Nullable MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> cursor;
+        @GuardedBy("this")
+        private @Nullable BsonDocument resumeToken;
+        @GuardedBy("this")
+        private @Nullable Thread thread;
+        private volatile boolean closed;
+        private volatile boolean historyLost;
+        private volatile boolean interrupted;
+        private volatile boolean lagging;
+        // counts the streams opened, so that a loss is re-established once, whoever asks first
+        @GuardedBy("this")
+        private long generation;
+
+        Watcher(MongoClient client, MongoLocation location) {
+            this.client = client;
+            this.databaseName = location.databaseName;
+            this.database = MongoSchema.database(client, location).withTimeout(OPERATION_TIMEOUT_SECONDS,
+                    TimeUnit.SECONDS);
+        }
+
+
+        private static String scope(String collection, String discriminator) {
+            return collection + "\0" + discriminator;
+        }
+
+        Registration register(MongoLocation location, ChangeListener listener, @Nullable BsonTimestamp since,
+                              MongoClusterTime clusterTime) {
+            Registration registration = new Registration(this,
+                    scope(location.collectionName, location.discriminator), listener, since, clusterTime);
+            scopes.computeIfAbsent(registration.scope, ignored -> new CopyOnWriteArrayList<>()).add(registration);
+            return registration;
+        }
+
+        // returns once the stream covers the collection: opened here for the first one, reopened by the watching
+        // thread from its resume token for a further one. The registration is delivered on the stream that covers
+        // it: taken before, its generation predated the stream opened for it, and its first resume suspecting the
+        // stream silent took that for a reopen by another cache and did nothing (found 2026-10-31)
+        void cover(String collection, Registration registration) {
+            CompletableFuture<@Nullable Void> covering;
+            synchronized (this) {
+                wanted.add(collection);
+                if (thread == null) {
+                    try {
+                        open(new LinkedHashSet<>(wanted), null);
+                    } catch (MongoException e) {
+                        throw new StoreException("Opening a change stream on " + databaseName + " failed: "
+                                + e.getMessage(), e, false);
                     }
-                    executorService.shutdown();
-                });
-    }
-
-    /**
-     * Subscribes, and returns what is completed once the cursor covers the subscriber - or completed exceptionally
-     * if watching cannot be begun at all.
-     */
-    CompletableFuture<@Nullable Void> subscribe(Subscriber subscriber) {
-        CompletableFuture<@Nullable Void> subscribed = new CompletableFuture<>();
-        synchronized (this) {
-            // checked under the same lock that failing takes, so that a request cannot slip in after failing has
-            // refused everybody waiting and then wait forever itself
-            if (state.get() == State.FAILED || state.get() == State.CLOSED) {
-                subscribed.completeExceptionally(new IllegalStateException("Watching has been given up"));
-                return subscribed;
+                    thread = new Thread(this::run, "distributed-caffeine-mongodb-" + databaseName);
+                    thread.setDaemon(true);
+                    thread.start();
+                    registration.generation = generation;
+                    return;
+                }
+                if (cursor == null) {
+                    // lost, and not resumed yet: the joining cache would wait for a resume it does not know of
+                    reopen();
+                }
+                if (covered.contains(collection)) {
+                    registration.generation = generation;
+                    return;
+                }
+                if (widening == null) {
+                    widening = new CompletableFuture<>();
+                }
+                covering = widening;
             }
-            identifiers.add(subscriber.getIdentifier());
-            Scope scope = new Scope(subscriber.getCollectionName(), subscriber.getDiscriminator());
-            // Covered by the open cursor already, so served right away: whatever is handed over from now on reaches
-            // it, and whatever was handed over before is what the cache instance reads from the store once
-            // activated. Otherwise the watching thread takes it into account between polls, reopening if need be
-            if (watching && covers(scope)) {
-                subscribersByScope.computeIfAbsent(scope, ignored -> ConcurrentHashMap.newKeySet()).add(subscriber);
-                confirmed.add(subscriber);
-                subscribed.complete(null);
+            try {
+                covering.get(JOIN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new StoreException("Interrupted while the change stream on " + databaseName
+                        + " took collection " + collection, e, false);
+            } catch (ExecutionException | TimeoutException e) {
+                throw new StoreException("The change stream on " + databaseName + " did not take collection "
+                        + collection + " in time", e, false);
+            }
+            synchronized (this) {
+                registration.generation = generation;
+            }
+        }
+
+        @GuardedBy("this")
+        private void open(Set<String> collections, @Nullable BsonDocument token) {
+            org.bson.BsonArray names = new org.bson.BsonArray();
+            collections.forEach(name -> names.add(new org.bson.BsonString(name)));
+            // the writes of the subscribed collections, and what removes their documents all at once: dropping or
+            // renaming one, dropping the database (which also ends the stream with an invalidate event)
+            BsonDocument match = new BsonDocument("$or", new org.bson.BsonArray(List.of(
+                    BsonDocument.parse("{operationType: {$in: ['insert', 'update', 'replace', 'drop', 'rename']}}")
+                            .append("ns.coll", new BsonDocument("$in", names)),
+                    BsonDocument.parse("{operationType: {$in: ['dropDatabase', 'invalidate']}}"))));
+            // whether an update wrote a value, kept as a flag before the value is projected out
+            BsonDocument valueWritten = BsonDocument.parse("{$addFields: {updateDescription: {$cond: {"
+                    + "if: {$eq: ['$operationType', 'update']}, else: '$$REMOVE', then: {$mergeObjects: ["
+                    + "'$updateDescription', {updatedFields: {$mergeObjects: ['$updateDescription.updatedFields', {"
+                    + VALUE_WRITTEN + ": {$ne: [{$type: '$updateDescription.updatedFields.value'}, 'missing']}}]}}]}}}}}");
+            List<BsonDocument> stages = List.of(new BsonDocument("$match", match), valueWritten,
+                    BsonDocument.parse("{$project: {'fullDocument.value': 0, 'fullDocument.key': 0, "
+                            + "'updateDescription.updatedFields.value': 0, 'updateDescription.updatedFields.key': 0}}"));
+            ChangeStreamIterable<BsonDocument> stream = database.watch(stages, BsonDocument.class)
+                    .maxAwaitTime(MAX_AWAIT_MILLIS, TimeUnit.MILLISECONDS);
+            if (token != null) {
+                stream = stream.resumeAfter(token);
             } else {
-                requests.add(new Request(subscriber, subscribed));
+                BsonTimestamp start = majorityTime(client, database, collections.iterator().next());
+                if (start != null) {
+                    stream = stream.startAtOperationTime(start);
+                }
             }
-        }
-        return subscribed;
-    }
-
-    // through the watching thread even for a subscriber that registered itself, so that leaving can never overtake
-    // a subscription of the same subscriber that is still waiting to be carried out
-    void unsubscribe(Subscriber subscriber) {
-        requests.add(new Request(subscriber, null));
-    }
-
-    // guarded by this
-    private boolean covers(Scope scope) {
-        return watchedCollectionNames.contains(scope.collectionName())
-                && (shared || watchedDiscriminators.contains(scope.discriminator()));
-    }
-
-    // by the registry, once nobody subscribes any more
-    void close() {
-        state.compareAndSet(State.STARTING, State.CLOSED);
-        state.compareAndSet(State.STARTED, State.CLOSED);
-    }
-
-    boolean isFailed() {
-        return state.get() == State.FAILED;
-    }
-
-    private boolean isClosed() {
-        return state.get() == State.CLOSED;
-    }
-
-    private synchronized void fail(Throwable throwable) {
-        if (!state.compareAndSet(State.STARTING, State.FAILED)) {
-            return;
-        }
-        Request request;
-        while ((request = requests.poll()) != null) {
-            Optional.ofNullable(request.subscribed()).ifPresent(future -> future.completeExceptionally(throwable));
-        }
-        unconfirmed.values().forEach(future -> future.completeExceptionally(throwable));
-        unconfirmed.clear();
-    }
-
-    private String describe() {
-        return identifiers.stream()
-                .map(identifier -> format("'%s'", identifier))
-                .collect(Collectors.joining(", ", "cache instances at ", ""));
-    }
-
-    private void watch() {
-        // this attempt may have been scheduled before closing, in which case watching must not be (re)started
-        if (isClosed()) {
-            return;
-        }
-        // Watching having begun before this attempt means the cursor it replaces failed, so cache entries may have
-        // been missed: an event whose document was swept in the meantime resolves to no full document and is
-        // dropped by the server-side match on the discriminator, so it never arrives and no replay can make it good.
-        // Whether that actually happened cannot be told from here - the stream that skipped it looks exactly like
-        // one with nothing to deliver - which is why the possibility is reported to everybody who relied on it
-        boolean recovering = state.get() == State.STARTED;
-        // a cursor reopened with a wider pipeline is not a failure, and resumes exactly where its predecessor was
-        while (!isClosed()) {
-            applyRequests();
-            if (!watchUntilWidened(recovering)) {
+            MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> opened = stream.cursor();
+            if (closed) {
+                closeQuietly(opened); // the last cache left meanwhile
                 return;
             }
-            recovering = false;
+            closeCursor();
+            cursor = opened;
+            generation++;
+            covered = Set.copyOf(collections);
+            BsonDocument position = opened.getResumeToken();
+            if (position != null) {
+                resumeToken = position;
+            }
         }
-    }
 
-    // Watches with a pipeline covering everybody subscribed so far, until somebody subscribes whom it does not
-    // cover - returning true, to be reopened wider - or until closed, returning false
-    @SuppressWarnings("java:S3776")
-    private boolean watchUntilWidened(boolean recovering) {
-        List<Bson> pipeline;
-        synchronized (this) {
-            watching = false;
-            watchedCollectionNames.clear();
-            watchedDiscriminators.clear();
-            subscribersByScope.keySet().forEach(scope -> {
-                watchedCollectionNames.add(scope.collectionName());
-                watchedDiscriminators.add(scope.discriminator());
-            });
-            pipeline = buildAggregationPipeline();
+        @SuppressWarnings({"java:S3776", "java:S135", "java:S1181"}) // each way out of a read is a case of its own
+        private void run() {
+            try {
+                watch();
+            } catch (RuntimeException | Error e) {
+                // never expected: the caches are told that delivery stopped rather than left trusting a dead stream
+                LOGGER.log(Level.ERROR, "The change stream on " + databaseName + " stopped", e);
+                lose(null, e);
+                throw e;
+            }
         }
-        ChangeStreamIterable<Document> changeStreamIterable = (isNull(collectionName)
-                ? mongoDatabase.watch(pipeline)
-                : mongoDatabase.getCollection(collectionName).watch(pipeline))
-                .fullDocument(FullDocument.UPDATE_LOOKUP);
-        if (nonNull(pollTimeout)) {
-            changeStreamIterable = changeStreamIterable.maxAwaitTime(pollTimeout.toMillis(), TimeUnit.MILLISECONDS);
-        }
-        changeStreamIterable = Optional.ofNullable(resumeToken.get())
-                .map(changeStreamIterable::resumeAfter)
-                .orElse(changeStreamIterable);
-        try (MongoChangeStreamCursor<ChangeStreamDocument<Document>> cursor = changeStreamIterable.cursor()) {
-            if (isClosed()) {
-                return false;
-            }
-            // reported once the new cursor is live, so that changes arriving while the cache instances recover are
-            // delivered rather than missed in turn, which is the order activation uses for the same reason
-            state.set(State.STARTED);
-            if (recovering) {
-                confirmed.forEach(Subscriber::receiveRestart);
-            }
-            synchronized (this) {
-                watching = true;
-            }
-            confirmSubscriptions();
-            while (!isClosed()) {
-                if (applyRequests()) {
-                    return true;
-                }
-                confirmSubscriptions();
-                ChangeStreamDocument<Document> changeStreamDocument = cursor.tryNext();
-                if (isNull(changeStreamDocument) && isNull(cursor.getServerCursor())) {
-                    // Ended by the server rather than idle, which an empty poll alone cannot tell apart: dropping or
-                    // renaming the collection or database watched ends a change stream for good, and every poll after
-                    // that comes back empty. Resuming after its end is refused, so watching starts anew from now -
-                    // failing here has the cursor replaced and the cache instances reconciled, which covers whatever
-                    // happened in between, such as the collection being recreated
-                    resumeToken.set(null);
-                    throw new IllegalStateException(format("Change stream was ended by the server for %s",
-                            describe()));
-                } else if (isNull(changeStreamDocument)) {
-                    // nothing pending, so the position reported for the batch just polled can be adopted as is: it
-                    // marks how far the server has looked without there being an event that still needs to be
-                    // handed over. Doing this while idle is what closes the gap, because the first event may be
-                    // hours away or never come
-                    BsonDocument postBatchResumeToken = cursor.getResumeToken();
-                    // the cursor reports none before its first poll, and a position once held must not be given up
-                    // again, because that would mean resuming at "now" - the very gap it is kept for
-                    if (nonNull(postBatchResumeToken)) {
-                        resumeToken.set(postBatchResumeToken);
+
+        @SuppressWarnings({"java:S3776", "java:S135"}) // the watching loop: each way out of a read is a case of its own
+        private void watch() {
+            while (!closed) {
+                // the cursor being read, whose failure is the one to report
+                MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> reading = null;
+                try {
+                    reopenIfAsked();
+                    if (historyLost) {
+                        historyLost = false;
+                        reopenFresh(new IllegalStateException("simulated: history lost"));
+                        continue;
                     }
-                } else if (!isClosed()) {
-                    // whatever else the cursor already holds is taken along, so that a burst of changes is handed
-                    // over as one batch. available() counts what can be taken without going to the server, so
-                    // nothing here waits for an event that has not arrived yet
-                    List<ChangeStreamDocument<Document>> changeStreamDocuments = new ArrayList<>();
-                    changeStreamDocuments.add(changeStreamDocument);
-                    while (changeStreamDocuments.size() < MAXIMUM_BATCH_SIZE && cursor.available() > 0
-                            && !isClosed()) {
-                        ChangeStreamDocument<Document> bufferedChangeStreamDocument = cursor.tryNext();
-                        if (isNull(bufferedChangeStreamDocument)) {
-                            break;
+                    if (interrupted) {
+                        interrupted = false;
+                        lose(currentCursor(), new IllegalStateException("simulated: connection lost"));
+                        continue;
+                    }
+                    // the stream's cursor, closed by whoever replaces or loses it
+                    MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> current = currentCursor();
+                    if (lagging || current == null) {
+                        pause(); // lagging, or lost until a cache resumes the stream
+                        continue;
+                    }
+                    reading = current;
+                    ChangeStreamDocument<BsonDocument> event = current.tryNext();
+                    BsonDocument position = current.getResumeToken();
+                    if (position != null) {
+                        advanceResumeToken(current, position);
+                    }
+                    if (event != null) {
+                        OperationType type = event.getOperationType();
+                        if (type == null) {
+                            dispatchOrGap(event);
+                        } else {
+                            switch (type) {
+                                // every document of the collection is gone, which no message announces: a gap
+                                case DROP, RENAME -> collectionGone(event);
+                                case DROP_DATABASE -> {
+                                    // the invalidate event that ends the stream follows
+                                }
+                                // the stream ended and cannot be resumed; what was dropped is gone: a gap
+                                case INVALIDATE -> reopenFresh(new IllegalStateException("the database was dropped"));
+                                default -> dispatchOrGap(event);
+                            }
                         }
-                        changeStreamDocuments.add(bufferedChangeStreamDocument);
                     }
-                    dispatch(changeStreamDocuments);
-                    // advanced once handed over: what a subscriber fails to apply is its own to recover from, by
-                    // reconciling, rather than a reason to deliver everything again to everybody
-                    resumeToken.set(changeStreamDocuments.get(changeStreamDocuments.size() - 1).getResumeToken());
+                } catch (RuntimeException e) {
+                    if (closed) {
+                        return;
+                    }
+                    failed(reading, e);
                 }
             }
-            return false;
-        } catch (MongoCommandException e) {
-            // A resume position that has fallen out of the oplog never becomes valid again, so retrying with it
-            // would repeat this failure for as long as the cache instances live. Giving the position up lets the
-            // retry open a fresh cursor, which starts at "now": watching recovers, the changes made in between do
-            // not, which is why this is logged rather than passed over silently
-            if (e.getErrorCode() == CHANGE_STREAM_HISTORY_LOST) {
-                resumeToken.set(null);
-                LOGGER.log(Level.WARNING, format("Resume position lost for %s. Watching continues without it, so "
-                        + "changes made in the meantime are not received", describe()));
-            }
-            throw e;
-        } finally {
-            // whoever subscribes from now on waits for the next cursor, which takes them into account
-            synchronized (this) {
-                watching = false;
+        }
+
+        private synchronized @Nullable MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> currentCursor() {
+            return cursor;
+        }
+
+        private void collectionGone(ChangeStreamDocument<BsonDocument> event) {
+            String collection = event.getNamespace() == null ? null : event.getNamespace().getCollectionName();
+            LOGGER.log(Level.WARNING, "Collection {0} in {1} was dropped or renamed; gap", collection, databaseName);
+            for (Map.Entry<String, List<Registration>> scope : scopes.entrySet()) {
+                if (collection == null || scope.getKey().startsWith(collection + "\0")) {
+                    for (Registration registration : scope.getValue()) {
+                        try {
+                            registration.listener.onGap();
+                        } catch (RuntimeException e) {
+                            LOGGER.log(Level.WARNING, LISTENER_FAILED, e);
+                        }
+                    }
+                }
             }
         }
-    }
 
-    // Takes the requests made since the last time into account, and returns whether somebody subscribed whom the
-    // pipeline of the open cursor does not cover
-    private synchronized boolean applyRequests() {
-        boolean widened = false;
-        Request request;
-        while ((request = requests.poll()) != null) {
-            Subscriber subscriber = request.subscriber();
-            Scope scope = new Scope(subscriber.getCollectionName(), subscriber.getDiscriminator());
-            CompletableFuture<@Nullable Void> subscribed = request.subscribed();
-            if (nonNull(subscribed)) {
-                subscribersByScope.computeIfAbsent(scope, ignored -> ConcurrentHashMap.newKeySet()).add(subscriber);
-                unconfirmed.put(subscriber, subscribed);
-                widened |= !covers(scope);
+        // an event that cannot be dispatched is lost to the caches, which is a gap
+        private void dispatchOrGap(ChangeStreamDocument<BsonDocument> event) {
+            try {
+                dispatch(event);
+            } catch (RuntimeException e) {
+                LOGGER.log(Level.WARNING, "A change event on " + databaseName + " could not be dispatched; gap", e);
+                forEachRegistration(registration -> registration.listener.onGap());
+            }
+        }
+
+        private synchronized Set<String> covered() {
+            return covered;
+        }
+
+        // widening for a join, narrowing after the last cache of a collection left: from the resume token
+        private synchronized void reopenIfAsked() {
+            if (!covered.equals(wanted)) {
+                open(new LinkedHashSet<>(wanted), resumeToken);
+            }
+            joined(null);
+        }
+
+        // ends the wait of the caches joining: covered now, or (with a failure) not
+        private synchronized void joined(@Nullable Exception failure) {
+            if (widening != null) {
+                if (failure == null) {
+                    widening.complete(null);
+                } else {
+                    widening.completeExceptionally(failure);
+                }
+                widening = null;
+            }
+        }
+
+        @SuppressWarnings("java:S3776") // one event, its kinds and the barriers among them
+        private void dispatch(ChangeStreamDocument<BsonDocument> event) {
+            if (event.getNamespace() == null) {
+                return;
+            }
+            BsonDocument key = event.getDocumentKey();
+            if (key != null && key.get("_id") != null && key.get("_id").isString()) {
+                // the schema marker: barriers (tests)
+                BsonDocument fields = event.getUpdateDescription() == null ? null
+                        : event.getUpdateDescription().getUpdatedFields();
+                BsonValue barrier = fields == null ? null : fields.get("barrier");
+                if (barrier != null && barrier.isString()) {
+                    CompletableFuture<@Nullable Void> arrived = barriers.remove(barrier.asString().getValue());
+                    if (arrived != null) {
+                        arrived.complete(null);
+                    }
+                }
+                return;
+            }
+            BsonValue id = key == null ? null : key.get("_id");
+            BsonValue discriminator = id == null || !id.isDocument() ? null : id.asDocument().get("d");
+            if (discriminator == null || !discriminator.isString()) {
+                return; // a document of no cache
+            }
+            List<Registration> registrations = scopes.get(scope(event.getNamespace().getCollectionName(),
+                    discriminator.asString().getValue()));
+            if (registrations == null) {
+                return;
+            }
+            Change message = message(event);
+            if (message == null) {
+                return;
+            }
+            BsonTimestamp time = event.getClusterTime();
+            for (Registration registration : registrations) {
+                if (time != null && registration.since != null && time.compareTo(registration.since) <= 0) {
+                    continue; // committed before it subscribed
+                }
+                // first: the reads the message leads to must see at least the write it announces
+                registration.clusterTime.advance(time);
+                try {
+                    registration.listener.onChanges(List.of(message));
+                } catch (RuntimeException e) {
+                    LOGGER.log(Level.WARNING, "A listener failed on a change event", e);
+                }
+            }
+        }
+
+        // a read failed: a history the stream cannot resume from is a gap (reopened without the token at once);
+        // anything else loses the stream until a cache resumes it. A failure of a cursor replaced meanwhile is not the
+        // stream's: a resume suspecting the stream silent reopens it on a cache's thread and closes the old cursor
+        // under the watching thread's read, which then fails. Taken for the current one, that failure lost the stream
+        // just reopened and told every cache on it (found 2026-10-31). A failure outside a read (reopening for a join)
+        // is the current cursor's
+        @SuppressWarnings("ReferenceEquality") // only the cursor that failed counts
+        private void failed(@Nullable MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> reading,
+                            RuntimeException failure) {
+            MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> failedCursor = reading != null ? reading
+                    : currentCursor();
+            if (failedCursor != null && failedCursor != currentCursor()) {
+                return; // replaced meanwhile: the next round reads the new one
+            }
+            if (isHistoryLost(failure)) {
+                reopenFresh(failure);
             } else {
-                Set<Subscriber> subscribers = subscribersByScope.get(scope);
-                if (nonNull(subscribers) && subscribers.remove(subscriber) && subscribers.isEmpty()) {
-                    subscribersByScope.remove(scope);
+                lose(failedCursor, failure);
+            }
+        }
+
+        // the stream lost: every cache is told, and resumes it when it can
+        @SuppressWarnings("ReferenceEquality") // only the cursor that failed is the current one
+        private void lose(@Nullable MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> failedCursor,
+                          Throwable failure) {
+            List<Registration> told = new ArrayList<>();
+            synchronized (this) {
+                if (closed || (failedCursor != null && cursor != failedCursor)) {
+                    return;
                 }
-                confirmed.remove(subscriber);
-                Optional.ofNullable(unconfirmed.remove(subscriber)).ifPresent(future -> future.cancel(false));
-                identifiers.remove(subscriber.getIdentifier());
+                closeCursor();
+                forEachRegistration(registration -> {
+                    registration.lost = true;
+                    told.add(registration);
+                });
+            }
+            LOGGER.log(Level.WARNING, "The change stream on {0} failed ({1})", databaseName, failure.getMessage());
+            told.forEach(registration -> notify(() -> registration.listener.onLost(failure)));
+        }
+
+        // the history lost: reopened at once without the token, a gap; if that fails, lost (a resume is a gap anyway)
+        private void reopenFresh(Exception failure) {
+            LOGGER.log(Level.WARNING, "The change stream on {0} lost its history ({1}); reopening, gap",
+                    databaseName, failure.getMessage());
+            List<Registration> told = new ArrayList<>();
+            try {
+                synchronized (this) {
+                    resumeToken = null;
+                    open(new LinkedHashSet<>(wanted), null);
+                    joined(null);
+                    long opened = generation;
+                    forEachRegistration(registration -> {
+                        if (!registration.lost) {
+                            registration.generation = opened;
+                            told.add(registration);
+                        }
+                    });
+                }
+            } catch (RuntimeException e) {
+                joined(e);
+                lose(null, e);
+                return;
+            }
+            told.forEach(registration -> notify(registration.listener::onGap));
+        }
+
+        // reopens the stream for a registration (VISION.md, "Supervision"): if another one did since this one lost
+        // it, nothing is left to do; otherwise from the token (so that the others on it miss nothing), also if the
+        // stream seems alive (suspected silent). Only a registration not told of a loss can suspect the stream: for
+        // one told, a stream there now is a newer one. The core counts every resume as a gap
+        void resume(Registration registration) {
+            synchronized (this) {
+                if (closed) {
+                    return;
+                }
+                if (cursor == null || (!registration.lost && generation == registration.generation)) {
+                    if (cursor != null) {
+                        LOGGER.log(Level.WARNING, "The change stream on {0} is suspected silent; reopening",
+                                databaseName);
+                    }
+                    reopen();
+                }
+                registration.generation = generation;
+                registration.lost = false;
             }
         }
-        return widened;
-    }
 
-    // only once the open cursor covers them, which is what a subscriber waits to be told
-    private void confirmSubscriptions() {
-        if (unconfirmed.isEmpty()) {
-            return;
-        }
-        unconfirmed.forEach((subscriber, subscribed) -> {
-            confirmed.add(subscriber);
-            subscribed.complete(null);
-        });
-        unconfirmed.clear();
-    }
-
-    // handed over grouped per subscriber, each in the order the store produced them
-    private void dispatch(List<ChangeStreamDocument<Document>> changeStreamDocuments) {
-        Map<Scope, List<Document>> documentsByScope = new LinkedHashMap<>();
-        for (ChangeStreamDocument<Document> changeStreamDocument : changeStreamDocuments) {
-            Document fullDocument = changeStreamDocument.getFullDocument();
-            if (isNull(fullDocument) || !(INSERT.equals(changeStreamDocument.getOperationType())
-                    || UPDATE.equals(changeStreamDocument.getOperationType()))) {
-                continue;
+        // from the token, or without it (a gap) if the history is lost; the caller holds the lock
+        @GuardedBy("this")
+        private void reopen() {
+            try {
+                openResuming();
+                joined(null);
+                LOGGER.log(Level.INFO, "The change stream on {0} reopened", databaseName);
+            } catch (MongoException e) {
+                throw new StoreException("Reopening the change stream on " + databaseName + " failed: "
+                        + e.getMessage(), e, false, true);
             }
-            String documentCollectionName = Optional.ofNullable(changeStreamDocument.getNamespace())
-                    .map(MongoNamespace::getCollectionName)
-                    .orElse(collectionName);
-            String discriminator = fullDocument.getString(DISCRIMINATOR_FIELD);
-            if (nonNull(documentCollectionName) && nonNull(discriminator)) {
-                Scope scope = new Scope(documentCollectionName, discriminator);
-                if (subscribersByScope.containsKey(scope)) {
-                    documentsByScope.computeIfAbsent(scope, ignored -> new ArrayList<>()).add(fullDocument);
+        }
+
+        // from the token, or without it if the history is lost; the caller holds the lock
+        @GuardedBy("this")
+        private void openResuming() {
+            try {
+                open(new LinkedHashSet<>(wanted), resumeToken);
+            } catch (RuntimeException e) {
+                if (!isHistoryLost(e)) {
+                    throw e;
+                }
+                resumeToken = null;
+                open(new LinkedHashSet<>(wanted), null);
+            }
+        }
+
+        private static void notify(Runnable call) {
+            try {
+                call.run();
+            } catch (RuntimeException e) {
+                LOGGER.log(Level.WARNING, LISTENER_FAILED, e);
+            }
+        }
+
+        private static boolean isHistoryLost(Exception failure) {
+            // a getMore reports it as a MongoQueryException, opening or resuming as a MongoCommandException: both are
+            // server exceptions (CappedPositionLost on an open cursor was taken for an interruption, and the stream
+            // resumed past the lost events without a gap, found by the oplog rollover test)
+            return failure instanceof MongoServerException server && HISTORY_LOST.contains(server.getCode());
+        }
+
+        boolean barrier(MongoLocation location) {
+            String token = UUID.randomUUID().toString();
+            CompletableFuture<@Nullable Void> arrived = new CompletableFuture<>();
+            barriers.put(token, arrived);
+            try {
+                database.getCollection(location.collectionName).updateOne(
+                        Filters.eq("_id", MongoLocation.MARKER_ID), Updates.set("barrier", token));
+                arrived.get(5, TimeUnit.SECONDS);
+                return true;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            } catch (ExecutionException | TimeoutException | RuntimeException e) {
+                return false;
+            } finally {
+                barriers.remove(token);
+            }
+        }
+
+        private void forEachRegistration(Consumer<Registration> action) {
+            for (List<Registration> registrations : scopes.values()) {
+                for (Registration registration : registrations) {
+                    try {
+                        action.accept(registration);
+                    } catch (RuntimeException e) {
+                        LOGGER.log(Level.WARNING, LISTENER_FAILED, e);
+                    }
                 }
             }
         }
-        documentsByScope.forEach((scope, documents) -> subscribersByScope.getOrDefault(scope, Set.of())
-                .forEach(subscriber -> subscriber.receiveDocuments(documents)));
-    }
 
-    private List<Bson> buildAggregationPipeline() {
-        List<String> projectionFields = new ArrayList<>();
-        projectionFields.add(DOCUMENT_KEY);
-        projectionFields.add(CLUSTER_TIME);
-        projectionFields.add(OPERATION_TYPE);
-        // what a document is handed over by: its collection, and its discriminator - which is not a field of a cache
-        // entry, and so has to be kept by name
-        projectionFields.add(NAMESPACE);
-        projectionFields.add(fullDocument(DISCRIMINATOR_FIELD));
-        projectionFields.addAll(Stream.of(Field.values())
-                .map(Object::toString)
-                .map(MongoWatcher::fullDocument)
-                .toList());
-        List<Bson> filters = new ArrayList<>();
-        filters.add(Filters.in(OPERATION_TYPE, INSERT.getValue(), UPDATE.getValue()));
-        // A cursor on the whole database has to name the collections on the server: that match is evaluated before
-        // the full document is looked up, so without it the server would look up every document updated anywhere in
-        // the database, only for it to be dropped
-        if (isNull(collectionName)) {
-            filters.add(Filters.in(NAMESPACE_COLLECTION, watchedCollectionNames));
+        void unregister(Registration registration) {
+            MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> last = null;
+            synchronized (WATCHERS) {
+                synchronized (this) {
+                    List<Registration> registrations = scopes.get(registration.scope);
+                    if (registrations != null) {
+                        registrations.remove(registration);
+                        if (registrations.isEmpty()) {
+                            scopes.remove(registration.scope);
+                        }
+                    }
+                    String collection = registration.scope.substring(0, registration.scope.indexOf('\0'));
+                    if (scopes.keySet().stream().noneMatch(scope -> scope.startsWith(collection + "\0"))
+                            && wanted.size() > 1) {
+                        wanted.remove(collection); // the watching thread narrows the stream
+                    }
+                    if (scopes.isEmpty()) {
+                        closed = true;
+                        last = cursor;
+                        cursor = null;
+                        Map<String, Watcher> byDatabase = WATCHERS.get(client);
+                        if (byDatabase != null) {
+                            byDatabase.remove(databaseName, this);
+                            if (byDatabase.isEmpty()) {
+                                WATCHERS.remove(client);
+                            }
+                        }
+                    }
+                }
+            }
+            closeQuietly(last); // a round trip, so outside the locks; the watching thread ends with it
         }
-        // events of other caches sharing these collections are not ours to hand over - selected on the server only
-        // for a cursor nobody can join, as described above
-        if (!shared) {
-            filters.add(Filters.in(fullDocument(DISCRIMINATOR_FIELD), watchedDiscriminators));
-        }
-        return List.of(
-                Aggregates.match(Filters.and(filters)),
-                Aggregates.project(Projections.fields(Projections.include(projectionFields))));
-    }
 
-    private static String fullDocument(String field) {
-        return format("%s.%s", FULL_DOCUMENT, field);
+        // the watching thread's position, read by a reopen on another thread; a cursor replaced meanwhile moves it no
+        // more
+        @SuppressWarnings("ReferenceEquality") // only the current cursor's position counts
+        private synchronized void advanceResumeToken(MongoChangeStreamCursor<?> current, BsonDocument position) {
+            if (cursor == current) {
+                resumeToken = position;
+            }
+        }
+
+        @GuardedBy("this")
+        private void closeCursor() {
+            closeQuietly(cursor);
+            cursor = null;
+        }
+
+        private static void closeQuietly(@Nullable MongoChangeStreamCursor<?> cursor) {
+            if (cursor != null) {
+                try {
+                    cursor.close();
+                } catch (RuntimeException ignored) {
+                    // closing a broken cursor
+                }
+            }
+        }
+
+        // a moment's wait of the watching thread, while there is nothing to read
+        private static void pause() {
+            try {
+                Thread.sleep(10);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 }

@@ -1,36 +1,53 @@
 # MongoDB adapter
 
-Details of the MongoDB-based adapter beyond its configuration, which the
-[main README](../../../../../../../../../README.md) describes. Synchronization uses MongoDB's change streams, which keep
-a connection open for watching. The adapter relies on the defaults of the client it is given, and starting
-synchronization fails right away if the setup cannot support it.
+Details of the MongoDB adapter beyond its configuration, which the [main README](../../../../../../../../../README.md)
+describes. Distribution uses MongoDB's change streams. The adapter works with the client it is given, and building a
+cache fails right away with an explanation if the setup cannot support it.
 
-## Watcher sharing
+## Deployments
 
-How cache instances (using the same client) share connections for watching is specified using
-`withWatcherSharingMode(...)`: `DATABASE` for one connection per database (default), `COLLECTION` for one per collection
-or `INSTANCE` for one per cache instance. With `DATABASE`, a cache instance whose collection is not watched yet takes a
-moment longer to start, because watching is restarted to include it.
+The adapter needs MongoDB 4.4 or newer as a replica set (a single node replica set is sufficient) or a sharded cluster
+through `mongos`, since change streams and majority reads need one. A standalone server is refused. In a sharded
+cluster, the collection itself must not be sharded; a sharded collection is refused.
 
-## Read concern
+## Consistency
 
-Change streams do not support every read concern. If the client is configured with one they do not support, such as
-`local`, starting synchronization fails right away.
+The cache reads from the primary and reads and writes with majority concern, writes also journaled, whatever the
+client's defaults are. A write the store has confirmed therefore survives a failover and a crash. Majority writes also
+keep changes fast: change streams deliver only majority-committed writes, so with `w:1` every change would wait for a
+periodic journal flush and arrive about a hundred times later.
 
-## Broken connections
+## Collection and change streams
 
-A watching connection that dies silently, for example during a failover, is detected and replaced automatically.
-Operations for reading and writing on such a connection fail once TCP keepalive gives up on it, after several minutes
-by default. If that is too long, `socketTimeoutMS` or `timeoutMS` can be set on the client to fail them sooner.
+The collection and its index are created when the first cache is built. A collection created by another version of this
+library is refused; `withSchemaReset()` drops and recreates it, which is only safe while no instance of any cache in the
+collection runs.
+
+The caches on one client share one change stream per database, whatever the number of caches and collections.
+
+## Timeouts
+
+The cache's operation timeout (`withOperationTimeout(...)`, 30 seconds by default) becomes the driver's client-side
+operation timeout for the cache's own operations, so caches sharing a client may have different ones, and the driver
+retries a write within it while the primary changes. A timeout set on the client itself (the connection string option
+`timeoutMS`) applies instead. The driver's wait for a pooled connection is covered by the timeout as well.
 
 ## Failovers
 
-Cache instances stay consistent with the client's defaults. A write may occasionally fail with an exception while the
-primary changes, because the driver retries it only once. Setting `timeoutMS` on the client above the duration of an
-election (for example 30 seconds) makes the driver retry until the timeout instead, and also bounds writes that would
-otherwise wait forever while no majority of data-bearing members is available.
+While the primary changes, writes are retried by the driver until the operation timeout runs out, so a timeout above the
+duration of an election (for example 30 seconds) lets them through. Confirmed writes survive the failover (see
+[Consistency](#consistency)). On MongoDB 4.4.0, a new primary waits for catching up with an unreachable old one
+indefinitely by default; `catchUpTimeoutMillis` bounds that.
 
-## Sharded clusters
+## Change history
 
-The collection may live in a sharded cluster, but must not be sharded itself. Building an adapter for a sharded
-collection fails.
+If an instance falls behind further than the oplog reaches, its change stream cannot resume. The instance notices,
+checks what it holds against the store and goes on, which costs loads, never a wrong answer. A larger oplog
+(`minSnapshotHistoryWindowInSeconds` on MongoDB 5.0 or newer, or the oplog size) lets instances fall further behind.
+
+## Managed and cloud databases
+
+MongoDB Atlas and other managed replica sets are replica sets like any other, so the above applies (not tested against
+them). Where an endpoint is switched over by DNS, `networkaddress.cache.ttl` of 60 seconds or less in the JVM lets
+reconnecting reach the new primary in time. Services that only speak MongoDB's protocol need change streams and majority
+reads; where those are missing, building a cache fails.

@@ -1,0 +1,191 @@
+/*
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.oberhoff.distributedcaffeine.spi;
+
+import java.time.Duration;
+import java.util.Collection;
+import java.util.Map;
+
+/**
+ * The store of one cache instance, created by its adapter, non-generic: keys and values travel as bytes in the
+ * formats fixed when the store was created. A store that can announce its writes, which distribution needs, also
+ * implements {@link ChangeFeed}; one that cannot supports only {@code DistributionMode.NONE}.
+ * <p>
+ * The contract every implementation must fulfil; each point is checked by the tests named after it in
+ * {@code StoreContractTest} ({@code contractN_...}), points 8 and 9 by each adapter's own tests:
+ * <ol>
+ *     <li><b>Versions:</b> a row's version only ever grows, and the core learns every version a write applied at.
+ *     A store applies a write either at the version the core proposed ({@link Write#version()}), only above the
+ *     stored one, or by assigning one itself, above the stored one, and reports it ({@link WriteResult}); it may
+ *     choose per call. A store assigning in the core's domain keeps the core's format (milliseconds since 2020 above
+ *     20 bits) so that both ways stay comparable on one key; one that assigns on every path, expiry included, may
+ *     number its versions in a domain of its own (a sequence), above every version it issued. A deleted row no longer
+ *     defends its version (VISION.md, "Target design: versions applied as well as each store can").</li>
+ *     <li><b>Clock:</b> the age of a row comes from the store's clock, set by every write ({@link Row#age()}); within
+ *     one read every age is measured at the same instant, so the ages of a read compare like the times of the writes
+ *     (the core compares them with the age of the {@link #CONTROL_HASH control row}). An age is reported as it is,
+ *     negative for a row written after that instant (a read that is not one snapshot, a clock stepped back), never
+ *     raised to zero: two such rows would compare as equal. A clock that never goes backwards is best; a wall clock is
+ *     fine within the core's allowance for skew.</li>
+ *     <li><b>Visibility and durability:</b> a read, on any instance of the cache, reflects every write that was
+ *     confirmed (returned to its writer) before the read began: its version, or a later one. A confirmed write is not
+ *     lost later, unless in an event (a crash, a failover) that every subscription of the change feed sees as a loss
+ *     or a gap.</li>
+ *     <li><b>Atomic conditional writes:</b> {@link #write} decides and writes as one step per key: of concurrent
+ *     writes conditioned on one version, or on the key missing, one wins.</li>
+ *     <li><b>Idempotent maintenance:</b> expiry and pruning run on several instances at once without expiring a row
+ *     twice or pruning more than once.</li>
+ *     <li><b>Bytes and cache:</b> keys and values come back byte for byte as written, in the formats of
+ *     {@link StoreSettings}; a store reads and writes only its own cache's rows, also where several caches share a
+ *     table or collection.</li>
+ *     <li><b>Semantics:</b> every method does what its documentation says, for every state a row can be in.</li>
+ *     <li><b>Failures:</b> a store reports a failure only as {@link StoreException}, classified (applied or not,
+ *     retryable or not); a write applied in part reports its outcome unknown
+ *     ({@link StoreException#afterPartlyApplied()}); a store does not retry, the core decides. Anything else it
+ *     throws counts as a failure that is not retryable, with the outcome of a write unknown.</li>
+ *     <li><b>Settings:</b> a store applies the {@link StoreSettings} it was created with: no operation waits longer
+ *     than the timeout for the store.</li>
+ * </ol>
+ * All methods take batches; a single key is a collection of one, and keys of a batch are independent (a result per
+ * key, no atomicity across keys).
+ * <p>
+ * <b>Reserved rows.</b> Hashes starting with {@code #} are the core's own rows (keys never have one): the
+ * {@link #CONTROL_HASH control row} of {@code invalidateAll}, and the heartbeat's row. A store reads and writes them
+ * like any other row, but maintenance ({@link #expire}, {@link #pruneToSize}, {@link #pruneTombstones}) never touches
+ * them.
+ *
+ * @author Andreas Oberhoff
+ */
+public interface Store extends AutoCloseable {
+
+    /**
+     * The hash of the control row (VISION.md, "Target design: {@code invalidateAll} by the store's time, hidden on
+     * read"): the core writes it on {@code invalidateAll}, and every row written at or before it (at least as old as
+     * it) counts as missing. Maintenance never expires or prunes it, ignores the rows it hides for expiry and size
+     * pruning, and deletes them in {@link #pruneTombstones}.
+     */
+    String CONTROL_HASH = "#invalidated";
+
+    // reads
+
+    /**
+     * Reads rows. Returns value rows younger than the maximum age, tombstones and expired rows, and value rows at
+     * least as old as the maximum age as {@link State#EXPIRED} (without value, with their version, so that a write
+     * can be conditioned on it); missing rows are omitted. Every row as it is, with its age, also rows the control
+     * row hides (the core decides, comparing ages within the read).
+     *
+     * @param hashes the hashes to read
+     * @param maxAge the maximum age of a value row
+     * @return the rows found, by hash
+     */
+    Map<String, Row> read(Collection<String> hashes, Duration maxAge);
+
+    /**
+     * Reads only the versions and ages of value rows younger than the maximum age (revalidation,
+     * {@code containsKey}), also of rows the control row hides (the core decides).
+     *
+     * @param hashes the hashes to read
+     * @param maxAge the maximum age of a value row
+     * @return the versions and ages of the value rows found, by hash
+     */
+    VersionsResult readVersions(Collection<String> hashes, Duration maxAge);
+
+    /**
+     * How far the store's clock may step back, or how coarse it counts (VISION.md, "Target design: {@code
+     * invalidateAll} by the store's time, hidden on read"): the core waits this long before {@code invalidateAll}
+     * returns, so that a write after it is never stamped at or before the control row. A store whose write times never
+     * go backwards and never repeat (a monotonic counter, a strictly increasing clock) returns zero.
+     *
+     * @return the allowance; 10 ms by default, for a wall clock counting in milliseconds
+     */
+    default Duration clockAllowance() {
+        return Duration.ofMillis(10);
+    }
+
+    // writes: "announces" names what the store's ChangeFeed, if it has one, delivers on commit
+
+    /**
+     * Writes values and tombstones, each at its version and under its condition ({@link Write#expected()}),
+     * atomically per key: advancing (only if no row exists or its version is smaller than the write's), only if the row
+     * still has the expected version (whatever its state), or only if no row exists. A tombstone keeps the row's key,
+     * or has none where no row existed. Announces
+     * {@link Change.Kind#WRITTEN} per value written and {@link Change.Kind#INVALIDATED} per tombstone written, at the
+     * version it was applied at. A conflict writes nothing and announces nothing, with one allowance: a write on a
+     * version that finds no row at all (deleted by maintenance since it was read) may leave a tombstone at the
+     * write's version, and announce it, still reported as a conflict; it reads as missing. MongoDB's bulk write needs it
+     * to report every write's outcome in one round trip (VISION.md, build plan, step 5).
+     * <p>
+     * An advancing write is applied either conditionally, at its own version and only above the stored one (refused
+     * otherwise), or by assigning: always, at a version above the stored one that the store chooses and reports in the
+     * result (VISION.md, "Target design: versions applied as well as each store can"). A store may choose per call.
+     *
+     * @param writes the writes, at most one per hash
+     * @return which writes were refused, and the versions the store assigned other than proposed
+     */
+    WriteResult write(Collection<Write> writes);
+
+    // maintenance: scheduled by the core, idempotent here. Each call changes at most a limit of rows, so that no call
+    // grows with the cache (one statement over millions of rows outlasted the store's timeout, measured: VISION.md,
+    // "Maintenance in paced batches"); the core calls again, paced, while a call reaches the limit. A store whose
+    // every change is a step of its own anyway may change more in one call
+
+    /**
+     * Marks value rows at least as old as the maximum age as expired, with the store's time as the new write time, so
+     * that their grace period before {@link #pruneTombstones} counts from the expiry. Each expiry advances the row's
+     * version, as a write does: conditionally, at the given version and only for rows whose version is smaller (the
+     * others are left for a later run), or by assigning, at a version above the row's that the store chooses (the
+     * given one a proposal, or ignored where the store numbers its own). Announces {@link Change.Kind#EXPIRED} per row,
+     * at the version it was expired at. Neither reserved rows nor rows the control row hides are expired. Safe to run
+     * on several instances concurrently: every row is expired and announced once.
+     *
+     * @param maxAge  the maximum age
+     * @param version the version the core proposes for every row expired now
+     * @param limit   how many rows to expire at most (see above)
+     * @return the number of rows expired
+     */
+    int expire(Duration maxAge, long version, int limit);
+
+    /**
+     * Deletes value rows beyond the maximum size (ranked by write time, the newest kept), silently, but none written
+     * less than the minimum age ago: those stay until a later run, the maximum size exceeded meanwhile. The rank
+     * counts every value row; only the deleting spares the young ones. Neither reserved rows nor rows the control row
+     * hides count or are deleted here.
+     *
+     * @param maxSize the maximum number of value rows
+     * @param minAge  how long a row is kept at least, whatever the size (the time its write needs to reach every
+     *                instance, chosen by the core)
+     * @param limit   how many rows to delete at most (see above)
+     * @return the number of rows deleted
+     */
+    int pruneToSize(long maxSize, Duration minAge, int limit);
+
+    /**
+     * Deletes tombstones and expired rows written at least the retention ago, and every row written at or before the
+     * control row (counted as missing already, so without a grace period), silently; never a reserved row.
+     *
+     * @param retention how long tombstones and expired rows are kept
+     * @param limit     how many rows to delete at most (see above)
+     * @return the number of rows deleted
+     */
+    int pruneTombstones(Duration retention, int limit);
+
+    /**
+     * Closes the store. Shared connections stay open for other users; subscriptions to its {@link ChangeFeed} are
+     * closed by whoever subscribed (the core closes its own first).
+     */
+    @Override
+    void close();
+}

@@ -19,10 +19,8 @@ import java.util.UUID;
 import java.util.function.Supplier;
 
 /**
- * Interface representing a provider that computes a hash for a key using the supplied hasher.
- * <p>
- * <b>Note:</b> Keys of type {@link String}, {@link Long}, {@link Integer} or {@link UUID} are hashed out of the box, so
- * only for keys of other types not implementing the {@link Hashable} interface a hash provider must be specified.
+ * Computes the hash of a key, for key types that are neither {@link String}, {@link Long}, {@link Integer} or
+ * {@link UUID} nor implement {@link Hashable}. Keys that are equal must have the same hash.
  *
  * @param <K> the key type of the cache
  * @author Andreas Oberhoff
@@ -31,10 +29,10 @@ import java.util.function.Supplier;
 public interface HashProvider<K> {
 
     /**
-     * Returns a hash for the specified key using the supplied hasher for computing.
+     * Returns the hash of the key, typically computed with a fresh hasher from the supplier.
      *
-     * @param key    the key to compute a hash for
-     * @param hasher the supplier for a hasher to compute the hash
+     * @param key    the key
+     * @param hasher the supplier of a fresh hasher
      * @return the hash
      */
     String getHash(K key, Supplier<Hasher> hasher);

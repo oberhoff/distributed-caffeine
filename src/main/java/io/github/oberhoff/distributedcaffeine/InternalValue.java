@@ -17,84 +17,116 @@ package io.github.oberhoff.distributedcaffeine;
 
 import org.jspecify.annotations.Nullable;
 
-import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicReference;
 
-import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
 
-class InternalValue<V> {
+/**
+ * A value in L1, with the version the store assigned to its write (compared under the ordering rules) and the epoch
+ * at which it was last confirmed (see "States and recovery": a held value is trusted only if its epoch is current).
+ * <p>
+ * The value and version never change; confirming only moves the epoch forward, in place, because replacing the
+ * value in Caffeine would count as a write and restart its expiry.
+ *
+ * @param <V> the value type
+ * @author Andreas Oberhoff
+ */
+final class InternalValue<V> {
 
     private final V value;
-    // the operation of the write this value came from, kept for one purpose only: recognising the cache entry
-    // written for it when it is delivered back, so that what is already held is not written a second time. How
-    // that write is ordered against the others is deliberately not kept here but remembered by the cache instance
-    // that published it (see InternalCacheManager), because a value is gone as soon as it is invalidated, evicted
-    // or overwritten, while the ordering has to outlive exactly that
-    private @Nullable String operation;
-    // the activation this value became content of. Since activating renews the identifier,
-    // everything held from before stops being of the current activation without a single value having to be
-    // touched - which decides both whether a change to it may be distributed and whether synchronizing keeps it
-    private @Nullable String activationId;
+    private final long version;
+    private volatile int epoch;
+    // no REPLACED event for this wrapper: replaced in L1 by a wrapper of the identical value instance (as in Caffeine),
+    // or a refresh result installed by the core, which Caffeine then discards as overtaken
+    private volatile boolean replacementSilent;
+    // the user key of the entry holding this value: Caffeine's unbounded cache reports a removal with the key the
+    // caller passed, which for a message is a lookup key holding the hash only
+    private final AtomicReference<@Nullable Object> key = new AtomicReference<>();
+    // when a user's Expiry must let this copy go at the latest (InternalExpiry): its install plus the store's maximum
+    // age, by Caffeine's ticker, so that no read lengthens it beyond
+    private volatile long latestExpiry = Long.MAX_VALUE;
 
-    private InternalValue(V value) {
-        this.value = requireNonNull(value);
+    InternalValue(V value, long version, int epoch) {
+        this.value = requireNonNull(value, "value cannot be null");
+        if (version < 0) {
+            throw new IllegalArgumentException("version cannot be negative (0: unconfirmed)");
+        }
+        this.version = version;
+        this.epoch = epoch;
     }
 
-    private V getValue() {
+    // the user's value of a value that may be absent
+    static <V> @Nullable V valueOrNull(@Nullable InternalValue<V> value) {
+        return value == null ? null : value.value();
+    }
+
+    // a future of L1 as the user's: completing with null where nothing was found, as Caffeine's futures do, which its
+    // types cannot express for a value type that is not nullable
+    @SuppressWarnings("DataFlowIssue") // the null Caffeine's types cannot express, see above
+    static <V> CompletableFuture<V> valuesOf(CompletableFuture<InternalValue<V>> future) {
+        return future.thenApply(InternalValue::valueOrNull);
+    }
+
+    V value() {
         return value;
     }
 
-    @Nullable String getOperation() {
-        return operation;
+    long version() {
+        return version;
     }
 
-    InternalValue<V> setOperation(@Nullable String operation) {
-        this.operation = operation;
+    int epoch() {
+        return epoch;
+    }
+
+    /**
+     * Marks the value as confirmed at the given epoch; never moves the epoch backwards.
+     *
+     * @param confirmedEpoch the epoch at which the store confirmed the version
+     */
+    void confirm(int confirmedEpoch) {
+        synchronized (this) {
+            if (confirmedEpoch > epoch) {
+                epoch = confirmedEpoch;
+            }
+        }
+    }
+
+    long latestExpiry() {
+        return latestExpiry;
+    }
+
+    void latestExpiry(long ticks) {
+        latestExpiry = ticks;
+    }
+
+    // binds the user key of the entry this value is held under; a lookup key binds nothing
+    InternalValue<V> bind(InternalKey<?> internalKey) {
+        if (internalKey.hasKey()) {
+            key.set(internalKey.key());
+        }
         return this;
     }
 
-    @Nullable String getActivationId() {
-        return activationId;
+    void bindLike(InternalValue<?> other) {
+        key.compareAndSet(null, other.key.get());
     }
 
-    @SuppressWarnings("UnusedReturnValue")
-    InternalValue<V> setActivationId(@Nullable String activationId) {
-        this.activationId = activationId;
-        return this;
+    @Nullable Object key() {
+        return key.get();
     }
 
-    @Override
-    public boolean equals(@Nullable Object object) {
-        return object instanceof InternalValue<?> that && Objects.equals(this.value, that.value);
+    boolean isReplacementSilent() {
+        return replacementSilent;
     }
 
-    @Override
-    public int hashCode() {
-        return value.hashCode();
+    void replacementSilent(boolean silent) {
+        this.replacementSilent = silent;
     }
 
     @Override
     public String toString() {
-        return value.toString();
-    }
-
-    static <V> InternalValue<V> iv(V value) {
-        return new InternalValue<>(value);
-    }
-
-    static <V> @Nullable InternalValue<V> ivn(@Nullable V value) {
-        return nonNull(value)
-                ? new InternalValue<>(value)
-                : null;
-    }
-
-    static <V> V v(InternalValue<V> value) {
-        return value.getValue();
-    }
-
-    static <V> @Nullable V vn(@Nullable InternalValue<V> value) {
-        return nonNull(value)
-                ? value.getValue()
-                : null;
+        return String.valueOf(value);
     }
 }

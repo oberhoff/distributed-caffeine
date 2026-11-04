@@ -8,35 +8,37 @@
     <version>0.8.0-SNAPSHOT</version>
     <packaging>jar</packaging>
 
-    <properties>
-        <maven.compiler.source>17</maven.compiler.source>
-        <maven.compiler.target>17</maven.compiler.target>
-        <maven.compiler.release>17</maven.compiler.release>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <jspecify.version>1.0.1</jspecify.version>
-        <caffeine.version>3.3.1</caffeine.version>
-        <mongodb.version>5.14.0</mongodb.version>
-        <fory.version>1.7.7</fory.version>
-        <jackson.version>3.2.4</jackson.version>
-        <hash4j.version>0.31.0</hash4j.version>
-        <failsafe.version>3.3.2</failsafe.version>
-        <checkerqual.version>4.3.1</checkerqual.version>
-        <junit.version>6.1.3</junit.version>
-        <testcontainers.version>2.0.5</testcontainers.version>
-        <postgresql.version>42.7.14</postgresql.version>
-        <mockito.version>5.24.0</mockito.version>
-        <assertj.version>3.27.7</assertj.version>
-        <awaitility.version>4.3.0</awaitility.version>
-        <slf4j.version>2.0.20</slf4j.version>
-        <hikaricp.version>7.1.0</hikaricp.version>
-    </properties>
-
     <name>Distributed Caffeine</name>
 
-    <description>Distributed Caffeine is a Caffeine-based distributed cache that keeps cache instances
-        synchronized in near real time, with optional persistence - through MongoDB change streams,
-        PostgreSQL LISTEN/NOTIFY, or custom adapters.
+    <description>Distributed Caffeine adds distribution and a shared second level to Caffeine, through a store
+        the application may already use: MongoDB, PostgreSQL, Redis (also Valkey, Dragonfly, Kvrocks), MariaDB or MySQL.
     </description>
+
+    <properties>
+        <maven.compiler.release>17</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <caffeine.sources>${project.build.directory}/caffeine-sources</caffeine.sources>
+        <caffeine.version>3.3.1</caffeine.version>
+        <hash4j.version>0.31.0</hash4j.version>
+        <fory.version>1.7.7</fory.version>
+        <jspecify.version>1.0.1</jspecify.version>
+        <mongodb.version>5.14.0</mongodb.version>
+        <postgresql.version>42.7.14</postgresql.version>
+        <lettuce.version>7.9.0.RELEASE</lettuce.version>
+        <jedis.version>8.0.2</jedis.version>
+        <redisson.version>4.8.0</redisson.version>
+        <jackson.version>3.2.4</jackson.version>
+        <checkerqual.version>4.3.1</checkerqual.version>
+        <junit.version>6.1.3</junit.version>
+        <assertj.version>3.27.7</assertj.version>
+        <testcontainers.version>2.0.5</testcontainers.version>
+        <hikaricp.version>7.1.0</hikaricp.version>
+        <mariadb.version>3.5.11</mariadb.version>
+        <mysql.version>26.10.0</mysql.version>
+        <lincheck.version>3.7</lincheck.version>
+        <jmh.version>1.37</jmh.version>
+        <slf4j.version>2.0.20</slf4j.version>
+    </properties>
 
     <url>https://github.com/oberhoff/distributed-caffeine</url>
 
@@ -64,51 +66,82 @@
         <url>https://github.com/oberhoff/distributed-caffeine/issues</url>
     </issueManagement>
 
+    <dependencyManagement>
+        <dependencies>
+            <!-- Jedis (optional) brings slf4j-api 1.7, which would win over the tests' SLF4J 2 bridge and break it
+                 (NoSuchMethodError on Logger.isEnabledForLevel); SLF4J 2's API serves Jedis's 1.7 calls. Only this
+                 build: a user's own build resolves its own version -->
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-api</artifactId>
+                <version>${slf4j.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
     <dependencies>
-        <dependency>
-            <groupId>org.jspecify</groupId>
-            <artifactId>jspecify</artifactId>
-            <version>${jspecify.version}</version>
-        </dependency>
         <dependency>
             <groupId>com.github.ben-manes.caffeine</groupId>
             <artifactId>caffeine</artifactId>
             <version>${caffeine.version}</version>
         </dependency>
         <dependency>
-            <groupId>org.mongodb</groupId>
-            <artifactId>mongodb-driver-sync</artifactId>
-            <version>${mongodb.version}</version>
+            <groupId>com.dynatrace.hash4j</groupId>
+            <artifactId>hash4j</artifactId>
+            <version>${hash4j.version}</version>
         </dependency>
-        <dependency>
-            <groupId>org.postgresql</groupId>
-            <artifactId>postgresql</artifactId>
-            <version>${postgresql.version}</version>
-        </dependency>
+        <!-- the default serializer, so a cache runs with no configuration (VISION.md, Serialization) -->
         <dependency>
             <groupId>org.apache.fory</groupId>
             <artifactId>fory-core</artifactId>
             <version>${fory.version}</version>
         </dependency>
         <dependency>
+            <groupId>org.jspecify</groupId>
+            <artifactId>jspecify</artifactId>
+            <version>${jspecify.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.mongodb</groupId>
+            <artifactId>mongodb-driver-sync</artifactId>
+            <version>${mongodb.version}</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>${postgresql.version}</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>io.lettuce</groupId>
+            <artifactId>lettuce-core</artifactId>
+            <version>${lettuce.version}</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>redis.clients</groupId>
+            <artifactId>jedis</artifactId>
+            <version>${jedis.version}</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.redisson</groupId>
+            <artifactId>redisson</artifactId>
+            <version>${redisson.version}</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
             <groupId>tools.jackson.core</groupId>
             <artifactId>jackson-core</artifactId>
             <version>${jackson.version}</version>
+            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>tools.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
             <version>${jackson.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.dynatrace.hash4j</groupId>
-            <artifactId>hash4j</artifactId>
-            <version>${hash4j.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>dev.failsafe</groupId>
-            <artifactId>failsafe</artifactId>
-            <version>${failsafe.version}</version>
+            <optional>true</optional>
         </dependency>
         <!-- The PostgreSQL driver's class files reference these annotations, which javac reads when compiling
              against it, while the driver itself declares them at runtime scope only - so they are absent exactly
@@ -128,6 +161,12 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>${assertj.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>testcontainers-mongodb</artifactId>
             <version>${testcontainers.version}</version>
@@ -140,27 +179,47 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>org.mockito</groupId>
-            <artifactId>mockito-core</artifactId>
-            <version>${mockito.version}</version>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>${hikaricp.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- the plain JDBC adapter's database in the tests: MariaDB in a container -->
+        <dependency>
+            <groupId>org.mariadb.jdbc</groupId>
+            <artifactId>mariadb-java-client</artifactId>
+            <version>${mariadb.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>org.mockito</groupId>
-            <artifactId>mockito-junit-jupiter</artifactId>
-            <version>${mockito.version}</version>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-mariadb</artifactId>
+            <version>${testcontainers.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>org.assertj</groupId>
-            <artifactId>assertj-core</artifactId>
-            <version>${assertj.version}</version>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <version>${mysql.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>org.awaitility</groupId>
-            <artifactId>awaitility</artifactId>
-            <version>${awaitility.version}</version>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-mysql</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- linearizability of the operations under concurrency: stress runs and model checking -->
+        <dependency>
+            <groupId>org.jetbrains.lincheck</groupId>
+            <artifactId>lincheck</artifactId>
+            <version>${lincheck.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.openjdk.jmh</groupId>
+            <artifactId>jmh-core</artifactId>
+            <version>${jmh.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -169,12 +228,11 @@
             <version>${slf4j.version}</version>
             <scope>test</scope>
         </dependency>
-        <!-- a pooled data source for the tests: the adapter opens a connection per operation, as a data source
-             is expected to absorb, so an unpooled one exhausts the ephemeral ports of the machine under a suite -->
+        <!-- prints what the library and Testcontainers log (src/test/resources/simplelogger.properties) -->
         <dependency>
-            <groupId>com.zaxxer</groupId>
-            <artifactId>HikariCP</artifactId>
-            <version>${hikaricp.version}</version>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>${slf4j.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -183,10 +241,38 @@
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.16.0</version>
+                <executions>
+                    <!-- JMH generates its benchmark classes with an annotation processor, which compilers since
+                         JDK 23 only run when asked to -->
+                    <execution>
+                        <id>default-testCompile</id>
+                        <configuration>
+                            <annotationProcessorPaths>
+                                <path>
+                                    <groupId>org.openjdk.jmh</groupId>
+                                    <artifactId>jmh-generator-annprocess</artifactId>
+                                    <version>${jmh.version}</version>
+                                </path>
+                            </annotationProcessorPaths>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.6.1</version>
                 <configuration>
-                    <argLine>@{argLine} -XX:MaxRAMPercentage=50</argLine>
+                    <!-- a plain class path, so that forked JMH benchmark JVMs find the test classes -->
+                    <useManifestOnlyJar>false</useManifestOnlyJar>
+                    <!-- JaCoCo's agent (@{argLine}); Lincheck attaches its agent at run time: within the JVM, quietly
+                         (JEP 451) -->
+                    <argLine>@{argLine} -XX:MaxRAMPercentage=50 -Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading</argLine>
+                    <!-- a JVM per test class: Lincheck's instrumentation has crashed the JVM (Temurin 25.0.1, SIGBUS
+                         in RedefineClasses), and in a shared fork every class after it went unrun -->
+                    <reuseForks>false</reuseForks>
                 </configuration>
             </plugin>
             <plugin>
@@ -216,8 +302,45 @@
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.8.1</version>
+                <executions>
+                    <!-- Caffeine's sources for the Javadoc tool, which copies Caffeine's text into {@inheritDoc}
+                         only from its sources, not from its classes -->
+                    <execution>
+                        <id>unpack-caffeine-sources</id>
+                        <phase>generate-sources</phase>
+                        <goals>
+                            <goal>unpack</goal>
+                        </goals>
+                        <configuration>
+                            <artifactItems>
+                                <artifactItem>
+                                    <groupId>com.github.ben-manes.caffeine</groupId>
+                                    <artifactId>caffeine</artifactId>
+                                    <version>${caffeine.version}</version>
+                                    <classifier>sources</classifier>
+                                    <outputDirectory>${caffeine.sources}</outputDirectory>
+                                    <!-- its module descriptor would make the documented sources a named module -->
+                                    <excludes>module-info.java</excludes>
+                                </artifactItem>
+                            </artifactItems>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-javadoc-plugin</artifactId>
                 <version>3.12.0</version>
+                <configuration>
+                    <!-- Caffeine's sources are read for {@inheritDoc}, not documented; its own Javadoc is linked -->
+                    <sourcepath>${project.build.sourceDirectory}${path.separator}${caffeine.sources}</sourcepath>
+                    <excludePackageNames>com.github.benmanes.caffeine:com.github.benmanes.caffeine.*</excludePackageNames>
+                    <links>
+                        <link>https://javadoc.io/doc/com.github.ben-manes.caffeine/caffeine/${caffeine.version}/</link>
+                    </links>
+                </configuration>
                 <executions>
                     <execution>
                         <id>attach-javadocs</id>
@@ -343,7 +466,9 @@
             </activation>
             <properties>
                 <errorprone.args>${nullaway.args} ${errorprone.checks}</errorprone.args>
-                <errorprone.testargs>${nullaway.testargs} ${errorprone.checks}</errorprone.testargs>
+                <errorprone.testargs>${nullaway.testargs} ${errorprone.checks} ${errorprone.generated}</errorprone.testargs>
+                <!-- JMH's generated benchmark classes are not ours to fix -->
+                <errorprone.generated>-XepExcludedPaths:.*/generated-test-sources/.*</errorprone.generated>
                 <errorprone.checks>${errorprone.nullness} ${errorprone.hygiene}</errorprone.checks>
                 <errorprone.nullness>-Xep:EqualsMissingNullable:ERROR</errorprone.nullness>
                 <errorprone.hygiene>${errorprone.catching} ${errorprone.utility}</errorprone.hygiene>
@@ -388,6 +513,7 @@
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-enforcer-plugin</artifactId>
+                        <version>3.7.0</version>
                         <executions>
                             <execution>
                                 <id>enforce-java-version</id>
@@ -481,6 +607,11 @@
                                             <artifactId>nullaway</artifactId>
                                             <version>0.14.3</version>
                                         </path>
+                                        <path>
+                                            <groupId>org.openjdk.jmh</groupId>
+                                            <artifactId>jmh-generator-annprocess</artifactId>
+                                            <version>${jmh.version}</version>
+                                        </path>
                                     </annotationProcessorPaths>
                                 </configuration>
                             </execution>
@@ -490,5 +621,4 @@
             </build>
         </profile>
     </profiles>
-
 </project>
