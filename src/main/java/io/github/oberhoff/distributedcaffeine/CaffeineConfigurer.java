@@ -177,7 +177,7 @@ public final class CaffeineConfigurer<K, V> {
 
     /**
      * See {@link Caffeine#expireAfterWrite(Duration)}. A duration longer than the store's maximum age is lowered to it,
-     * so no copy outlives the store's bound.
+     * so no copy outlives the store's bound (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
      *
      * @param duration the duration
      * @return this configurer

@@ -156,11 +156,12 @@ The store's settings have defaults that suit most uses:
 
 The distribution mode decides what a change made elsewhere does to the copies of an instance:
 
-* `INVALIDATE`: The copy is dropped, and the next read gets the value from the store. This is the default distribution
-  mode.
-* `UPDATE`: A write replaces the copy at once, which saves the next read a round trip, at one store read per write and
-  instance holding the key; an invalidation or an expiry still drops it.
-* `NONE`: No distribution; a change elsewhere reaches an instance only when its copy expires or is evicted.
+* `INVALIDATE`: The copy is dropped; the next read takes the value from the store, or else from the loader or mapping
+  function (if any). This is the default distribution mode.
+* `UPDATE`: A write replaces the copy; an invalidation or an expiry drops it, and the next read then takes the value
+  from the store, or else from the loader or mapping function (if any).
+* `NONE`: No distribution; a copy changed elsewhere stays until it expires or is evicted, and the next read then takes
+  the value from the store, or else from the loader or mapping function (if any).
 
 ```java
 DistributedCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
@@ -168,7 +169,7 @@ DistributedCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
         .build();
 ```
 
-Note: No mode adds a key to an instance that does not hold it.
+Note: No mode creates a copy on an instance that doesn't hold the key yet; `UPDATE` only refreshes existing copies.
 
 #### Configuration of hashing (for keys)
 
@@ -276,6 +277,11 @@ instance's copies.
       if they cannot recognize their own write (on stores that assign versions themselves, or when another write
       raced), since deciding again would apply the remapping twice.
     * Loads and refreshes repeat it.
+* A write fails with a `StoreException` while the store does not answer; after repeated failures, writes are refused at
+  once instead of waiting for the store. `distributedPolicy().getSynchronizationState()` cannot tell beforehand whether
+  a write will succeed (`DEGRADED` also covers an interrupted change feed, and the store can fail right after the
+  check), so a caller that must not fail catches the exception:
+  `try { cache.put(key, value); } catch (StoreException e) { ... }`.
 
 ## Requirements
 

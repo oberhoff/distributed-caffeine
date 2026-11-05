@@ -18,22 +18,22 @@ package io.github.oberhoff.distributedcaffeine;
 /**
  * How the instances of a cache react to changes made elsewhere ({@code withDistributionMode}): any write, invalidation
  * or expiry of a key. Every mode reads and writes the store alike; the mode decides what happens to the copies other
- * instances hold. No mode adds a key to an instance that does not hold it.
+ * instances hold. No mode creates a copy on an instance that does not hold the key yet.
  *
  * @author Andreas Oberhoff
  */
 public enum DistributionMode {
 
     /**
-     * No distribution: a change made elsewhere reaches this instance only when its copy expires or is evicted. Without
-     * {@code expireAfterWrite} or {@code expireAfter}, copies expire after the store's maximum age.
+     * No distribution: a copy changed elsewhere stays until it expires or is evicted, at the store's maximum age at the
+     * latest; the next read then takes the value from the store, or else from the loader or mapping function (if any).
      */
     NONE,
 
     /**
-     * The default: a change elsewhere drops this instance's copy of the key; the next read gets the value from the
-     * store. Costs a listening connection, shared by the caches on the same client, and a store read only for keys read
-     * again.
+     * The default: a change elsewhere drops this instance's copy of the key; the next read takes the value from the
+     * store, or else from the loader or mapping function (if any). Costs a listening connection, shared by the caches on
+     * the same client, and a store read only for keys read again.
      */
     INVALIDATE,
 
