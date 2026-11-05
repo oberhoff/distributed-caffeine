@@ -26,6 +26,7 @@ import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.time.temporal.ChronoUnit;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -65,7 +66,6 @@ class DistributedCaffeineTest {
     }
 
     @Test
-    @SuppressWarnings("resource") // the second build fails: there is no cache to close
     void the_adapter_is_released_on_close_and_on_a_failed_build() {
         Adapter<String, String> open = settings -> database.openStore("cache");
         DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(open)
@@ -90,7 +90,8 @@ class DistributedCaffeineTest {
     void defaults() {
         DistributedCaffeine<String, String> builder = DistributedCaffeine.newBuilder(adapter);
 
-        assertThat(builder.store().maximumSize()).isEqualTo(-1);
+        assertThat(builder.store().maximumAge()).isEqualTo(StoreConfigurer.UNBOUNDED_AGE);
+        assertThat(builder.store().maximumSize()).isEqualTo(StoreConfigurer.UNBOUNDED_SIZE);
         assertThat(builder.store().maintenanceInterval()).isEqualTo(Duration.ofMinutes(1));
         assertThat(builder.store().heartbeatInterval()).isEqualTo(Duration.ofSeconds(10));
         assertThat(builder.store().operationTimeout()).isEqualTo(Duration.ofSeconds(30));
@@ -101,17 +102,57 @@ class DistributedCaffeineTest {
     }
 
     @Test
-    void the_maximum_age_and_size_are_required() {
-        DistributedCaffeine<String, String> unbounded = DistributedCaffeine.newBuilder(adapter);
-        DistributedCaffeine<String, String> withoutSize = DistributedCaffeine.newBuilder(adapter)
-                .withStore(store -> store.withMaximumAge(Duration.ofHours(1)));
-        DistributedCaffeine<String, String> withoutAge = DistributedCaffeine.newBuilder(adapter)
-                .withStore(store -> store.withMaximumSize(10));
+    void the_store_bounds_are_optional_and_an_age_beyond_the_cap_is_taken_as_unbounded() {
+        DistributedCaffeine<String, String> forever = DistributedCaffeine.newBuilder(adapter)
+                .withStore(store -> store.withMaximumAge(ChronoUnit.FOREVER.getDuration()));
+        DistributedCaffeine<String, String> atTheCap = DistributedCaffeine.newBuilder(adapter)
+                .withStore(store -> store.withMaximumAge(StoreConfigurer.UNBOUNDED_AGE));
 
-        assertThatThrownBy(unbounded::build).isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("withMaximumAge").hasMessageContaining("withMaximumSize");
-        assertThatThrownBy(withoutSize::build).isInstanceOf(IllegalStateException.class);
-        assertThatThrownBy(withoutAge::build).isInstanceOf(IllegalStateException.class);
+        assertThat(forever.store().maximumAge()).isEqualTo(StoreConfigurer.UNBOUNDED_AGE);
+        assertThat(atTheCap.store().maximumAge()).isEqualTo(Duration.ofNanos(Long.MAX_VALUE));
+        assertThat(StoreConfigurer.UNBOUNDED_AGE.toDays()).as("about 292 years").isEqualTo(106_751);
+        DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(adapter)
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(StringSerializer.ofString()))
+                .build();
+        cache.put("k", "v");
+        assertThat(cache.getIfPresent("k")).isEqualTo("v");
+        cache.close();
+    }
+
+    @Test
+    void the_maximum_age_for_the_store_only_requires_an_age_distribution_and_a_short_heartbeat() {
+        DistributedCaffeine<String, String> noAge = DistributedCaffeine.newBuilder(adapter)
+                .withStore(StoreConfigurer::withMaximumAgeForStoreOnly);
+        assertThatThrownBy(noAge::build).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("requires withMaximumAge");
+        DistributedCaffeine<String, String> none = DistributedCaffeine.newBuilder(adapter)
+                .withDistributionMode(DistributionMode.NONE)
+                .withStore(store -> store.withMaximumAgeForStoreOnly().withMaximumAge(Duration.ofHours(1)));
+        assertThatThrownBy(none::build).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("DistributionMode.NONE");
+        DistributedCaffeine<String, String> fifth = DistributedCaffeine.newBuilder(adapter)
+                .withStore(store -> store.withMaximumAge(Duration.ofSeconds(30)).withMaximumAgeForStoreOnly());
+        assertThatThrownBy(fifth::build).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("heartbeat interval of at most PT6S");
+        DistributedCaffeine<String, String> minute = DistributedCaffeine.newBuilder(adapter)
+                .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumAgeForStoreOnly()
+                        .withHeartbeatInterval(Duration.ofMinutes(2)));
+        assertThatThrownBy(minute::build).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("heartbeat interval of at most PT1M");
+    }
+
+    @Test
+    void the_maximum_age_for_the_store_only_spares_three_heartbeat_intervals_from_size_pruning() {
+        DistributedCaffeine<String, String> storeOnly = DistributedCaffeine.newBuilder(adapter)
+                .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumAgeForStoreOnly()
+                        .withHeartbeatInterval(Duration.ofSeconds(5)));
+        DistributedCaffeine<String, String> usual = DistributedCaffeine.newBuilder(adapter)
+                .withStore(store -> store.withMaximumAge(Duration.ofHours(1))
+                        .withHeartbeatInterval(Duration.ofSeconds(5)));
+
+        assertThat(storeOnly.pruneGrace(false)).isEqualTo(Duration.ofSeconds(15));
+        assertThat(usual.pruneGrace(false)).isEqualTo(InternalMaintenance.PRUNE_GRACE);
     }
 
     @Test

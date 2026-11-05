@@ -332,22 +332,6 @@ abstract class PostgresAdapterTest {
     }
 
     @Test
-    void a_table_of_the_previous_layout_is_refused_unless_it_is_reset() {
-        database.execute("CREATE SCHEMA IF NOT EXISTS adapter");
-        database.execute("CREATE TABLE adapter.\"" + table + "\" (discriminator text, id text, stamp bigint)");
-        database.execute("COMMENT ON TABLE adapter.\"" + table + "\" IS 'distributed-caffeine schema 1'");
-
-        Function<DistributedCaffeine<String, String>, DistributedCaffeine<String, String>> unchanged =
-                Function.identity();
-        assertThatThrownBy(() -> cache(unchanged)).isInstanceOf(StoreException.class)
-                .hasMessageContaining(PostgresTable.MARKER).hasMessageContaining("withSchemaReset");
-
-        DistributedCache<String, String> reset = track(strings(adapter().withSchemaReset().build()).build());
-        reset.put("k", "v");
-        assertThat(reset.getIfPresent("k")).isEqualTo("v");
-    }
-
-    @Test
     void a_table_without_the_marker_is_refused_unless_it_is_reset() {
         database.execute("CREATE SCHEMA IF NOT EXISTS adapter");
         database.execute("CREATE TABLE adapter.\"" + table + "\" (id text, cache_entry bytea)");

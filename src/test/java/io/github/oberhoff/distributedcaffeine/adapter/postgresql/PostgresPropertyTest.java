@@ -70,7 +70,7 @@ abstract class PostgresPropertyTest {
 
         private static SilencingProxy proxy(PostgresTestDatabase database) {
             try {
-                return new SilencingProxy(database.host(), database.port());
+                return new SilencingProxy(PostgresTestDatabase.HOST, database.port());
             } catch (java.io.IOException e) {
                 throw new java.io.UncheckedIOException(e);
             }

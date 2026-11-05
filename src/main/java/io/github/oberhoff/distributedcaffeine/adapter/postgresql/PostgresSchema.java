@@ -69,9 +69,8 @@ final class PostgresSchema {
             boolean exists = exists(connection, table);
             if (exists && !schemaReset) {
                 throw new StoreException("Table " + table + " exists without the schema marker '"
-                        + PostgresTable.MARKER + "' (e.g. a table of an earlier layout, or of distributed-caffeine "
-                        + "0.x). Stop all instances using it, then drop it or configure another name, or enable "
-                        + "withSchemaReset().", false);
+                        + PostgresTable.MARKER + "' (e.g. a table of distributed-caffeine 0.x). Stop all instances "
+                        + "using it, then drop it or configure another name, or enable withSchemaReset().", false);
             }
             create(connection, table, schemaReset);
         }

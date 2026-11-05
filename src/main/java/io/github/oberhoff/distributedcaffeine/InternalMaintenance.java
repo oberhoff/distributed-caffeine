@@ -26,6 +26,9 @@ import java.util.concurrent.ScheduledFuture;
 final class InternalMaintenance {
 
     static final Duration TOMBSTONE_RETENTION = Duration.ofMinutes(5);
+    // the longest heartbeat interval with the maximum age for the store only (DistributedCaffeine#validate): three
+    // intervals within the retention of tombstones
+    static final Duration STORE_ONLY_HEARTBEAT_LIMIT = Duration.ofMinutes(1);
     // the least time size pruning spares a row (DistributedCaffeine#pruneGrace): a load slower than this that met
     // the cache turning over its whole maximum size meanwhile may leave an older value, up to the maximum age
     static final Duration PRUNE_GRACE = Duration.ofSeconds(4);

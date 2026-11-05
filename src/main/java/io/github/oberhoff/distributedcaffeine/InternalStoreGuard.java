@@ -67,26 +67,35 @@ final class InternalStoreGuard {
 
     // a read call (values or versions), timed and counted
     <T> T read(Supplier<T> call) {
-        return call(call, Operation.READ);
+        return call(call, Operation.READ, () -> {
+        });
     }
 
     // a write call that may be repeated (conditional writes, invalidations), timed and counted
     <T> T write(Supplier<T> call) {
-        return call(call, Operation.WRITE);
+        return call(call, Operation.WRITE, () -> {
+        });
+    }
+
+    // as write, telling the caller before each repetition of an attempt whose outcome was unknown: a conditional write
+    // repeated after its first attempt landed is refused by its own row
+    <T> T write(Supplier<T> call, Runnable repeatingUnknown) {
+        return call(call, Operation.WRITE, repeatingUnknown);
     }
 
     // the unconditional put, timed and counted: not repeated once its outcome is unknown
     <T> T put(Supplier<T> call) {
-        return call(call, Operation.PUT);
+        return call(call, Operation.PUT, () -> {
+        });
     }
 
-    private <T> T call(Supplier<T> call, Operation operation) {
+    private <T> T call(Supplier<T> call, Operation operation, Runnable repeatingUnknown) {
         admit();
         boolean write = operation != Operation.READ;
         long start = environment.nanoTime();
         T result;
         try {
-            result = retrying(call, operation);
+            result = retrying(call, operation, repeatingUnknown);
         } catch (StoreException e) {
             failure();
             stats.increment(InternalStatsCounter.Counter.STORE_FAILURE);
@@ -106,6 +115,11 @@ final class InternalStoreGuard {
     // the call with the retries, unguarded (maintenance calls the store this way: it is how the guard learns that the
     // store answers again)
     <T> T retrying(Supplier<T> call, Operation operation) {
+        return retrying(call, operation, () -> {
+        });
+    }
+
+    private <T> T retrying(Supplier<T> call, Operation operation, Runnable repeatingUnknown) {
         boolean unknown = false;
         for (int attempt = 1; ; attempt++) {
             StoreException failure;
@@ -121,14 +135,23 @@ final class InternalStoreGuard {
             boolean again = failure.isRetryable() && attempt < ATTEMPTS
                     && !(operation == Operation.PUT && failure.isOutcomeUnknown());
             if (!again) {
-                if (attempt == 1 && unknown == failure.isOutcomeUnknown()) {
-                    throw failure;
-                }
-                throw new StoreException(failure.getMessage() + " (after " + attempt + " attempts)", failure, unknown,
-                        failure.isRetryable());
+                throw given(failure, attempt, unknown);
+            }
+            if (failure.isOutcomeUnknown()) {
+                repeatingUnknown.run();
             }
             backoff(attempt, unknown);
         }
+    }
+
+    // the failure as the caller gets it: as it came after a single attempt, otherwise with the attempts made and
+    // whether any of them had an unknown outcome
+    private static StoreException given(StoreException failure, int attempt, boolean unknown) {
+        if (attempt == 1 && unknown == failure.isOutcomeUnknown()) {
+            return failure;
+        }
+        return new StoreException(failure.getMessage() + " (after " + attempt + " attempts)", failure, unknown,
+                failure.isRetryable());
     }
 
     private void backoff(int attempt, boolean unknown) {

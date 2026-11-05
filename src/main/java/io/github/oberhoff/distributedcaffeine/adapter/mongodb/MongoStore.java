@@ -261,7 +261,9 @@ final class MongoStore implements Store, ChangeFeed {
         }
     }
 
-    // max(stored + 1, floor, min(proposed, floor + bound)), the floor the server's time in the core's format
+    // max(stored + 1, floor, min(proposed, floor + bound)), the floor the server's time in the core's format. The
+    // expressions are BSON documents (maps to the IDE), complete as constructed
+    @SuppressWarnings("MismatchedQueryAndUpdateOfCollection")
     private static BsonDocument assigned(long proposed) {
         BsonDocument floor = new BsonDocument("$multiply", new BsonArray(List.of(
                 new BsonDocument(SUBTRACT, new BsonArray(List.of(

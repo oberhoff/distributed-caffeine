@@ -37,17 +37,17 @@ Two levels, as in JetCache:
 
 Operations:
 
-| Operation | Behaviour |
-|---|---|
-| read | L1 → L2 (only if younger than the maximum age) → loader / mapping function, then write L2 (conditionally) and L1; without a loader (`getIfPresent`) L1 → L2 only |
-| refresh | source via `CacheLoader.reload`, then write L2 (conditionally) and distribute; never from L2 |
-| write | write L2, then distribute; L1 updated |
-| invalidate | write L2 (removal), then distribute; L1 removed |
-| local eviction | L1 only. Never distributed, never changes L2 |
-| received invalidation or expiry | drop the key from L1 |
-| received write, `UPDATE` | **only if the key is held** and older: read the row (batched) and apply it; never adds a key |
-| received write, `INVALIDATE` (default) | drop the key if held |
-| `NONE` | nothing is received: a copy changed elsewhere stays until Caffeine expires or evicts it |
+| Operation                              | Behaviour                                                                                                                                                        |
+|----------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| read                                   | L1 → L2 (only if younger than the maximum age) → loader / mapping function, then write L2 (conditionally) and L1; without a loader (`getIfPresent`) L1 → L2 only |
+| refresh                                | source via `CacheLoader.reload`, then write L2 (conditionally) and distribute; never from L2                                                                     |
+| write                                  | write L2, then distribute; L1 updated                                                                                                                            |
+| invalidate                             | write L2 (removal), then distribute; L1 removed                                                                                                                  |
+| local eviction                         | L1 only. Never distributed, never changes L2                                                                                                                     |
+| received invalidation or expiry        | drop the key from L1                                                                                                                                             |
+| received write, `UPDATE`               | **only if the key is held** and older: read the row (batched) and apply it; never adds a key                                                                     |
+| received write, `INVALIDATE` (default) | drop the key if held                                                                                                                                             |
+| `NONE`                                 | nothing is received: a copy changed elsewhere stays until Caffeine expires or evicts it                                                                          |
 
 Two lifetimes, deliberately separate: Caffeine's expiry is local memory management, untouched by the library; the
 L2 maximum age is how old a value may get anywhere. The store enforces it on reads and distributes it as an
@@ -98,7 +98,7 @@ Explicitly out of scope (and why):
 Names are placeholders.
 
 ```java
-DistributedCaffeine.newBuilder(adapter)
+DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
     .withCaffeine(caffeine -> caffeine                         // Caffeine's builder methods, one to one
         .maximumSize(10_000)
         .expireAfterWrite(Duration.ofMinutes(5)))
@@ -217,12 +217,12 @@ publishing instance, echo handling, and refresh/load tokens.
 On both stores a message is only **(kind, hash, version)**. A holder that needs the new value reads the row; values
 never travel through change streams or notifications.
 
-| Kind | Holders do (only if the key is held and the message version is higher) |
-|---|---|
-| `WRITTEN` | population on: read the row and apply what it holds (value or tombstone); population off: drop |
-| `INVALIDATED` | drop, no read |
-| `EXPIRED` | drop, no read (the maximum age was exceeded; distinct from `INVALIDATED` for stats only) |
-| `INVALIDATED_ALL` | clear L1, increment the epoch (no hash, no version) |
+| Kind              | Holders do (only if the key is held and the message version is higher)                         |
+|-------------------|------------------------------------------------------------------------------------------------|
+| `WRITTEN`         | population on: read the row and apply what it holds (value or tombstone); population off: drop |
+| `INVALIDATED`     | drop, no read                                                                                  |
+| `EXPIRED`         | drop, no read (the maximum age was exceeded; distinct from `INVALIDATED` for stats only)       |
+| `INVALIDATED_ALL` | clear L1, increment the epoch (no hash, no version)                                            |
 
 - **Reads happen in the delivery path, batched:** per delivered batch, keep the held and older hashes and read them
   in one query (`WHERE id = ANY(...)` / `$in`). This does not stall delivery on a dead store in a way that
@@ -288,14 +288,14 @@ each variant twice; "applied" is the time from the write's start until a holder 
 holders; A takes the value from the event, B projects it out and reads the rows of each delivered batch in one
 query):
 
-| Journal default | Holders | A applied p50 / p99 | B applied p50 / p99 | B reads per write | Writer's ack p50, A / B |
-|---|---|---|---|---|---|
-| `true` | 1 | 762–920 / 2,175–2,517 µs | 1,067–1,071 / 2,107–2,259 µs | 1.00 | 707–862 / 778–824 µs |
-| `true` | 4 | 1,064–1,069 / 2,266–2,871 µs | 1,305–1,310 / 2,297–4,508 µs | 4.00 | 988–1,001 / 995–1,009 µs |
-| `true` | 16 | 1,195–1,215 / 2,392 µs | 1,940–2,089 / 3,106–3,840 µs | 15.94 | 971–976 / 1,206–1,307 µs |
-| `false` | 1 | 270–272 / 417–469 µs | 603–613 / 970–991 µs | 0.55 | 211–215 / 202–207 µs |
-| `false` | 4 | 381–399 / 614–705 µs | 791–802 / 1,233–1,409 µs | 2.27 | 281–304 / 276–281 µs |
-| `false` | 16 | 774–812 / 2,192–2,409 µs | 1,511–1,681 / 4,673–5,757 µs | 8.79–8.94 | 520–545 / 519–581 µs |
+| Journal default | Holders | A applied p50 / p99          | B applied p50 / p99          | B reads per write | Writer's ack p50, A / B  |
+|-----------------|---------|------------------------------|------------------------------|-------------------|--------------------------|
+| `true`          | 1       | 762–920 / 2,175–2,517 µs     | 1,067–1,071 / 2,107–2,259 µs | 1.00              | 707–862 / 778–824 µs     |
+| `true`          | 4       | 1,064–1,069 / 2,266–2,871 µs | 1,305–1,310 / 2,297–4,508 µs | 4.00              | 988–1,001 / 995–1,009 µs |
+| `true`          | 16      | 1,195–1,215 / 2,392 µs       | 1,940–2,089 / 3,106–3,840 µs | 15.94             | 971–976 / 1,206–1,307 µs |
+| `false`         | 1       | 270–272 / 417–469 µs         | 603–613 / 970–991 µs         | 0.55              | 211–215 / 202–207 µs     |
+| `false`         | 4       | 381–399 / 614–705 µs         | 791–802 / 1,233–1,409 µs     | 2.27              | 281–304 / 276–281 µs     |
+| `false`         | 16      | 774–812 / 2,192–2,409 µs     | 1,511–1,681 / 4,673–5,757 µs | 8.79–8.94         | 520–545 / 519–581 µs     |
 
 - **B costs holders about one read round trip more:** +0.15–0.3 ms with the default journal setting at 1–4
   holders, +0.8 ms at 16; about twice A's time with journal default `false`. Small in absolute terms,
@@ -312,12 +312,12 @@ Follow-up for non-holders (`MongoNonHolderExperimentTest`, MongoDB 8.3, single-n
 instances each holding 1 % or 10 % of them, 4 writers writing 20,000 times to random keys; A raw reads events as
 raw BSON and decodes only held keys, A decoded decodes every event, B as before; each variant twice):
 
-| Value | Held | Writes/s, A raw / A decoded / B | CPU per instance, A raw / A decoded / B | Received per instance, A / B | Held p50, A / B | B reads per write |
-|---|---|---|---|---|---|---|
-| 1 KB | 1 % | 3,539–3,750 / 3,651–3,710 / 3,617–3,623 | 324–347 / 313–358 / 320–342 ms | 29.6 / 8.8 MB | ~1,300 / ~1,670 µs | 0.08 |
-| 1 KB | 10 % | 3,582–3,612 / 3,637–3,650 / 3,553–3,690 | 329–358 / 350–365 / 324–338 ms | 29.6 / 8.8 MB | ~1,330 / ~1,620 µs | 0.70 |
-| 10 KB | 1 % | 2,982–3,144 / 3,096–3,119 / 3,272–3,285 | 428–437 / 467–470 / 355–359 ms | 214 / 8.8 MB | ~1,470 / ~1,690 µs | 0.08 |
-| 10 KB | 10 % | 2,852–3,057 / 2,705–2,823 / 2,719–3,008 | 444–451 / 449–500 / 429–466 ms | 214 / 8.8 MB | ~1,500 / ~1,880 µs | 0.70 |
+| Value | Held | Writes/s, A raw / A decoded / B         | CPU per instance, A raw / A decoded / B | Received per instance, A / B | Held p50, A / B    | B reads per write |
+|-------|------|-----------------------------------------|-----------------------------------------|------------------------------|--------------------|-------------------|
+| 1 KB  | 1 %  | 3,539–3,750 / 3,651–3,710 / 3,617–3,623 | 324–347 / 313–358 / 320–342 ms          | 29.6 / 8.8 MB                | ~1,300 / ~1,670 µs | 0.08              |
+| 1 KB  | 10 % | 3,582–3,612 / 3,637–3,650 / 3,553–3,690 | 329–358 / 350–365 / 324–338 ms          | 29.6 / 8.8 MB                | ~1,330 / ~1,620 µs | 0.70              |
+| 10 KB | 1 %  | 2,982–3,144 / 3,096–3,119 / 3,272–3,285 | 428–437 / 467–470 / 355–359 ms          | 214 / 8.8 MB                 | ~1,470 / ~1,690 µs | 0.08              |
+| 10 KB | 10 % | 2,852–3,057 / 2,705–2,823 / 2,719–3,008 | 444–451 / 449–500 / 429–466 ms          | 214 / 8.8 MB                 | ~1,500 / ~1,880 µs | 0.70              |
 
 - **Holders gain about 0.2–0.4 ms with A** (20–25 %), as in measurement 2.
 - **Every instance pays for it in bytes:** A sends each instance every value, 3.4 times B's traffic with 1 KB values
@@ -405,7 +405,7 @@ tests; no ordering requirement. Tested by two deterministic regression tests (mi
 test, whose `invalidateAll` now changes the source first; mutation-checked (seven mutants, all killed, the PostgreSQL
 sweep restricted to value rows by the property test's freshness oracle).
 
-### `invalidateAll`, logical: one counter and the cache's time T (designed 2026-10-24, not built yet)
+### `invalidateAll`, logical: one counter and the cache's time T (designed 2026-10-24, not built; parked 2026-10-28 for `invalidateAll` by the store's time)
 
 Replaces the sweep of the previous section. The previous design gives every row a new version on `invalidateAll`,
 lets every instance learn the sweep's time from messages, and has the core treat value rows below it as missing and
@@ -483,15 +483,15 @@ the read time), so only reads (`read`, `readVersions`) and maintenance look T up
 Docker Desktop on macOS, 10,000 keys, today's statements against the logical ones on the same data, alternating, 3
 rounds; p50, ranges over the rounds):
 
-| Operation | PostgreSQL today / logical | MongoDB today / logical |
-|---|---|---|
-| read, 1 key | 175–183 / 194–206 µs | 280–326 / 274–302 µs |
-| read, 100 keys, on the server (`EXPLAIN ANALYZE`) | 0.43 / 0.37 ms, same plan; the two lookups 0.02 ms | – |
-| `readVersions`, 100 keys | 251–286 / 241–284 µs | 509–764 / 683–812 µs (with the batch size, see below) |
-| put, 1 writer | 172–201 / 172–194 µs | 289–366 / 268–344 µs |
-| put, 16 writers | 15,300–18,070 / 15,320–18,220 puts/s | 7,600–9,460 / 9,290–9,860 puts/s |
-| `invalidateAll`, 10,000 rows | 43 ms / 0.65 ms | 77 ms and 10,001 events / 2.1 ms and 1 event |
-| `invalidateAll`, 100,000 rows | 438 ms / 1.2 ms | 862 ms and 100,001 events / 4.9 ms and 1 event |
+| Operation                                         | PostgreSQL today / logical                         | MongoDB today / logical                               |
+|---------------------------------------------------|----------------------------------------------------|-------------------------------------------------------|
+| read, 1 key                                       | 175–183 / 194–206 µs                               | 280–326 / 274–302 µs                                  |
+| read, 100 keys, on the server (`EXPLAIN ANALYZE`) | 0.43 / 0.37 ms, same plan; the two lookups 0.02 ms | –                                                     |
+| `readVersions`, 100 keys                          | 251–286 / 241–284 µs                               | 509–764 / 683–812 µs (with the batch size, see below) |
+| put, 1 writer                                     | 172–201 / 172–194 µs                               | 289–366 / 268–344 µs                                  |
+| put, 16 writers                                   | 15,300–18,070 / 15,320–18,220 puts/s               | 7,600–9,460 / 9,290–9,860 puts/s                      |
+| `invalidateAll`, 10,000 rows                      | 43 ms / 0.65 ms                                    | 77 ms and 10,001 events / 2.1 ms and 1 event          |
+| `invalidateAll`, 100,000 rows                     | 438 ms / 1.2 ms                                    | 862 ms and 100,001 events / 4.9 ms and 1 event        |
 
 - **Common paths unchanged within the noise,** except PostgreSQL's single-key read (+10–30 µs, the two lookups) and
   MongoDB's `readVersions` (+50–100 µs, one more document back); `nextval` costs nothing measurable, also with 16
@@ -517,11 +517,11 @@ the three `invalidateAll` tests); the property test's freshness oracle covers th
 
 `withDistributionMode(DistributionMode)`, set at most once, replaces `withPopulation()`:
 
-| Mode | Subscription | A write elsewhere | An invalidation or expiry elsewhere |
-|---|---|---|---|
-| `NONE` | none (no listening connection) | not seen | not seen |
-| `INVALIDATE` (default) | yes | held copy dropped | held copy dropped |
-| `UPDATE` | yes | held copy re-read (batched) | held copy dropped |
+| Mode                   | Subscription                   | A write elsewhere           | An invalidation or expiry elsewhere |
+|------------------------|--------------------------------|-----------------------------|-------------------------------------|
+| `NONE`                 | none (no listening connection) | not seen                    | not seen                            |
+| `INVALIDATE` (default) | yes                            | held copy dropped           | held copy dropped                   |
+| `UPDATE`               | yes                            | held copy re-read (batched) | held copy dropped                   |
 
 - **One setting, three levels:** population is built on invalidation (same subscription, same messages; only a
   write is applied differently), so "population without invalidation" would distribute writes but not removals.
@@ -546,6 +546,38 @@ the three `invalidateAll` tests); the property test's freshness oracle covers th
   messages for negative caching; held values count as trusted. `invalidateAll()` and `invalidate` reach only the store and this instance's L1.
 - The property test covers `INVALIDATE` and `UPDATE`; its convergence oracle does not
   apply to `NONE` by design, which has unit tests of its own.
+
+### Maximum age for the store only (built 2026-11-05)
+
+`withStore(store -> store.withMaximumAge(age).withMaximumAgeForStoreOnly())`: a value expires in the store after the
+maximum age, which answers misses within it; later misses call the source, and the local copies follow their Caffeine
+expiry alone. For a store too small or too expensive for the working set, or local copies kept far longer than the
+store should keep values. Built first as `withDistributionOnly()` with a fixed internal retention of five minutes,
+then expressed through the existing setting: on the store's side it is exactly a maximum age, and the decoupling of
+the copies is what is new.
+
+- **The switch, not a second age:** the name starts with `withMaximumAge`, so both show up together. It requires a
+  maximum age and distribution (without messages every held value counts as trusted, which the atomic methods rely on).
+- **Misses read the store:** the load path is unchanged, so a key loaded or written elsewhere within the maximum age is
+  not loaded again (and `UPDATE` re-reads it). Skipping the read would save one round trip per miss but needs a second
+  load path with its own version and trust rules.
+- **The store's expiry is not a change:** `EXPIRED` messages are ignored, and L1 gets no cap.
+- **Atomic `asMap()` methods stay atomic across instances:** they always read (no hot path on the held value, whose row
+  has usually expired), and a row the store let go of (expired, pruned to size, or an expired row cleaned up) counts as
+  the trusted copy held here, at the row's version, so that the write is conditioned on it. Sound because a trusted
+  holder has heard every write older than about two heartbeat intervals with their jitter (the heartbeat notices a
+  silent feed), and the store lets go of no younger row: the heartbeat interval is at most a fifth of the maximum age
+  and at most a minute (three intervals within the tombstones' five minutes), and size pruning spares three intervals
+  in this mode (`DistributedCaffeine#pruneGrace`; the store briefly holds those writes beyond its maximum size). The
+  first build took missing rows for the held copy without that grace, which size pruning seconds after a write would
+  have broken; found while switching. A removal leaves a tombstone and an `invalidateAll` hides rows as tombstones, so
+  neither is taken for the held value; a row deleted by an `invalidateAll` not heard of yet is the race accepted for
+  updates in flight. An instance without a copy decides on an absent value, as on a miss.
+- **Accepted:** nothing bounds how long a copy is served if a change never reaches its instance (a message lost
+  without a gap noticed), as with an unbounded maximum age. After a gap noticed, copies are checked by version and
+  those whose row has expired are dropped.
+- **Tests:** `InternalCoreTest` (on every store: sharing within the age, copies kept after it, atomic methods on
+  expired and on pruned rows) and `DistributedCaffeineTest` (validation, prune grace). Not in the property test.
 
 ### Refresh
 
@@ -624,11 +656,11 @@ The core serializes and deserializes, and only what it uses (held keys, misses).
 `K` or `V`; the core translates the serializer once into a **format**, passed when the cache's adapter creates its
 store:
 
-| Serializer | Format | MongoDB | PostgreSQL | Redis, Valkey, Dragonfly; plain JDBC |
-|---|---|---|---|---|
-| `ByteArraySerializer` (Fory, Java object) | `BINARY` | `BinData` | `bytea` | bytes |
-| `StringSerializer`, `JsonSerializer` with `storeAsNativeJson() == false` | `TEXT` | string | `text` | UTF-8 bytes |
-| `JsonSerializer` with `storeAsNativeJson() == true` (Jackson) | `JSON` | BSON value | `jsonb` | UTF-8 bytes |
+| Serializer                                                               | Format   | MongoDB    | PostgreSQL | Redis, Valkey, Dragonfly; plain JDBC |
+|--------------------------------------------------------------------------|----------|------------|------------|--------------------------------------|
+| `ByteArraySerializer` (Fory, Java object)                                | `BINARY` | `BinData`  | `bytea`    | bytes                                |
+| `StringSerializer`, `JsonSerializer` with `storeAsNativeJson() == false` | `TEXT`   | string     | `text`     | UTF-8 bytes                          |
+| `JsonSerializer` with `storeAsNativeJson() == true` (Jackson)            | `JSON`   | BSON value | `jsonb`    | UTF-8 bytes                          |
 
 `storeAsNativeJson` was `storeAsBinaryJson` until 2026-11-01: named after MongoDB's BSON, it chose `jsonb` on
 PostgreSQL as well and nothing on the stores without a JSON type of their own, so it was renamed after what it means on
@@ -636,14 +668,14 @@ every store, its Javadoc a table per store.
 
 How often it happens, and three rules that keep it at the minimum:
 
-| Operation | Serialize | Deserialize |
-|---|---|---|
-| L1 hit | – | – |
-| put | key and value, once | – |
-| miss answered by L2 | – | value, once (not the key; the caller has it) |
-| population read by a holder | – | value, once per holder, only if the version is newer |
-| invalidation, expiry, any message | – | – (messages carry no values) |
-| `putIfUnchanged` conflict | – | value of the newer row, once |
+| Operation                         | Serialize           | Deserialize                                          |
+|-----------------------------------|---------------------|------------------------------------------------------|
+| L1 hit                            | –                   | –                                                    |
+| put                               | key and value, once | –                                                    |
+| miss answered by L2               | –                   | value, once (not the key; the caller has it)         |
+| population read by a holder       | –                   | value, once per holder, only if the version is newer |
+| invalidation, expiry, any message | –                   | – (messages carry no values)                         |
+| `putIfUnchanged` conflict         | –                   | value of the newer row, once                         |
 
 1. **Keys are matched by hash and never deserialized.**
 2. **Compare the version before deserializing.** `Row` holds bytes; the core deserializes only what it applies.
@@ -755,13 +787,13 @@ reference store passes them, and 10 more tests cover its fault injection. 13 del
 after one gap in the tests was closed (a young tombstone under "if no value"). The tests use short real sleeps for
 ages (50–100 ms); if they flake under load, the reference store's injectable clock is the remedy.
 
-| Core | Adapter |
-|---|---|
-| hashes, serialization, L1, version comparison, loads, refresh | storage per format, queries, conditional writes |
-| when maintenance runs (interval with jitter) | how it runs, safe on several instances at once |
-| the store guard (exceptions → degraded state), on reads too | throwing, reconnecting on its own |
-| revalidating after `onGap()` | detecting gaps (Mongo: resume token lost; PostgreSQL: every reconnect) |
-| | sharing listeners/watchers between caches, the discriminator |
+| Core                                                          | Adapter                                                                |
+|---------------------------------------------------------------|------------------------------------------------------------------------|
+| hashes, serialization, L1, version comparison, loads, refresh | storage per format, queries, conditional writes                        |
+| when maintenance runs (interval with jitter)                  | how it runs, safe on several instances at once                         |
+| the store guard (exceptions → degraded state), on reads too   | throwing, reconnecting on its own                                      |
+| revalidating after `onGap()`                                  | detecting gaps (Mongo: resume token lost; PostgreSQL: every reconnect) |
+|                                                               | sharing listeners/watchers between caches, the discriminator           |
 
 Decided with it:
 
@@ -773,27 +805,27 @@ Decided with it:
 The contract, written out on `Store` and `ChangeFeed` (authoritative; 2026-10-23, step 6 of the SPI rework), each
 point checked by the contract tests named after it (`contractN_...`):
 
-| Store | Point | Tests |
-|---|---|---|
-| 1 | Versions from the store, strictly increasing per hash (across instances, after a delete), returned to the writer | `contract1_*` |
-| 2 | Ages and read times on the store's clock, the clock of the versions | `contract2_*` |
-| 3 | Visibility and durability: a read on any instance reflects every write confirmed before it began; a confirmed write is lost only in an event every subscription sees as a loss or gap | `contract3_*` (visibility; durability per adapter: majority journaled on MongoDB) |
-| 4 | Conditional writes (`putIfUnchanged`, `invalidateIfUnchanged`) atomic per key | `contract4_*` |
-| 5 | Maintenance idempotent on several instances at once | `contract5_*` |
-| 6 | Keys and values byte for byte; only the store's own cache, also in a shared table or collection | `contract6_*` |
-| 7 | Every method as documented, for every state of a row | `contract7_*` |
-| 8 | Failures only as classified `StoreException`, a partly applied write unknown, no retries in the store | each adapter's own (`PostgresRetryTest`, the timeout tests), and `InternalRetryTest` for the core's side |
-| 9 | The `StoreSettings` applied: no operation waits longer than the timeout | each adapter's silent-connection tests |
+| Store | Point                                                                                                                                                                                 | Tests                                                                                                    |
+|-------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|
+| 1     | Versions from the store, strictly increasing per hash (across instances, after a delete), returned to the writer                                                                      | `contract1_*`                                                                                            |
+| 2     | Ages and read times on the store's clock, the clock of the versions                                                                                                                   | `contract2_*`                                                                                            |
+| 3     | Visibility and durability: a read on any instance reflects every write confirmed before it began; a confirmed write is lost only in an event every subscription sees as a loss or gap | `contract3_*` (visibility; durability per adapter: majority journaled on MongoDB)                        |
+| 4     | Conditional writes (`putIfUnchanged`, `invalidateIfUnchanged`) atomic per key                                                                                                         | `contract4_*`                                                                                            |
+| 5     | Maintenance idempotent on several instances at once                                                                                                                                   | `contract5_*`                                                                                            |
+| 6     | Keys and values byte for byte; only the store's own cache, also in a shared table or collection                                                                                       | `contract6_*`                                                                                            |
+| 7     | Every method as documented, for every state of a row                                                                                                                                  | `contract7_*`                                                                                            |
+| 8     | Failures only as classified `StoreException`, a partly applied write unknown, no retries in the store                                                                                 | each adapter's own (`PostgresRetryTest`, the timeout tests), and `InternalRetryTest` for the core's side |
+| 9     | The `StoreSettings` applied: no operation waits longer than the timeout                                                                                                               | each adapter's silent-connection tests                                                                   |
 
-| ChangeFeed | Point | Tests |
-|---|---|---|
-| 1 | A message exactly for a committed write; deletes announce nothing | `contract1_*` |
-| 2 | The version as returned to the writer | `contract2_*` |
-| 3 | At least once, per key in commit order; otherwise a gap | `contract3_*` |
-| 4 | Everything committed after `subscribe` returned, nothing after closing | `contract4_*` |
-| 5 | A loss reported, restored only by `resume()`, from then on (the core counts every resume as a gap) | `contract5_*` |
-| 6 | A read after a message reflects the announced write | `contract6_*` |
-| 7 | Only the own cache's writes, also in a shared table or collection | `contract7_*` |
+| ChangeFeed | Point                                                                                              | Tests         |
+|------------|----------------------------------------------------------------------------------------------------|---------------|
+| 1          | A message exactly for a committed write; deletes announce nothing                                  | `contract1_*` |
+| 2          | The version as returned to the writer                                                              | `contract2_*` |
+| 3          | At least once, per key in commit order; otherwise a gap                                            | `contract3_*` |
+| 4          | Everything committed after `subscribe` returned, nothing after closing                             | `contract4_*` |
+| 5          | A loss reported, restored only by `resume()`, from then on (the core counts every resume as a gap) | `contract5_*` |
+| 6          | A read after a message reflects the announced write                                                | `contract6_*` |
+| 7          | Only the own cache's writes, also in a shared table or collection                                  | `contract7_*` |
 
 Every store runs the store contract (also a storage-only wrapper of the reference store and PostgreSQL without a
 listener), every store with a feed the feed contract; the store fixtures open a second cache in the same table or
@@ -857,25 +889,40 @@ generation does not reach the other. Either stop all old instances first (short 
 roll out without downtime and accept outdated values during the rollout, bounded by Caffeine's expiry in the old
 instances. A bridge between the generations is out of scope: it would bring the old protocol back.
 
+**Marker versions set back to 1 before the release (2026-11-05, the user's choice):** MongoDB `distributed-caffeine
+schema 1`, PostgreSQL `distributed-caffeine schema 1`, Redis `1`. The numbers 2 and 3 named layout changes during
+development, none released; a later layout change starts counting from here. MariaDB/MySQL have no marker (the
+layout is checked by its columns).
+
+**A rolling update with `withSchemaReset()` on the same MongoDB collection (tested 2026-11-05,
+`MigrationExperimentTest`, the published 0.7.0 in a class loader of its own against MongoDB 8):** the first new
+instance drops the old collection; the running old instances resume their change streams and go on among themselves
+(their documents filter on a top-level `discriminator`, which new ones lack); the new generation ignores old documents
+(an ObjectId `_id`, no `{d, h}`); neither sees the other's writes. An old instance starting after the reset fails: the
+new generation has two documents at once (marker and start document), so the old unique index on `(discriminator,
+hash)` finds two `null` pairs and its build fails (E11000), creating nothing; the new generation is unaffected. So a
+rollback to 0.7.x needs the collection dropped first. Old documents written during the rollout stay behind:
+`db.<collection>.deleteMany({discriminator: {$exists: true}})` removes them once the last old instance is gone.
+
 **Configuration: a migration guide.**
 
-| Current generation | Next generation |
-|---|---|
-| `POPULATION_AND_INVALIDATION_AND_EVICTION`, `POPULATION_AND_INVALIDATION` | `DistributionMode.UPDATE` |
-| `INVALIDATION`, `INVALIDATION_AND_EVICTION` | `DistributionMode.INVALIDATE` (default) |
-| `NONE` | `DistributionMode.NONE` |
-| eviction distribution | gone, eviction stays local |
-| cached tier `withMaximumSize` / `withMaximumTime` | `withStore(s -> s.withMaximumSize(...).withMaximumAge(...))`, counted from the write |
-| evicted tier, loading strategies | gone, L2 read-through is always on |
-| restoration / `withColdStart()` | gone: L1 starts empty, read-through fills it (one L2 read per key on first access) |
-| serializers on the adapter | serializers on the cache |
-| `getFromStore` / `getAllFromStore` (returning `CacheEntry`) | `getFromStore` / `getAllFromStore` returning `StoredValue<V>` (value and age) |
-| `withCaffeine(Caffeine.newBuilder()...)` | `withCaffeine(caffeine -> caffeine...)` with the same method names |
-| `startSynchronization()` / `stopSynchronization()` | gone; `close()` (`AutoCloseable`) and build anew |
-| `DistributedPolicy.getAdapter()` | gone |
-| `withListenerSharingMode` / `withWatcherSharingMode` | gone: always shared per database |
-| PostgreSQL `withListenerDataSource(...)` | kept, optional: listening goes through the `DataSource` by default |
-| `weakKeys()` / `weakValues()` / `softValues()` (rejected today too) | rejected |
+| Current generation                                                        | Next generation                                                                      |
+|---------------------------------------------------------------------------|--------------------------------------------------------------------------------------|
+| `POPULATION_AND_INVALIDATION_AND_EVICTION`, `POPULATION_AND_INVALIDATION` | `DistributionMode.UPDATE`                                                            |
+| `INVALIDATION`, `INVALIDATION_AND_EVICTION`                               | `DistributionMode.INVALIDATE` (default)                                              |
+| `NONE`                                                                    | `DistributionMode.NONE`                                                              |
+| eviction distribution                                                     | gone, eviction stays local                                                           |
+| cached tier `withMaximumSize` / `withMaximumTime`                         | `withStore(s -> s.withMaximumSize(...).withMaximumAge(...))`, counted from the write |
+| evicted tier, loading strategies                                          | gone, L2 read-through is always on                                                   |
+| restoration / `withColdStart()`                                           | gone: L1 starts empty, read-through fills it (one L2 read per key on first access)   |
+| serializers on the adapter                                                | serializers on the cache                                                             |
+| `getFromStore` / `getAllFromStore` (returning `CacheEntry`)               | `getFromStore` / `getAllFromStore` returning `StoredValue<V>` (value and age)        |
+| `withCaffeine(Caffeine.newBuilder()...)`                                  | `withCaffeine(caffeine -> caffeine...)` with the same method names                   |
+| `startSynchronization()` / `stopSynchronization()`                        | gone; `close()` (`AutoCloseable`) and build anew                                     |
+| `DistributedPolicy.getAdapter()`                                          | gone                                                                                 |
+| `withListenerSharingMode` / `withWatcherSharingMode`                      | gone: always shared per database                                                     |
+| PostgreSQL `withListenerDataSource(...)`                                  | kept, optional: listening goes through the `DataSource` by default                   |
+| `weakKeys()` / `weakValues()` / `softValues()` (rejected today too)       | rejected                                                                             |
 
 Unchanged, so user code carries over: `Hashable`, `HashProvider` and the hash computation, the serializer
 implementations (Fory stays the default), the names (schema and table, database and collection, discriminator) and
@@ -929,12 +976,12 @@ asynchronously" rather than "async-first, synchronous waits"):
 distinct keys, the loader completing after 100 ms without holding a thread, every store call blocking for 1 ms; two
 runs each, both shown where they differ):
 
-| N | as built, platform pool: all done / peak threads | as built, virtual threads | non-blocking load, platform pool |
-|---|---|---|---|
-| 100 | 107 ms / 102–103 | 108–109 ms / 1 | 111 ms / 48–72 |
-| 1,000 | 167–172 ms / 1,002–1,003 | 117–124 ms / 1 | 121–126 ms / 110–157 |
-| 5,000 | 777–781 ms / 1,651–1,652 | 158–194 ms / 1–2 | 156–157 ms / 226–257 |
-| 10,000 | 1,369–1,462 ms / 1,750–1,865 | 179–187 ms / 1 | 196–207 ms / 273–327 |
+| N      | as built, platform pool: all done / peak threads | as built, virtual threads | non-blocking load, platform pool |
+|--------|--------------------------------------------------|---------------------------|----------------------------------|
+| 100    | 107 ms / 102–103                                 | 108–109 ms / 1            | 111 ms / 48–72                   |
+| 1,000  | 167–172 ms / 1,002–1,003                         | 117–124 ms / 1            | 121–126 ms / 110–157             |
+| 5,000  | 777–781 ms / 1,651–1,652                         | 158–194 ms / 1–2          | 156–157 ms / 226–257             |
+| 10,000 | 1,369–1,462 ms / 1,750–1,865                     | 179–187 ms / 1            | 196–207 ms / 273–327             |
 
 - **With platform threads the cost is real:** one store-executor thread waits per async miss in flight, so a burst
   of 1,000 holds about 1,000 threads, and from 5,000 on, creating them dominates (5–7 times slower than either
@@ -959,11 +1006,11 @@ exists once; only the retry skeleton is written as a chain.
 
 Measured again with it (same experiment, two runs):
 
-| N | before: all done / peak threads | non-blocking load, as built | modelled non-blocking load |
-|---|---|---|---|
-| 1,000 | 167–172 ms / 1,002–1,003 | 117–131 ms / 146–238 | 129–130 ms / 178–236 |
-| 5,000 | 777–781 ms / 1,651–1,652 | 157–160 ms / 365–451 | 155–158 ms / 215–232 |
-| 10,000 | 1,369–1,462 ms / 1,750–1,865 | 229–242 ms / 703–834 | 195–206 ms / 267–328 |
+| N      | before: all done / peak threads | non-blocking load, as built | modelled non-blocking load |
+|--------|---------------------------------|-----------------------------|----------------------------|
+| 1,000  | 167–172 ms / 1,002–1,003        | 117–131 ms / 146–238        | 129–130 ms / 178–236       |
+| 5,000  | 777–781 ms / 1,651–1,652        | 157–160 ms / 365–451        | 155–158 ms / 215–232       |
+| 10,000 | 1,369–1,462 ms / 1,750–1,865    | 229–242 ms / 703–834        | 195–206 ms / 267–328       |
 
 The remaining threads serve the blocking store calls (the SPI stays blocking); the core's own message processing
 runs on the same executor. Tests assert that pending loader futures hold no store-executor thread (single, bulk,
@@ -1040,13 +1087,13 @@ Measured (`HitPathBenchmarkTest`, JMH 1.37, JDK 25, `getIfPresent` on a filled c
 `user:000123:profile` or random `Long`s, one fork, 3 × 1 s warm-up, 5 × 1 s measurement, average time per call
 and thread):
 
-| Variant | `String` key, 1 / 4 threads | `Long` key, 1 / 4 threads | Allocated per call |
-|---|---|---|---|
-| plain Caffeine | 21.1 / 17.3 ns | 17.0 / 15.0 ns | 0 |
-| wrapper compared by key (today) | 18.1 / 14.3 ns | 18.1 / 12.8 ns | 0 (escape analysis) |
-| by hash string, as today's `Hasher.getHash()` | 117.9 / 102.6 ns | 85.0 / 76.3 ns | 496 B |
-| by hash string, reused stream, hex from the two longs | 186.7 / 168.4 ns | 149.2 / 130.4 ns | 168 B |
-| by the two longs (compact form) | 65.9 / 62.5 ns | 45.5 / 29.0 ns | 32 B |
+| Variant                                               | `String` key, 1 / 4 threads | `Long` key, 1 / 4 threads | Allocated per call  |
+|-------------------------------------------------------|-----------------------------|---------------------------|---------------------|
+| plain Caffeine                                        | 21.1 / 17.3 ns              | 17.0 / 15.0 ns            | 0                   |
+| wrapper compared by key (today)                       | 18.1 / 14.3 ns              | 18.1 / 12.8 ns            | 0 (escape analysis) |
+| by hash string, as today's `Hasher.getHash()`         | 117.9 / 102.6 ns            | 85.0 / 76.3 ns            | 496 B               |
+| by hash string, reused stream, hex from the two longs | 186.7 / 168.4 ns            | 149.2 / 130.4 ns          | 168 B               |
+| by the two longs (compact form)                       | 65.9 / 62.5 ns              | 45.5 / 29.0 ns            | 32 B                |
 
 - **The hash string costs too much on the hit path:** 5–7 times a plain hit and about 500 bytes of garbage per
   call (at a million hits per second, 500 MB/s). Formatting the hex from the two longs is even slower.
@@ -1125,12 +1172,12 @@ last cache using it.
 Three states: `SYNCHRONIZED`, `DEGRADED`, `CLOSED`. What the cache does while degraded depends on which side fails;
 both report `DEGRADED`, and the reason goes into the log (a state per reason would add API without a clear use).
 
-| | `SYNCHRONIZED` | `DEGRADED`, store down | `DEGRADED`, subscription down | `CLOSED` |
-|---|---|---|---|---|
-| L1 hits | served (confirmed) | served unconfirmed | each access checks the version first | throws |
-| Misses | L1 → L2 → loader | loader only, held in L1, not written to L2 | L2 → loader | throws |
-| Writes | normal | refused (`invalidate` drops the local copy, then throws) | normal | throws |
-| Back to normal | – | guard closes, reconnect, revalidation | reconnect, revalidation | – |
+|                | `SYNCHRONIZED`     | `DEGRADED`, store down                                   | `DEGRADED`, subscription down        | `CLOSED` |
+|----------------|--------------------|----------------------------------------------------------|--------------------------------------|----------|
+| L1 hits        | served (confirmed) | served unconfirmed                                       | each access checks the version first | throws   |
+| Misses         | L1 → L2 → loader   | loader only, held in L1, not written to L2               | L2 → loader                          | throws   |
+| Writes         | normal             | refused (`invalidate` drops the local copy, then throws) | normal                               | throws   |
+| Back to normal | –                  | guard closes, reconnect, revalidation                    | reconnect, revalidation              | –        |
 
 - **Store down** (the store guard is open; the subscription is usually down too): nobody can write, so held values
   rarely go stale; in a partial partition, where others still reach the store, they can, until recovery (accepted,
@@ -1310,11 +1357,11 @@ place:
 Measured (`HitPathAsyncBenchmarkTest`, JMH 1.37, JDK 25, precomputed two-long keys so only the cache differs, filled
 cache of 10,000 keys, average time per call, 1 / 4 threads; no allocation in any variant):
 
-| Variant | `getIfPresent` | `get(key, function)` on a hit |
-|---|---|---|
-| plain `Cache` | 16.9 / 13.2 ns | 15.6 / 13.0 ns |
-| `AsyncCache`, future then `join()` | 18.8 / 14.3 ns | 20.2 / 14.5 ns |
-| `AsyncCache.synchronous()` | 23.6 / 17.8 ns | 22.1 / 15.1 ns |
+| Variant                            | `getIfPresent` | `get(key, function)` on a hit |
+|------------------------------------|----------------|-------------------------------|
+| plain `Cache`                      | 16.9 / 13.2 ns | 15.6 / 13.0 ns                |
+| `AsyncCache`, future then `join()` | 18.8 / 14.3 ns | 20.2 / 14.5 ns                |
+| `AsyncCache.synchronous()`         | 23.6 / 17.8 ns | 22.1 / 15.1 ns                |
 
 The `AsyncCache` costs 1–5 ns per hit used directly (up to 7 ns through `synchronous()`), against 30–65 ns for
 hashing the key; negligible.
@@ -1326,10 +1373,10 @@ about the whole local map (views, sizes, iteration) show this instance's L1.
 
 **Reading through L2:**
 
-| Method | Behaviour |
-|---|---|
-| `getIfPresent`, `getAllPresent`, `asMap().get`, `getOrDefault` | L1, then L2 (a hit is held in L1), never the loader |
-| `asMap().containsKey` | L1 if held and trusted; otherwise an existence check (`readVersions`: a `VALUE` row younger than the maximum age, version only, no value transferred); nothing is held; an unconfirmed copy is confirmed or dropped by the same query; a store that does not answer counts as a miss, as for `getIfPresent` |
+| Method                                                         | Behaviour                                                                                                                                                                                                                                                                                                   |
+|----------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `getIfPresent`, `getAllPresent`, `asMap().get`, `getOrDefault` | L1, then L2 (a hit is held in L1), never the loader                                                                                                                                                                                                                                                         |
+| `asMap().containsKey`                                          | L1 if held and trusted; otherwise an existence check (`readVersions`: a `VALUE` row younger than the maximum age, version only, no value transferred); nothing is held; an unconfirmed copy is confirmed or dropped by the same query; a store that does not answer counts as a miss, as for `getIfPresent` |
 
 Today `getIfPresent` stays local because L1 holds everything; with L1 a subset it would be almost useless without
 L2. Caffeine's "without loading" still holds: only the loader is skipped. JetCache's `get` without a loader goes
@@ -1340,14 +1387,14 @@ locally first and otherwise ask the shared level for existence only, without fil
 **Conditional `asMap()` methods, atomic across instances** (like `merge`: read the current value through L1 and L2,
 decide, write conditionally on the version read; on a conflict read again and decide again):
 
-| Method | Condition | Effect |
-|---|---|---|
-| `putIfAbsent(k, v)` | L2 holds no value | written (`putIfUnchanged` with "missing" or on the version of a tombstone); otherwise the existing value is returned (not held: a raw read held without a load in flight would escape ordering rule 4) |
-| `replace(k, v)` | L2 holds a value | written conditionally on its version |
-| `replace(k, old, new)` | the current value `equals(old)` | written conditionally on its version |
-| `remove(k, v)` | the current value `equals(v)` | tombstone conditionally on its version (`invalidateIfUnchanged`) |
-| `computeIfAbsent`, `compute`, `computeIfPresent`, `merge` | see `asMap()` compute methods | |
-| `asMap().put(k, v)`, `asMap().remove(k)` | none | written / tombstone conditionally on the version read, so the returned previous value is exact across instances; `put` always writes, also an equal value, so the row's age renews; `remove` always writes a tombstone, also where there is no value (conditionally on the tombstone's version, or on no row existing), because like Caffeine's `remove` it must defeat a load in flight: without it, a record deleted at the source and removed from the cache while a load was in flight was cached again from the load's older source read (found by the property test). `invalidateIfUnchanged` therefore matches a row of any state by its version, or `MISSING` |
+| Method                                                    | Condition                       | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+|-----------------------------------------------------------|---------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `putIfAbsent(k, v)`                                       | L2 holds no value               | written (`putIfUnchanged` with "missing" or on the version of a tombstone); otherwise the existing value is returned (not held: a raw read held without a load in flight would escape ordering rule 4)                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `replace(k, v)`                                           | L2 holds a value                | written conditionally on its version                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `replace(k, old, new)`                                    | the current value `equals(old)` | written conditionally on its version                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `remove(k, v)`                                            | the current value `equals(v)`   | tombstone conditionally on its version (`invalidateIfUnchanged`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `computeIfAbsent`, `compute`, `computeIfPresent`, `merge` | see `asMap()` compute methods   |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `asMap().put(k, v)`, `asMap().remove(k)`                  | none                            | written / tombstone conditionally on the version read, so the returned previous value is exact across instances; `put` always writes, also an equal value, so the row's age renews; `remove` always writes a tombstone, also where there is no value (conditionally on the tombstone's version, or on no row existing), because like Caffeine's `remove` it must defeat a load in flight: without it, a record deleted at the source and removed from the cache while a load was in flight was cached again from the load's older source read (found by the property test). `invalidateIfUnchanged` therefore matches a row of any state by its version, or `MISSING` |
 
 A remapping that returns the current value instance unchanged writes nothing; if that decision was made on a held
 value, its version is first checked against the store (`readVersions`), and on a mismatch the decision is made again
@@ -1381,14 +1428,14 @@ two concurrent `put`s: the store's order decides and L1 follows it through the v
 
 **`policy()`:**
 
-| Method | Behaviour |
-|---|---|
-| `VarExpiration.put` / `putIfAbsent` / `compute` with a duration | written like `put` / `putIfAbsent` / `compute`; the duration applies to this instance's L1 copy only |
-| `eviction().setMaximum`, `setExpiresAfter`, `setRefreshesAfter`, `VarExpiration.setExpiresAfter(k, d)` | local, as in Caffeine (L1 configuration) |
-| `getIfPresentQuietly`, `getEntryIfPresentQuietly` | L1 only: "quietly" means without side effects, so no L2 read |
-| `refreshes()` | L1's refreshes in flight, unwrapped |
-| `refreshAfterWrite().setRefreshesAfter(d)` | local; refresh rule 2 follows the new duration |
-| `coldest`, `hottest`, `oldest`, `youngest`, `getEntryIfPresentQuietly` | L1 snapshots, unwrapped and immutable |
+| Method                                                                                                 | Behaviour                                                                                            |
+|--------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------|
+| `VarExpiration.put` / `putIfAbsent` / `compute` with a duration                                        | written like `put` / `putIfAbsent` / `compute`; the duration applies to this instance's L1 copy only |
+| `eviction().setMaximum`, `setExpiresAfter`, `setRefreshesAfter`, `VarExpiration.setExpiresAfter(k, d)` | local, as in Caffeine (L1 configuration)                                                             |
+| `getIfPresentQuietly`, `getEntryIfPresentQuietly`                                                      | L1 only: "quietly" means without side effects, so no L2 read                                         |
+| `refreshes()`                                                                                          | L1's refreshes in flight, unwrapped                                                                  |
+| `refreshAfterWrite().setRefreshesAfter(d)`                                                             | local; refresh rule 2 follows the new duration                                                       |
+| `coldest`, `hottest`, `oldest`, `youngest`, `getEntryIfPresentQuietly`                                 | L1 snapshots, unwrapped and immutable                                                                |
 
 `VarExpiration.setExpiresAfter(k, d)` leaves entries resident but invisible (memory note
 `caffeine-setexpiresafter-stuck-entries`); it is Caffeine's behaviour, passed through unchanged and never used
@@ -1467,21 +1514,28 @@ builder of `InternalKey` to `InternalValue`, so Caffeine's own validation applie
 - **Parity enforced by a test:** it checks by reflection (in the test only) that the configurer has a counterpart
   with the same name and parameter types for every public configuration method of Caffeine's builder (21 in
   Caffeine 3.3.1); a method added by Caffeine fails the build until it is followed.
+- **Both optional since 2026-11-05 (the user's choice: a required age can be set to 100 years anyway), as Caffeine's
+  bounds are:** without a maximum age the store keeps values until written again (internally the cap
+  `Duration.ofNanos(Long.MAX_VALUE)`, about 292 years, the largest every path computes with: `Duration#toNanos` in
+  the core, PostgreSQL and the in-memory store; MongoDB milliseconds, Redis microseconds as Lua doubles and
+  PostgreSQL intervals all hold it; a larger value is lowered to it); without a maximum size no size pruning runs.
+  Maintenance skips a bound not set. Tested on every store's latest image with neither bound and with
+  `ChronoUnit.FOREVER`. Was:
 - **The store's maximum age and maximum size are both required**
   (`withStore(store -> store.withMaximumAge(...).withMaximumSize(...))`), the maintenance interval optional: without
   a maximum age the store would serve arbitrarily old values, without a maximum size it would grow without bound,
   and implicit defaults would hide either bound.
 
-| Setting | Handling |
-|---|---|
-| `maximumSize`, `maximumWeight`, `initialCapacity`, `expireAfterWrite` / `expireAfterAccess`, `refreshAfterWrite` | passed through to L1 |
-| `executor`, `scheduler`, `ticker` | passed through |
-| `weigher` | wrapped: unwraps `InternalKey` / `InternalValue` before calling the user's weigher |
-| `expireAfter(Expiry)` | wrapped (as today's `InternalExpiry`) |
-| `removalListener`, `evictionListener` | wrapped, with the causes below |
-| `recordStats(...)` | passed through; the distribution stats come on top |
-| `weakKeys`, `weakValues`, `softValues` | rejected with a clear error |
-| `build(...)` / `buildAsync(...)` | always `buildAsync` internally, with the internal `AsyncCacheLoader` |
+| Setting                                                                                                          | Handling                                                                           |
+|------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------|
+| `maximumSize`, `maximumWeight`, `initialCapacity`, `expireAfterWrite` / `expireAfterAccess`, `refreshAfterWrite` | passed through to L1                                                               |
+| `executor`, `scheduler`, `ticker`                                                                                | passed through                                                                     |
+| `weigher`                                                                                                        | wrapped: unwraps `InternalKey` / `InternalValue` before calling the user's weigher |
+| `expireAfter(Expiry)`                                                                                            | wrapped (as today's `InternalExpiry`)                                              |
+| `removalListener`, `evictionListener`                                                                            | wrapped, with the causes below                                                     |
+| `recordStats(...)`                                                                                               | passed through; the distribution stats come on top                                 |
+| `weakKeys`, `weakValues`, `softValues`                                                                           | rejected with a clear error                                                        |
+| `build(...)` / `buildAsync(...)`                                                                                 | always `buildAsync` internally, with the internal `AsyncCacheLoader`               |
 
 **Why weak and soft references are rejected** (invariant 1 alone would allow them): `weakKeys()` compares keys by
 identity (`==`), which cannot hold across instances where keys are identified by hash; `weakValues()` /
@@ -1491,14 +1545,14 @@ the value weakly itself, and Caffeine's `COLLECTED` cause would be lost.
 
 **Removal causes for the user's listeners:**
 
-| Event | Cause |
-|---|---|
-| own `invalidate`, or a received `INVALIDATED` | `EXPLICIT` (invalidated, here or elsewhere) |
-| received `EXPIRED` (maximum age) | `EXPIRED` |
-| population replaces a held value | `REPLACED` |
-| revalidation drops an outdated copy | `EXPLICIT` |
+| Event                                         | Cause                                                 |
+|-----------------------------------------------|-------------------------------------------------------|
+| own `invalidate`, or a received `INVALIDATED` | `EXPLICIT` (invalidated, here or elsewhere)           |
+| received `EXPIRED` (maximum age)              | `EXPIRED`                                             |
+| population replaces a held value              | `REPLACED`                                            |
+| revalidation drops an outdated copy           | `EXPLICIT`                                            |
 | a load or refresh result discarded by version | `REPLACED` (as Caffeine does for discarded refreshes) |
-| L1's own eviction and expiry | as Caffeine reports them (`SIZE`, `EXPIRED`) |
+| L1's own eviction and expiry                  | as Caffeine reports them (`SIZE`, `EXPIRED`)          |
 
 ### Adapter setup
 
@@ -1585,13 +1639,13 @@ overwrite a newer write of another instance.
 - **Outcome unknown:** a timeout or broken connection after sending (on PostgreSQL the other `08...` errors during
   execution and socket timeouts); the write may have committed.
 
-| Write | Certainly not committed | Outcome unknown |
-|---|---|---|
-| `putIfUnchanged` (loads, refresh, `compute`, `putIfAbsent`, ...) | retry | retry: if the first attempt landed, the retry sees a changed version, a conflict, and reads the row (the "newer" row is then its own) |
-| `invalidateIfUnchanged` (`remove(k, v)`) | retry | retry, for the same reason |
-| `invalidate` | retry | retry: at worst it removes a value written in between, which costs that key one load from the source but never leaves an outdated value |
-| `put` (unconditional) | retry | **no retry:** if the first attempt landed and another instance wrote in between, the retry would overwrite their newer value with the older one. The key is dropped from L1 (ordering rule 5), and the call throws, since the caller cannot know whether the write happened |
-| expiry, pruning, `invalidateAll` | retry | retry: all are conditional (`state = VALUE`, ...) and idempotent, and maintenance runs again anyway |
+| Write                                                                                                         | Certainly not committed | Outcome unknown                                                                                                                                                                                                                                                                                                                                                        |
+|---------------------------------------------------------------------------------------------------------------|-------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| conditional write of a load or a refresh                                                                      | retry                   | retry: if the first attempt landed, the retry sees a changed version, a conflict, and reads the row (the "newer" row is then its own, the value it loaded)                                                                                                                                                                                                             |
+| conditional write of an atomic map method (`putIfAbsent`, `replace`, `remove(k, v)`, `compute`, `merge`, ...) | retry                   | retry (since 2026-11-04): a refusal after an attempt of unknown outcome is checked against the row. At the write's version with its content it is the write itself, applied; otherwise the call throws, the key dropped from L1, as for `put`. Deciding again on its own row would apply the remapping twice (`merge` adding twice, reproduced by `InternalRetryTest`) |
+| `invalidate`                                                                                                  | retry                   | retry: at worst it removes a value written in between, which costs that key one load from the source but never leaves an outdated value                                                                                                                                                                                                                                |
+| `put` (unconditional)                                                                                         | retry                   | **no retry:** if the first attempt landed and another instance wrote in between, the retry would overwrite their newer value with the older one. The key is dropped from L1 (ordering rule 5), and the call throws, since the caller cannot know whether the write happened                                                                                            |
+| expiry, pruning, `invalidateAll`                                                                              | retry                   | retry: all are conditional (`state = VALUE`, ...) and idempotent, and maintenance runs again anyway                                                                                                                                                                                                                                                                    |
 
 **MongoDB: the driver retries.** Single-document writes are retryable writes: the driver retries them and the server
 deduplicates by the session's transaction number, so a retry never applies twice, which removes the unknown case
@@ -1614,9 +1668,18 @@ write's outcome unknown; a statement without an answer within the timeout, a poo
 connection, and every other error are not retryable. A missing table is not retryable either (see "The PostgreSQL
 adapter": changing the table by hand is not supported).
 
-**Open point:** a conditional write whose outcome was unknown and that the core repeats cannot tell its own row from
-another writer's: `putIfAbsent` then reports the value as present already (it is stored and held; the return value
-is the only difference). Telling them apart needs an id of the write in the row, a later decision.
+**Closed 2026-11-04 (was the open point):** a conditional write whose outcome was unknown and that the core repeated
+could not tell its own row from another writer's. For loads and refreshes that is harmless (deciding again returns the
+value written); for the atomic map methods it applied the remapping twice, a wrong value in the store and every cache.
+Fixed in `InternalCore#decide` (the guard tells it that an attempt of unknown outcome was repeated): a refused
+repetition reads the row, and the row at the write's version with its content counts as the write itself (the check
+`advance` makes); anything else throws, outcome unknown. So it throws only where the store applied a version of its
+own (PostgreSQL, Redis; MongoDB mostly applies the proposal, and its driver's retryable writes absorb most lost
+answers) or another write raced the lost answer. Rejected first, the small fix (never repeating these writes after an
+unknown outcome): it threw also where the repetition would have applied cleanly. Accepted: two instances proposing
+the same version and content (one pair in 1,024 within one millisecond and counter) read as one write there, one
+remapping lost; it needs a lost answer and such a race together. Never throwing would need an id of the write in the
+row, returned with a refusal (as DynamoDB returns the item on a failed condition): an SPI and schema change in every store, only if throwing on an unknown outcome turns out too strict.
 
 ### Operations
 
@@ -1651,15 +1714,15 @@ component (`...distributedcaffeine.core`, `....mongodb`, `....postgresql`) inste
 `minus` as today), gated by `recordStats()`, with counters re-derived for this model; no Micrometer binder (decided
 in the current generation; the value can be polled and exported).
 
-| Area | Counters |
-|---|---|
-| L2 reads | hits, misses, rejected by maximum age, read time |
-| Source | loads (distinct from Caffeine's load count, which includes L2 hits), reloads |
-| Writes | puts, conditional writes, conflicts, refused (store down), unknown outcome, write time |
-| Messages | received by kind, applied, ignored (version not newer), population reads |
-| Removals by others | invalidated, expired, replaced |
-| Recovery | gaps, reconnects, revalidated (checked, kept, dropped), store guard openings |
-| Data | unreadable rows, negative hits |
+| Area               | Counters                                                                               |
+|--------------------|----------------------------------------------------------------------------------------|
+| L2 reads           | hits, misses, rejected by maximum age, read time                                       |
+| Source             | loads (distinct from Caffeine's load count, which includes L2 hits), reloads           |
+| Writes             | puts, conditional writes, conflicts, refused (store down), unknown outcome, write time |
+| Messages           | received by kind, applied, ignored (version not newer), population reads               |
+| Removals by others | invalidated, expired, replaced                                                         |
+| Recovery           | gaps, reconnects, revalidated (checked, kept, dropped), store guard openings           |
+| Data               | unreadable rows, negative hits                                                         |
 
 Built (2026-10-21), 31 counters as named accessors on an immutable `DistributedStats` (`empty()`, saturating
 `plus`, `minus` never below zero):
@@ -1697,15 +1760,15 @@ population once, however many messages it has.
 **Timings** (only what affects the semantics is configurable; the rest stays internal and is re-measured with R2DBC
 before the release, the heartbeat in particular):
 
-| Timing | Default | Configurable |
-|---|---|---|
-| Maintenance interval (expiry, pruning) | 1 min ±20 % jitter | yes: part of the maximum-age bound |
-| Tombstone retention | 5 min | no |
-| `build()` timeout | 30 s | yes |
-| Store guard | opens after 3 failures, probe after 1 s | no |
-| Feed heartbeat (reserved-key invalidate, core) | every 10 s ±20 % jitter | yes: bounds how long a silent feed goes unnoticed |
-| Resume after a loss (core) | at once, then from 250 ms, doubling, at most 30 s, ±20 % jitter | no |
-| MongoDB shared watcher `maxAwaitTime` | 100 ms | no |
+| Timing                                         | Default                                                         | Configurable                                      |
+|------------------------------------------------|-----------------------------------------------------------------|---------------------------------------------------|
+| Maintenance interval (expiry, pruning)         | 1 min ±20 % jitter                                              | yes: part of the maximum-age bound                |
+| Tombstone retention                            | 5 min                                                           | no                                                |
+| `build()` timeout                              | 30 s                                                            | yes                                               |
+| Store guard                                    | opens after 3 failures, probe after 1 s                         | no                                                |
+| Feed heartbeat (reserved-key invalidate, core) | every 10 s ±20 % jitter                                         | yes: bounds how long a silent feed goes unnoticed |
+| Resume after a loss (core)                     | at once, then from 250 ms, doubling, at most 30 s, ±20 % jitter | no                                                |
+| MongoDB shared watcher `maxAwaitTime`          | 100 ms                                                          | no                                                |
 
 **README for operations,** carried forward and updated: CSOT (`timeoutMS`) for MongoDB, socket timeouts, DNS TTL,
 managed services, `writeConcernMajorityJournalDefault` (graded), R2DBC and poolers, the cost of `NOTIFY` per
@@ -1806,12 +1869,12 @@ measurements below are kept for that history and for a possible opt-in later.
 Measured (`MongoWriteConcernExperimentTest`, MongoDB 5.0.31, 6.0.28, 7.0.45, 8.3.13, 9.0.4, single-node replica set,
 1,000 sequential writes to one hot key per variant, each variant twice; 8.3 shown, the others alike):
 
-| Variant | Writer's ack p50 / p99 | Event at a watcher p50 / p99 |
-|---|---|---|
-| majority, journal default `true` (MongoDB's default) | 546 / 1,641 µs | 590 / 1,687 µs |
-| w:1, journal default `true` | 168 / 332 µs | 52,174 / 103,886 µs |
-| majority, journal default `false` | 196 / 309 µs | 244 / 404 µs |
-| w:1, journal default `false` | 198 / 300 µs | 246 / 377 µs |
+| Variant                                              | Writer's ack p50 / p99 | Event at a watcher p50 / p99 |
+|------------------------------------------------------|------------------------|------------------------------|
+| majority, journal default `true` (MongoDB's default) | 546 / 1,641 µs         | 590 / 1,687 µs               |
+| w:1, journal default `true`                          | 168 / 332 µs           | 52,174 / 103,886 µs          |
+| majority, journal default `false`                    | 196 / 309 µs           | 244 / 404 µs                 |
+| w:1, journal default `false`                         | 198 / 300 µs           | 246 / 377 µs                 |
 
 - **w:1 makes propagation about 100 times slower.** Change streams deliver only majority-committed writes, which
   with journal default `true` means journaled. Without a majority write nothing forces a journal flush, so events
@@ -1829,12 +1892,12 @@ Measured (`MongoWriteConcernExperimentTest`, MongoDB 5.0.31, 6.0.28, 7.0.45, 8.3
 Crash test (`MongoCrashExperimentTest`, MongoDB 8.3, single node, `mongod` killed with `kill -9` after about 1,000
 majority writes and restarted on the same data, three rounds per setting):
 
-| Journal default | Round | Last acknowledged | Stored after restart | Acknowledged lost | Events delivered for lost writes | Change stream afterwards |
-|---|---|---|---|---|---|---|
-| `false` | 1 | 1,052 | 832 | 220 | 220 | error 280 `ChangeStreamFatalError` ("resume token was not found"), resuming from the last token fails too |
-| `false` | 2 | 1,071 | 1,070 | 1 | 0 | resumes silently, next event arrives |
-| `false` | 3 | 1,051 | 659 | 392 | 391 | error 280, as in round 1 |
-| `true` | 1–3 | 1,018 / 1,018 / 1,021 | same | 0 | 0 | resumes silently |
+| Journal default | Round | Last acknowledged     | Stored after restart | Acknowledged lost | Events delivered for lost writes | Change stream afterwards                                                                                  |
+|-----------------|-------|-----------------------|----------------------|-------------------|----------------------------------|-----------------------------------------------------------------------------------------------------------|
+| `false`         | 1     | 1,052                 | 832                  | 220               | 220                              | error 280 `ChangeStreamFatalError` ("resume token was not found"), resuming from the last token fails too |
+| `false`         | 2     | 1,071                 | 1,070                | 1                 | 0                                | resumes silently, next event arrives                                                                      |
+| `false`         | 3     | 1,051                 | 659                  | 392               | 391                              | error 280, as in round 1                                                                                  |
+| `true`          | 1–3   | 1,018 / 1,018 / 1,021 | same                 | 0                 | 0                                | resumes silently                                                                                          |
 
 - **Peers are protected by the gap path:** whenever events for lost writes had been delivered, the resume token
   points into the lost part of the oplog and the stream fails with error 280, so the adapter reports `onGap()` and
@@ -1850,12 +1913,12 @@ majority writes and restarted on the same data, three rounds per setting):
 3-member replica set (`MongoReplicaSetExperimentTest`, MongoDB 5.0.31, 8.3.13, 9.0.4, all members on one Docker host,
 same writes and variants, each twice; 8.3 shown, 9.0 alike, 5.0 slower across the board):
 
-| Variant | Writer's ack p50 / p99 | Event at a watcher p50 / p99 |
-|---|---|---|
-| majority, journal default `true` | 725 / 1,119 µs | 801 / 1,260 µs |
-| w:1, journal default `true` | 361 / 569 µs | 1,342 / 2,590 µs |
-| majority, journal default `false` | 545 / 867 µs | 637 / 930 µs |
-| w:1, journal default `false` | 377 / 597 µs | 830 / 1,855 µs |
+| Variant                           | Writer's ack p50 / p99 | Event at a watcher p50 / p99 |
+|-----------------------------------|------------------------|------------------------------|
+| majority, journal default `true`  | 725 / 1,119 µs         | 801 / 1,260 µs               |
+| w:1, journal default `true`       | 361 / 569 µs           | 1,342 / 2,590 µs             |
+| majority, journal default `false` | 545 / 867 µs           | 637 / 930 µs                 |
+| w:1, journal default `false`      | 377 / 597 µs           | 830 / 1,855 µs               |
 
 - **w:1 still delivers events later than majority** (about 1.7 times), though no longer 100 times: the secondaries'
   replication moves the majority point along without a periodic journal flush. The decision against a w:1 option
@@ -1887,11 +1950,11 @@ notifies in one statement, `pg_notify` over the rows a CTE returns): all checks 
 own `LISTEN` session and read connection, a holder reads the row once per batch of notifications, 1 KB values, each
 variant twice):
 
-| Variant | Writer's ack p50 | Applied p50 / p99 | Reads per write |
-|---|---|---|---|
-| writer alone, without / with `pg_notify` | 145–154 / 143–148 µs | – | – |
-| 1 / 4 / 16 holders, 500 writes/s | 674–683 / 739–793 / 451–459 µs | 2.5 / 2.7–2.9 / 1.9 ms, p99 4.6–6.0 ms | 0.97 / 3.7 / 14.8 |
-| 1 / 4 / 16 holders, 1,500 writes/s | 264–289 / 301–335 / 407–408 µs | 26–32 / 25–170 / 336–338 ms, p99 up to 665 ms | 0.01–0.05 |
+| Variant                                  | Writer's ack p50               | Applied p50 / p99                             | Reads per write   |
+|------------------------------------------|--------------------------------|-----------------------------------------------|-------------------|
+| writer alone, without / with `pg_notify` | 145–154 / 143–148 µs           | –                                             | –                 |
+| 1 / 4 / 16 holders, 500 writes/s         | 674–683 / 739–793 / 451–459 µs | 2.5 / 2.7–2.9 / 1.9 ms, p99 4.6–6.0 ms        | 0.97 / 3.7 / 14.8 |
+| 1 / 4 / 16 holders, 1,500 writes/s       | 264–289 / 301–335 / 407–408 µs | 26–32 / 25–170 / 336–338 ms, p99 up to 665 ms | 0.01–0.05         |
 
 - **The notification costs the writer nothing measurable.**
 - **Below about 750 writes/s holders have the value within about 2–3 ms** (p99 about 5–6 ms), somewhat slower than
@@ -1925,11 +1988,11 @@ variant twice):
   PostgreSQL 18, pgjdbc with HikariCP against r2dbc-postgresql 1.1.1 with r2dbc-pool 1.0.2, both pools of 10, 10,000
   rows of 1 KB, each operation twice):
 
-  | Operation | JDBC p50 / p99, 8 concurrent | R2DBC p50 / p99, 8 concurrent |
-  |---|---|---|
-  | upsert with `pg_notify` | 142–146 / 211–244 µs, 24,100–26,800/s | 313–403 / 453–689 µs, 13,200–14,400/s |
-  | conditional write (conflict) | 138–144 / 200–275 µs, 27,400–30,000/s | 308–310 / 526–561 µs, 14,500/s |
-  | read of 100 rows by `= ANY` | 356–359 / 499–511 µs, 7,600/s | 1,277–1,307 / 2,253–2,373 µs, 3,800–3,900/s |
+  | Operation                    | JDBC p50 / p99, 8 concurrent          | R2DBC p50 / p99, 8 concurrent               |
+  |------------------------------|---------------------------------------|---------------------------------------------|
+  | upsert with `pg_notify`      | 142–146 / 211–244 µs, 24,100–26,800/s | 313–403 / 453–689 µs, 13,200–14,400/s       |
+  | conditional write (conflict) | 138–144 / 200–275 µs, 27,400–30,000/s | 308–310 / 526–561 µs, 14,500/s              |
+  | read of 100 rows by `= ANY`  | 356–359 / 499–511 µs, 7,600/s         | 1,277–1,307 / 2,253–2,373 µs, 3,800–3,900/s |
 
   R2DBC takes about twice as long and does about half as many operations for writes, and about 3.6 times as long
   for batched reads, with default settings. It would have saved one driver and the `DataSource` configuration, and
@@ -1954,13 +2017,13 @@ Channel partitioning measured (`PostgresChannelPartitioningExperimentTest`, Post
 random by two paced writers, 4 instances with one session per channel each, channel = bucket of the key, each
 variant twice):
 
-| Writes/s (target) | Channels (sessions) | Arrival p50 / p99 | PostgreSQL CPU per 1,000 writes | Writes/s reached |
-|---|---|---|---|---|
-| 1,500 | 1 (4) | 50–52 / 632–788 ms | 175–177 ms | 1,500 |
-| 1,500 | 2 (8) / 4 (16) / 8 (32) | 1.5 / 4.1–4.2, 3.6, 2.3 ms | 233–242 / 387–394 / 658–672 ms | 1,500 |
-| 3,000 | 1 (4) | 668–1,082 / 1,388–3,042 ms | 131–134 ms | 3,000 |
-| 3,000 | 2 (8) / 4 (16) / 8 (32) | 4.3 / 26.1, 2.4 / 7.5, 1.6–1.7 / 4.6–4.7 ms | 202–205 / 366–379 / 675–678 ms | 3,000 |
-| 6,000 | 1 (4) / 2 (8) / 4 (16) / 8 (32) | 627–920 ms, 19–27 ms, 3.1 ms, 1.6–1.7 ms p50 | 142–147 / 217–227 / 384–393 / 729–758 ms | 5,400 / 5,300 / 4,400 / 3,200 |
+| Writes/s (target) | Channels (sessions)             | Arrival p50 / p99                            | PostgreSQL CPU per 1,000 writes          | Writes/s reached              |
+|-------------------|---------------------------------|----------------------------------------------|------------------------------------------|-------------------------------|
+| 1,500             | 1 (4)                           | 50–52 / 632–788 ms                           | 175–177 ms                               | 1,500                         |
+| 1,500             | 2 (8) / 4 (16) / 8 (32)         | 1.5 / 4.1–4.2, 3.6, 2.3 ms                   | 233–242 / 387–394 / 658–672 ms           | 1,500                         |
+| 3,000             | 1 (4)                           | 668–1,082 / 1,388–3,042 ms                   | 131–134 ms                               | 3,000                         |
+| 3,000             | 2 (8) / 4 (16) / 8 (32)         | 4.3 / 26.1, 2.4 / 7.5, 1.6–1.7 / 4.6–4.7 ms  | 202–205 / 366–379 / 675–678 ms           | 3,000                         |
+| 6,000             | 1 (4) / 2 (8) / 4 (16) / 8 (32) | 627–920 ms, 19–27 ms, 3.1 ms, 1.6–1.7 ms p50 | 142–147 / 217–227 / 384–393 / 729–758 ms | 5,400 / 5,300 / 4,400 / 3,200 |
 
 - **Partitioning fixes the latency** as soon as every channel stays below about 750 notifications/s (1.5 ms p50
   at 1,500/s with 2 channels, 1.6 ms at 3,000/s with 8).
@@ -1977,13 +2040,13 @@ R2DBC listener measured (`PostgresR2dbcListenerExperimentTest`, now `PostgresLis
 R2DBC variant; r2dbc-postgresql 1.1.1, PostgreSQL 18, one channel,
 one listening session per instance, two paced writers, each variant twice):
 
-| Listener | Keys | Instances | Writes/s | Arrival p50 / p99 | PostgreSQL CPU per 1,000 writes |
-|---|---|---|---|---|---|
-| pgjdbc | 10,000 | 4 | 1,500 / 3,000 / 6,000 | 28–101 / 489–1,646 / 1,604–2,056 ms p50, p99 up to 4.1 s | 176–177 / 133 / 137–140 ms |
-| R2DBC | 10,000 | 4 | 1,500 / 3,000 / 6,000 | 0.3 / 1.3–1.4, 0.3 / 0.5, 0.3 / 0.5 ms | 175–176 / 135–140 / 143–145 ms |
-| R2DBC | 10,000 | 16 | 3,000 | 0.6 / 0.9–1.0 ms | 528–544 ms |
-| pgjdbc | 1 (hot) | 4 | 1,500 | 48–55 / 948–1,070 ms | 178–180 ms |
-| R2DBC | 1 (hot) | 4 | 1,500 | 0.3 / 1.1–1.4 ms | 171–174 ms |
+| Listener | Keys    | Instances | Writes/s              | Arrival p50 / p99                                        | PostgreSQL CPU per 1,000 writes |
+|----------|---------|-----------|-----------------------|----------------------------------------------------------|---------------------------------|
+| pgjdbc   | 10,000  | 4         | 1,500 / 3,000 / 6,000 | 28–101 / 489–1,646 / 1,604–2,056 ms p50, p99 up to 4.1 s | 176–177 / 133 / 137–140 ms      |
+| R2DBC    | 10,000  | 4         | 1,500 / 3,000 / 6,000 | 0.3 / 1.3–1.4, 0.3 / 0.5, 0.3 / 0.5 ms                   | 175–176 / 135–140 / 143–145 ms  |
+| R2DBC    | 10,000  | 16        | 3,000                 | 0.6 / 0.9–1.0 ms                                         | 528–544 ms                      |
+| pgjdbc   | 1 (hot) | 4         | 1,500                 | 48–55 / 948–1,070 ms                                     | 178–180 ms                      |
+| R2DBC    | 1 (hot) | 4         | 1,500                 | 0.3 / 1.1–1.4 ms                                         | 171–174 ms                      |
 
 - **R2DBC removes the limit:** 0.3 ms p50 at every rate up to 6,000 writes/s (faster than MongoDB's change
   streams here), the hot key included, with one session per instance.
@@ -2016,11 +2079,11 @@ before its response, repeated while more kept coming. Measured with an empty que
 Measured with `PostgresR2dbcListenerExperimentTest` (now `PostgresListenerExperimentTest`), PostgreSQL 18, 4
 instances, 2 writers:
 
-| Variant | 1,500 writes/s | 3,000 writes/s | 6,000 writes/s (reached) | hot key, 1,500/s | PostgreSQL CPU per 1,000 writes |
-|---|---|---|---|---|---|
-| batched, 2 ms window | 3.7 / 7.7 ms | 3.6 / 6.0 ms | 3.3 / 5.5 ms (5,678/s) | 3.4 / 5.4 ms | 95–215 ms |
-| batched, 5 ms window | 5.1 / 9.1 ms | 4.9 / 8.3 ms | 4.7 / 8.1 ms (5,990/s) | 5.0 / 8.6 ms | 68–111 ms |
-| R2DBC, `pg_notify` in the write | 0.5 / 1.7 ms | 0.5 / 0.7 ms | 0.5 / 0.8 ms (3,934/s) | 0.4 / 0.6 ms | 161–194 ms |
+| Variant                         | 1,500 writes/s | 3,000 writes/s | 6,000 writes/s (reached) | hot key, 1,500/s | PostgreSQL CPU per 1,000 writes |
+|---------------------------------|----------------|----------------|--------------------------|------------------|---------------------------------|
+| batched, 2 ms window            | 3.7 / 7.7 ms   | 3.6 / 6.0 ms   | 3.3 / 5.5 ms (5,678/s)   | 3.4 / 5.4 ms     | 95–215 ms                       |
+| batched, 5 ms window            | 5.1 / 9.1 ms   | 4.9 / 8.3 ms   | 4.7 / 8.1 ms (5,990/s)   | 5.0 / 8.6 ms     | 68–111 ms                       |
+| R2DBC, `pg_notify` in the write | 0.5 / 1.7 ms   | 0.5 / 0.7 ms   | 0.5 / 0.8 ms (3,934/s)   | 0.4 / 0.6 ms     | 161–194 ms                      |
 
 The figures are p50 / p99 arrival.
 
@@ -2064,10 +2127,10 @@ CPU; or adaptive, by the number of writing instances).
   one field. The executor is reached through `unwrap(BaseConnection.class).getQueryExecutor()`.
 - Measured with the writes notifying inside their transaction, as with R2DBC:
 
-| Listener (4 instances) | 1,500 writes/s | 3,000 writes/s | 6,000 writes/s (reached) | hot key, 1,500/s | PostgreSQL CPU per 1,000 writes |
-|---|---|---|---|---|---|
-| pgjdbc stream taken over | 0.4 / 0.6 ms | 0.5 / 0.7 ms | 0.5 / 0.8 ms (3,914/s) | 0.4 / 0.6 ms | 155–194 ms |
-| R2DBC | 0.4 / 0.7 ms | 0.5 / 0.8 ms | 0.5 / 0.8 ms (3,873/s) | 0.4 / 0.6 ms | 156–198 ms |
+| Listener (4 instances)   | 1,500 writes/s | 3,000 writes/s | 6,000 writes/s (reached) | hot key, 1,500/s | PostgreSQL CPU per 1,000 writes |
+|--------------------------|----------------|----------------|--------------------------|------------------|---------------------------------|
+| pgjdbc stream taken over | 0.4 / 0.6 ms   | 0.5 / 0.7 ms   | 0.5 / 0.8 ms (3,914/s)   | 0.4 / 0.6 ms     | 155–194 ms                      |
+| R2DBC                    | 0.4 / 0.7 ms   | 0.5 / 0.8 ms   | 0.5 / 0.8 ms (3,873/s)   | 0.4 / 0.6 ms     | 156–198 ms                      |
 
   The figures are p50 / p99 arrival.
 
@@ -2084,11 +2147,11 @@ CPU; or adaptive, by the number of writing instances).
 
 **Decided (2026-10-26): R2DBC is ruled out. Sources of changes, by kind.**
 
-| Source | Used | How |
-|---|---|---|
-| PostgreSQL: `NOTIFY` inside the write's transaction, the listener taking over pgjdbc's stream | the PostgreSQL adapter's default | the listening connection from the user's `DataSource`; exact (no crash window), 0.5 ms; no dependency beyond pgjdbc |
-| a generic message bus | stores without a native feed; or, optionally, to save PostgreSQL's CPU with many instances | the library sends after the commit, batched, numbered per sender, with heartbeats. Gap detection, including a writer's death, is in the core. A thin bus SPI: publish a batch, subscribe |
-| a native feed | where a store has one (MongoDB's change streams, a binlog, DynamoDB Streams) | an optional capability of the store SPI; it sees writes from outside the library too |
+| Source                                                                                        | Used                                                                                       | How                                                                                                                                                                                      |
+|-----------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| PostgreSQL: `NOTIFY` inside the write's transaction, the listener taking over pgjdbc's stream | the PostgreSQL adapter's default                                                           | the listening connection from the user's `DataSource`; exact (no crash window), 0.5 ms; no dependency beyond pgjdbc                                                                      |
+| a generic message bus                                                                         | stores without a native feed; or, optionally, to save PostgreSQL's CPU with many instances | the library sends after the commit, batched, numbered per sender, with heartbeats. Gap detection, including a writer's death, is in the core. A thin bus SPI: publish a batch, subscribe |
+| a native feed                                                                                 | where a store has one (MongoDB's change streams, a binlog, DynamoDB Streams)               | an optional capability of the store SPI; it sees writes from outside the library too                                                                                                     |
 
 Consequences, to build:
 
@@ -2154,7 +2217,8 @@ broadcast manager is: Kafka, NATS, RabbitMQ, Redis pub/sub, JGroups, a Hazelcast
 `ArchitectureTest`):
 
 ```java
-PostgresAdapter.newBuilder(dataSource, schemaName, tableName)   // names mandatory, at most 63 bytes, quoted
+// names mandatory, at most 63 bytes, quoted
+PostgresAdapter<Key, Value> adapter = PostgresAdapter.newBuilder(dataSource, schemaName, tableName)
     .withDiscriminator("orders")                                // optional, "default"
     .withListenerDataSource(listenerDataSource)                 // optional: behind a transaction-mode pooler
     .withSchemaReset()                                          // optional
@@ -2232,7 +2296,8 @@ PostgresAdapter.newBuilder(dataSource, schemaName, tableName)   // names mandato
 `ArchitectureTest`):
 
 ```java
-MongoAdapter.newBuilder(mongoClient, databaseName, collectionName)   // names checked against MongoDB's limits
+// names checked against MongoDB's limits
+MongoAdapter<Key, Value> adapter = MongoAdapter.newBuilder(mongoClient, databaseName, collectionName)
     .withDiscriminator("orders")                                     // optional, "default"
     .withSchemaReset()                                               // optional
     .build();
@@ -2486,13 +2551,13 @@ Sketch, to be settled against the thin SPI ("Target design: a thin SPI, versions
     **Rerun 2026-11-03** (after the cluster, the CROSSSLOT split, `SCRIPT LOAD` on `NOSCRIPT`, READONLY, Kvrocks),
     p50 per store call and 8 threads at 80 % gets:
 
-    | | `getIfPresent` | `put` | 1 hot key | 10 hot keys |
-    |---|---|---|---|---|
-    | Redis 8, Lettuce | 261 µs | 323 µs | 93,781 ops/s | 62,680 ops/s |
-    | Redis 8, Jedis | 175 µs | 263 µs | 58,836 ops/s | 43,601 ops/s |
-    | Redis 8, Redisson | 206 µs | 304 µs | 68,547 ops/s | 45,051 ops/s |
-    | Valkey 9, Lettuce | 193 µs | 293 µs | 92,237 ops/s | 58,667 ops/s |
-    | MariaDB 13 (after step 6's first change) | 251 µs | 489 µs | 21,631 ops/s | 47,093 ops/s |
+    |                                          | `getIfPresent` | `put`  | 1 hot key    | 10 hot keys  |
+    |------------------------------------------|----------------|--------|--------------|--------------|
+    | Redis 8, Lettuce                         | 261 µs         | 323 µs | 93,781 ops/s | 62,680 ops/s |
+    | Redis 8, Jedis                           | 175 µs         | 263 µs | 58,836 ops/s | 43,601 ops/s |
+    | Redis 8, Redisson                        | 206 µs         | 304 µs | 68,547 ops/s | 45,051 ops/s |
+    | Valkey 9, Lettuce                        | 193 µs         | 293 µs | 92,237 ops/s | 58,667 ops/s |
+    | MariaDB 13 (after step 6's first change) | 251 µs         | 489 µs | 21,631 ops/s | 47,093 ops/s |
 
     No regression: ten hot keys as on 2026-11-01 (62,900, 43,700, 47,200), one hot key 8–19 % lower (101,500,
     72,500, 77,500), within what the order of back-to-back runs moves. `putAll` of 100 still ~16 ms everywhere (the
@@ -2733,7 +2798,7 @@ PostgreSQL's wire protocol). Facts from CockroachDB's documentation (v26.4, read
   contract tests on one node; 3. the changefeed and the change feed contract; 4. the core suites; 5. three nodes and
   failover; 6. the version matrix, documentation, benchmark against PostgreSQL.
 
-### MariaDB and MySQL: dialects of one store, an adapter each (decided 2026-11-02, not built)
+### MariaDB and MySQL: dialects of one store, an adapter each (decided 2026-11-02, built 2026-11-02 to 2026-11-03)
 
 The question: own adapters for MariaDB and MySQL, or dialects of the JDBC store, given that the JDBC store already
 does without what MariaDB could offer (`RETURNING`, sequences, a native upsert)? A store of its own is justified here
@@ -2774,6 +2839,17 @@ the complexity budget (a mechanism only for a guarantee or a measured gap), no s
    adapter by `-Djdbc.image` (`JdbcTestDatabase.adapter`), the failover topology by its own image; new: the other
    product's adapter refused, versions parsed. Green: the JDBC suites (49) on MariaDB 11.8 with `utf8mb4` and
    MySQL 8.4, the failover test on both.
+   **Driver floors tested 2026-11-05** (each adapter's suites on the latest image, the first release of each driver
+   major and bisected where it failed): MongoDB driver 5.2 (5.0 and 5.1 lack API the adapter uses), pgjdbc 42.7.6
+   (42.7.5 and older hang on concurrent size pruning, below 42.3.1 it does not compile), Lettuce 7.8 (7.0 to 7.7
+   fail about half the suites, "script marker failed"; the test classpath needs one Netty version for all three
+   clients), Jedis 8.0, Redisson 4.0, MariaDB Connector/J 3.0 on MariaDB and 3.1 on MySQL (3.0 refuses MySQL 8.4's
+   `caching_sha2_password`), MySQL Connector/J 8.0.31 (the first release of `com.mysql:mysql-connector-j`). Connector/J
+   8 and 9 failed two robustness tests at first: they report a killed session and a silent connection both as "No
+   operations allowed after statement closed." (SQLState S1009), which `JdbcStore` took as a plain failure, a write
+   that may have landed then certainly not applied. Fixed driver-neutrally: a failure the exception does not explain
+   is a timeout if it waited the whole timeout, and a connection lost if the connection is no longer valid
+   (`Connection#isValid`, asked only then, before the connection goes back); both branches mutation-checked.
    **Drivers: strict plus one (the user's decision, 2026-11-03).** MariaDB through MariaDB Connector/J only (MySQL
    Connector/J refused by its driver name: neither Oracle nor MariaDB supports that pairing); MySQL through MySQL
    Connector/J or MariaDB Connector/J (MariaDB supports it, and its LGPL licence is why users pick it over the GPL
@@ -2931,15 +3007,15 @@ the complexity budget (a mechanism only for a guarantee or a measured gap), no s
    connection that comes without auto-commit is still committed or rolled back and goes back as it came.
    `JdbcBenchmarkExperimentTest` (`EndToEndBenchmark`, `-Dexperiments=true`), p50 before → after:
 
-   | | MariaDB 13 | MySQL 26 |
-   |---|---|---|
-   | `put` | 874 → 489 µs | 1,312 → 720 µs |
-   | `invalidate` | 708 → 283 µs | 1,007 → 518 µs |
-   | `compute`, hot | 677 → 249 µs | 1,048 → 451 µs |
-   | `putAll` of 100 | 88.0 → 45.8 ms | 136.0 → 75.9 ms |
-   | 1 hot key, 80 % gets | 10,329 → 21,631 ops/s | 6,975 → 11,645 ops/s |
+   |                        | MariaDB 13            | MySQL 26              |
+   |------------------------|-----------------------|-----------------------|
+   | `put`                  | 874 → 489 µs          | 1,312 → 720 µs        |
+   | `invalidate`           | 708 → 283 µs          | 1,007 → 518 µs        |
+   | `compute`, hot         | 677 → 249 µs          | 1,048 → 451 µs        |
+   | `putAll` of 100        | 88.0 → 45.8 ms        | 136.0 → 75.9 ms       |
+   | 1 hot key, 80 % gets   | 10,329 → 21,631 ops/s | 6,975 → 11,645 ops/s  |
    | 10 hot keys, 80 % gets | 19,786 → 47,093 ops/s | 12,439 → 21,410 ops/s |
-   | `compute` increments | 418 → 1,913 /s | 311 → 870 /s |
+   | `compute` increments   | 418 → 1,913 /s        | 311 → 870 /s          |
 
    Reads unchanged (`getIfPresent` ~200–250 µs, as PostgreSQL's 253). Left: a batch is still a round trip or two per
    row (`putAll` of 100 at 46 ms against PostgreSQL's 18 ms with Docker Desktop's stall); fewer would need a JDBC
@@ -2982,11 +3058,11 @@ What changes:
 Measured (`PostgresR2dbcCeilingExperimentTest`, removed 2026-10-28 with R2DBC; PostgreSQL 18, one R2DBC session
 listening on 20 channels as for 20 caches, writes spread over all channels by 8 or 16 paced writers, each rate twice):
 
-| `synchronous_commit` | Target writes/s | Reached | Arrival p50 / p99 | Lost | PostgreSQL CPU per 1,000 writes |
-|---|---|---|---|---|---|
-| `on` (default) | 5,000 / 10,000–40,000 | 5,000 / 7,370–7,610 | 0.3 / 1.3–1.5, then 1.0–1.1 / 1.4–1.5 ms | 0 | 91–101 ms |
-| `off` (measurement only) | 5,000 / 10,000 / 20,000 | as targeted | 0.5–0.6 / 1.0–1.6 ms | 0 | 95–110 ms |
-| `off` (measurement only) | 40,000 / 80,000 | 29,700–30,300 | 0.5–0.6 / 1.2–1.5 ms | 0 | 88–90 ms |
+| `synchronous_commit`     | Target writes/s         | Reached             | Arrival p50 / p99                        | Lost | PostgreSQL CPU per 1,000 writes |
+|--------------------------|-------------------------|---------------------|------------------------------------------|------|---------------------------------|
+| `on` (default)           | 5,000 / 10,000–40,000   | 5,000 / 7,370–7,610 | 0.3 / 1.3–1.5, then 1.0–1.1 / 1.4–1.5 ms | 0    | 91–101 ms                       |
+| `off` (measurement only) | 5,000 / 10,000 / 20,000 | as targeted         | 0.5–0.6 / 1.0–1.6 ms                     | 0    | 95–110 ms                       |
+| `off` (measurement only) | 40,000 / 80,000         | 29,700–30,300       | 0.5–0.6 / 1.2–1.5 ms                     | 0    | 88–90 ms                        |
 
 - **One session carried every rate PostgreSQL could write** (about 7,500 single-row writes/s with default commits
   on this machine, about 30,000/s without commit flushes) at about 0.5–1 ms p50, under 1.5 ms p99, nothing lost.
@@ -3153,17 +3229,17 @@ for closing the clock residual below.
 
 ### The current contract, point by point
 
-| Point | Today | In the study |
-|---|---|---|
-| Store 1: versions | `max(old + 1, server time)`, computed by the store | per-key counter, starting at the store's time; still computed by the store, in one upsert |
-| Store 2: clock | ages and read times from the store's clock | ages from the store's write time; read time no longer compared with versions |
-| Store 3: visibility, durability | store guarantee | unchanged |
-| Store 4: atomic conditional writes | `putIfUnchanged`, `invalidateIfUnchanged` | compare-and-set on the version, unchanged in substance |
-| Store 5: idempotent maintenance | expire, prune | plus deleting rows hidden by the cut-off |
-| Store 6: bytes, own cache | unchanged | unchanged |
-| Store 7: semantics | per method | per operation; `ifMissing(entry, readTime)` and the sweep go |
-| Store 8, 9: failures, settings | unchanged | unchanged |
-| ChangeFeed 1-7 | for native feeds | unchanged, optional; plus the polling feed |
+| Point                              | Today                                              | In the study                                                                              |
+|------------------------------------|----------------------------------------------------|-------------------------------------------------------------------------------------------|
+| Store 1: versions                  | `max(old + 1, server time)`, computed by the store | per-key counter, starting at the store's time; still computed by the store, in one upsert |
+| Store 2: clock                     | ages and read times from the store's clock         | ages from the store's write time; read time no longer compared with versions              |
+| Store 3: visibility, durability    | store guarantee                                    | unchanged                                                                                 |
+| Store 4: atomic conditional writes | `putIfUnchanged`, `invalidateIfUnchanged`          | compare-and-set on the version, unchanged in substance                                    |
+| Store 5: idempotent maintenance    | expire, prune                                      | plus deleting rows hidden by the cut-off                                                  |
+| Store 6: bytes, own cache          | unchanged                                          | unchanged                                                                                 |
+| Store 7: semantics                 | per method                                         | per operation; `ifMissing(entry, readTime)` and the sweep go                              |
+| Store 8, 9: failures, settings     | unchanged                                          | unchanged                                                                                 |
+| ChangeFeed 1-7                     | for native feeds                                   | unchanged, optional; plus the polling feed                                                |
 
 ### Conditional writes racing an `invalidateAll` (worked through 2026-10-24)
 
@@ -3173,15 +3249,15 @@ must equal either "the operation, then `invalidateAll`" (the key is absent) or "
 (the operation as on an absent key). The race (the operation reads before T, writes after it) gives a third outcome
 unless something prevents it.
 
-| Operation | Race outcome without a check | Valid? |
-|---|---|---|
-| load, refresh, `get(k, fn)`, `computeIfAbsent` | a value from the source or function as it was before the `invalidateAll` | no: the source may have changed before it (the reason for `invalidateAll`) |
-| `compute`, `computeIfPresent`, `merge` on a present value | `f(old)`: the old value survives in what is written | no: after the `invalidateAll`, `f` would have seen no value |
-| `compute`, `merge` on an absent key | `f(null)` or the given value | yes as values go, but `f` may read a source like a loader |
-| `replace(k, v)`, `replace(k, old, new)` | written because a value was present | no: after the `invalidateAll` the key is absent and nothing is written |
-| `putIfAbsent` on an absent key | the caller's value | yes: "`invalidateAll`, then `putIfAbsent`" |
-| `remove(k)`, `remove(k, v)`, `invalidate` | a tombstone | yes: absent in both orders |
-| `put`, `putAll` (unconditional) | linearised at their write | yes |
+| Operation                                                 | Race outcome without a check                                             | Valid?                                                                     |
+|-----------------------------------------------------------|--------------------------------------------------------------------------|----------------------------------------------------------------------------|
+| load, refresh, `get(k, fn)`, `computeIfAbsent`            | a value from the source or function as it was before the `invalidateAll` | no: the source may have changed before it (the reason for `invalidateAll`) |
+| `compute`, `computeIfPresent`, `merge` on a present value | `f(old)`: the old value survives in what is written                      | no: after the `invalidateAll`, `f` would have seen no value                |
+| `compute`, `merge` on an absent key                       | `f(null)` or the given value                                             | yes as values go, but `f` may read a source like a loader                  |
+| `replace(k, v)`, `replace(k, old, new)`                   | written because a value was present                                      | no: after the `invalidateAll` the key is absent and nothing is written     |
+| `putIfAbsent` on an absent key                            | the caller's value                                                       | yes: "`invalidateAll`, then `putIfAbsent`"                                 |
+| `remove(k)`, `remove(k, v)`, `invalidate`                 | a tombstone                                                              | yes: absent in both orders                                                 |
+| `put`, `putAll` (unconditional)                           | linearised at their write                                                | yes                                                                        |
 
 **Rule: every conditional write of a value is checked; tombstones and unconditional writes are not.** Exact would be
 "only where the written value depends on a present value or on a function", which exempts `putIfAbsent` on an absent
@@ -3257,13 +3333,13 @@ feed have cleared L1 on `INVALIDATED_ALL` already, a holder that missed it is in
 reports the row missing), and holders without a feed are not reachable anyway. Announcing would bring back the storm
 of one event per row the cut-off removed. Each case of a silent delete:
 
-| Who | What happens | Valid? |
-|---|---|---|
-| a reader | the row counted as missing before the delete, and after it | unchanged |
-| a load in flight that read the row before T | its conditional write finds no row: a conflict, it reads again (or, if the write came first, its check finds T moved and undoes it) | yes |
-| a load that read the row after T (as missing, with its physical version) | its conditional write conflicts, it reads again | yes, one extra round trip |
-| a holder in a gap | revalidates, the row is missing, the copy dropped | yes |
-| a later write of the key | starts at the store's time, above every earlier version | yes |
+| Who                                                                      | What happens                                                                                                                        | Valid?                    |
+|--------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------|---------------------------|
+| a reader                                                                 | the row counted as missing before the delete, and after it                                                                          | unchanged                 |
+| a load in flight that read the row before T                              | its conditional write finds no row: a conflict, it reads again (or, if the write came first, its check finds T moved and undoes it) | yes                       |
+| a load that read the row after T (as missing, with its physical version) | its conditional write conflicts, it reads again                                                                                     | yes, one extra round trip |
+| a holder in a gap                                                        | revalidates, the row is missing, the copy dropped                                                                                   | yes                       |
+| a later write of the key                                                 | starts at the store's time, above every earlier version                                                                             | yes                       |
 
 **No grace period:** tombstones keep a grace period so that loads in flight conflict; a hidden row needs none, since
 any load that read it either conflicts on the missing row or is caught by its check against T.
@@ -3616,21 +3692,21 @@ p50/p99, the store calls it costs and the time inside store calls (every instanc
 holder, and the throughput of 8 threads (80 % gets, 20 % puts). Local containers have almost no network latency: the
 store calls per operation tell what a network adds. After the fix below (PostgreSQL 18, MongoDB 9, µs):
 
-| Operation | PostgreSQL p50 | calls | MongoDB p50 | calls |
-|---|---|---|---|---|
-| `get`, held in L1 | 1 | 0 | 2 | 0 |
-| `getIfPresent`, from the store | 253 | 1 | 324 | 1 |
-| `get`, loaded (a miss everywhere) | 567 | 2 | 787 | 2 |
-| `getAll` of 100, from the store | 635 | 1 | (16,611, see below) | 1 |
-| `put` | 300 | 1 | 415 | 1 |
-| `putAll` of 100 | (18,049, see below) | 1 | 45,870 | 1 (100 round trips) |
-| `compute`, cold | 496 | 2 | 722 | 2 |
-| `compute`, hot | 300 | 1 | 711 | 2 (no hot path) |
-| `putIfAbsent`, present | 183 | 1 | 266 | 1 |
-| `invalidate` | 289 | 1 | 404 | 1 |
-| `invalidateAll` | 562 | 1 | 641 | 1 |
-| propagation to a holder | 292 | | 412 | |
-| throughput, 8 threads | 27,377 ops/s | | 22,154 ops/s | |
+| Operation                         | PostgreSQL p50      | calls | MongoDB p50         | calls               |
+|-----------------------------------|---------------------|-------|---------------------|---------------------|
+| `get`, held in L1                 | 1                   | 0     | 2                   | 0                   |
+| `getIfPresent`, from the store    | 253                 | 1     | 324                 | 1                   |
+| `get`, loaded (a miss everywhere) | 567                 | 2     | 787                 | 2                   |
+| `getAll` of 100, from the store   | 635                 | 1     | (16,611, see below) | 1                   |
+| `put`                             | 300                 | 1     | 415                 | 1                   |
+| `putAll` of 100                   | (18,049, see below) | 1     | 45,870              | 1 (100 round trips) |
+| `compute`, cold                   | 496                 | 2     | 722                 | 2                   |
+| `compute`, hot                    | 300                 | 1     | 711                 | 2 (no hot path)     |
+| `putIfAbsent`, present            | 183                 | 1     | 266                 | 1                   |
+| `invalidate`                      | 289                 | 1     | 404                 | 1                   |
+| `invalidateAll`                   | 562                 | 1     | 641                 | 1                   |
+| propagation to a holder           | 292                 |       | 412                 |                     |
+| throughput, 8 threads             | 27,377 ops/s        |       | 22,154 ops/s        |                     |
 
 In memory (the core alone) every single operation is a few µs, a batch of 100 about 0.1 ms, the throughput 2.9
 million ops/s: the core's own costs are negligible against a store's round trip.
@@ -3658,11 +3734,11 @@ is. A batch of one key runs on the caller's thread as before.
 Measured (MongoDB 9, single-node replica set, local container), a put of 100 keys:
 
 | Calls in flight | On the store alone | Through the core, two instances with change streams |
-|---|---|---|
-| 1 (before) | 45.5 ms | 45.9 ms |
-| 4 | 27.2 ms | |
-| 16 (built) | 13.6 ms | 28.0 ms |
-| 64 | 9.4 ms | 36.5 ms |
+|-----------------|--------------------|-----------------------------------------------------|
+| 1 (before)      | 45.5 ms            | 45.9 ms                                             |
+| 4               | 27.2 ms            |                                                     |
+| 16 (built)      | 13.6 ms            | 28.0 ms                                             |
+| 64              | 9.4 ms             | 36.5 ms                                             |
 
 The scaling is sublinear (each write waits for the journal under `majority`, concurrent ones share that only in
 part), and with change streams open more concurrency gets slower again: 16 is the choice. One round trip per batch
@@ -3675,41 +3751,41 @@ makes ambiguous. Not built; decided 2026-10-26 (next section): read back with an
 **What makes the library unique.** Caffeine's API, on the database an application already has, with no stale value
 in L1 beyond the delivery delay, even under races and failures. No other library offers that combination:
 
-| Gap | Redisson, JetCache | Hazelcast, Infinispan | This library |
-|---|---|---|---|
-| Infrastructure | Redis required | a cluster of their own | the existing database (PostgreSQL, MongoDB) as L2 and feed |
-| API | their own | their own | Caffeine's, as a drop-in |
-| A load racing a write (stale set) | stale until the TTL | protected | protected |
-| Lost messages | stale until the TTL | detected per partition | detected; L1 distrusted until checked |
-| `compute` across instances | local only, or a lock | atomic (entry processor) | atomic, one store operation on the hot path |
-| `invalidateAll` | racy | cluster-wide | exact, atomic per key as in Caffeine (since the decision for a sweep; before: O(1) and atomic across keys) |
+| Gap                               | Redisson, JetCache    | Hazelcast, Infinispan    | This library                                                                                               |
+|-----------------------------------|-----------------------|--------------------------|------------------------------------------------------------------------------------------------------------|
+| Infrastructure                    | Redis required        | a cluster of their own   | the existing database (PostgreSQL, MongoDB) as L2 and feed                                                 |
+| API                               | their own             | their own                | Caffeine's, as a drop-in                                                                                   |
+| A load racing a write (stale set) | stale until the TTL   | protected                | protected                                                                                                  |
+| Lost messages                     | stale until the TTL   | detected per partition   | detected; L1 distrusted until checked                                                                      |
+| `compute` across instances        | local only, or a lock | atomic (entry processor) | atomic, one store operation on the hot path                                                                |
+| `invalidateAll`                   | racy                  | cluster-wide             | exact, atomic per key as in Caffeine (since the decision for a sweep; before: O(1) and atomic across keys) |
 
 A simpler design that bounds every rare race by a mandatory maximum age in L1 was considered and rejected: it would
 be no better than the others.
 
 **The complexity budget: the core's mechanisms, each tied to a guarantee that makes the library unique.**
 
-| Mechanism | Guarantee |
-|---|---|
-| a version per key, counted by the store; conditional writes | atomic `compute`; no stale sets |
-| versions from reads and messages; one reservation registry | no stale value in L1 beyond the delivery delay; hot keys stay cached |
-| stamp and cut-off, with the basis | exact `invalidateAll` in O(1) |
-| the epoch on gaps | lost messages never leave stale values |
-| a fresh row's start value from the store's counter | a recreated key is never confused with its old lifetime, without a clock |
-| the store guard and retries | robustness when the store fails |
+| Mechanism                                                   | Guarantee                                                                |
+|-------------------------------------------------------------|--------------------------------------------------------------------------|
+| a version per key, counted by the store; conditional writes | atomic `compute`; no stale sets                                          |
+| versions from reads and messages; one reservation registry  | no stale value in L1 beyond the delivery delay; hot keys stay cached     |
+| stamp and cut-off, with the basis                           | exact `invalidateAll` in O(1)                                            |
+| the epoch on gaps                                           | lost messages never leave stale values                                   |
+| a fresh row's start value from the store's counter          | a recreated key is never confused with its old lifetime, without a clock |
+| the store guard and retries                                 | robustness when the store fails                                          |
 
 Revised the same day: with one number per write (a section below), the first, third and fifth collapse into one,
 which gives four mechanisms.
 
 Revised again the same day, with the thin SPI and `invalidateAll` by a sweep:
 
-| Mechanism | Guarantee |
-|---|---|
-| versions (incarnation, counter) computed by the core; compare-and-set in the store | atomic `compute`; no stale sets; a recreated key never confused with its old lifetime |
-| one reservation registry, ordered within an incarnation and conservative across them | no stale value in L1 beyond the delivery delay; hot keys stay cached |
-| `invalidateAll` as a sweep of tombstones with one message | exact, with Caffeine's semantics (atomic per key) |
-| the epoch on gaps | lost messages never leave stale values |
-| the store guard and retries | robustness when the store fails |
+| Mechanism                                                                            | Guarantee                                                                             |
+|--------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------|
+| versions (incarnation, counter) computed by the core; compare-and-set in the store   | atomic `compute`; no stale sets; a recreated key never confused with its old lifetime |
+| one reservation registry, ordered within an incarnation and conservative across them | no stale value in L1 beyond the delivery delay; hot keys stay cached                  |
+| `invalidateAll` as a sweep of tombstones with one message                            | exact, with Caffeine's semantics (atomic per key)                                     |
+| the epoch on gaps                                                                    | lost messages never leave stale values                                                |
+| the store guard and retries                                                          | robustness when the store fails                                                       |
 
 The stamp, the cut-off, the basis and start values from the store are gone.
 
@@ -3773,20 +3849,20 @@ based on its docs (`Tagging.md`, `Clear.md`, `AutoRecovery.md`, `Backplane.md`),
     the node checks whether L2 changed in the meantime. This could matter for the later bus SPI (failed publishes).
     Our writes fail to the caller with an unknown outcome, by design.
 
-### Target design: monotonic versions, proposed by the core, enforced by the store (decided 2026-10-28, not built; supersedes the incarnations of step 2)
+### Target design: monotonic versions, proposed by the core, enforced by the store (decided and built 2026-10-28, build plan step 6a; supersedes the incarnations of step 2)
 
 **Why.** The benchmark of step 6 showed that versions of incarnations and counters (step 2) do not hold under
 contention: when several instances write the same few keys, their versions belong to different incarnations, no
 instance can order them, and L1 drops instead of keeping. Measured (2 instances x 4 threads, 5 s, local containers):
 
-| Scenario | Store | Before step 2 (store versions) | Incarnations | + draining, unconditional puts |
-|---|---|---|---|---|
-| 1 hot key, 80 % gets / 20 % puts: ops/s | PostgreSQL 18 | 29,043 | 21,194 | 16,552 |
-| | MongoDB 8 | 25,324 | 14,620 | 11,545 |
-| the same: store reads per get | PostgreSQL / MongoDB | 0.00 / 0.01 | 1.00 / 1.00 | 0.77 / 0.84 |
-| 10 hot keys, 80/20: ops/s | PostgreSQL / MongoDB | 34,586 / 25,499 | 25,438 / 17,511 | 25,618 / 17,724 |
-| the same: store reads per get | both | 0.15 | 0.30–0.32 | 0.31 |
-| 1 key, `compute` increments: ops/s | MongoDB | 337 | 779 | 725 |
+| Scenario                                | Store                | Before step 2 (store versions) | Incarnations    | + draining, unconditional puts |
+|-----------------------------------------|----------------------|--------------------------------|-----------------|--------------------------------|
+| 1 hot key, 80 % gets / 20 % puts: ops/s | PostgreSQL 18        | 29,043                         | 21,194          | 16,552                         |
+|                                         | MongoDB 8            | 25,324                         | 14,620          | 11,545                         |
+| the same: store reads per get           | PostgreSQL / MongoDB | 0.00 / 0.01                    | 1.00 / 1.00     | 0.77 / 0.84                    |
+| 10 hot keys, 80/20: ops/s               | PostgreSQL / MongoDB | 34,586 / 25,499                | 25,438 / 17,511 | 25,618 / 17,724                |
+| the same: store reads per get           | both                 | 0.15                           | 0.30–0.32       | 0.31                           |
+| 1 key, `compute` increments: ops/s      | MongoDB              | 337                            | 779             | 725                            |
 
 Every write of a key not held started a new incarnation (1,000 of 1,000 on the hot key); the version hint (conditional
 puts on the last version seen) brought that to about 210, but the conditional puts became a compare-and-set storm and
@@ -3851,14 +3927,14 @@ retried above it); the milliseconds are clamped to the 43 bits, and every refusa
 (`DistributedStats#versionRefusalCount`), so a clock far off shows as a steady count. Contention, as in the table above
 (local containers, 2 instances x 4 threads, 5 s):
 
-| Scenario | Store | Before step 2 | Incarnations | Monotonic versions |
-|---|---|---|---|---|
-| 1 hot key, 80/20: ops/s | PostgreSQL / MongoDB | 29,043 / 25,324 | 21,194 / 14,620 | 17,364 / 23,801 |
+| Scenario                                   | Store                | Before step 2      | Incarnations     | Monotonic versions |
+|--------------------------------------------|----------------------|--------------------|------------------|--------------------|
+| 1 hot key, 80/20: ops/s                    | PostgreSQL / MongoDB | 29,043 / 25,324    | 21,194 / 14,620  | 17,364 / 23,801    |
 | the same: store reads per get, L1 hit rate | PostgreSQL / MongoDB | 0.00 / 0.01, 100 % | 1.00 / 1.00, 0 % | 0.24 / 0.09, 100 % |
-| 1 hot key, 50/50: ops/s | PostgreSQL / MongoDB | 11,442 / 9,067 | 10,787 / 10,785 | 7,000 / 9,306 |
-| the same: store reads per get | PostgreSQL / MongoDB | 0.00 / 0.02 | 1.00 / 1.00 | 0.94 / 0.35 |
-| 10 hot keys, 80/20: ops/s | PostgreSQL / MongoDB | 34,586 / 25,499 | 25,438 / 17,511 | 33,738 / 27,033 |
-| throughput, 8 threads, 80/20 | PostgreSQL / MongoDB | 35,476 / 25,786 | 34,251 / 26,883 | 35,408 / 26,995 |
+| 1 hot key, 50/50: ops/s                    | PostgreSQL / MongoDB | 11,442 / 9,067     | 10,787 / 10,785  | 7,000 / 9,306      |
+| the same: store reads per get              | PostgreSQL / MongoDB | 0.00 / 0.02        | 1.00 / 1.00      | 0.94 / 0.35        |
+| 10 hot keys, 80/20: ops/s                  | PostgreSQL / MongoDB | 34,586 / 25,499    | 25,438 / 17,511  | 33,738 / 27,033    |
+| throughput, 8 threads, 80/20               | PostgreSQL / MongoDB | 35,476 / 25,786    | 34,251 / 26,883  | 35,408 / 26,995    |
 
 L1 holds the hot key again (hit rate 100 %, no new incarnations); 10 hot keys are back at the level before step 2. The
 single hot key still reads the store more than before. Measured by where the reads come from (2026-10-29): nearly all
@@ -3870,7 +3946,7 @@ ever refused. Not a correctness question; resolved by "Target design: versions a
 **Separate from it:** a load whose conditional write conflicts again and again (a removal of its key on every attempt)
 gives up after three attempts and returns its value without storing it; decided 2026-10-29 in "The uncached load".
 
-### Target design: versions applied as well as each store can (decided 2026-10-29, not built; refines monotonic versions)
+### Target design: versions applied as well as each store can (decided 2026-10-29, built 2026-10-29 to 2026-10-31, build plan step 6b; refines monotonic versions)
 
 **Decided 2026-10-29:** one version domain, one `write`, and every store applies an advancing write as well as it can
 within its one round trip. Stores that can assign and return a version are never refused; stores that cannot keep
@@ -3879,11 +3955,11 @@ proposal and refusal. The core sees one result for both.
 **Why.** Monotonic versions (above) hold under every store, but their price showed with the clocks per instance (one
 hot key, 2 instances x 4 threads, 5 s, local containers):
 
-| ops/s | Versions assigned by the store (before step 2) | Proposed by the core, refused by the store |
-|---|---|---|
-| 1 hot key 80/20, PostgreSQL | 29,043 | 14,297 (17,857 refusals of 14,262 puts) |
-| 1 hot key 80/20, MongoDB (single-document updates before) | 25,324 | 16,343 (10,697 refusals of 16,354 puts) |
-| 10 hot keys 80/20, PostgreSQL / MongoDB | 34,586 / 25,499 | 30,919 / 23,268 |
+| ops/s                                                     | Versions assigned by the store (before step 2) | Proposed by the core, refused by the store |
+|-----------------------------------------------------------|------------------------------------------------|--------------------------------------------|
+| 1 hot key 80/20, PostgreSQL                               | 29,043                                         | 14,297 (17,857 refusals of 14,262 puts)    |
+| 1 hot key 80/20, MongoDB (single-document updates before) | 25,324                                         | 16,343 (10,697 refusals of 16,354 puts)    |
+| 10 hot keys 80/20, PostgreSQL / MongoDB                   | 34,586 / 25,499                                | 30,919 / 23,268                            |
 
 A store assigning versions decides under its lock of the row: each write takes "stored + 1" and is never refused. A
 version proposed before the write knows nothing of the writers racing it; the store can only refuse the loser, which
@@ -3909,10 +3985,10 @@ versions and stores that cannot; stores with a global counter and stores without
    condition)`, the condition one of advance, missing, or equal to a version. The store answers per write: **applied
    at version v**, or **refused**. How it applies an advance is its choice, per call:
 
-   | Applied | Rule | Version | Refused |
-   |---|---|---|---|
-   | conditional | only if proposed > stored | v = proposed | when a version at least as large is stored |
-   | assigning | always: v = max(stored + 1, proposed [, the server's time]) | v returned by the store | never |
+   | Applied     | Rule                                                        | Version                 | Refused                                    |
+   |-------------|-------------------------------------------------------------|-------------------------|--------------------------------------------|
+   | conditional | only if proposed > stored                                   | v = proposed            | when a version at least as large is stored |
+   | assigning   | always: v = max(stored + 1, proposed [, the server's time]) | v returned by the store | never                                      |
 
    The core treats both alike: it takes the version reported back (in L1, in its clock, as what its messages announce);
    on a refusal it reads and proposes again above (as now). No capability flags: a store that can do more is simply
@@ -3995,17 +4071,17 @@ and with a scan only (polled).
 
 **Missing, as found in real stores so far:**
 
-| Dimension | Values | Found in |
-|---|---|---|
-| Applying an advance | conditional / assigning, chosen per call (single, batch) | all; MongoDB mixes (single assigning, bulk conditional) |
-| Floor of a new row | the proposal / a sequence of its own / the store's time in the core's format | generic JDBC / PostgreSQL / MongoDB, Redis |
-| Batch | atomic / per row, partly failing | PostgreSQL / MongoDB's unordered bulk write |
-| Version-conditioned write on a purged row | nothing / a tombstone | MongoDB (step 5) |
-| Store clock | resolution (micro- or milliseconds), stepping back by up to an amount | PostgreSQL µs, MongoDB ms; NTP |
-| Read of several keys | one snapshot / not one | PostgreSQL / MongoDB's `$in` (matters for the control row read with the keys) |
-| Failover | acknowledged writes lost, versions back to older ones, a gap in the feed | MongoDB with `w:1`, Redis's asynchronous replication |
-| Eviction | none / rows deleted silently, without tombstone or message | Redis with `maxmemory` |
-| Feed | per key in commit order / lossy / history lost | all / Redis pub/sub / MongoDB's `CappedPositionLost` |
+| Dimension                                 | Values                                                                       | Found in                                                                      |
+|-------------------------------------------|------------------------------------------------------------------------------|-------------------------------------------------------------------------------|
+| Applying an advance                       | conditional / assigning, chosen per call (single, batch)                     | all; MongoDB mixes (single assigning, bulk conditional)                       |
+| Floor of a new row                        | the proposal / a sequence of its own / the store's time in the core's format | generic JDBC / PostgreSQL / MongoDB, Redis                                    |
+| Batch                                     | atomic / per row, partly failing                                             | PostgreSQL / MongoDB's unordered bulk write                                   |
+| Version-conditioned write on a purged row | nothing / a tombstone                                                        | MongoDB (step 5)                                                              |
+| Store clock                               | resolution (micro- or milliseconds), stepping back by up to an amount        | PostgreSQL µs, MongoDB ms; NTP                                                |
+| Read of several keys                      | one snapshot / not one                                                       | PostgreSQL / MongoDB's `$in` (matters for the control row read with the keys) |
+| Failover                                  | acknowledged writes lost, versions back to older ones, a gap in the feed     | MongoDB with `w:1`, Redis's asynchronous replication                          |
+| Eviction                                  | none / rows deleted silently, without tombstone or message                   | Redis with `maxmemory`                                                        |
+| Feed                                      | per key in commit order / lossy / history lost                               | all / Redis pub/sub / MongoDB's `CappedPositionLost`                          |
 
 **How it is used:**
 
@@ -4215,15 +4291,15 @@ ScyllaDB, Aerospike, etcd, Cosmos DB, Redis 7, Valkey 8, Couchbase, Firestore, D
 the sources did not confirm are marked so in the research and taken here as likely, not as fact; only PostgreSQL,
 MongoDB and MariaDB were tested by us.
 
-| Dimension | Options confirmed | New options the survey adds |
-|---|---|---|
-| Versioning | conditional: every store; assigning with return, one item: PostgreSQL, CockroachDB, YugabyteDB, SQL Server (`OUTPUT`), Oracle (`RETURNING INTO`), MongoDB, Redis/Valkey/Dragonfly (script), Aerospike (`operate`), DynamoDB (`UpdateItem`, an increment only: no `max`), Firestore (`maximum` transform); in a batch: PostgreSQL family, SQL Server, Redis family (one slot), Aerospike (per key), Firestore (`commit`); none: MySQL (no `RETURNING`; `LAST_INSERT_ID` for one row), Cassandra | **create-then-update**: the advance (`stored < new`, or no row) is two steps where a missing row fails the condition (Cassandra/ScyllaDB `IF v < ?`, Cosmos patch with a filter, Couchbase without a transaction): an insert-if-missing, then an update guarded by the version, the second possibly refused; **refusal reports the row**: DynamoDB (`ReturnValuesOnConditionCheckFailure`), Cassandra LWT, etcd (failure branch), Redis family (script), but none of the SQL databases (at most "0 rows"; MySQL only the 1/2/0 code) |
-| Store clock | microseconds, wall clock: PostgreSQL, MySQL, Oracle, YugabyteDB, Redis family (`TIME`); 100 ns, wall clock: SQL Server; milliseconds: MongoDB, Firestore, Aerospike (last-update time) | **monotonic store clock**: CockroachDB (HLC, `cluster_logical_timestamp()`), Spanner (TrueTime commit timestamp), Couchbase (CAS: an HLC per vBucket, which a future CAS can poison), etcd (revision: logical, no time at all); **none in a write**: DynamoDB, Cosmos (only in a stored procedure), Cassandra (client timestamps by default) |
-| Change source | feed: PostgreSQL, MongoDB, CockroachDB changefeeds, Spanner change streams, SQL Server CDC, MySQL binlog, Oracle LogMiner, YugabyteDB CDC, DynamoDB Streams, ScyllaDB CDC, etcd watch, Cosmos change feed, Couchbase DCP, Firestore listeners, Redis Streams (written by the script); scan: any SQL database | feeds with **a retention that runs out**, each with a detectable error: DynamoDB 24 h, YugabyteDB 8 h (at most 24), SQL Server CDC 72 h, ScyllaDB 24 h, Spanner 1–30 days, MySQL binlog 30 days, etcd until compaction (`compact_revision`); feeds that **miss changes silently**: Cosmos latest-version mode (no deletes, no intermediate versions), Aerospike XDR (skips versions under lag, ships no expirations), DynamoDB (no record for a write that changes nothing), Redis keyspace notifications (fire and forget) |
-| Read of several keys | one snapshot: PostgreSQL, MySQL, Oracle, CockroachDB, YugabyteDB, Spanner, etcd, Redis family (`MGET` or a script, one slot), DynamoDB `TransactGetItems` | item by item: MongoDB, DynamoDB `BatchGetItem`, Cassandra, Aerospike, Couchbase, Cosmos; **SQL Server only with snapshot isolation** (READ COMMITTED takes locks; Azure SQL has RCSI on) |
-| Batch | atomic: every SQL database (per statement), etcd, Redis family (one slot), DynamoDB `TransactWriteItems` (100 items, one outcome), Firestore `commit`, Cosmos (one partition key) | per item, partly failing: MongoDB, DynamoDB `BatchWriteItem`, Cassandra unlogged, Aerospike, Couchbase, Firestore `batchWrite` |
-| Failover | no loss of committed writes by default: CockroachDB, YugabyteDB, Spanner, etcd (consensus); by setting: MySQL (semi-sync `AFTER_SYNC`, Group Replication), SQL Server (synchronous commit), Oracle (Maximum Protection), Couchbase (durability levels, with failover limits), Cassandra (`QUORUM`), Aerospike (strong consistency) | **loss whatever the setting**: Redis and Valkey (`WAIT` and `WAITAOF` do not prevent it, says Redis), Dragonfly; **several writers, the last by time wins**: DynamoDB global tables (default mode: conditions checked against the local copy only), Cosmos with several write regions, KeyDB multi-master. There the store cannot enforce that versions only grow: such a setup is unsupported (documented), or a hostile profile |
-| Deletion by the store | TTL with a delete in the feed: CockroachDB, Spanner, DynamoDB, Cosmos (all-versions mode), Couchbase, etcd (leases), Firestore | **late TTL**: DynamoDB ("within a few days"), Firestore (24 h), Couchbase and Redis (on access or in a sweep): an expired item stays readable and writable until then; **eviction**: Redis family (`maxmemory`), Aerospike, Couchbase ephemeral buckets |
+| Dimension             | Options confirmed                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | New options the survey adds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+|-----------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Versioning            | conditional: every store; assigning with return, one item: PostgreSQL, CockroachDB, YugabyteDB, SQL Server (`OUTPUT`), Oracle (`RETURNING INTO`), MongoDB, Redis/Valkey/Dragonfly (script), Aerospike (`operate`), DynamoDB (`UpdateItem`, an increment only: no `max`), Firestore (`maximum` transform); in a batch: PostgreSQL family, SQL Server, Redis family (one slot), Aerospike (per key), Firestore (`commit`); none: MySQL (no `RETURNING`; `LAST_INSERT_ID` for one row), Cassandra | **create-then-update**: the advance (`stored < new`, or no row) is two steps where a missing row fails the condition (Cassandra/ScyllaDB `IF v < ?`, Cosmos patch with a filter, Couchbase without a transaction): an insert-if-missing, then an update guarded by the version, the second possibly refused; **refusal reports the row**: DynamoDB (`ReturnValuesOnConditionCheckFailure`), Cassandra LWT, etcd (failure branch), Redis family (script), but none of the SQL databases (at most "0 rows"; MySQL only the 1/2/0 code) |
+| Store clock           | microseconds, wall clock: PostgreSQL, MySQL, Oracle, YugabyteDB, Redis family (`TIME`); 100 ns, wall clock: SQL Server; milliseconds: MongoDB, Firestore, Aerospike (last-update time)                                                                                                                                                                                                                                                                                                         | **monotonic store clock**: CockroachDB (HLC, `cluster_logical_timestamp()`), Spanner (TrueTime commit timestamp), Couchbase (CAS: an HLC per vBucket, which a future CAS can poison), etcd (revision: logical, no time at all); **none in a write**: DynamoDB, Cosmos (only in a stored procedure), Cassandra (client timestamps by default)                                                                                                                                                                                         |
+| Change source         | feed: PostgreSQL, MongoDB, CockroachDB changefeeds, Spanner change streams, SQL Server CDC, MySQL binlog, Oracle LogMiner, YugabyteDB CDC, DynamoDB Streams, ScyllaDB CDC, etcd watch, Cosmos change feed, Couchbase DCP, Firestore listeners, Redis Streams (written by the script); scan: any SQL database                                                                                                                                                                                   | feeds with **a retention that runs out**, each with a detectable error: DynamoDB 24 h, YugabyteDB 8 h (at most 24), SQL Server CDC 72 h, ScyllaDB 24 h, Spanner 1–30 days, MySQL binlog 30 days, etcd until compaction (`compact_revision`); feeds that **miss changes silently**: Cosmos latest-version mode (no deletes, no intermediate versions), Aerospike XDR (skips versions under lag, ships no expirations), DynamoDB (no record for a write that changes nothing), Redis keyspace notifications (fire and forget)          |
+| Read of several keys  | one snapshot: PostgreSQL, MySQL, Oracle, CockroachDB, YugabyteDB, Spanner, etcd, Redis family (`MGET` or a script, one slot), DynamoDB `TransactGetItems`                                                                                                                                                                                                                                                                                                                                      | item by item: MongoDB, DynamoDB `BatchGetItem`, Cassandra, Aerospike, Couchbase, Cosmos; **SQL Server only with snapshot isolation** (READ COMMITTED takes locks; Azure SQL has RCSI on)                                                                                                                                                                                                                                                                                                                                             |
+| Batch                 | atomic: every SQL database (per statement), etcd, Redis family (one slot), DynamoDB `TransactWriteItems` (100 items, one outcome), Firestore `commit`, Cosmos (one partition key)                                                                                                                                                                                                                                                                                                              | per item, partly failing: MongoDB, DynamoDB `BatchWriteItem`, Cassandra unlogged, Aerospike, Couchbase, Firestore `batchWrite`                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Failover              | no loss of committed writes by default: CockroachDB, YugabyteDB, Spanner, etcd (consensus); by setting: MySQL (semi-sync `AFTER_SYNC`, Group Replication), SQL Server (synchronous commit), Oracle (Maximum Protection), Couchbase (durability levels, with failover limits), Cassandra (`QUORUM`), Aerospike (strong consistency)                                                                                                                                                             | **loss whatever the setting**: Redis and Valkey (`WAIT` and `WAITAOF` do not prevent it, says Redis), Dragonfly; **several writers, the last by time wins**: DynamoDB global tables (default mode: conditions checked against the local copy only), Cosmos with several write regions, KeyDB multi-master. There the store cannot enforce that versions only grow: such a setup is unsupported (documented), or a hostile profile                                                                                                    |
+| Deletion by the store | TTL with a delete in the feed: CockroachDB, Spanner, DynamoDB, Cosmos (all-versions mode), Couchbase, etcd (leases), Firestore                                                                                                                                                                                                                                                                                                                                                                 | **late TTL**: DynamoDB ("within a few days"), Firestore (24 h), Couchbase and Redis (on access or in a sweep): an expired item stays readable and writable until then; **eviction**: Redis family (`maxmemory`), Aerospike, Couchbase ephemeral buckets                                                                                                                                                                                                                                                                              |
 
 What follows for the plan:
 - **Versioning** gets two options: create-then-update (the advance in two steps) and a refusal that reports the row.
@@ -4271,14 +4347,14 @@ threads on one key).
 
 **What others do** (verified 2026-10-29), each after the first removal, none retrying:
 
-| System | An invalidation during the load | Source |
-|---|---|---|
-| Caffeine 3.3.1 `AsyncLoadingCache` | the waiter gets the value, the cache keeps nothing | measured against the jar |
-| Caffeine 3.3.1 synchronous `LoadingCache` | the removal waits for the load (the key's lock), then removes: linearizable, within one JVM | measured |
-| Hazelcast Near Cache | the fetched value is returned, published only if the reservation still holds | `NearCachedMapProxyImpl`, `AbstractNearCacheRecordStore` |
-| Infinispan Hot Rod near cache | a placeholder before the fetch, `replace(key, placeholder, value)` after; the value returned either way | `InvalidatedNearRemoteCache` |
-| Redis client-side caching | a placeholder; an invalidation deletes it, the reply is not stored | redis.io, "Avoiding race conditions" |
-| Facebook memcache leases | a delete invalidates the lease, the later set is ignored | MIT 6.824 FAQ on the paper |
+| System                                    | An invalidation during the load                                                                         | Source                                                   |
+|-------------------------------------------|---------------------------------------------------------------------------------------------------------|----------------------------------------------------------|
+| Caffeine 3.3.1 `AsyncLoadingCache`        | the waiter gets the value, the cache keeps nothing                                                      | measured against the jar                                 |
+| Caffeine 3.3.1 synchronous `LoadingCache` | the removal waits for the load (the key's lock), then removes: linearizable, within one JVM             | measured                                                 |
+| Hazelcast Near Cache                      | the fetched value is returned, published only if the reservation still holds                            | `NearCachedMapProxyImpl`, `AbstractNearCacheRecordStore` |
+| Infinispan Hot Rod near cache             | a placeholder before the fetch, `replace(key, placeholder, value)` after; the value returned either way | `InvalidatedNearRemoteCache`                             |
+| Redis client-side caching                 | a placeholder; an invalidation deletes it, the reply is not stored                                      | redis.io, "Avoiding race conditions"                     |
+| Facebook memcache leases                  | a delete invalidates the lease, the later set is ignored                                                | MIT 6.824 FAQ on the paper                               |
 
 **Why three attempts, not a time limit.** Every attempt calls the source again (after a removal the value may be
 outdated). A count bounds the calls to the source; a time limit bounds only the caller's wait and lets a storm of
@@ -4293,7 +4369,7 @@ often as it loads, where a cached value would hardly outlive its load anyway. Th
 **Tested:** the exception on its own (`InternalCoreTest`, with the counter); the Lincheck tests raise the attempts
 above the operations of a scenario (`withLoadAttempts`, package-private), so that they check every other case.
 
-### Target design: `invalidateAll` by the store's time, hidden on read (decided 2026-10-28, not built; supersedes the sweep)
+### Target design: `invalidateAll` by the store's time, hidden on read (decided and built 2026-10-28, build plan step 3; supersedes the sweep)
 
 **Decided 2026-10-28:** `invalidateAll` writes one time and hides every row written at or before it; maintenance
 deletes those rows later. This replaces the synchronous sweep of "Target design: a thin SPI" below, and the stamp, the
@@ -4306,16 +4382,16 @@ about that: every O(1) design in the industry cleans up lazily.
 
 **What others do and accept** (researched 2026-10-28):
 
-| System | Invalidate-all | A write pays | Accepted |
-|---|---|---|---|
-| memcached `flush_all` | one server time ("oldest live"); older items expired on access, reclaimed by the LRU | nothing | the server clock; racing sets survive |
-| Varnish bans | a ban list with times, checked on lookup; the ban lurker cleans in the background | nothing | the server clock |
-| FusionCache `Clear()` | a special tag's timestamp; older entries hidden on read; no purge, entries die by TTL | nothing | the writers' clocks (skew loses or keeps entries); racing loads survive |
-| Redisson local cached map | deletes the hash, publishes a clear message | nothing | O(n) in Redis; local copies stale for the message delay |
-| Spring `RedisCache.clear()` | `SCAN` plus `DEL` in batches | nothing | O(n), half cleared while it runs |
-| Hazelcast, Infinispan | removes every entry, near caches invalidated by events | nothing | O(n), not atomic across keys |
-| Caffeine, Guava | key by key | nothing | O(n); loads in flight explicitly undefined |
-| namespace versioning (memcached pattern) | bump a version key carried by every key | **an extra read per operation** | old entries die by TTL |
+| System                                   | Invalidate-all                                                                        | A write pays                    | Accepted                                                                |
+|------------------------------------------|---------------------------------------------------------------------------------------|---------------------------------|-------------------------------------------------------------------------|
+| memcached `flush_all`                    | one server time ("oldest live"); older items expired on access, reclaimed by the LRU  | nothing                         | the server clock; racing sets survive                                   |
+| Varnish bans                             | a ban list with times, checked on lookup; the ban lurker cleans in the background     | nothing                         | the server clock                                                        |
+| FusionCache `Clear()`                    | a special tag's timestamp; older entries hidden on read; no purge, entries die by TTL | nothing                         | the writers' clocks (skew loses or keeps entries); racing loads survive |
+| Redisson local cached map                | deletes the hash, publishes a clear message                                           | nothing                         | O(n) in Redis; local copies stale for the message delay                 |
+| Spring `RedisCache.clear()`              | `SCAN` plus `DEL` in batches                                                          | nothing                         | O(n), half cleared while it runs                                        |
+| Hazelcast, Infinispan                    | removes every entry, near caches invalidated by events                                | nothing                         | O(n), not atomic across keys                                            |
+| Caffeine, Guava                          | key by key                                                                            | nothing                         | O(n); loads in flight explicitly undefined                              |
+| namespace versioning (memcached pattern) | bump a version key carried by every key                                               | **an extra read per operation** | old entries die by TTL                                                  |
 
 Common ground: racing loads and writes survive everywhere; the O(1) designs trust a server clock and clean up lazily;
 none of them makes a write read anything extra, except namespace versioning. Requirement here too: **a `put` reads
@@ -4344,11 +4420,12 @@ stamps in `ReadResult`/`VersionsResult`/`Row`, `Store#invalidateAll` as a method
 
 **What we accept, as the industry does.**
 
-- **A racing load or `compute`:** one that read before the clear and commits after it is stamped after it, so its
+- **A racing load:** one that read before the clear and commits after it is stamped after it, so its
   value survives, stale until the maximum age or the next write of the key. Only the writer knows its decision is
   older than the clear; a timestamp says when a row was written, not when its value was decided. Caffeine documents
-  loads in flight during `invalidateAll` as undefined; memcached, Redis, Hazelcast and FusionCache let them survive.
-  Rare (a load must overlap the clear) and bounded. The repair is for later (build plan, "Later").
+  loads in flight during `invalidateAll` as undefined; Redis, Hazelcast and FusionCache let them survive.
+  Rare (a load must overlap the clear) and bounded. The same for a racing `compute` (any atomic map method deciding on
+  a present value): a repair was built and reverted on 2026-11-05, see below.
 - **The clock.** Stores with a time that never goes backwards (MongoDB's cluster time, a monotonic counter) have no
   caveat. With a wall clock (PostgreSQL's `now()`, Redis `TIME`), a step back (an NTP correction, a failover to a
   standby whose clock is behind) could make a `put` just after a clear look older than it and hide it.
@@ -4358,23 +4435,41 @@ stamps in `ReadResult`/`VersionsResult`/`Row`, `Store#invalidateAll` as a method
   after it counts as before it. Linearizable, since the two overlapped; the window is one short statement.
 - **Other instances** clear L1 within the delivery delay, the bound every change has.
 
-**The repair, for later.** A load or `compute` knows the cut-off from its own read (no extra read: the control row
-comes with it). Generic: each instance keeps a short log of its recent conditional writes, and when it learns a newer
-cut-off (the `INVALIDATED_ALL` message, a poll, a read) it tombstones those decided under an older one, each
-conditionally on its own version: stale at most for the delivery delay. Optional capability for stores that can (SQL):
-the conditional write's statement checks the control row itself and conflicts if the cut-off moved, with no window at
-all. `NONE` mode would read the control row after a conditional write, or keep accepting the race. A `put` is never
-involved: it is not based on a read.
+**The repair: built and reverted 2026-11-05 (too complex for a partial guarantee).** Reproduced first: five of
+`InternalInvalidateAllRaceTest`'s disabled tests failed on every profile (`compute` stored `v+`, `merge` `v1`,
+`replace` `x`); `computeIfAbsent` and `merge` on an absent key are valid in both orders (only the source's freshness
+is open, as for loads). Built: a log per instance of the atomic methods' writes derived from a present value (hash,
+version applied, the cut-off the decision knew), repaired by a conditional tombstone when a newer cut-off was
+learned, settled by the reads the instance made anyway (every read carries the control row; a feed orders per key
+only, so messages cannot settle), with a capacity after which the next operation read instead of taking the hot
+path. Its tests found two more windows (a settling read returning the row under repair; a message between a decision
+and its write), both closed. **Then the property test found the flaw:** a decision on a held value (the hot path, and
+every refresh) knows the cut-off this instance had heard of, not when its value was written against an
+`invalidateAll` not heard of yet. A value this instance wrote after such an `invalidateAll` and then decided on was
+tombstoned, a confirmed write lost without any race (23 of 50 deterministic seeds failed). Only decisions that read
+the store can be judged exactly; repaired alone, they pass, but they close only the window between one read and one
+write, while the hot path's window (the delivery delay) stays open. Reverted by the user's choice ("it's getting
+complex"), the race accepted and documented in the README. To close it fully, if a user needs it:
+- **B: no hot path for the atomic methods**, every one reads first (one more store read each), plus the log above for
+  the window between read and write; a refresh would read before it writes too.
+- **C: the store checks the control row in the conditional write**, with no window and no log: free in a Redis
+  script; `FOR SHARE` on the control row in SQL (a lock hotspot, a MultiXact per operation on PostgreSQL); a
+  transaction on MongoDB. An SPI capability; Redis alone would be the cheap start.
+- **Others (from memory, 2026-11-05):** memcached (`flush_all` makes a later `cas` fail) and Redis (`FLUSHDB` touches
+  watched keys) close it in the store, Hazelcast serializes `clear` and entry processors per partition, Caffeine
+  holds the bin's lock from read to write; FusionCache, JetCache and Redisson have no atomic `compute` across
+  instances. Caffeine discards a refresh whose entry was invalidated meanwhile; here a refresh racing an
+  `invalidateAll` elsewhere survives it.
 
 **Compared.**
 
-| | Caller waits | Extra per `put` | Extra per row | Racing loads |
-|---|---|---|---|---|
-| today's cut-off | no | nothing | stamp and basis | exact |
-| the sweep | yes, O(n) | nothing | nothing | exact |
-| **this design** | **no** | **nothing** | **nothing (write time and age reused)** | **survive until the maximum age, as everywhere; the repair later makes them exact on SQL and bounded by the delivery delay elsewhere** |
+|                 | Caller waits | Extra per `put` | Extra per row                           | Racing loads                                                                                                                           |
+|-----------------|--------------|-----------------|-----------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
+| today's cut-off | no           | nothing         | stamp and basis                         | exact                                                                                                                                  |
+| the sweep       | yes, O(n)    | nothing         | nothing                                 | exact                                                                                                                                  |
+| **this design** | **no**       | **nothing**     | **nothing (write time and age reused)** | **survive until the maximum age, as everywhere; the repair later makes them exact on SQL and bounded by the delivery delay elsewhere** |
 
-### Target design: a thin SPI, versions in the core (decided 2026-10-26, not built; supersedes the target designs below)
+### Target design: a thin SPI, versions in the core (decided 2026-10-26, built 2026-10-28, build plan step 2; supersedes the target designs below)
 
 **Superseded in part 2026-10-28:** `invalidateAll` by a sweep is replaced by the store's time, hidden on read; see
 "Target design: `invalidateAll` by the store's time, hidden on read" above. The rest of this section stands, and
@@ -4483,13 +4578,13 @@ expressions), Cassandra (lightweight transactions), Redis (Lua or `WATCH`), etcd
 
 Optional capabilities, each an upgrade:
 
-| Capability | Gain |
-|---|---|
-| a native feed | `INVALIDATE` and `UPDATE` without polling |
-| a scan by time | the polling feed, gap repair |
-| server time | the cut-off from the store's clock instead of the instance's |
-| a global counter (sequence, cluster time, `rowversion`) | an exact `invalidateAll`, without the wait and without an assumption about skew |
-| checks the cut-off when writing | the hot path: `compute` on a value held in L1 in one operation, a decision under an older cut-off refused. Without it, `compute` reads first (two operations), as MongoDB does today |
+| Capability                                              | Gain                                                                                                                                                                                 |
+|---------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| a native feed                                           | `INVALIDATE` and `UPDATE` without polling                                                                                                                                            |
+| a scan by time                                          | the polling feed, gap repair                                                                                                                                                         |
+| server time                                             | the cut-off from the store's clock instead of the instance's                                                                                                                         |
+| a global counter (sequence, cluster time, `rowversion`) | an exact `invalidateAll`, without the wait and without an assumption about skew                                                                                                      |
+| checks the cut-off when writing                         | the hot path: `compute` on a value held in L1 in one operation, a decision under an older cut-off refused. Without it, `compute` reads first (two operations), as MongoDB does today |
 
 **The core.**
 
@@ -4523,22 +4618,22 @@ Optional capabilities, each an upgrade:
 
 **What it costs.**
 
-| Cost | Weight |
-|---|---|
+| Cost                                                                                                                         | Weight                                                                                 |
+|------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------|
 | a `put` on a key not held starts a new incarnation, so its order against other writes is unknown, and L1 acts conservatively | low: a hot key is usually held, and then the `put` is conditional on the known version |
-| without the global counter, `invalidateAll` waits 2ε and is exact only while the measured skew stays within ε | only on the rare operation; PostgreSQL and MongoDB declare the counter |
-| without the cut-off check, `compute` reads first | as MongoDB today |
-| the control row read with every batch | one more key in the same round trip |
-| the refactor: versions move from the store to the core | high, once |
+| without the global counter, `invalidateAll` waits 2ε and is exact only while the measured skew stays within ε                | only on the rare operation; PostgreSQL and MongoDB declare the counter                 |
+| without the cut-off check, `compute` reads first                                                                             | as MongoDB today                                                                       |
+| the control row read with every batch                                                                                        | one more key in the same round trip                                                    |
+| the refactor: versions move from the store to the core                                                                       | high, once                                                                             |
 
 **Compared with the designs below.**
 
-| | One number from the store | A thin SPI, versions in the core |
-|---|---|---|
-| what a store must do | count, return, filter | compare-and-set on a version it does not interpret |
-| returns | mandatory (MongoDB's bulk: two round trips) | none |
-| stores without a global counter | a fallback, a special case | the normal case |
-| exact `invalidateAll` without an assumption | everywhere with a counter | where the counter capability exists |
+|                                             | One number from the store                   | A thin SPI, versions in the core                   |
+|---------------------------------------------|---------------------------------------------|----------------------------------------------------|
+| what a store must do                        | count, return, filter                       | compare-and-set on a version it does not interpret |
+| returns                                     | mandatory (MongoDB's bulk: two round trips) | none                                               |
+| stores without a global counter             | a fallback, a special case                  | the normal case                                    |
+| exact `invalidateAll` without an assumption | everywhere with a counter                   | where the counter capability exists                |
 
 The one-number design and its fallback below remain as the reasoning, and as what the global counter capability
 gives.
@@ -4548,15 +4643,15 @@ gives.
 **The idea, as in etcd's `revision` and a database's log sequence number.** One number, assigned by the store on
 every write, does every job a number does today:
 
-| Today | With one number |
-|---|---|
-| a per-key version (`+1`) | the stamp, which increases per key too |
-| a fresh row's start value | gone: a global counter is above every older lifetime by itself |
-| the order of messages and reads in L1 | the stamp |
-| `invalidateAll`'s cut-off | the control row's stamp, as now |
-| the basis in the SPI | gone: the expected stamp is the basis. A decision on a row with stamp `s` stands exactly while `s > cutoff`. SQL checks that in the write's statement; MongoDB stores `s` as `b` internally, with its visibility rule unchanged |
-| the feed's position, gap repair | "since stamp X", as now |
-| session tokens (later) | free: the highest stamp seen |
+| Today                                 | With one number                                                                                                                                                                                                                 |
+|---------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| a per-key version (`+1`)              | the stamp, which increases per key too                                                                                                                                                                                          |
+| a fresh row's start value             | gone: a global counter is above every older lifetime by itself                                                                                                                                                                  |
+| the order of messages and reads in L1 | the stamp                                                                                                                                                                                                                       |
+| `invalidateAll`'s cut-off             | the control row's stamp, as now                                                                                                                                                                                                 |
+| the basis in the SPI                  | gone: the expected stamp is the basis. A decision on a row with stamp `s` stands exactly while `s > cutoff`. SQL checks that in the write's statement; MongoDB stores `s` as `b` internally, with its visibility rule unchanged |
+| the feed's position, gap repair       | "since stamp X", as now                                                                                                                                                                                                         |
+| session tokens (later)                | free: the highest stamp seen                                                                                                                                                                                                    |
 
 Ruled out earlier because it narrows the stores. Under the database focus and the complexity budget that no longer
 counts: the cut-off needs a global counter anyway.
@@ -4569,12 +4664,12 @@ counts: the cut-off needs a global counter anyway.
 
 **The core, with one number.**
 
-| Mechanism | Guarantee |
-|---|---|
+| Mechanism                                                     | Guarantee                                                                                     |
+|---------------------------------------------------------------|-----------------------------------------------------------------------------------------------|
 | one number from the store per write; conditional writes on it | atomic `compute`; no stale sets; recreated keys never confused; exact `invalidateAll` in O(1) |
-| one reservation registry, ordered by the number | no stale value in L1 beyond the delivery delay; hot keys stay cached |
-| the epoch on gaps; repair by a scan from the last number | lost messages never leave stale values |
-| the store guard and retries | robustness when the store fails |
+| one reservation registry, ordered by the number               | no stale value in L1 beyond the delivery delay; hot keys stay cached                          |
+| the epoch on gaps; repair by a scan from the last number      | lost messages never leave stale values                                                        |
+| the store guard and retries                                   | robustness when the store fails                                                               |
 
 Four mechanisms instead of the six in the complexity budget, with the same guarantees.
 
@@ -4606,14 +4701,14 @@ number. Returning costs nothing on PostgreSQL (`RETURNING`), and nothing on Mong
 
 **What it costs.**
 
-| Cost | Weight |
-|---|---|
-| fewer stores: a global counter, set atomically in the write and returnable | already paid: the cut-off needs one |
-| PostgreSQL's sequence must use `CACHE 1`, the default: with a cache per session a later write can get a lower number | new, and a hard requirement: checked at startup, as `PostgresSchema` checks the schema, and documented |
-| no dense numbers per key (8, 15, 42 …) | low: the core uses neither a count of writes nor gaps per key; debugging loses a little |
-| thicker adapters: MongoDB's bulk path | medium; adapter code, tested there |
-| the refactor: the SPI, three adapters, the core, every test that uses versions | high, once; done under the contract, property and Lincheck tests |
-| checks before building: `$$CLUSTER_TIME` increasing per MongoDB document and never repeating; MariaDB under row locks | to do |
+| Cost                                                                                                                  | Weight                                                                                                 |
+|-----------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------|
+| fewer stores: a global counter, set atomically in the write and returnable                                            | already paid: the cut-off needs one                                                                    |
+| PostgreSQL's sequence must use `CACHE 1`, the default: with a cache per session a later write can get a lower number  | new, and a hard requirement: checked at startup, as `PostgresSchema` checks the schema, and documented |
+| no dense numbers per key (8, 15, 42 …)                                                                                | low: the core uses neither a count of writes nor gaps per key; debugging loses a little                |
+| thicker adapters: MongoDB's bulk path                                                                                 | medium; adapter code, tested there                                                                     |
+| the refactor: the SPI, three adapters, the core, every test that uses versions                                        | high, once; done under the contract, property and Lincheck tests                                       |
+| checks before building: `$$CLUSTER_TIME` increasing per MongoDB document and never repeating; MariaDB under row locks | to do                                                                                                  |
 
 Not a cost:
 
@@ -4643,12 +4738,12 @@ Not a cost:
 **The caveat for stores that scale out.** A global order across all writes is always a point of coordination, and
 the further a store scales out, the more it costs:
 
-| Store | Global number | Price |
-|---|---|---|
-| one primary (PostgreSQL, a MongoDB replica set) | sequence, cluster time | about free |
-| sharded MongoDB | cluster time | cheap: a hybrid clock, exchanged anyway |
+| Store                                              | Global number              | Price                                                                                                     |
+|----------------------------------------------------|----------------------------|-----------------------------------------------------------------------------------------------------------|
+| one primary (PostgreSQL, a MongoDB replica set)    | sequence, cluster time     | about free                                                                                                |
+| sharded MongoDB                                    | cluster time               | cheap: a hybrid clock, exchanged anyway                                                                   |
 | distributed SQL (CockroachDB, YugabyteDB, Spanner) | commit timestamp, sequence | expensive (restarts, a hotspot, a round trip between regions), or only as safe as the bound on clock skew |
-| key-value at scale (DynamoDB, Cassandra) | none, or a counter row | a hotspot, about 1,000 writes a second |
+| key-value at scale (DynamoDB, Cassandra)           | none, or a counter row     | a hotspot, about 1,000 writes a second                                                                    |
 
 One number ties every write to that order. For the focus (PostgreSQL, MongoDB) that is free. Order across keys is
 truly needed for two things only: the cut-off of `invalidateAll`, and a fresh row's start. Order per key is cheap
@@ -4702,14 +4797,14 @@ distributed SQL, when one is wanted).**
     budget, and it supersedes the "optional version in write results" from the target design's settled points.
 - **Performance against the global counter: not a degraded mode.** Each store takes the path that is fastest for it.
 
-  | Point | Global counter | Fallback |
-  |---|---|---|
-  | `invalidateAll` | O(1), returns at once | O(1), waits 2ε (one second, say) |
-  | hits on keys written by bulk `put` | full, the order always known | fewer: a new incarnation per item leaves the order unknown, so L1 acts conservatively |
-  | hits after a key is recreated | full | one extra miss (rare) |
-  | guarantee | exact, without an assumption | exact while skew stays within ε |
-  | single writes, conditional writes, inserts, reads | one round trip | one round trip, the version computed |
-  | write throughput as the store scales out | every write draws from one counter, a point of coordination | nothing global: writes scale with the partitions |
+  | Point                                             | Global counter                                              | Fallback                                                                              |
+  |---------------------------------------------------|-------------------------------------------------------------|---------------------------------------------------------------------------------------|
+  | `invalidateAll`                                   | O(1), returns at once                                       | O(1), waits 2ε (one second, say)                                                      |
+  | hits on keys written by bulk `put`                | full, the order always known                                | fewer: a new incarnation per item leaves the order unknown, so L1 acts conservatively |
+  | hits after a key is recreated                     | full                                                        | one extra miss (rare)                                                                 |
+  | guarantee                                         | exact, without an assumption                                | exact while skew stays within ε                                                       |
+  | single writes, conditional writes, inserts, reads | one round trip                                              | one round trip, the version computed                                                  |
+  | write throughput as the store scales out          | every write draws from one counter, a point of coordination | nothing global: writes scale with the partitions                                      |
 
   - On a single primary (PostgreSQL, MongoDB) the global counter is free and best: exact, no wait, full hits. It
     stays the main path.
@@ -4717,17 +4812,17 @@ distributed SQL, when one is wanted).**
     trades a slower `invalidateAll` and some hits on keys hot through `put` for writes that scale freely.
 - **Drawbacks per store**, as known on 2026-10-26. Points marked "to check" are not verified yet.
 
-  | Store | Path | Drawbacks |
-  |---|---|---|
-  | PostgreSQL | global counter | the sequence must keep `CACHE 1` (checked at startup); `NOTIFY` payloads are capped at 8000 bytes; one connection per instance stays open for `LISTEN` |
-  | MongoDB | global counter | **bulk writes return no versions**: two round trips (bulk write, then a read of `{s, w}` with the write marker), plus classifying each index and repairing the purge race in the adapter; a write cannot check the cut-off in its filter (no read of a second document), so a decision under an older cut-off is hidden by `b` instead of refused; `$$CLUSTER_TIME` increasing and unique per document (to check) |
-  | MariaDB | global counter | no `RETURNING` on `UPDATE`: `PREVIOUS VALUE FOR` in the same session, or a read back in the same transaction (row locks held a little longer); no native feed: the binlog through a replication client (`binlog_format=ROW`, replication privileges) or the polling feed; under Galera, sequences are not globally ordered; a waiting `UPDATE` drawing after its lock (to check) |
-  | MySQL | global counter, emulated | no sequences: a ticket table on `AUTO_INCREMENT` (one more small insert per write, `innodb_autoinc_lock_mode=2`, tickets deleted now and then); no native feed (binlog or polling) |
-  | SQL Server | global counter (`rowversion`) | the feed is Change Tracking or CDC, filled from the log, so close to polling, with a latency of seconds; Query Notifications are coarse |
-  | Oracle | global counter | under RAC a sequence keeps its order only with `ORDER`, which coordinates across nodes; the feed (Continuous Query Notification, Advanced Queuing) depends on edition and licence (to check) |
-  | CockroachDB | global counter (commit timestamp) or fallback | `cluster_logical_timestamp()` pins the transaction's timestamp, so more restarts under contention, and only under `SERIALIZABLE`; it must be packed into 64 bits (assumes a logical part below 1000); a sequence is a hotspot of one range; changefeeds need `kv.rangefeed.enabled` and a licence check |
-  | DynamoDB | fallback | no server time in writes, so ε must cover the instances' clocks; `BatchWriteItem` cannot `+1`, so bulk `put`s take a new incarnation per item and lose hits on keys hot through `put`; no `updateAll`; Streams keep 24 hours (a longer outage is a gap) |
-  | Cassandra | fallback | `+1` only through lightweight transactions (Paxos, several round trips), so every write is a slow conditional one; no usable feed (CDC writes files per node), and a scan by time needs an index of its own; `TRUNCATE` removes without tombstones |
+  | Store       | Path                                          | Drawbacks                                                                                                                                                                                                                                                                                                                                                                                                         |
+  |-------------|-----------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+  | PostgreSQL  | global counter                                | the sequence must keep `CACHE 1` (checked at startup); `NOTIFY` payloads are capped at 8000 bytes; one connection per instance stays open for `LISTEN`                                                                                                                                                                                                                                                            |
+  | MongoDB     | global counter                                | **bulk writes return no versions**: two round trips (bulk write, then a read of `{s, w}` with the write marker), plus classifying each index and repairing the purge race in the adapter; a write cannot check the cut-off in its filter (no read of a second document), so a decision under an older cut-off is hidden by `b` instead of refused; `$$CLUSTER_TIME` increasing and unique per document (to check) |
+  | MariaDB     | global counter                                | no `RETURNING` on `UPDATE`: `PREVIOUS VALUE FOR` in the same session, or a read back in the same transaction (row locks held a little longer); no native feed: the binlog through a replication client (`binlog_format=ROW`, replication privileges) or the polling feed; under Galera, sequences are not globally ordered; a waiting `UPDATE` drawing after its lock (to check)                                  |
+  | MySQL       | global counter, emulated                      | no sequences: a ticket table on `AUTO_INCREMENT` (one more small insert per write, `innodb_autoinc_lock_mode=2`, tickets deleted now and then); no native feed (binlog or polling)                                                                                                                                                                                                                                |
+  | SQL Server  | global counter (`rowversion`)                 | the feed is Change Tracking or CDC, filled from the log, so close to polling, with a latency of seconds; Query Notifications are coarse                                                                                                                                                                                                                                                                           |
+  | Oracle      | global counter                                | under RAC a sequence keeps its order only with `ORDER`, which coordinates across nodes; the feed (Continuous Query Notification, Advanced Queuing) depends on edition and licence (to check)                                                                                                                                                                                                                      |
+  | CockroachDB | global counter (commit timestamp) or fallback | `cluster_logical_timestamp()` pins the transaction's timestamp, so more restarts under contention, and only under `SERIALIZABLE`; it must be packed into 64 bits (assumes a logical part below 1000); a sequence is a hotspot of one range; changefeeds need `kv.rangefeed.enabled` and a licence check                                                                                                           |
+  | DynamoDB    | fallback                                      | no server time in writes, so ε must cover the instances' clocks; `BatchWriteItem` cannot `+1`, so bulk `put`s take a new incarnation per item and lose hits on keys hot through `put`; no `updateAll`; Streams keep 24 hours (a longer outage is a gap)                                                                                                                                                           |
+  | Cassandra   | fallback                                      | `+1` only through lightweight transactions (Paxos, several round trips), so every write is a slow conditional one; no usable feed (CDC writes files per node), and a scan by time needs an index of its own; `TRUNCATE` removes without tombstones                                                                                                                                                                |
 
   | Redis | global counter on one node, or with all keys of a cache in one slot (a hash tag); fallback in cluster mode | a Lua script does `INCR` of a counter, the row and the message atomically, and returns the number. In cluster mode a script reaches keys of one slot only, so a global counter means one shard (no scaling out), otherwise the fallback (per key, with `TIME` for the cut-off). Asynchronous replication and AOF `everysec` can lose the last writes on a failover or crash, **and the counter can go back**, a hard risk for every order: a change of `run_id` or of the primary must count as a gap (the epoch), and the counter is raised past anything handed out. Keyspace notifications carry no version and are fire-and-forget, so the script publishes its own message (`PUBLISH`, `SPUBLISH` in a cluster), or appends to a stream (`XADD`: ordered and resumable by ID, so gaps are repaired, but it must be trimmed). A scan in stamp order needs an index of its own (a sorted set) or the stream |
 
@@ -4832,19 +4927,19 @@ the gain is reachable inside an adapter.
   2. the Docker stall confirmed on native databases;
   3. MongoDB's bulk writes as above, measured against the native numbers.
 
-### Design study: L1 by invalidation and reservation instead of version order (recorded 2026-10-26, not built)
+### Design study: L1 by invalidation and reservation instead of version order (recorded 2026-10-26; only its reservation registry built, build plan step 4)
 
 The goal: a simpler core for L1 that is not weaker, following what others do in production. The store side stays
 as it is: versions as compare-and-set tokens, stamps, the cut-off and the basis.
 
 **What others do.**
 
-| System | L1 kept current by | Loads racing writes | Lost messages |
-|---|---|---|---|
-| Redis client-side caching | invalidations from the server, no versions | a "load in progress" placeholder; an invalidation removes it; the reply is stored only if it is still there | clear L1 on reconnect |
-| Hazelcast Near Cache | invalidations with a sequence per partition | a reservation with an id; installed only if still one's own | gaps in the sequence detected; a repair task clears |
-| Facebook memcache | deletes | a lease per miss; a set counts only with a valid lease; a delete revokes it | (no L1) |
-| Redisson local cached map, JetCache | pub/sub invalidation or update, no versions | none (accepted) | clear, or replay a log of 10 minutes |
+| System                              | L1 kept current by                          | Loads racing writes                                                                                         | Lost messages                                       |
+|-------------------------------------|---------------------------------------------|-------------------------------------------------------------------------------------------------------------|-----------------------------------------------------|
+| Redis client-side caching           | invalidations from the server, no versions  | a "load in progress" placeholder; an invalidation removes it; the reply is stored only if it is still there | clear L1 on reconnect                               |
+| Hazelcast Near Cache                | invalidations with a sequence per partition | a reservation with an id; installed only if still one's own                                                 | gaps in the sequence detected; a repair task clears |
+| Facebook memcache                   | deletes                                     | a lease per miss; a set counts only with a valid lease; a delete revokes it                                 | (no L1)                                             |
+| Redisson local cached map, JetCache | pub/sub invalidation or update, no versions | none (accepted)                                                                                             | clear, or replay a log of 10 minutes                |
 
 None of them order versions inside L1. They protect a load by a reservation, and treat a gap by clearing.
 
@@ -4957,19 +5052,19 @@ Three more make sense; three others were considered and do not fit.
 
 **Considered and not a fit.**
 
-| Design | Why not |
-|---|---|
+| Design                                                                                                                                                                    | Why not                                                                                                                                            |
+|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
 | One ordered log as the only truth (change data capture, e.g. PostgreSQL logical replication: apply up to a position, read one's own writes by waiting for one's position) | the strongest and clearest semantics, but heavy to run (replication slots, `wal_level=logical`), and one's own writes wait for the log: not simple |
-| Ownership per key (Hazelcast, Infinispan: consistent hashing, writes routed to the owner) | needs cluster membership among the instances, a second system beside the store: the store is meant to be the only coordinator |
-| Order by timestamp (last write wins as in Cassandra) | correctness would depend on clocks: ruled out in alternative 1 |
+| Ownership per key (Hazelcast, Infinispan: consistent hashing, writes routed to the owner)                                                                                 | needs cluster membership among the instances, a second system beside the store: the store is meant to be the only coordinator                      |
+| Order by timestamp (last write wins as in Cassandra)                                                                                                                      | correctness would depend on clocks: ruled out in alternative 1                                                                                     |
 
 **How they combine.**
 
-| Design | Robustness | Performance | Simplicity |
-|---|---|---|---|
-| 2 | high | extra misses under contention | simpler L1 |
-| 2 + 3 | highest: bounded staleness even after a lost message | plus small asynchronous checks | simple, plus one rule |
-| 2 with 4's rule | high | a read after each write | simplest |
+| Design          | Robustness                                           | Performance                    | Simplicity            |
+|-----------------|------------------------------------------------------|--------------------------------|-----------------------|
+| 2               | high                                                 | extra misses under contention  | simpler L1            |
+| 2 + 3           | highest: bounded staleness even after a lost message | plus small asynchronous checks | simple, plus one rule |
+| 2 with 4's rule | high                                                 | a read after each write        | simplest              |
 
 Recommended target: 2 + 3 (superseded the same day by the target design below).
 
@@ -4979,7 +5074,7 @@ Recommended target: 2 + 3 (superseded the same day by the target design below).
 - 5 only if measured.
 - 1 stays inside the MongoDB adapter.
 
-### Target design: reservations in L1, versions read but never returned by writes (recorded 2026-10-26, not built)
+### Target design: reservations in L1, versions read but never returned by writes (recorded 2026-10-26; only its reservation registry built, build plan step 4)
 
 **Status after the complexity budget (same day).**
 
@@ -4999,12 +5094,12 @@ The rest is kept for the reasoning.
 - **Op ids** for recognising one's own unconditional writes, and for resolving unknown outcomes.
 - **Writes that return only applied or conflict.**
 
-| Path | Version known? | Rule in L1 |
-|---|---|---|
-| a read or reload under a reservation | yes, the read returns it | install if its version is at least the highest version announced during the reservation, and at least what L1 holds |
-| a message | yes, it carries it | at or below what is held: ignore; newer: remove (`INVALIDATE`) or reload under a reservation (`UPDATE`) |
-| a conditional write | yes: `expected + 1`, computed by the writer | as a read |
-| an unconditional `put` or `remove` | no | install only if no message came during the reservation; its echo, recognised by op id, fills in the version |
+| Path                                 | Version known?                              | Rule in L1                                                                                                          |
+|--------------------------------------|---------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
+| a read or reload under a reservation | yes, the read returns it                    | install if its version is at least the highest version announced during the reservation, and at least what L1 holds |
+| a message                            | yes, it carries it                          | at or below what is held: ignore; newer: remove (`INVALIDATE`) or reload under a reservation (`UPDATE`)             |
+| a conditional write                  | yes: `expected + 1`, computed by the writer | as a read                                                                                                           |
+| an unconditional `put` or `remove`   | no                                          | install only if no message came during the reservation; its echo, recognised by op id, fills in the version         |
 
 Why not op ids alone (the design below):
 
@@ -5110,13 +5205,13 @@ apply.
 
 **The design.**
 
-| Part | What it is |
-|---|---|
-| Row | key, value, state, **op id**, **stamp**, basis |
-| Op id | chosen by the writer, unique, never reused: 128 bits, an instance id drawn from a store sequence at start plus a local counter. It replaces the per-key version everywhere. |
-| Stamp | assigned by the store, ordered across keys (a sequence, cluster time). It orders `invalidateAll`'s cut-off and the scan, as now. |
-| Writes | conditional (`WHERE op = :expected`, or absent) or unconditional; return per entry **applied or conflict**, nothing else |
-| L1 | alternative 2: reservations in the per-key registry, with equality of op ids instead of version order |
+| Part   | What it is                                                                                                                                                                  |
+|--------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Row    | key, value, state, **op id**, **stamp**, basis                                                                                                                              |
+| Op id  | chosen by the writer, unique, never reused: 128 bits, an instance id drawn from a store sequence at start plus a local counter. It replaces the per-key version everywhere. |
+| Stamp  | assigned by the store, ordered across keys (a sequence, cluster time). It orders `invalidateAll`'s cut-off and the scan, as now.                                            |
+| Writes | conditional (`WHERE op = :expected`, or absent) or unconditional; return per entry **applied or conflict**, nothing else                                                    |
+| L1     | alternative 2: reservations in the per-key registry, with equality of op ids instead of version order                                                                       |
 
 **What uses equality of op ids.**
 
@@ -5155,11 +5250,11 @@ in order and limited. It reads again over a window of late commits, because a st
 before the commit and can commit out of order. That is what the polling feed does today, by write time on its
 maintenance index.
 
-| Use | Needed for correctness? |
-|---|---|
-| Distribution for a store without a native feed (the polling feed) | yes, there: it is that store's only feed |
+| Use                                                                                  | Needed for correctness?                                                                              |
+|--------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------|
+| Distribution for a store without a native feed (the polling feed)                    | yes, there: it is that store's only feed                                                             |
 | Repairing a gap: scan since the last position seen, instead of distrusting all of L1 | no: the epoch is correct without it, only more expensive (every held value checked on its next read) |
-| A periodic scan beside a native feed, as a safety net | no: a bonus |
+| A periodic scan beside a native feed, as a safety net                                | no: a bonus                                                                                          |
 
 **Why the safety net is only a bonus.**
 
@@ -5185,17 +5280,17 @@ maintenance index.
 What the cut-off costs as built, per operation, against before (not measured yet as built; the measurements under
 "`invalidateAll`, logical" were of the statements alone):
 
-| Where | Cost | Why |
-|---|---|---|
-| every conditional write of a value (load, refresh, compute methods, `putIfAbsent`, bulk loads once per batch) | one read of no keys after it | the check against the cut-off |
-| `compute`, `computeIfPresent`, `merge` with the key held trusted in L1 | one read before it | the decision must carry the cut-off of a read |
-| a refresh | one read of no keys before the source | the same, for the held value it starts from |
-| a load starting over after a conflict | one read | a conflict's row carries no cut-off |
-| a conditional write with its outcome unknown, after an `invalidateAll` | one read and possibly an undo | the repair by value |
-| `invalidateAll` | two control writes, two `INVALIDATED_ALL` messages, two clears of L1 per instance | the commit window |
-| every read | the cut-off with it: PostgreSQL one primary-key subselect, MongoDB the control document already | the visibility filter |
-| maintenance after an `invalidateAll` | deleting the hidden rows, in batches over its runs | no sweep |
-| MongoDB documents | one more field (`s`, 12 bytes) | the stamp |
+| Where                                                                                                         | Cost                                                                                            | Why                                           |
+|---------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------|-----------------------------------------------|
+| every conditional write of a value (load, refresh, compute methods, `putIfAbsent`, bulk loads once per batch) | one read of no keys after it                                                                    | the check against the cut-off                 |
+| `compute`, `computeIfPresent`, `merge` with the key held trusted in L1                                        | one read before it                                                                              | the decision must carry the cut-off of a read |
+| a refresh                                                                                                     | one read of no keys before the source                                                           | the same, for the held value it starts from   |
+| a load starting over after a conflict                                                                         | one read                                                                                        | a conflict's row carries no cut-off           |
+| a conditional write with its outcome unknown, after an `invalidateAll`                                        | one read and possibly an undo                                                                   | the repair by value                           |
+| `invalidateAll`                                                                                               | two control writes, two `INVALIDATED_ALL` messages, two clears of L1 per instance               | the commit window                             |
+| every read                                                                                                    | the cut-off with it: PostgreSQL one primary-key subselect, MongoDB the control document already | the visibility filter                         |
+| maintenance after an `invalidateAll`                                                                          | deleting the hidden rows, in batches over its runs                                              | no sweep                                      |
+| MongoDB documents                                                                                             | one more field (`s`, 12 bytes)                                                                  | the stamp                                     |
 
 **Superseded (2026-10-25):** the decision's cut-off on every row removed the check after every conditional write,
 its undo and repair, and the second control write; candidate 3 below became the hot path. The table above and the
@@ -5265,7 +5360,7 @@ each with the in-memory store). Nothing on the store contract.
 
 Nothing left; the next step is the decision whether to build it, and in which order.
 
-## Build plan: start here (recorded 2026-10-26; steps 1 to 5 built 2026-10-28)
+## Build plan: start here (recorded 2026-10-26; steps 1 to 6 built 2026-10-28 to 2026-10-31, step 7 open)
 
 The decisions of 2026-10-26, in the order to build them. Every step stays green under the existing tests: the
 contract, the property test, Lincheck on one and on two instances, the minimal runs per change, and the full matrix
@@ -5303,12 +5398,12 @@ at the end.
    - Compared with others (checked 2026-10-28 in their sources): the epoch plus a counter within it is an
      established pattern. What differs is who issues the epoch, and so whether epochs are ordered:
 
-     | | Epoch | Order across epochs | Issued by |
-     |---|---|---|---|
-     | Hazelcast near cache | partition UUID, plus a sequence per partition | none: a new UUID resets the tracking, the data is distrusted (`RepairingHandler`) | the cluster |
-     | Infinispan | topology id, plus a counter (`SimpleClusteredVersion`) | yes: compared topology first, then counter | the cluster |
-     | Raft | term, plus an index | yes: terms increase | an election |
-     | this library | random incarnation, plus a counter | none: L1 drops what it cannot order | the writer, without coordination |
+     |                      | Epoch                                                  | Order across epochs                                                               | Issued by                        |
+     |----------------------|--------------------------------------------------------|-----------------------------------------------------------------------------------|----------------------------------|
+     | Hazelcast near cache | partition UUID, plus a sequence per partition          | none: a new UUID resets the tracking, the data is distrusted (`RepairingHandler`) | the cluster                      |
+     | Infinispan           | topology id, plus a counter (`SimpleClusteredVersion`) | yes: compared topology first, then counter                                        | the cluster                      |
+     | Raft                 | term, plus an index                                    | yes: terms increase                                                               | an election                      |
+     | this library         | random incarnation, plus a counter                     | none: L1 drops what it cannot order                                               | the writer, without coordination |
 
      Increasing epochs need a coordinator or the store to issue them; that is what store-assigned, returned versions
      (memcached's and Couchbase's CAS, DynamoDB's ETags, the earlier design here) buy back: every version ordered, no
@@ -5333,8 +5428,8 @@ at the end.
      and added to every read; its write is announced as an ordinary `WRITTEN`, which the core takes as
      `invalidateAll` (`Change.Kind.INVALIDATED_ALL` is gone). Reserved rows (`#` hashes) are never expired or pruned.
    - `read` returns the rows only (`ReadResult` is gone); `VersionsResult` carries versions and ages; `Row` and
-     `Write` have no stamp and no basis. PostgreSQL and MongoDB refuse tables of the previous layout (schema marker
-     2) unless reset; the JDBC adapter refuses a table with a `stamp` column.
+     `Write` have no stamp and no basis. PostgreSQL and MongoDB refuse tables of the previous layout (schema
+     marker 2) unless reset; the JDBC adapter refuses a table with a `stamp` column.
    - `Store#clockAllowance()` (10 ms by default, zero for the in-memory store): what `invalidateAll` waits before it
      returns, so that no `put` pays for a wall clock's skew or millisecond resolution.
    - The atomic map operations of one instance are atomic per key against its own `invalidateAll`, as in Caffeine:
@@ -5477,15 +5572,15 @@ at the end.
       Measured (2026-10-31, local container, 2 instances x 4 threads, 5 s; the commit before, c561c9b, measured
       right before on the same machine, slower today than in the tables above):
 
-      | Scenario | Proposed (c561c9b) | Assigned |
-      |---|---|---|
-      | 1 hot key, 80/20: ops/s | 12,737 | 23,569 |
-      | the same: store reads per get, refusals in 5 s | 0.31, 15,550 | 0.00, 0 |
-      | 1 hot key, 50/50: ops/s, store reads per get | 4,625, 1.27 | 9,923, 0.00 |
-      | 10 hot keys, 80/20: ops/s | 22,097 | 25,781 |
-      | compute (increment) only: ops/s | 1,118 | 1,266 |
-      | throughput, 8 threads, 80/20 (1,000 keys) | 27,073 | 25,735 |
-      | put, p50 µs | 313 | 319 |
+      | Scenario                                       | Proposed (c561c9b) | Assigned    |
+      |------------------------------------------------|--------------------|-------------|
+      | 1 hot key, 80/20: ops/s                        | 12,737             | 23,569      |
+      | the same: store reads per get, refusals in 5 s | 0.31, 15,550       | 0.00, 0     |
+      | 1 hot key, 50/50: ops/s, store reads per get   | 4,625, 1.27        | 9,923, 0.00 |
+      | 10 hot keys, 80/20: ops/s                      | 22,097             | 25,781      |
+      | compute (increment) only: ops/s                | 1,118              | 1,266       |
+      | throughput, 8 threads, 80/20 (1,000 keys)      | 27,073             | 25,735      |
+      | put, p50 µs                                    | 313                | 319         |
 
       A racing put no longer reads and writes again: the single hot key nearly doubles, as before step 2 (29,043
       against 14,297 then); the uncontended rows are unchanged within the noise (`nextval` per write costs nothing
@@ -5507,14 +5602,14 @@ at the end.
       bound of an assigning store). Measured (2026-10-31, local containers, 2 instances x 4 threads, 5 s; c561c9b,
       unchanged for MongoDB, in three runs, the change in two):
 
-      | Scenario | Proposed (c561c9b) | Single writes assigned |
-      |---|---|---|
-      | 1 hot key, 80/20: ops/s | 14,505–14,954 | 21,398–22,012 |
-      | the same: store reads per get, refusals in 5 s | 0.17, 9,592 | 0.01, 0 |
-      | 1 hot key, 50/50: ops/s | 4,257–6,136 | 8,647–8,878 |
-      | 10 hot keys, 80/20: ops/s | 19,370–20,383 | 20,086–21,269 |
-      | compute (increment) only: ops/s | 571–680 | 437–692 |
-      | throughput, 8 threads, 80/20 (1,000 keys) | 19,852–21,430 | 18,644–21,157 |
+      | Scenario                                       | Proposed (c561c9b) | Single writes assigned |
+      |------------------------------------------------|--------------------|------------------------|
+      | 1 hot key, 80/20: ops/s                        | 14,505–14,954      | 21,398–22,012          |
+      | the same: store reads per get, refusals in 5 s | 0.17, 9,592        | 0.01, 0                |
+      | 1 hot key, 50/50: ops/s                        | 4,257–6,136        | 8,647–8,878            |
+      | 10 hot keys, 80/20: ops/s                      | 19,370–20,383      | 20,086–21,269          |
+      | compute (increment) only: ops/s                | 571–680            | 437–692                |
+      | throughput, 8 threads, 80/20 (1,000 keys)      | 19,852–21,430      | 18,644–21,157          |
 
       Compute looked a fifth slower at first; it was the order of the runs (the second of a pair ran faster, either
       way round: 571 before against 692 after, reversed). Assigning only single advances, conditional ones left on
@@ -5661,10 +5756,10 @@ at the end.
      (thousands per second per instance), so it waits for the benchmark (step 6). The stall around an
      `invalidateAll` (the atomic operations in flight draining, about one store round trip, at worst the store's
      timeout) stays the same with stripes;
-   - the repair of loads racing `invalidateAll` (see "Target design: `invalidateAll` by the store's time"): a short log
-     of each instance's recent conditional writes, tombstoned when a newer cut-off is learned; and, as an optional
-     capability for SQL stores, the conditional write's statement checking the control row itself. Until then the
-     race is accepted, as Caffeine, memcached, Redis, Hazelcast and FusionCache accept it;
+   - the repair of loads, refreshes and atomic map methods racing `invalidateAll` (see "Target design: `invalidateAll`
+     by the store's time", the repair): built and reverted 2026-11-05; options B (no hot path, a read per atomic
+     method) and C (the control row checked in the store's write, free on Redis) recorded there. Accepted until a user
+     needs it, as Caffeine (loads), Redis, Hazelcast and FusionCache accept it for loads;
    - **built 2026-11-01** (see "Redis adapters", item 11): the Redis cluster;
    - Redis `WAIT` as an opt-in (recorded 2026-11-02, left as it is by the user's choice, not to be forgotten): after
      each write, wait for N replicas (`withReplicaAcknowledgement(1, timeout)`), a write fewer confirm failing as
@@ -5726,21 +5821,27 @@ at the end.
      - Cost: N store reads per write with N instances, because messages carry no values. L1 is polluted by keys that
        are never read here, and W-TinyLFU may reject them anyway.
      - Use case: small, read-mostly data that every instance needs.
-     - The cheaper alternative to weigh first: a warm-up (`getAll` or a `warmUp(keys)`) plus `UPDATE`;
+     - The cheaper alternative to weigh first: a warm-up (`getAll` or a `warmUp(keys)`) plus `UPDATE`.
+     - Reviewed 2026-11-05, not built: messages alone cannot make every instance hold every key. A new instance only
+       gets the keys written after its start, and after a gap an instance knows which of its own keys to check, but
+       not which keys it missed. A correct replicated mode needs a full load at start and a full resync after every
+       gap: a store scan (a new SPI operation) and recovery around it, as Hazelcast's Replicated Map and Infinispan's
+       replicated mode do (Redisson's `SyncStrategy.UPDATE` inserts best-effort only, with `preloadCache()` as a
+       manual call). Against the warm-up plus `UPDATE`, it saves only the first read of a key created elsewhere (one
+       store read per instance), at N reads per write. If a use case comes (small reference data every instance
+       needs), designed as a replicated cache with full load and resync, not as a fourth message mode;
    - a warm-up: filling L1 at startup, from given keys (`warmUp(keys)` or `getAll`) or from the store's most recent
      rows (by the write-time index). With `UPDATE`, the warmed keys then stay current. It is useful on its own, and it
-     is the cheaper alternative to `UPSERT`;
-   - a distribution-only store mode (proposed 2026-10-27): the store is a channel for distribution, not an L2.
-     - Rows keep their values only for the time of distribution, a retention of about 5 minutes. After that the
-       value goes, or the whole row goes; versions stay monotonic through the incarnation.
-     - A local miss calls the loader directly, not the store. The reservation registry protects the load: a message
-       for the key during the load means the result is not admitted.
-     - `UPDATE` (and `UPSERT`) re-read the value within the retention. A message read after the retention, from a
-       lagging listener, is treated as an invalidation.
-     - Gaps lead to an epoch, as usual.
-     - Benefits: the store stays small, and the O(n) `invalidateAll` shrinks with it. With `INVALIDATE`, no value
-       needs to be written at all, so values would not even need to be serializable.
-     - Comparable: Redisson's `StoreMode.LOCALCACHE` (from memory, not verified);
+     is the cheaper alternative to `UPSERT`. Given keys work today: `getAll(keys)` reads them in one bulk store read
+     and loads only the missing ones. From the most recent rows (reviewed 2026-11-05, not built): a new store
+     operation reading the newest N rows by that index; it fills L1 with recent writes rather than hot keys (the
+     store knows no access frequency, and Caffeine's admission may reject them), and instances starting together
+     read N rows each at once. Built only on demand: without it, the first access per key costs one store read;
+   - **built 2026-11-05** in another form: a distribution-only store mode (proposed 2026-10-27), as
+     `withMaximumAgeForStoreOnly()` (see "Maximum age for the store only"): the store keeps values for its maximum
+     age, and the local copies are no longer bounded by it. Not taken from the proposal: misses skipping the store (a
+     second load path with its own version and trust rules, for one round trip per miss), and values not written
+     with `INVALIDATE` (`UPDATE`, the atomic methods and the misses within the age read them);
    - write-behind for load results (proposed 2026-10-27): a loaded value is returned to the caller, and to the
      callers waiting on the same future, before its conditional write to the store has returned. The write follows
      in the background.
@@ -5761,7 +5862,7 @@ at the end.
 
 The frame for every step: "Positioning and the complexity budget".
 
-## Deterministic simulation (started 2026-11-03)
+## Deterministic simulation (started and built 2026-11-03)
 
 Deferred by the user on 2026-10-23 until the design is lean, the SPI general and the performance acceptable; taken
 up on 2026-11-03, the user agreeing those hold (one store for MariaDB and MySQL, failover fixed without an SPI change,
@@ -5929,36 +6030,36 @@ its lock on every L1 hit are weaker than this design.
 Each lesson from the current generation becomes a test, a design rule, or is recorded as not applying. Names refer
 to the working notes of the current generation.
 
-| Lesson | Note | Carries over as |
-|---|---|---|
-| Overtaken refreshes and loads must be discarded (tokens; the null-operation trap) | refresh-in-flight-discard | test; mechanism replaced by versions (Ordering, rules 4 and 6) |
-| Loads run outside the lock; commit rules for extras | refresh-in-flight-discard | design rule: `AsyncCache` loads outside the lock; extras only where L2 holds no value (see Shared loads) |
-| Stale loads are only visible to a freshness oracle, not to a convergence oracle | convergence-loads-freshness-oracle | central test oracle |
-| Property tests need publish latency and phased checks to see concurrency | convergence-property-test-and-its-blind-spots | test harness: built as `InternalPropertyTest` (below) |
-| The store guard must cover the read path, not only writes | store-guard-and-health-state | test (SPI: `read`, and the read after a `putIfUnchanged` conflict) |
-| A failed write may still land; forget its operation | failed-write-suppresses-landed-echo, postgres-single-statement-publish | test; mechanism replaced by dropping the key (Ordering, rule 5) |
-| `invalidateAll` needs a global marker and global, not per-key, ordering | invalidate-all-marker-design, publisher-repository-adapter-split | design rule |
-| Replayed invalidations can be dropped past ~1 min; history can be lost; revalidate after gaps | store-downtime-robustness-plan, read-based-synchronization-design | invariant 7, test |
-| Starting synchronization on a partially activated instance froze | partial-activation-freeze | does not apply: no stop/start and no `getAdapter()` (see Lifecycle, Adapter ownership) |
-| Overlapping size pruning over-prunes | concurrent-size-pruning-over-prunes | test |
-| Async publishes need one ordered drain per cache | async-publish-single-drain | writes are synchronous now; the ordered queue per cache carries over for delivery (see Operations) |
-| The write is the round trip; the global lock caps throughput (fair lock, striping) | write-path-cost-measured | benchmark baseline |
-| Duplicate-key retry on upsert is needed though rarely hit | upsert-duplicate-key-retry-cost | does not apply on MongoDB: upserts by the composite `_id` are atomic (see Adapter setup); a duplicate key on `putIfUnchanged` stays a conflict |
-| Mongo: one connection pair per watcher; filter server-side; watcher sharing; majority write concern, no w:1 (measured: w:1 slows propagation about 100x, see MongoDB write concern) | change-stream-watcher-connection-cost, change-stream-match-pushdown, mongo-watcher-sharing, postgres-single-statement-publish | adapter design (sharing: see Connection sharing; failed applies now dropped, not re-queued; dispatch by the discriminator in `_id`) |
-| Postgres: stream reads in a transaction; heartbeat for half-open listeners; poolers need a listener data source; one session delays above ~750 notifications/s; listener sharing | postgres-streaming-and-ordered-reads, postgres-listener-half-open-heartbeat, postgres-listener-sharing, pgjdbc-single-session-notification-cliff | adapter design (listener via R2DBC, so the ~750/s limit no longer applies; heartbeat to re-check with R2DBC; sharing: see Connection sharing) |
-| Multiple caches per collection/table via discriminator | discriminator-and-watcher-sharing-design | adapter design |
-| Stats counting rules | distributed-stats-design | design rule |
-| Entries expired via `setExpiresAfter` stay resident and invisible | caffeine-setexpiresafter-stuck-entries | design rule: never used internally; passed through to users as Caffeine's behaviour |
-| `weightedSize()` needs `cleanUp()` first | caffeine-weightedsize-needs-cleanup | test harness |
-| Log-counting tests break on any new log line | logging-breaks-log-counting-tests | avoid that test style |
-| 3-member replica set; javadoc verification | mongo-three-member-test-replica-set, javadoc-verification-gotcha | test harness, build |
-| Mongo < 4.4 namespace limit (120 bytes) | mongo-namespace-limit-test-names | does not apply: MongoDB 4.4 or later |
-| Eviction echoes race persistence tests | eviction-echo-races-persistence-tests | does not apply: no eviction distribution |
-| The own-echo re-add is load-bearing | own-echo-readd-is-load-bearing | does not apply: no contents synchronization |
-| Restore marking a value Caffeine is evicting | restore-mark-race-loses-store-backed-keys | does not apply: no restore |
-| Silent entry loss (parked) | silent-entry-loss-open-lead | does not apply: any subset is valid (invariant 1) |
-| Store owns values, the mode owns residency; `pruningStatus()` | extended-persistence-no-eviction-mode | does not apply: no statuses |
-| `PartialCacheEntry` / `CacheEntry` projections | cache-entry-projection-design | does not apply: the SPI has plain rows, no projections |
+| Lesson                                                                                                                                                                              | Note                                                                                                                                             | Carries over as                                                                                                                                |
+|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------|
+| Overtaken refreshes and loads must be discarded (tokens; the null-operation trap)                                                                                                   | refresh-in-flight-discard                                                                                                                        | test; mechanism replaced by versions (Ordering, rules 4 and 6)                                                                                 |
+| Loads run outside the lock; commit rules for extras                                                                                                                                 | refresh-in-flight-discard                                                                                                                        | design rule: `AsyncCache` loads outside the lock; extras only where L2 holds no value (see Shared loads)                                       |
+| Stale loads are only visible to a freshness oracle, not to a convergence oracle                                                                                                     | convergence-loads-freshness-oracle                                                                                                               | central test oracle                                                                                                                            |
+| Property tests need publish latency and phased checks to see concurrency                                                                                                            | convergence-property-test-and-its-blind-spots                                                                                                    | test harness: built as `InternalPropertyTest` (below)                                                                                          |
+| The store guard must cover the read path, not only writes                                                                                                                           | store-guard-and-health-state                                                                                                                     | test (SPI: `read`, and the read after a `putIfUnchanged` conflict)                                                                             |
+| A failed write may still land; forget its operation                                                                                                                                 | failed-write-suppresses-landed-echo, postgres-single-statement-publish                                                                           | test; mechanism replaced by dropping the key (Ordering, rule 5)                                                                                |
+| `invalidateAll` needs a global marker and global, not per-key, ordering                                                                                                             | invalidate-all-marker-design, publisher-repository-adapter-split                                                                                 | design rule                                                                                                                                    |
+| Replayed invalidations can be dropped past ~1 min; history can be lost; revalidate after gaps                                                                                       | store-downtime-robustness-plan, read-based-synchronization-design                                                                                | invariant 7, test                                                                                                                              |
+| Starting synchronization on a partially activated instance froze                                                                                                                    | partial-activation-freeze                                                                                                                        | does not apply: no stop/start and no `getAdapter()` (see Lifecycle, Adapter ownership)                                                         |
+| Overlapping size pruning over-prunes                                                                                                                                                | concurrent-size-pruning-over-prunes                                                                                                              | test                                                                                                                                           |
+| Async publishes need one ordered drain per cache                                                                                                                                    | async-publish-single-drain                                                                                                                       | writes are synchronous now; the ordered queue per cache carries over for delivery (see Operations)                                             |
+| The write is the round trip; the global lock caps throughput (fair lock, striping)                                                                                                  | write-path-cost-measured                                                                                                                         | benchmark baseline                                                                                                                             |
+| Duplicate-key retry on upsert is needed though rarely hit                                                                                                                           | upsert-duplicate-key-retry-cost                                                                                                                  | does not apply on MongoDB: upserts by the composite `_id` are atomic (see Adapter setup); a duplicate key on `putIfUnchanged` stays a conflict |
+| Mongo: one connection pair per watcher; filter server-side; watcher sharing; majority write concern, no w:1 (measured: w:1 slows propagation about 100x, see MongoDB write concern) | change-stream-watcher-connection-cost, change-stream-match-pushdown, mongo-watcher-sharing, postgres-single-statement-publish                    | adapter design (sharing: see Connection sharing; failed applies now dropped, not re-queued; dispatch by the discriminator in `_id`)            |
+| Postgres: stream reads in a transaction; heartbeat for half-open listeners; poolers need a listener data source; one session delays above ~750 notifications/s; listener sharing    | postgres-streaming-and-ordered-reads, postgres-listener-half-open-heartbeat, postgres-listener-sharing, pgjdbc-single-session-notification-cliff | adapter design (listener via R2DBC, so the ~750/s limit no longer applies; heartbeat to re-check with R2DBC; sharing: see Connection sharing)  |
+| Multiple caches per collection/table via discriminator                                                                                                                              | discriminator-and-watcher-sharing-design                                                                                                         | adapter design                                                                                                                                 |
+| Stats counting rules                                                                                                                                                                | distributed-stats-design                                                                                                                         | design rule                                                                                                                                    |
+| Entries expired via `setExpiresAfter` stay resident and invisible                                                                                                                   | caffeine-setexpiresafter-stuck-entries                                                                                                           | design rule: never used internally; passed through to users as Caffeine's behaviour                                                            |
+| `weightedSize()` needs `cleanUp()` first                                                                                                                                            | caffeine-weightedsize-needs-cleanup                                                                                                              | test harness                                                                                                                                   |
+| Log-counting tests break on any new log line                                                                                                                                        | logging-breaks-log-counting-tests                                                                                                                | avoid that test style                                                                                                                          |
+| 3-member replica set; javadoc verification                                                                                                                                          | mongo-three-member-test-replica-set, javadoc-verification-gotcha                                                                                 | test harness, build                                                                                                                            |
+| Mongo < 4.4 namespace limit (120 bytes)                                                                                                                                             | mongo-namespace-limit-test-names                                                                                                                 | does not apply: MongoDB 4.4 or later                                                                                                           |
+| Eviction echoes race persistence tests                                                                                                                                              | eviction-echo-races-persistence-tests                                                                                                            | does not apply: no eviction distribution                                                                                                       |
+| The own-echo re-add is load-bearing                                                                                                                                                 | own-echo-readd-is-load-bearing                                                                                                                   | does not apply: no contents synchronization                                                                                                    |
+| Restore marking a value Caffeine is evicting                                                                                                                                        | restore-mark-race-loses-store-backed-keys                                                                                                        | does not apply: no restore                                                                                                                     |
+| Silent entry loss (parked)                                                                                                                                                          | silent-entry-loss-open-lead                                                                                                                      | does not apply: any subset is valid (invariant 1)                                                                                              |
+| Store owns values, the mode owns residency; `pruningStatus()`                                                                                                                       | extended-persistence-no-eviction-mode                                                                                                            | does not apply: no statuses                                                                                                                    |
+| `PartialCacheEntry` / `CacheEntry` projections                                                                                                                                      | cache-entry-projection-design                                                                                                                    | does not apply: the SPI has plain rows, no projections                                                                                         |
 
 ### The property test (built 2026-10-21)
 

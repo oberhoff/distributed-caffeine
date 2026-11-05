@@ -19,6 +19,7 @@ import com.github.benmanes.caffeine.cache.AsyncCacheLoader;
 import com.github.benmanes.caffeine.cache.AsyncLoadingCache;
 import com.github.benmanes.caffeine.cache.CacheLoader;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.Expiry;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.Change;
@@ -44,15 +45,18 @@ import org.junit.jupiter.api.Timeout;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -149,6 +153,157 @@ public class InternalCoreTest {
     }
 
     // reading through the store
+
+    // a store without bounds, as a Caffeine cache without its bounds: nothing expires and nothing is pruned, also with
+    // a maximum age at or beyond the cap (about 292 years), which every store and the local expiry compute with
+
+    private DistributedCache<String, String> unbounded(@Nullable Duration maximumAge,
+                                                       @Nullable Expiry<String, String> expiry) {
+        DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(adapter())
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(StringSerializer.ofString()))
+                .withCaffeine(caffeine -> expiry == null ? caffeine : caffeine.expireAfter(expiry))
+                .withStore(store -> {
+                    store.withPollInterval(Duration.ofMillis(10)).withMaintenanceInterval(Duration.ofMillis(50));
+                    return maximumAge == null ? store : store.withMaximumAge(maximumAge);
+                })
+                .build();
+        closeables.add(cache);
+        return cache;
+    }
+
+    @Test
+    void a_store_without_bounds_keeps_every_value_through_maintenance() {
+        DistributedCache<String, String> writer = unbounded(null, null);
+        DistributedCache<String, String> reader = unbounded(null, null);
+        for (int i = 0; i < 20; i++) {
+            writer.put("k" + i, "v" + i);
+        }
+
+        pause(300); // several maintenance runs: no expiry, no pruning to a size
+
+        for (int i = 0; i < 20; i++) {
+            assertThat(reader.get("k" + i, key -> "loaded")).isEqualTo("v" + i);
+        }
+        assertThat(requireNonNull(reader.distributedPolicy().getFromStore("k0")).value()).isEqualTo("v0");
+    }
+
+    @Test
+    void a_maximum_age_beyond_the_cap_works_with_every_store_and_a_local_expiry() {
+        DistributedCache<String, String> writer = unbounded(ChronoUnit.FOREVER.getDuration(), null);
+        DistributedCache<String, String> reader = unbounded(ChronoUnit.FOREVER.getDuration(),
+                Expiry.creating((key, value) -> Duration.ofDays(1)));
+        writer.put("k", "v");
+
+        pause(300); // several maintenance runs
+
+        assertThat(reader.get("k", key -> "loaded")).isEqualTo("v");
+        assertThat(reader.policy().getIfPresentQuietly("k")).as("held under the local expiry").isEqualTo("v");
+        StoredValue<String> stored = requireNonNull(writer.distributedPolicy().getFromStore("k"));
+        assertThat(stored.value()).isEqualTo("v");
+        assertThat(stored.age()).isLessThan(Duration.ofMinutes(1));
+        writer.put("k", "w");
+        await(() -> !"v".equals(reader.policy().getIfPresentQuietly("k")));
+    }
+
+    // the maximum age for the store only: a value expires in the store after the maximum age (short here), which
+    // answers the misses within it; after it, misses call the source, and the copies stay, also for the atomic methods
+
+    // the heartbeat at a fifth of it, one second: shorter, a beat missed on a loaded machine makes a gap, which drops
+    // the copies whose rows expired (as documented), and the copies these tests check are gone
+    private static final Duration STORE_AGE = Duration.ofSeconds(5);
+
+    // every removal from the local caches of these tests, for a failure to say who removed a copy and why
+    private final Queue<String> removals = new ConcurrentLinkedQueue<>();
+
+    private DistributedCaffeine<String, String> storeOnly(Duration maximumAge, long maximumSize) {
+        return DistributedCaffeine.newBuilder(adapter())
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(StringSerializer.ofString()))
+                .withCaffeine(caffeine -> caffeine.recordStats()
+                        .removalListener((key, value, cause) -> removals.add(cause + " " + key + "=" + value)))
+                .withStore(store -> store.withMaximumAge(maximumAge).withMaximumAgeForStoreOnly()
+                        .withMaximumSize(maximumSize).withPollInterval(Duration.ofMillis(10))
+                        .withHeartbeatInterval(STORE_AGE.dividedBy(5)).withMaintenanceInterval(Duration.ofMillis(50)));
+    }
+
+    private DistributedCache<String, String> storeOnlyCache() {
+        DistributedCache<String, String> cache = storeOnly(STORE_AGE, 1_000).build();
+        closeables.add(cache);
+        return cache;
+    }
+
+    private static void awaitGone(DistributedCache<String, String> cache) {
+        await(() -> cache.distributedPolicy().getFromStore("k") == null);
+        pause(300); // the expiry's messages delivered
+    }
+
+    @Test
+    void the_maximum_age_for_the_store_only_shares_a_value_within_it_and_keeps_the_copies_after_it() {
+        DistributedCache<String, String> writer = storeOnlyCache();
+        DistributedCache<String, String> reader = storeOnlyCache();
+        writer.put("k", "v");
+        // read once the put's message is here: a message arriving while the load is about to reserve its key drops
+        // the loaded copy on purpose (it is loaded again on the next read), which this test does not look at
+        await(() -> reader.distributedPolicy().stats().writtenMessageCount() >= 1);
+        assertThat(reader.get("k", key -> "loaded")).as("taken from the store").isEqualTo("v");
+
+        awaitGone(writer);
+
+        assertThat(writer.policy().getIfPresentQuietly("k"))
+                .as("not bounded by the store (%s, removals %s)", writer.distributedPolicy().stats(), removals)
+                .isEqualTo("v");
+        assertThat(reader.policy().getIfPresentQuietly("k"))
+                .as("not bounded by the store (%s, removals %s)", reader.distributedPolicy().stats(), removals)
+                .isEqualTo("v");
+        assertThat(reader.getIfPresent("k")).isEqualTo("v");
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> late = storeOnly(STORE_AGE, 1_000)
+                .build(key -> "loaded-" + loads.incrementAndGet());
+        closeables.add(late);
+        assertThat(late.get("k")).as("a miss after the maximum age calls the source").isEqualTo("loaded-1");
+        await(() -> writer.policy().getIfPresentQuietly("k") == null);
+        await(() -> reader.policy().getIfPresentQuietly("k") == null);
+        assertThat(reader.get("k", key -> "again")).isEqualTo("loaded-1");
+        assertThat(loads).hasValue(1);
+    }
+
+    @Test
+    void the_maximum_age_for_the_store_only_lets_the_atomic_methods_decide_on_a_held_copy_after_it() {
+        DistributedCache<String, String> first = storeOnlyCache();
+        DistributedCache<String, String> second = storeOnlyCache();
+        first.put("k", "1");
+        assertThat(second.get("k", key -> "loaded")).isEqualTo("1");
+        first.put("gone", "1");
+        awaitGone(first);
+
+        AtomicInteger runs = new AtomicInteger();
+        assertThat(first.asMap().merge("k", "2", (held, given) -> {
+            runs.incrementAndGet();
+            return held + given;
+        })).as("decided on the held copy (%s)", first.distributedPolicy().stats()).isEqualTo("12");
+        assertThat(runs).as("decided once, on a read").hasValue(1);
+        await(() -> second.policy().getIfPresentQuietly("k") == null);
+        assertThat(second.asMap().merge("k", "3", String::concat)).as("within the maximum age again")
+                .isEqualTo("123");
+        assertThat(first.asMap().computeIfPresent("gone", (key, value) -> value + "x")).isEqualTo("1x");
+        assertThat(first.asMap().remove("gone", "1x")).isTrue();
+        assertThat(first.asMap().putIfAbsent("gone", "2")).as("the removal left a tombstone").isNull();
+        await(() -> "123".equals(first.getIfPresent("k")));
+    }
+
+    @Test
+    void the_maximum_age_for_the_store_only_lets_the_atomic_methods_decide_on_a_held_copy_pruned_to_size() {
+        DistributedCache<String, String> cache = storeOnly(LONG, 1).build();
+        closeables.add(cache);
+        cache.put("k", "1");
+        cache.put("newer", "1");
+
+        awaitGone(cache); // pruned after the grace
+
+        assertThat(cache.asMap().merge("k", "2", String::concat))
+                .as("decided on the held copy (%s)", cache.distributedPolicy().stats()).isEqualTo("12");
+    }
 
     @Test
     void a_load_writes_the_store_and_another_instance_reads_it_instead_of_the_source() {

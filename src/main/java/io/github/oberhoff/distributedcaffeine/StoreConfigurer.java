@@ -24,8 +24,9 @@ import java.util.concurrent.Executor;
 import static java.util.Objects.requireNonNull;
 
 /**
- * The bounds of the shared store and how the cache works with it. The maximum age and the maximum size are required;
- * every other setting has a default that suits most uses.
+ * The bounds of the shared store and how the cache works with it. Every setting is optional: without a maximum age or
+ * a maximum size the store is unbounded in that respect, as a Caffeine cache is without its bounds; every other setting
+ * has a default that suits most uses.
  *
  * @author Andreas Oberhoff
  */
@@ -34,9 +35,15 @@ public final class StoreConfigurer {
     static final Duration DEFAULT_MAINTENANCE_INTERVAL = Duration.ofMinutes(1);
     static final Duration DEFAULT_HEARTBEAT_INTERVAL = Duration.ofSeconds(10);
     static final Duration DEFAULT_POLL_INTERVAL = Duration.ofSeconds(1);
+    // the maximum age without one set, and the largest one taken (a larger one is lowered to it): the largest duration
+    // in nanoseconds a long holds, about 292 years, which the core and the stores compute with (Duration#toNanos)
+    static final Duration UNBOUNDED_AGE = Duration.ofNanos(Long.MAX_VALUE);
+    // the maximum size without one set: no size pruning
+    static final long UNBOUNDED_SIZE = -1;
 
     private @Nullable Duration maximumAge;
-    private long maximumSize = -1;
+    private long maximumSize = UNBOUNDED_SIZE;
+    private boolean maximumAgeForStoreOnly;
     private Duration operationTimeout = StoreSettings.DEFAULT_OPERATION_TIMEOUT;
     private @Nullable Executor executor;
     private Duration maintenanceInterval = DEFAULT_MAINTENANCE_INTERVAL;
@@ -49,7 +56,9 @@ public final class StoreConfigurer {
     /**
      * Sets how old a value may get, counted from its write by the store's clock. The store never returns an older
      * value, and the instances drop their copies of it within about one maintenance interval, however their own expiry
-     * is set. Required.
+     * is set (unless {@link #withMaximumAgeForStoreOnly()}). It also bounds how long a local copy is served at most
+     * when a change reaches no instance (a message lost without a gap noticed, {@link DistributionMode#NONE}).
+     * Optional: unbounded by default, as with {@code ChronoUnit.FOREVER.getDuration()}.
      *
      * @param maximumAge the maximum age (positive)
      * @return this configurer
@@ -62,14 +71,15 @@ public final class StoreConfigurer {
         if (this.maximumAge != null) {
             throw new IllegalStateException("maximumAge was already set to " + this.maximumAge);
         }
-        this.maximumAge = maximumAge;
+        this.maximumAge = maximumAge.compareTo(UNBOUNDED_AGE) > 0 ? UNBOUNDED_AGE : maximumAge;
         return this;
     }
 
     /**
      * Sets how many values the store keeps for this cache. Beyond it, the oldest writes are removed periodically,
-     * without notifying the instances, which may keep their copies. Values younger than a few seconds are kept, so a
-     * cache that replaces its whole size faster than that briefly holds more. Required.
+     * without notifying the instances, which may keep their copies. Values younger than a few seconds are kept (three
+     * heartbeat intervals with {@link #withMaximumAgeForStoreOnly()}), so a cache that replaces its whole size faster
+     * than that briefly holds more. Optional: unbounded by default.
      *
      * @param maximumSize the maximum number of values (positive)
      * @return this configurer
@@ -78,10 +88,29 @@ public final class StoreConfigurer {
         if (maximumSize <= 0) {
             throw new IllegalArgumentException("maximumSize must be positive");
         }
-        if (this.maximumSize != -1) {
+        if (this.maximumSize != UNBOUNDED_SIZE) {
             throw new IllegalStateException("maximumSize was already set to " + this.maximumSize);
         }
         this.maximumSize = maximumSize;
+        return this;
+    }
+
+    /**
+     * Applies the maximum age to the store only: a value expires in the store as set, but the local copies expire as
+     * their Caffeine expiry says, not bounded by it, and the store's expiry does not drop them. A miss reads the store
+     * as before, so a value written or loaded elsewhere within the maximum age is taken from it; later, a miss calls
+     * the source. For a store too small or too expensive for the working set, or local copies kept far longer than
+     * the store should keep values. Nothing bounds how long a copy is served if a change never reaches its instance (a
+     * message lost without a gap noticed); after a gap noticed, copies whose values expired in the store are dropped.
+     * The atomic {@code asMap()} methods stay atomic across instances, at one read more. Requires
+     * {@link #withMaximumAge(Duration)}, distribution (not {@link DistributionMode#NONE}) and a heartbeat interval of
+     * at most a fifth of the maximum age and at most a minute (the default is ten seconds). Values written in the last
+     * three heartbeat intervals are kept beyond the maximum size.
+     *
+     * @return this configurer
+     */
+    public StoreConfigurer withMaximumAgeForStoreOnly() {
+        maximumAgeForStoreOnly = true;
         return this;
     }
 
@@ -169,8 +198,17 @@ public final class StoreConfigurer {
         return this;
     }
 
-    @Nullable Duration maximumAge() {
-        return maximumAge;
+    Duration maximumAge() {
+        return maximumAge != null ? maximumAge : UNBOUNDED_AGE;
+    }
+
+    boolean maximumAgeForStoreOnly() {
+        return maximumAgeForStoreOnly;
+    }
+
+    // whether a maximum age was set (maximumAge() returns the unbounded one otherwise)
+    boolean hasMaximumAge() {
+        return maximumAge != null;
     }
 
     long maximumSize() {

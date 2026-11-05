@@ -99,7 +99,7 @@ abstract class PostgresConnectionTest {
     }
 
     private DataSource listener(String application) {
-        return listener(database.host(), database.port(),
+        return listener(PostgresTestDatabase.HOST, database.port(),
                 database.databaseName(), application);
     }
 
@@ -152,7 +152,7 @@ abstract class PostgresConnectionTest {
 
     @Test
     void a_listening_session_that_went_silent_is_replaced_and_what_it_missed_is_revalidated() throws Exception {
-        SilencingProxy proxy = track(new SilencingProxy(database.host(),
+        SilencingProxy proxy = track(new SilencingProxy(PostgresTestDatabase.HOST,
                 database.port()));
         DistributedCache<String, String> writer = writer();
         DistributedCache<String, String> holder = cache(listener("127.0.0.1", proxy.port(),
@@ -170,7 +170,7 @@ abstract class PostgresConnectionTest {
 
     @Test
     void a_listening_session_stuck_in_the_middle_of_a_notification_is_aborted_and_replaced() throws Exception {
-        SilencingProxy proxy = track(new SilencingProxy(database.host(),
+        SilencingProxy proxy = track(new SilencingProxy(PostgresTestDatabase.HOST,
                 database.port()));
         DistributedCache<String, String> writer = writer();
         DistributedCache<String, String> holder = cache(listener("127.0.0.1", proxy.port(),
@@ -191,7 +191,7 @@ abstract class PostgresConnectionTest {
 
     @Test
     void a_statement_on_a_silent_connection_fails_within_the_timeout_instead_of_hanging() throws Exception {
-        SilencingProxy proxy = track(new SilencingProxy(database.host(),
+        SilencingProxy proxy = track(new SilencingProxy(PostgresTestDatabase.HOST,
                 database.port()));
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl("jdbc:postgresql://127.0.0.1:" + proxy.port() + "/" + database.databaseName());
@@ -222,7 +222,7 @@ abstract class PostgresConnectionTest {
 
     @Test
     void a_slow_database_is_waited_for_and_not_taken_for_a_broken_one() throws Exception {
-        SilencingProxy proxy = track(new SilencingProxy(database.host(),
+        SilencingProxy proxy = track(new SilencingProxy(PostgresTestDatabase.HOST,
                 database.port()));
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl("jdbc:postgresql://127.0.0.1:" + proxy.port() + "/" + database.databaseName());
@@ -258,7 +258,7 @@ abstract class PostgresConnectionTest {
     @Test
     void a_listening_session_slower_than_the_probe_timeout_is_taken_for_a_broken_one_until_it_is_fast_again()
             throws Exception {
-        SilencingProxy proxy = track(new SilencingProxy(database.host(),
+        SilencingProxy proxy = track(new SilencingProxy(PostgresTestDatabase.HOST,
                 database.port()));
         DistributedCache<String, String> writer = writer();
         DistributedCache<String, String> holder = cache(listener("127.0.0.1", proxy.port(),
@@ -283,7 +283,7 @@ abstract class PostgresConnectionTest {
         String elsewhere = "elsewhere_" + NAMES.incrementAndGet();
         database.execute("CREATE DATABASE " + elsewhere);
         DistributedCaffeine<String, String> builder = strings(adapter(database.dataSource,
-                listener(database.host(), database.port(), elsewhere,
+                listener(PostgresTestDatabase.HOST, database.port(), elsewhere,
                         application())));
 
         assertThatThrownBy(builder::build).isInstanceOf(StoreException.class)
@@ -338,7 +338,7 @@ abstract class PostgresConnectionTest {
 
     @Test
     void a_cache_slow_to_apply_what_arrives_holds_up_no_other_cache_on_the_session() throws Exception {
-        SilencingProxy proxy = track(new SilencingProxy(database.host(),
+        SilencingProxy proxy = track(new SilencingProxy(PostgresTestDatabase.HOST,
                 database.port()));
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl("jdbc:postgresql://127.0.0.1:" + proxy.port() + "/" + database.databaseName());
@@ -433,7 +433,7 @@ abstract class PostgresConnectionTest {
     @Test
     void a_session_broken_by_a_message_it_cannot_decode_is_closed_and_replaced() throws Exception {
         String application = application();
-        SilencingProxy proxy = track(new SilencingProxy(database.host(),
+        SilencingProxy proxy = track(new SilencingProxy(PostgresTestDatabase.HOST,
                 database.port()));
         DistributedCache<String, String> writer = writer();
         DistributedCache<String, String> holder = cache(listener("127.0.0.1", proxy.port(),

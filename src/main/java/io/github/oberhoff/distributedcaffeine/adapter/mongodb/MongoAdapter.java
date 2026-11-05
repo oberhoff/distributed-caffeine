@@ -112,9 +112,11 @@ public final class MongoAdapter<K, V> implements Adapter<K, V> {
 
         private Builder(MongoClient client, String databaseName, String collectionName) {
             try {
+                // the library is an automatic module, which reads every module: the IDE's module check does not apply
+                //noinspection Java9ReflectionClassVisibility
                 Class.forName("com.mongodb.client.MongoClient", false, MongoAdapter.class.getClassLoader());
             } catch (ClassNotFoundException e) {
-                throw new IllegalStateException("MongoAdapter requires org.mongodb:mongodb-driver-sync 5.x on the "
+                throw new IllegalStateException("MongoAdapter requires org.mongodb:mongodb-driver-sync on the "
                         + "classpath", e);
             }
             this.client = requireNonNull(client, "client cannot be null");

@@ -38,9 +38,8 @@ import static java.util.Objects.requireNonNull;
 final class MongoLocation {
 
     static final String MARKER_ID = "distributed-caffeine";
-    // schema 2: invalidateAll by the control row's write time, no stamps, bases or control document (a collection of
-    // schema 1 would show the rows its old control document hid)
-    static final String MARKER = "distributed-caffeine schema 2";
+    // the layout of this generation; a later layout change gets a new number, refused by this one and the other way
+    static final String MARKER = "distributed-caffeine schema 1";
     static final String START = "started";
     private static final JsonWriterSettings JSON = JsonWriterSettings.builder().outputMode(JsonMode.RELAXED).build();
 

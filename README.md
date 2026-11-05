@@ -9,10 +9,11 @@ Distributed Caffeine adds distribution and a shared second level to [Caffeine](h
 through a store the application may already use: MongoDB, PostgreSQL, Redis (also Valkey, Dragonfly, Kvrocks), MariaDB
 or MySQL.
 
-* **Distribution:** a change on one instance reaches all others within moments.
-* **Second level:** misses are read from the shared store before the source is called.
-* **Consistency:** versions keep racing writes and late messages from bringing back outdated values.
-* **Compatibility:** a drop-in replacement for Caffeine's caches.
+* **Distribution:** a change on one instance reaches the copies on all others.
+* **Second level:** a miss reads the shared store before calling the source.
+* **Consistency:** versions keep racing writes, slow loads and late messages from bringing back outdated values.
+* **Compatibility:** Caffeine's cache interfaces, configured with Caffeine's builder methods.
+* **Resilience:** if the store fails, instances keep serving what they hold and recover by themselves.
 
 ## Table of contents
 
@@ -24,32 +25,32 @@ or MySQL.
 
 ## Introduction
 
-Each instance of a cache has a local Caffeine cache of its own (first level, L1): a hit is answered locally, and
-Caffeine's eviction keeps a [near optimal](https://github.com/ben-manes/caffeine/wiki/Efficiency) hit ratio. Behind it,
-all instances share a store (second level, L2):
+Each instance has its own local Caffeine cache (first level, L1), which answers hits with Caffeine's
+[near optimal](https://github.com/ben-manes/caffeine/wiki/Efficiency) hit ratio. All instances share a store (second
+level, L2):
 
-* A read that finds nothing in the local cache reads the store, and if the store holds nothing either, the loader or
-  mapping function, if any.
-* A write goes to the store first, then into the local cache.
-* A change made on one instance — a write, an invalidation or an expiry — makes the other instances drop or replace
-  their copy of the key, or leaves it alone, depending on the
-  [distribution mode](#configuration-of-the-distribution-mode).
+* **Reads:** the local cache first, then the store, then the loader or mapping function (if any).
+* **Writes:** the store first, then the local cache.
+* **Changes:** writes, invalidations and expiries make the other instances drop, replace or keep their copy, depending
+  on the [distribution mode](#configuration-of-the-distribution-mode).
 
-Every write carries a version, so a slow load, a late message or a racing write never overwrites a newer value. With
-distribution on, no instance serves an outdated copy for longer than distributing the change takes. If distribution
-stops, an instance notices within about two heartbeat intervals and checks its copies against the store. The store is
-bounded by a maximum age and a maximum size, and no instance keeps a copy beyond the maximum age.
+Every write carries a version, so a slow load, a change that arrives late or a racing write never replaces a newer
+value. With distribution on, an instance serves an outdated copy only until the change reaches it. If distribution
+stops, an instance notices within about two heartbeat intervals and checks its copies against the store until
+distribution works again. The store can be bounded by a maximum age and a maximum size. An instance keeps a copy at
+most for the maximum age after it got it, unless the maximum age is set for the store only.
 
-If the store stops answering, the instances keep serving what they hold and loads go straight to the source, while
-writes fail; they recover by themselves once the store answers again. Changes that may have been missed meanwhile make
-the instances check what they hold against the store.
+If the store stops answering, the instances keep serving what they hold, misses load straight from the source, and
+writes fail. Once the store answers again, the instances recover by themselves and check what they hold against the
+store, for changes they may have missed.
 
 ## Usage
 
 ### Adapters
 
-An adapter tells a cache where it lives in the store. Each store has one, and each supports every distribution mode, via
-the store's own way of announcing changes or by polling:
+An adapter connects a cache to its store and says where in the store the cache lives. Each store below has one, and
+each adapter supports every distribution mode. MongoDB, PostgreSQL and Redis announce changes themselves; MariaDB and
+MySQL are polled:
 
 | Store                                   | Adapter                          | Distribution via                 | Details                                                                                                   |
 |-----------------------------------------|----------------------------------|----------------------------------|-----------------------------------------------------------------------------------------------------------|
@@ -58,9 +59,9 @@ the store's own way of announcing changes or by polling:
 | Redis (also Valkey, Dragonfly, Kvrocks) | `RedisAdapter`                   | Redis Streams                    | [Redis adapter](src/main/java/io/github/oberhoff/distributedcaffeine/adapter/redis/README.md)             |
 | MariaDB, MySQL                          | `MariaDbAdapter`, `MySqlAdapter` | polling (each second by default) | [MariaDB and MySQL adapters](src/main/java/io/github/oberhoff/distributedcaffeine/adapter/jdbc/README.md) |
 
-Every adapter is built from the client or data source the application already uses, and a name for the place of the
+Every adapter is built from the client or data source the application might already use, and a name for the place of the
 cache (a collection, a table or a keyspace). Several caches can share that place, told apart by a discriminator. The
-collection, table or keys are created as needed, and a setup that cannot work is refused right away with an explanation.
+collection, table or keyspace is created as needed, and a setup that cannot work is refused right away with an explanation.
 
 ```java
 MongoAdapter<Key, Value> adapter = MongoAdapter.newBuilder(mongoClient, databaseName, collectionName)
@@ -89,10 +90,6 @@ MariaDbAdapter<Key, Value> adapter = MariaDbAdapter.newBuilder(dataSource, table
 
 Note: An adapter belongs to exactly one cache: building a second cache with it fails while the first is open.
 
-The key and value types of a cache come from the adapter's variable, as above, or from the variable the cache is
-assigned to, so an adapter can also be built inline within `DistributedCaffeine.newBuilder(...)`. A hash provider or
-serializers that work with the key or value type need the typed adapter variable.
-
 ### Distributed Caffeine caches
 
 The caches are represented by `DistributedCache`, `DistributedLoadingCache`, `DistributedAsyncCache` and
@@ -104,24 +101,24 @@ Where a method behaves differently, its Javadoc says so. Please refer to the off
 #### Minimal configuration
 
 A cache is configured with a builder returned by `DistributedCaffeine.newBuilder(adapter)` and built by one of its
-`build(...)` or `buildAsync(...)` methods. The store's maximum age and maximum size are required.
+`build(...)` or `buildAsync(...)` methods.
 
 ```java
 DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
-        .withStore(store -> store
-                .withMaximumAge(Duration.ofHours(1))
-                .withMaximumSize(1_000_000))
         .build(key -> loadExpensiveValue(key));
 ```
 
-Building connects to the store and checks it, so a misconfiguration fails at once. A cache is closed with `close()`,
-which releases its connections.
+Note: Building connects to the store and checks it, so a misconfiguration fails at once. A cache is closed with
+`close()`, which releases its connections.
 
 #### Configuration of the local cache
 
-Caffeine's builder methods configure each instance's local cache and keep their meaning. They apply to the copies of
-this instance only; the store has its own bounds. No copy is kept longer than the store's maximum age, whatever its
-expiry.
+Caffeine's builder methods configure the local cache of each instance, with their usual meaning. The store has bounds
+of its own, and the two relate as follows:
+
+* **Age:** a copy expires at its local expiry or at the store's maximum age after this instance got it, whichever comes
+  first.
+* **Size:** only the local `maximumSize` or `maximumWeight` bounds the local cache; the store's maximum size does not.
 
 ```java
 DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
@@ -136,15 +133,24 @@ DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapt
         .build(key -> loadExpensiveValue(key));
 ```
 
+Note: The store's bounds are optional, as Caffeine's are, but recommended (see
+[Configuration of the store](#configuration-of-the-store)).
+
 #### Configuration of the store
 
-Besides the required maximum age and maximum size, the store's settings have defaults that suit most uses:
+The store's settings have defaults that suit most uses:
 
-* `withOperationTimeout(...)`: how long a call waits for the store before it fails (30 seconds).
-* `withExecutor(...)`: the executor of the blocking store calls, such as virtual threads (a pool of daemon threads).
-* `withMaintenanceInterval(...)`: how often values beyond the maximum age or size are removed (one minute).
-* `withHeartbeatInterval(...)`: how often an instance checks that distribution still works (ten seconds).
-* `withPollInterval(...)`: how often an instance polls MariaDB or MySQL for changes (one second).
+* `withMaximumAge(...)`: how old a value may get, counted from its write, and how long a copy is served at most when a
+  change does not reach an instance (default: unbounded).
+* `withMaximumAgeForStoreOnly()`: the maximum age bounds the store's values but not the local copies, for which only the
+  local expiry counts; a miss after the maximum age calls the source (default: off). For a store too small or too
+  expensive for the working set. Requires a maximum age and distribution.
+* `withMaximumSize(...)`: how many values the store keeps (default: unbounded).
+* `withOperationTimeout(...)`: how long a call waits for the store before it fails (default: 30 seconds).
+* `withExecutor(...)`: the executor of the blocking store calls, such as virtual threads (default: daemon threads).
+* `withMaintenanceInterval(...)`: how often values beyond the maximum age or size are removed (default: one minute).
+* `withHeartbeatInterval(...)`: how often an instance checks that distribution still works (default: ten seconds).
+* `withPollInterval(...)`: how often an instance polls MariaDB or MySQL for changes (default: one second).
 
 #### Configuration of the distribution mode
 
@@ -158,7 +164,6 @@ The distribution mode decides what a change made elsewhere does to the copies of
 
 ```java
 DistributedCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
-        .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(1_000_000))
         .withDistributionMode(DistributionMode.UPDATE)
         .build();
 ```
@@ -180,7 +185,6 @@ DistributedCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
                 .putLong(key.getVersion())
                 .putString(key.getName())
                 .getHash())
-        .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(1_000_000))
         .build();
 ```
 
@@ -210,15 +214,15 @@ configuration and stores bytes, using [Apache Fory](https://github.com/apache/fo
 text or, on MongoDB and PostgreSQL, in the store's own JSON type, using [Jackson](https://github.com/FasterXML/jackson).
 `JavaObjectSerializer` uses
 [Java Object Serialization](https://docs.oracle.com/en/java/javase/17/docs/specs/serialization/index.html), and
-`StringSerializer.ofString()`, `ofLong()`, `ofInteger()` and `ofUUID()` store those types readably. A serializer of
-one's own implements `ByteArraySerializer`, `StringSerializer` or `JsonSerializer`.
+`StringSerializer.ofString()`, `ofLong()`, `ofInteger()` and `ofUUID()` store those types readably. A custom serializer
+must implement `ByteArraySerializer`, `StringSerializer` or `JsonSerializer`, so the store holds its result as bytes,
+text or JSON.
 
 ```java
 DistributedCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
         .withSerializers(serializers -> serializers
                 .withKeySerializer(new JacksonSerializer<>(Key.class, false)) // as text
                 .withValueSerializer(new JacksonSerializer<>(Value.class, true))) // as the store's JSON type, if any
-        .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(1_000_000))
         .build();
 ```
 
@@ -235,7 +239,6 @@ distribution, only through the same instance). It is off by default, as Caffeine
 
 ```java
 DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
-        .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(1_000_000))
         .withNegativeCaching(Duration.ofSeconds(30))
         .build(key -> loadExpensiveValue(key));
 ```
@@ -243,38 +246,52 @@ DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapt
 #### The distributed policy
 
 `distributedPolicy()` gives access to the distributed side of a cache instance: its synchronization state
-(`SYNCHRONIZED`, `DEGRADED` or `CLOSED`), its stats of store and synchronization activity (recorded with
+(`SYNCHRONIZED`, `DEGRADED` or `CLOSED`), its stats of store and synchronization activity (only recorded with
 `recordStats()`), and `getFromStore(...)` and `getAllFromStore(...)`, which read the store directly, bypassing the
 instance's copies.
 
 ## Remarks
 
-* All instances of a cache must be configured alike, in particular the serializers, the hashing and the store's bounds.
+* All instances of a cache must be configured alike, in particular the store's bounds, the serializers and the hashing.
 * Changing the key or value classes, their serializers or the hashing can make the stored values unusable: remove them
   first (`invalidateAll()`), or give the cache a new place. A serializer that stores another format (bytes, text or
   JSON) needs a new table on PostgreSQL.
-* Reference-based eviction using Caffeine's
-  [weak or soft references](https://github.com/ben-manes/caffeine/wiki/Eviction#reference-based) is not supported.
-* `refreshAfterWrite` counts from when an instance got its copy, and a value read from the store that is already older
-  is refreshed at once, so a value is refreshed by an age of at most twice the duration.
-* The store is the cache's bound: there is no eviction across instances, and the first read of a key on each instance
-  reads the store.
 * Synchronization runs in background threads of the application. Platforms that allocate CPU only while a request is
   handled, as is common for serverless deployments, should allocate it permanently, otherwise instances fall behind
   while idle.
+* Reference-based eviction using Caffeine's
+  [weak or soft references](https://github.com/ben-manes/caffeine/wiki/Eviction#reference-based) is not supported.
+* `refreshAfterWrite` counts from when an instance got its copy, not from the write: a copy already older when read
+  from the store is refreshed at once, so a value is refreshed at an age of at most twice the duration.
+* There is no eviction across instances: each local cache evicts by its own bounds, the store by its own. The first
+  read of a key on each instance reads the store; `getAll(keys)` warms an instance up in one store read.
+* `invalidateAll()` is not atomic with operations of other instances in flight: a load that read the source before it,
+  or an atomic `asMap()` method (`compute`, `merge`, `replace`, ...) that decided on a value present before it, may
+  write its result after it, which then stays until the key is written again or reaches the store's maximum age.
+  Caffeine leaves loads in flight during `invalidateAll` undefined as well.
+* A write whose outcome the store leaves unknown (a timeout, or a connection lost after sending) drops the key locally,
+  and the call may throw a `StoreException` whose `isOutcomeUnknown()` is `true`:
+    * `put` throws, since repeating it could overwrite a newer value.
+    * The atomic `asMap()` methods (`putIfAbsent`, `replace`, `compute`, `merge`, ...) repeat the write and throw only
+      if they cannot recognize their own write (on stores that assign versions themselves, or when another write
+      raced), since deciding again would apply the remapping twice.
+    * Loads and refreshes repeat it.
 
 ## Requirements
 
 * Java 17 or newer.
 * One of the stores, with its Java driver on the classpath (the drivers are optional dependencies, so only the one in
   use is needed):
-    * MongoDB 4.4 or newer, as a replica set or a sharded cluster, with `org.mongodb:mongodb-driver-sync`.
-    * PostgreSQL 9.6 or newer, through a data source, with `org.postgresql:postgresql`.
+    * MongoDB 4.4 or newer, as a replica set or a sharded cluster, with `org.mongodb:mongodb-driver-sync` (5.2 or
+      newer).
+    * PostgreSQL 9.6 or newer, through a data source, with `org.postgresql:postgresql` (42.7.6 or newer).
     * Redis 6.2 or newer, Valkey 7.2 or newer, Dragonfly 1.4 or newer, or Kvrocks 2.16 or newer, with
-      `io.lettuce:lettuce-core`, `redis.clients:jedis` (8 or newer) or `org.redisson:redisson`.
-    * MariaDB 10.2 or newer with `org.mariadb.jdbc:mariadb-java-client`, or MySQL 5.7 or newer with
-      `com.mysql:mysql-connector-j` or `org.mariadb.jdbc:mariadb-java-client`.
-* `tools.jackson.core:jackson-databind` if `JacksonSerializer` is used.
+      `io.lettuce:lettuce-core` (7.8 or newer), `redis.clients:jedis` (8 or newer) or `org.redisson:redisson` (4 or
+      newer).
+    * MariaDB 10.2 or newer with `org.mariadb.jdbc:mariadb-java-client` (3 or newer).
+    * MySQL 5.7 or newer with `com.mysql:mysql-connector-j` (8 or newer) or `org.mariadb.jdbc:mariadb-java-client` (3.1
+      or newer).
+* For `JacksonSerializer`: `tools.jackson.core:jackson-databind` (3 or newer).
 
 ## Installation
 

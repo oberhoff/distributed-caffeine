@@ -16,8 +16,8 @@
 /**
  * Serializers of keys and values for the store: {@link ForySerializer} (the default), {@link JacksonSerializer},
  * {@link JavaObjectSerializer}, and the plain ones of {@link StringSerializer} and {@link ByteArraySerializer}. A
- * serializer of one's own implements {@link ByteArraySerializer}, {@link StringSerializer} or {@link JsonSerializer},
- * which decides how the store holds its result.
+ * custom serializer must implement {@link ByteArraySerializer}, {@link StringSerializer} or {@link JsonSerializer},
+ * so the store holds its result as bytes, text or JSON.
  *
  * @author Andreas Oberhoff
  * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>

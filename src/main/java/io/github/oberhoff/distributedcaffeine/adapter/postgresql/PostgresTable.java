@@ -32,9 +32,8 @@ import java.util.HexFormat;
 final class PostgresTable {
 
     static final int MAXIMUM_NAME_BYTES = 63;
-    // 2: without the stamp column, its sequence and the basis column (step 3, VISION.md); 3: with the version sequence
-    // (step 6b), as the versions of a table of 2 are the core's, which a new row at the sequence would fall below
-    static final String MARKER = "distributed-caffeine schema 3";
+    // the layout of this generation; a later layout change gets a new number, refused by this one and the other way
+    static final String MARKER = "distributed-caffeine schema 1";
 
     final String schemaName;
     final String tableName;

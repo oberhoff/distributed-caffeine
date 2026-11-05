@@ -71,6 +71,8 @@ import static java.util.Objects.requireNonNull;
 @SuppressWarnings({"SqlNoDataSourceInspection", "resource"})
 final class PostgresTestDatabase implements AutoCloseable {
 
+    // the containers' mapped ports are on this machine
+    static final String HOST = "localhost";
     static final String LISTENER_APPLICATION = "dc-test-listener";
     static final String STATEMENT_POOLED = "statement_pooled";
     private static final String USER = "test";
@@ -158,7 +160,7 @@ final class PostgresTestDatabase implements AutoCloseable {
         config.setMaximumPoolSize(16);
         config.setInitializationFailTimeout(-1);
         dataSource = new HikariDataSource(config);
-        listener = direct(host(), primaryPort, DATABASE, LISTENER_APPLICATION);
+        listener = direct(HOST, primaryPort, DATABASE, LISTENER_APPLICATION);
         broken = false;
     }
 
@@ -244,10 +246,6 @@ final class PostgresTestDatabase implements AutoCloseable {
         pooler.start();
     }
 
-    String host() {
-        return "localhost";
-    }
-
     /**
      * A data source of plain pgjdbc connections, no pool, named so that its sessions can be found: to listen through.
      *
@@ -295,7 +293,7 @@ final class PostgresTestDatabase implements AutoCloseable {
     }
 
     String jdbcUrl() {
-        return "jdbc:postgresql://" + host() + ":" + primaryPort + "/" + DATABASE;
+        return "jdbc:postgresql://" + HOST + ":" + primaryPort + "/" + DATABASE;
     }
 
     String poolerHost() {
@@ -334,7 +332,7 @@ final class PostgresTestDatabase implements AutoCloseable {
     }
 
     private static @Nullable String query(int port, String sql) throws SQLException {
-        try (Connection connection = DriverManager.getConnection("jdbc:postgresql://localhost:" + port + "/"
+        try (Connection connection = DriverManager.getConnection("jdbc:postgresql://" + HOST + ":" + port + "/"
                 + DATABASE, USER, PASSWORD);
              Statement statement = connection.createStatement()) {
             if (!statement.execute(sql)) {

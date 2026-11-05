@@ -174,7 +174,7 @@ public record StoreProfile(String name, Versioning versioning, Changes changes, 
      * Hostile: Redis with {@code maxmemory} and an eviction policy, deleting rows silently, and pub/sub losing
      * messages across a disconnect it did not notice.
      */
-    public static final StoreProfile REDIS_HOSTILE = REDIS.with("redis-hostile", true, true);
+    public static final StoreProfile REDIS_HOSTILE = REDIS.hostile();
 
     /**
      * Hostile: PostgreSQL on a wall clock that steps back by up to 5 ms (NTP), declared in its allowance.
@@ -253,9 +253,10 @@ public record StoreProfile(String name, Versioning versioning, Changes changes, 
                 stepBack, snapshotReads, batch, losesWritesOnFailover, tombstoneOnPurgedRow, evicts, lossyFeed);
     }
 
-    private StoreProfile with(String name, boolean evicts, boolean lossyFeed) {
-        return new StoreProfile(name, versioning, changes, clock, clockStepBack, snapshotReads, batch,
-                losesWritesOnFailover, tombstoneOnPurgedRow, evicts, lossyFeed);
+    // evicting and losing messages silently, as a hostile Redis may
+    private StoreProfile hostile() {
+        return new StoreProfile("redis-hostile", versioning, changes, clock, clockStepBack, snapshotReads, batch,
+                losesWritesOnFailover, tombstoneOnPurgedRow, true, true);
     }
 
     /**
