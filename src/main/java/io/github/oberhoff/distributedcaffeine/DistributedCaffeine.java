@@ -95,7 +95,7 @@ public final class DistributedCaffeine<K, V> {
     }
 
     /**
-     * Configures the bounds of the shared store; a maximum age and a maximum size are required.
+     * Configures the shared store: its bounds, all optional, and how the cache works with it.
      *
      * @param configurer the configuration
      * @return this builder
@@ -106,9 +106,7 @@ public final class DistributedCaffeine<K, V> {
     }
 
     /**
-     * Sets how instances learn about changes made elsewhere; {@link DistributionMode#INVALIDATE} by default. With
-     * {@link DistributionMode#NONE} and no {@code expireAfterWrite} or {@code expireAfter}, local copies expire after
-     * the store's maximum age.
+     * Sets how instances learn about changes made elsewhere; {@link DistributionMode#INVALIDATE} by default.
      *
      * @param distributionMode the distribution mode
      * @return this builder

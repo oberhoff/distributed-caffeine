@@ -32,7 +32,7 @@ import java.util.function.Supplier;
 import static java.util.Objects.requireNonNull;
 
 /**
- * The entry for Jedis ({@code redis.clients:jedis}, 8 or later): wraps the application's client for the cache. Jedis is
+ * The entry for Jedis ({@code redis.clients:jedis}): wraps the application's client for the cache. Jedis is
  * needed on the classpath only where this class is used.
  * <p>
  * The cache borrows a connection from the client's pool per command, and holds one for as long as it listens for

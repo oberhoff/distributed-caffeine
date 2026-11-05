@@ -14,8 +14,9 @@ keeps a connection open for listening. In short:
 The table, its index and a sequence for its versions are created when the first cache is built. If the user lacks the
 rights to create them, building fails with the DDL to run instead, which also suits migration tools. A table created by
 another version of this library is refused; `withSchemaReset()` drops and recreates it, which is only safe while no
-instance of any cache in the table runs. A table's columns follow what the serializers of its caches store (bytes, text
-or JSON), so a cache whose serializers store another format needs a table of its own.
+instance of any cache in the table runs. It is meant for a migration: remove it afterwards, or a later upgrade drops the
+table again. A table's columns follow what the serializers of its caches store (bytes, text or JSON), so a cache whose
+serializers store another format needs a table of its own.
 
 ## Listening
 

@@ -21,7 +21,7 @@ periodic journal flush and arrive about a hundred times later.
 
 The collection and its index are created when the first cache is built. A collection created by another version of this
 library is refused; `withSchemaReset()` drops and recreates it, which is only safe while no instance of any cache in the
-collection runs.
+collection runs. It is meant for a migration: remove it afterwards, or a later upgrade drops the collection again.
 
 The caches on one client share one change stream per database, whatever the number of caches and collections.
 

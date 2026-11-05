@@ -147,7 +147,8 @@ public final class MongoAdapter<K, V> implements Adapter<K, V> {
 
         /**
          * Drops and recreates the collection if another version of this library created it. Only while no instance of
-         * any cache in the collection runs.
+         * any cache in the collection runs. Meant for a migration: remove it afterwards, or a later upgrade drops the
+         * collection again.
          *
          * @return this builder
          */
