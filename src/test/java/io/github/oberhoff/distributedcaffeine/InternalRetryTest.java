@@ -22,6 +22,7 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import io.github.oberhoff.distributedcaffeine.testing.StoreProfile;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -68,7 +69,12 @@ class InternalRetryTest {
     private final AtomicInteger puts = new AtomicInteger();
     private final AtomicInteger conditionalWrites = new AtomicInteger();
 
-    private record Fault(RuntimeException failure, boolean applied) {
+    private record Fault(RuntimeException failure, boolean applied, Runnable meanwhile) {
+
+        Fault(RuntimeException failure, boolean applied) {
+            this(failure, applied, () -> {
+            });
+        }
     }
 
     @AfterEach
@@ -87,16 +93,21 @@ class InternalRetryTest {
         if (fault.applied()) {
             write.get();
         }
+        fault.meanwhile().run();
         throw fault.failure();
     }
 
     private DistributedCache<String, String> cache() {
+        return cache(database);
+    }
+
+    private DistributedCache<String, String> cache(InMemoryDatabase database) {
         Adapter<String, String> adapter = settings -> new InternalCoreTest.DelegatingStore(
                 database.openStore("cache")) {
-            // the writes of values, unconditional (put) or conditional; tombstones (the heartbeat's too) pass
+            // the writes of keys, unconditional (put) or conditional; the library's own rows (the heartbeat's) pass
             @Override
             public WriteResult write(Collection<Write> writes) {
-                if (writes.stream().allMatch(Write::isTombstone)) {
+                if (writes.stream().allMatch(write -> write.hash().startsWith("#"))) {
                     return super.write(writes);
                 }
                 if (writes.stream().allMatch(Write::isAdvance)) {
@@ -225,16 +236,121 @@ class InternalRetryTest {
     }
 
     @Test
-    void a_conditional_write_whose_outcome_is_unknown_is_repeated_and_finds_its_own_row() {
+    void a_conditional_write_of_a_load_whose_outcome_is_unknown_is_repeated_and_returns_its_value() {
         DistributedCache<String, String> cache = cache();
         faults.add(new Fault(broken, true)); // applied, then broken: the repetition conflicts with its own write
 
-        // the repetition cannot tell its own row from another writer's: the value counts as present already
-        // (VISION.md, "Write retries": an open point)
-        assertThat(cache.asMap().putIfAbsent("k", "v")).isIn(null, "v");
+        // deciding again on its own row returns the value it wrote
+        assertThat(cache.get("k", k -> "v")).isEqualTo("v");
 
         assertThat(conditionalWrites).hasValue(2);
         assertThat(cache.getIfPresent("k")).isEqualTo("v");
         assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("v");
+    }
+
+    // an atomic map method's write is repeated after an unknown outcome; refused then, it is told by its row: its own
+    // (the version proposed, the content written) counts as applied, anything else (a version the store chose)
+    // throws, its outcome unknown, since
+    // deciding again on its own result would apply the remapping twice
+
+    @Test
+    void a_put_if_absent_whose_answer_was_lost_finds_its_own_row_and_reports_it_absent() {
+        DistributedCache<String, String> cache = cache(proposing());
+        faults.add(new Fault(broken, true)); // applied, then broken
+
+        assertThat(cache.asMap().putIfAbsent("k", "v")).isNull();
+
+        assertThat(conditionalWrites).hasValue(2);
+        assertThat(cache.getIfPresent("k")).isEqualTo("v");
+        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("v");
+    }
+
+    @Test
+    void a_merge_whose_answer_was_lost_finds_its_own_row_and_is_applied_once() {
+        DistributedCache<String, String> cache = cache(proposing());
+        cache.put("k", "1");
+        faults.add(new Fault(broken, true)); // applied, then broken
+
+        assertThat(cache.asMap().merge("k", "1", InternalRetryTest::sum)).isEqualTo("2");
+
+        assertThat(conditionalWrites).hasValue(2);
+        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("2");
+        assertThat(cache.getIfPresent("k")).isEqualTo("2");
+    }
+
+    @Test
+    void a_remove_whose_answer_was_lost_finds_its_own_tombstone() {
+        DistributedCache<String, String> cache = cache(proposing());
+        cache.put("k", "v");
+        faults.add(new Fault(broken, true)); // applied, then broken
+
+        assertThat(cache.asMap().remove("k", "v")).isTrue();
+
+        assertThat(cache.distributedPolicy().getFromStore("k")).isNull();
+        assertThat(cache.getIfPresent("k")).isNull();
+    }
+
+    @Test
+    void a_merge_whose_lost_write_did_not_land_is_applied_by_the_repetition() {
+        DistributedCache<String, String> cache = cache();
+        cache.put("k", "1");
+        faults.add(new Fault(broken, false)); // broken before applying
+
+        assertThat(cache.asMap().merge("k", "1", InternalRetryTest::sum)).isEqualTo("2");
+
+        assertThat(conditionalWrites).hasValue(2);
+        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("2");
+    }
+
+    @Test
+    void a_merge_whose_answer_was_lost_on_a_store_assigning_its_own_versions_is_not_applied_twice() {
+        DistributedCache<String, String> cache = cache(new InMemoryDatabase(StoreProfile.POSTGRESQL));
+        cache.put("k", "1");
+        faults.add(new Fault(broken, true)); // applied at the store's version, then broken: the row cannot be told
+
+        assertThatThrownBy(() -> cache.asMap().merge("k", "1", InternalRetryTest::sum))
+                .isInstanceOfSatisfying(StoreException.class, e -> assertThat(e.isOutcomeUnknown()).isTrue());
+
+        assertThat(conditionalWrites).hasValue(2);
+        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("2");
+        assertThat(cache.policy().getIfPresentQuietly("k")).as("not held: whether it was written is unknown")
+                .isNull();
+        assertThat(cache.distributedPolicy().stats().unknownOutcomeCount()).isEqualTo(1);
+    }
+
+    @Test
+    void a_compute_whose_lost_write_did_not_land_but_raced_another_write_is_not_decided_again() {
+        DistributedCache<String, String> cache = cache();
+        DistributedCache<String, String> other = cache();
+        cache.put("k", "a");
+        // broken before applying, another instance writing meanwhile: the repetition is refused by a row not its own
+        faults.add(new Fault(broken, false, () -> other.put("k", "x")));
+
+        assertThatThrownBy(() -> cache.asMap().compute("k", (k, v) -> v + "b"))
+                .isInstanceOfSatisfying(StoreException.class, e -> assertThat(e.isOutcomeUnknown()).isTrue());
+
+        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("x");
+        assertThat(cache.policy().getIfPresentQuietly("k")).isNull();
+    }
+
+    @Test
+    void a_compute_rejected_before_applying_is_repeated() {
+        DistributedCache<String, String> cache = cache();
+        cache.put("k", "a");
+        faults.add(new Fault(rejected, false));
+
+        assertThat(cache.asMap().compute("k", (k, v) -> v + "b")).isEqualTo("ab");
+
+        assertThat(conditionalWrites).hasValue(2);
+        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("ab");
+    }
+
+    // a store applying the versions the core proposes (as MariaDB/MySQL), whatever profile the suite runs under
+    private static InMemoryDatabase proposing() {
+        return new InMemoryDatabase(StoreProfile.JDBC);
+    }
+
+    private static String sum(String a, String b) {
+        return String.valueOf(Integer.parseInt(a) + Integer.parseInt(b));
     }
 }

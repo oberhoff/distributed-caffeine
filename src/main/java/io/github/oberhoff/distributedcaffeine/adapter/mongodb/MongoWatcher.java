@@ -614,7 +614,8 @@ final class MongoWatcher {
         // under the watching thread's read, which then fails. Taken for the current one, that failure lost the stream
         // just reopened and told every cache on it (found 2026-10-31). A failure outside a read (reopening for a join)
         // is the current cursor's
-        @SuppressWarnings("ReferenceEquality") // only the cursor that failed counts
+        // only the cursor that failed counts; the cursors are the watcher's, closed when replaced, not here
+        @SuppressWarnings({"ReferenceEquality", "resource"})
         private void failed(@Nullable MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> reading,
                             RuntimeException failure) {
             MongoChangeStreamCursor<ChangeStreamDocument<BsonDocument>> failedCursor = reading != null ? reading

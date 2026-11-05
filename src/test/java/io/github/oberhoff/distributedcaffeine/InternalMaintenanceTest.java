@@ -45,6 +45,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @NullMarked
 @Timeout(60)
+@SuppressWarnings("resource") // every cache a test opens is closed after it (@AfterEach), and with it its store
 class InternalMaintenanceTest {
 
     private static final Duration LONG = Duration.ofHours(1);

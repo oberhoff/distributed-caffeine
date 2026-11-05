@@ -184,6 +184,8 @@ public final class PostgresAdapter<K, V> implements Adapter<K, V> {
         // the driver is an optional dependency of this library: a clear message where it is missing
         private static void requireDriver() {
             try {
+                // the library is an automatic module, which reads every module: the IDE's module check does not apply
+                //noinspection Java9ReflectionClassVisibility
                 Class.forName("org.postgresql.PGConnection", false, PostgresAdapter.class.getClassLoader());
             } catch (ClassNotFoundException e) {
                 throw new IllegalStateException("PostgresAdapter requires org.postgresql:postgresql on the classpath",

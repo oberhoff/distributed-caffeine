@@ -300,12 +300,28 @@ public final class DistributedCaffeine<K, V> {
     }
 
     private void validate(boolean loading) {
-        if (store.maximumAge() == null || store.maximumSize() == -1) {
-            throw new IllegalStateException("The store's maximum age and maximum size are required: "
-                    + "withStore(store -> store.withMaximumAge(...).withMaximumSize(...))");
-        }
         if (caffeine.isRefreshing() && !loading) {
             throw new IllegalStateException("refreshAfterWrite requires a loading cache, as in Caffeine");
+        }
+        if (store().maximumAgeForStoreOnly()) {
+            if (!store().hasMaximumAge()) {
+                throw new IllegalStateException("withMaximumAgeForStoreOnly() requires withMaximumAge(...)");
+            }
+            // without messages every held value counts as trusted, which the atomic methods rely on (InternalCore#read)
+            if (distributionMode() == DistributionMode.NONE) {
+                throw new IllegalStateException("withMaximumAgeForStoreOnly() requires distribution, not "
+                        + "DistributionMode.NONE");
+            }
+            // a trusted holder knows of every write well before the store lets go of its row (InternalCore#read): a
+            // fifth of the maximum age, and at most a minute, three intervals within the tombstones' retention
+            Duration limit = store().maximumAge().dividedBy(5);
+            if (limit.compareTo(InternalMaintenance.STORE_ONLY_HEARTBEAT_LIMIT) > 0) {
+                limit = InternalMaintenance.STORE_ONLY_HEARTBEAT_LIMIT;
+            }
+            if (store().heartbeatInterval().compareTo(limit) > 0) {
+                throw new IllegalStateException("withMaximumAgeForStoreOnly() requires a heartbeat interval of at most "
+                        + limit + ", not " + store().heartbeatInterval());
+            }
         }
     }
 
@@ -315,10 +331,15 @@ public final class DistributedCaffeine<K, V> {
     // jitter and the poll's own time (rounded up to twice the interval) plus the overlap for writes committed after
     // their time. A feed needs nothing more: its messages carry their versions, not a reference to the row (VISION.md,
     // "In-memory store profiles", dimension 0)
-    private Duration pruneGrace(boolean polled) {
+    // With the maximum age for the store only, at least three heartbeat intervals: a trusted holder has heard every
+    // write older than that (two intervals with their jitter), so a row pruned is no write it may not know of, and the
+    // atomic methods decide on its held copy (InternalCore#read)
+    Duration pruneGrace(boolean polled) {
         Duration window = store().pollInterval().multipliedBy(2).plus(InternalPollingStore.POLL_OVERLAP);
-        return polled && window.compareTo(InternalMaintenance.PRUNE_GRACE) > 0 ? window
+        Duration grace = polled && window.compareTo(InternalMaintenance.PRUNE_GRACE) > 0 ? window
                 : InternalMaintenance.PRUNE_GRACE;
+        Duration heard = store().heartbeatInterval().multipliedBy(3);
+        return store().maximumAgeForStoreOnly() && heard.compareTo(grace) > 0 ? heard : grace;
     }
 
     private static <T> void configure(Configurer<T> configurer, T configured) {
@@ -356,10 +377,13 @@ public final class DistributedCaffeine<K, V> {
                         InternalMaintenance.TOMBSTONE_RETENTION.minus(overlap), store().operationTimeout(), executor,
                         environment);
             }
-            // no copy outlives the store's maximum age, also where no message drops it (none sent, or one lost)
-            return new InternalCore<>(created, caffeine.caffeine(requireNonNull(store().maximumAge())),
+            // no copy outlives the store's maximum age, also where no message drops it (none sent, or one lost); with
+            // the maximum age for the store only, the copies expire as Caffeine's expiry says
+            boolean forStoreOnly = store().maximumAgeForStoreOnly();
+            return new InternalCore<>(created,
+                    caffeine.caffeine(forStoreOnly ? StoreConfigurer.UNBOUNDED_AGE : store().maximumAge()),
                     new InternalHasher<>(hashProvider), keySerializer,
-                    valueSerializer, requireNonNull(store().maximumAge()), executor, caffeine.refreshAfterWrite(),
+                    valueSerializer, store().maximumAge(), forStoreOnly, executor, caffeine.refreshAfterWrite(),
                     loaders, distributionMode(), negativeCachingExpiry, store().maximumSize(),
                     store().maintenanceInterval(), pruneGrace(created instanceof InternalPollingStore),
                     store().heartbeatInterval(), loadAttempts,

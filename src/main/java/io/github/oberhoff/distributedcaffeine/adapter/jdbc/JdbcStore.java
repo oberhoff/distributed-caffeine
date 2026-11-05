@@ -65,7 +65,7 @@ import static java.util.Objects.requireNonNull;
  * @author Andreas Oberhoff
  */
 // the SQL runs against the user's database, unknown to the IDE; what is formatted into it are quoted names only
-@SuppressWarnings({"SqlNoDataSourceInspection", "java:S2077", "SqlSourceToSinkFlow"})
+@SuppressWarnings({"SqlNoDataSourceInspection", "java:S2077"})
 final class JdbcStore extends PrimitiveStore {
 
     private static final int CHUNK = 1_000;
@@ -537,14 +537,23 @@ final class JdbcStore extends PrimitiveStore {
             throw new StoreException("Connecting to " + table + " failed: " + e.getMessage(), e, false, true);
         }
         try (connection) {
-            int previousTimeout = bound(connection, timeout);
-            try {
-                return run(connection, kind, work);
-            } finally {
-                unbound(connection, previousTimeout);
-            }
+            return bounded(connection, kind, work);
         } catch (SQLException e) {
             throw classified(kind, e);
+        }
+    }
+
+    // the work under the timeout; a failure classified while the connection is still at hand, before it goes back to
+    // the data source
+    private <T> T bounded(Connection connection, Kind kind, Work<T> work) throws SQLException {
+        int previousTimeout = bound(connection, timeout);
+        long start = System.nanoTime();
+        try {
+            return run(connection, kind, work);
+        } catch (SQLException e) {
+            throw classified(kind, e, connection, System.nanoTime() - start);
+        } finally {
+            unbound(connection, previousTimeout);
         }
     }
 
@@ -625,6 +634,32 @@ final class JdbcStore extends PrimitiveStore {
     }
 
     private RuntimeException classified(Kind kind, SQLException e) {
+        return classified(kind, e, false, false);
+    }
+
+    // a failure the exception does not explain is judged by what it left behind, the same for every driver: one
+    // after waiting the whole timeout is a timeout, and one that left the connection unusable is a connection lost.
+    // MySQL Connector/J 8 and 9 report both as "No operations allowed after statement closed." (SQLState S1009, the
+    // statement closed under the call by the driver's own timeout or by the broken connection), which taken as a
+    // plain failure would make a write that may have landed certainly not applied. Asked only then: the check of
+    // the connection may cost a round trip, which a failure explained by the exception does not need
+    private RuntimeException classified(Kind kind, SQLException e, Connection connection, long elapsedNanos) {
+        if (isDuplicate(e) || rejected(e) || timedOut(e) || connectionLost(e)) {
+            return classified(kind, e, false, false);
+        }
+        boolean waitedOut = elapsedNanos >= timeout.toNanos();
+        return classified(kind, e, waitedOut, !waitedOut && !valid(connection));
+    }
+
+    private static boolean valid(Connection connection) {
+        try {
+            return connection.isValid(1);
+        } catch (SQLException ignored) {
+            return false;
+        }
+    }
+
+    private RuntimeException classified(Kind kind, SQLException e, boolean waitedOut, boolean broken) {
         boolean write = kind != Kind.READ;
         if (isDuplicate(e)) {
             // a row inserted meanwhile: for an insert the answer, for an upsert a race lost, rolled back
@@ -634,13 +669,13 @@ final class JdbcStore extends PrimitiveStore {
         if (rejected(e)) {
             return new StoreException(accessing() + " was rejected: " + e.getMessage(), e, false, true);
         }
-        if (timedOut(e)) {
+        if (waitedOut || timedOut(e)) {
             // no answer within the timeout, by the query timeout or the network timeout (which also breaks the
             // connection, so it comes as a connection lost): another attempt would most likely wait as long again
             return new StoreException(accessing() + " got no answer within " + timeout.toMillis() + " ms"
                     + (write ? ", the outcome unknown" : "") + ": " + e.getMessage(), e, write, false);
         }
-        if (connectionLost(e)) {
+        if (broken || connectionLost(e)) {
             return new StoreException(accessing() + " lost its connection" + (write
                     ? ", the outcome unknown" : "") + ": " + e.getMessage(), e, write, true);
         }

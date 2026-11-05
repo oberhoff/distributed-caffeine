@@ -294,7 +294,7 @@ final class JedisSession implements RedisSession {
                 held.disconnect();
             }, bound.toMillis(), TimeUnit.MILLISECONDS);
             // nil (null) where the block time passed without entries, whatever the reply's type says
-            @Nullable List<Map.Entry<String, List<StreamEntry>>> read;
+            List<Map.Entry<String, List<StreamEntry>>> read;
             try {
                 read = run(held, bound, "XREAD", objects -> objects.xread(
                         XReadParams.xReadParams().block(Math.toIntExact(block.toMillis())).count(count), offsets),

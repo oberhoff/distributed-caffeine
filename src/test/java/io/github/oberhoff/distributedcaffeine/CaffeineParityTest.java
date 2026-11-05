@@ -573,6 +573,11 @@ public class CaffeineParityTest {
         }
     }
 
+    // completed with a value: what a cache keeps of a future
+    private static boolean settled(CompletableFuture<?> future) {
+        return future.isDone() && !future.isCompletedExceptionally() && future.join() != null;
+    }
+
     private interface Side {
         LoadingCache<String, String> sync();
 
@@ -701,11 +706,16 @@ public class CaffeineParityTest {
         }
 
         // waits until every write has landed (an async put writes once its future completes), the store has delivered
-        // everything and every instance has applied it
+        // everything and every instance has applied it. Also until a failed or empty future has left each cache:
+        // Caffeine removes it in a callback that may run after its caller was woken, so a get right after it may
+        // still be answered with it, in Caffeine as in the instances (about one in a hundred, measured); the step
+        // after would then compare two outcomes of that race
         private void settle() {
             await(() -> instances.stream().allMatch(instance -> instance.core.l1().asMap().values().stream()
-                    .allMatch(CompletableFuture::isDone)) && backend.isIdle()
-                    && instances.stream().allMatch(instance -> instance.core.isQuiescent()));
+                    .allMatch(CaffeineParityTest::settled)) && backend.isIdle()
+                    && instances.stream().allMatch(instance -> instance.core.isQuiescent())
+                    && (caffeine.asyncCache() == null
+                    || caffeine.asyncCache().asMap().values().stream().allMatch(CaffeineParityTest::settled)));
         }
 
         @Override

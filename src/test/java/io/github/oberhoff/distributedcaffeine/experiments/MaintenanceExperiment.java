@@ -117,7 +117,7 @@ public final class MaintenanceExperiment {
         AtomicLong messages = new AtomicLong();
         AtomicLong gaps = new AtomicLong();
         try (Store maintaining = backend.open(); Store probing = backend.open(); Store subscribed = backend.open()) {
-            ChangeSubscription subscription = ((ChangeFeed) subscribed).subscribe(new ChangeListener() {
+            try (ChangeSubscription ignored = ((ChangeFeed) subscribed).subscribe(new ChangeListener() {
                 @Override
                 public void onChanges(List<Change> batch) {
                     for (Change change : batch) {
@@ -136,8 +136,7 @@ public final class MaintenanceExperiment {
                 public void onLost(Throwable cause) {
                     gaps.incrementAndGet();
                 }
-            });
-            try {
+            })) {
                 List<Long> probes = Collections.synchronizedList(new ArrayList<>());
                 AtomicBoolean running = new AtomicBoolean(true);
                 byte[] value = "p".getBytes(StandardCharsets.UTF_8);
@@ -192,8 +191,6 @@ public final class MaintenanceExperiment {
                         rows, changed, calls, longest / 1_000_000, callNanos / 1_000_000, delivered,
                         sorted.isEmpty() ? 0 : sorted.get(sorted.size() - 1) / 1e6,
                         sorted.isEmpty() ? 0 : sorted.get((int) (sorted.size() * 0.99)) / 1e6);
-            } finally {
-                subscription.close();
             }
         }
     }

@@ -91,9 +91,8 @@ public final class RedisAdapter<K, V> implements Adapter<K, V> {
     // controller, replication without Sentinel, TLS, managed services, other servers speaking the protocol.
 
     private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine.adapter.redis");
-    // the layout of this version (RedisKeys, RedisScripts); a cache written by another one is refused. 2: keyspace and
-    // discriminator (2026-11-01), the name alone before
-    private static final String MARKER = "2";
+    // the layout of this version (RedisKeys, RedisScripts); a cache written by another one is refused
+    private static final String MARKER = "1";
 
     /**
      * The discriminator of a cache that names none.

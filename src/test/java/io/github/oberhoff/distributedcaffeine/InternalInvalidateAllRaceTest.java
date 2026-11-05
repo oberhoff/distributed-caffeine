@@ -57,9 +57,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 class InternalInvalidateAllRaceTest {
 
     private static final Duration LONG = Duration.ofHours(1);
-    // the race these tests close is accepted for now, as the industry accepts it: a load or an update that read before
+    // the race these tests close is accepted, as the industry accepts it for loads: a load or an update that read before
     // another instance's invalidateAll and writes after it survives it (VISION.md, "Target design: invalidateAll by the
-    // store's time, hidden on read"). They are the acceptance tests of its repair (build plan, "Later")
+    // store's time, hidden on read", the repair tried and reverted 2026-11-05). A log of decisions repairs those that
+    // read exactly, but not those decided on a held value (when it was written against the unheard invalidateAll is
+    // unknown); closing it needs a read per operation or a check of the control row in the store's write
     private static final String RACE_ACCEPTED = "racing loads and updates are accepted until their repair (VISION.md, "
             + "build plan, Later)";
 

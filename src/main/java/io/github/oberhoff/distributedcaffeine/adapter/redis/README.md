@@ -9,11 +9,11 @@ uses Redis Streams. Building a cache fails right away with an explanation if the
 The adapter works through the application's client, wrapped by the entry class of its library; only the library in use
 has to be on the classpath:
 
-| Library  | Entry class     | Clients                                                     |
-|----------|-----------------|-------------------------------------------------------------|
+| Library  | Entry class     | Clients                                                         |
+|----------|-----------------|-----------------------------------------------------------------|
 | Lettuce  | `LettuceRedis`  | `RedisClient` (single server or Sentinel), `RedisClusterClient` |
-| Jedis 8+ | `JedisRedis`    | `RedisClient`, `RedisSentinelClient`, `RedisClusterClient`  |
-| Redisson | `RedissonRedis` | `RedissonClient` (single server, Sentinel or cluster)       |
+| Jedis 8+ | `JedisRedis`    | `RedisClient`, `RedisSentinelClient`, `RedisClusterClient`      |
+| Redisson | `RedissonRedis` | `RedissonClient` (single server, Sentinel or cluster)           |
 
 The client and its options (URI, TLS, credentials) stay the application's; what the cache opens through it, it closes
 again. Each command is bounded by the cache's operation timeout, also where caches with different timeouts share a

@@ -200,6 +200,9 @@ final class InternalCore<K, V> {
     private final InternalSerializer<K> keySerializer;
     private final InternalSerializer<V> valueSerializer;
     private final Duration maximumAge;
+    // the maximum age for the store only (StoreConfigurer#withMaximumAgeForStoreOnly): a value expires in the store,
+    // but its copies stay here
+    private final boolean maximumAgeForStoreOnly;
     private final Executor storeExecutor;
     private final int loadAttempts;
     private volatile @Nullable Duration refreshAfterWrite;
@@ -268,7 +271,8 @@ final class InternalCore<K, V> {
     @SuppressWarnings("java:S2637") // l1 is assigned in the try below, before anything can fail after it
     InternalCore(Store store, Caffeine<InternalKey<K>, InternalValue<V>> caffeine, InternalHasher<K> hasher,
                  InternalSerializer<K> keySerializer, InternalSerializer<V> valueSerializer, Duration maximumAge,
-                 Executor storeExecutor, @Nullable Duration refreshAfterWrite, @Nullable Loaders<K, V> loaders,
+                 boolean maximumAgeForStoreOnly, Executor storeExecutor, @Nullable Duration refreshAfterWrite,
+                 @Nullable Loaders<K, V> loaders,
                  DistributionMode distributionMode,
                  @Nullable Duration negativeCachingExpiry, long maximumSize, Duration maintenanceInterval,
                  Duration pruneGrace, Duration heartbeatInterval, int loadAttempts, InternalStatsCounter stats, Runnable onClose,
@@ -283,6 +287,7 @@ final class InternalCore<K, V> {
         this.keySerializer = requireNonNull(keySerializer);
         this.valueSerializer = requireNonNull(valueSerializer);
         this.maximumAge = requireNonNull(maximumAge);
+        this.maximumAgeForStoreOnly = maximumAgeForStoreOnly;
         this.storeExecutor = requireNonNull(storeExecutor);
         this.loader = loaders == null ? null : loaders.single();
         this.onClose = requireNonNull(onClose);
@@ -751,7 +756,7 @@ final class InternalCore<K, V> {
                             : clock.next(current.version());
                     if (newValue == null) {
                         Write tombstone = Write.tombstone(hash, version);
-                        long applied = writeConditionally(current.version() == 0 ? tombstone.ifMissing()
+                        long applied = decide(current.version() == 0 ? tombstone.ifMissing()
                                 : tombstone.ifVersion(current.version()));
                         if (applied != REFUSED) {
                             dropOlder(internalKey, applied);
@@ -760,7 +765,7 @@ final class InternalCore<K, V> {
                     } else {
                         forgetAbsence(hash);
                         Write write = valueWrite(internalKey, newValue, version);
-                        long applied = writeConditionally(current.version() == 0 ? write.ifMissing()
+                        long applied = decide(current.version() == 0 ? write.ifMissing()
                                 : write.ifVersion(current.version()));
                         if (applied != REFUSED) {
                             // at the epoch of the read: after an invalidateAll here since, the value is checked on
@@ -791,10 +796,12 @@ final class InternalCore<K, V> {
     // store operation, refused if a write elsewhere came since. Otherwise from the store. An invalidateAll elsewhere not
     // heard of yet is not seen by the version (it leaves the row as it is): the decision then counts as before it,
     // the race accepted for loads and updates in flight (VISION.md, "Target design: invalidateAll by the store's time")
+    // With the maximum age for the store only, always read: most held copies outlive their rows, and a write
+    // conditioned on the held version would be refused and decided again, the remapping run twice
     private Current<V> heldOrRead(InternalKey<K> internalKey) {
         int heldEpoch = epoch.get();
         InternalValue<V> held = completedValue(l1.asMap().get(internalKey));
-        if (held != null && isTrusted(held)) {
+        if (held != null && !maximumAgeForStoreOnly && isTrusted(held)) {
             return new Current<>(held.value(), held.version(), heldEpoch, true);
         }
         return read(internalKey);
@@ -803,6 +810,21 @@ final class InternalCore<K, V> {
     private Current<V> read(InternalKey<K> internalKey) {
         int readEpoch = epoch.get();
         Row row = readRows(List.of(internalKey.hash())).get(internalKey.hash());
+        if (maximumAgeForStoreOnly && (row == null || row.state() == State.EXPIRED)) {
+            // with the maximum age for the store only, a row the store let go of (expired, pruned to size, or an
+            // expired row cleaned up) is not a removal: a trusted copy held here is still the latest value, at the
+            // row's version (0: none), so that the write is conditioned on what the store holds. Sound because a
+            // trusted holder has heard every write older than about two heartbeat intervals with their jitter, and the
+            // store lets go of no row younger: a row expires a maximum age after its last write (at least five
+            // intervals), size pruning spares three intervals (DistributedCaffeine#pruneGrace), and tombstones are kept
+            // five minutes (at least five intervals, since an interval is at most a minute). A removal leaves a
+            // tombstone, and a row hidden by an invalidateAll reads as one; neither is taken for the held value. A row
+            // deleted by an invalidateAll not heard of yet is the race accepted for updates in flight (see heldOrRead)
+            InternalValue<V> held = completedValue(l1.asMap().get(internalKey));
+            if (held != null && held.epoch() == readEpoch && isTrusted(held)) {
+                return new Current<>(held.value(), row == null ? 0 : row.version(), readEpoch, false);
+            }
+        }
         if (row == null) {
             return new Current<>(null, 0, readEpoch, false);
         }
@@ -1616,6 +1638,37 @@ final class InternalCore<K, V> {
         return version == 0 ? write.ifMissing() : write.ifVersion(version);
     }
 
+    // the conditional write of an atomic map method. Repeated like any conditional write, but a repetition after an
+    // attempt whose outcome was unknown that is refused may be refused by that attempt's own row: decided again on it,
+    // the remapping would be applied twice (merge adding twice). So the row is read: at the write's version with its
+    // content, it is the write itself (as in advance), which counts as applied there; otherwise the call throws, its
+    // outcome unknown, as a put's. That happens only where the store applied a version of its own (PostgreSQL, Redis,
+    // while MongoDB mostly takes the one proposed) or another writer raced the lost answer. Two instances proposing the
+    // same version and content (see advance) would read as one write here, one remapping lost: accepted, as it needs a
+    // lost answer and a race in the same millisecond. A load's or a refresh's write needs none of this: deciding again
+    // on its own row returns the value it wrote
+    private long decide(Write write) {
+        boolean[] unknown = {false};
+        WriteResult result = guard.write(() -> store.write(List.of(write)), () -> unknown[0] = true);
+        stats.increment(Counter.CONDITIONAL_WRITE);
+        if (!result.isRefused(write)) {
+            return result.version(write);
+        }
+        if (unknown[0]) {
+            Row row = readRows(List.of(write.hash())).get(write.hash());
+            if (row != null && row.version() == write.version()
+                    && (row.state() == State.TOMBSTONE) == write.isTombstone()
+                    && Arrays.equals(row.value(), write.value())) {
+                return write.version();
+            }
+            stats.increment(Counter.UNKNOWN_OUTCOME);
+            throw new StoreException("A write whose answer was lost was refused when repeated, by its own row or "
+                    + "another writer's: its outcome unknown", null, true, false);
+        }
+        stats.increment(Counter.CONFLICT);
+        return REFUSED;
+    }
+
     // a conditional write through the guard; returns the version it was applied at (the store's, where it assigns
     // one), or REFUSED
     private long writeConditionally(Write write) {
@@ -1875,6 +1928,17 @@ final class InternalCore<K, V> {
     // messages (ordering rules 2 and 4): applied only to held values older than the announced version; a message
     // below the held version makes the store decide (see apply)
 
+    // with the maximum age for the store only, an expiry is the end of the maximum age in the store, not a change:
+    // counted and ignored, the copies stay (see read for the atomic methods)
+    private boolean ignoredExpiry(Change message) {
+        if (!maximumAgeForStoreOnly || message.kind() != Change.Kind.EXPIRED) {
+            return false;
+        }
+        stats.increment(Counter.EXPIRED_MESSAGE);
+        stats.increment(Counter.IGNORED_MESSAGE);
+        return true;
+    }
+
     // a message of the heartbeat or of the control row, applied: false for a message of a key
     private boolean appliedAsSignal(Change message) {
         if (InternalHeartbeat.HASH.equals(message.hash())) {
@@ -1910,7 +1974,7 @@ final class InternalCore<K, V> {
         Map<InternalKey<K>, CompletableFuture<InternalValue<V>>> toCheck = new LinkedHashMap<>();
         for (Change message : messages) {
             clock.observe(message.version());
-            if (appliedAsSignal(message)) {
+            if (appliedAsSignal(message) || ignoredExpiry(message)) {
                 continue;
             }
             stats.increment(switch (message.kind()) {
@@ -2283,9 +2347,12 @@ final class InternalCore<K, V> {
                 int current = next;
                 int limit = current == 0 ? InternalMaintenance.EXPIRY_BATCH : InternalMaintenance.PRUNE_BATCH;
                 long start = environment.nanoTime();
+                // a bound not set has nothing to remove
                 int changed = guard.retrying(() -> switch (current) {
-                    case 0 -> store.expire(maximumAge, expiredVersion, limit);
-                    case 1 -> store.pruneToSize(maximumSize, pruneGrace, limit);
+                    case 0 -> maximumAge.equals(StoreConfigurer.UNBOUNDED_AGE) ? 0
+                            : store.expire(maximumAge, expiredVersion, limit);
+                    case 1 -> maximumSize == StoreConfigurer.UNBOUNDED_SIZE ? 0
+                            : store.pruneToSize(maximumSize, pruneGrace, limit);
                     default -> store.pruneTombstones(InternalMaintenance.TOMBSTONE_RETENTION, limit);
                 }, Operation.WRITE);
                 guard.success();

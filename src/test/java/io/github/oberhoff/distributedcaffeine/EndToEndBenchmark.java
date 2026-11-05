@@ -84,15 +84,12 @@ public final class EndToEndBenchmark {
      *
      * @param label   what is measured, for the table's title
      * @param backend the store
-     * @return the table
      * @throws Exception if an operation fails
      */
-    public static String run(String label, CacheBackend backend) throws Exception {
+    public static void run(String label, CacheBackend backend) throws Exception {
         EndToEndBenchmark benchmark = new EndToEndBenchmark(backend);
         try {
-            String table = benchmark.measure(label);
-            System.out.println(table);
-            return table;
+            System.out.println(benchmark.measure(label));
         } finally {
             for (AutoCloseable closeable : benchmark.closeables) {
                 closeable.close();
