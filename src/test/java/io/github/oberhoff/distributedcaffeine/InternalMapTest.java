@@ -418,6 +418,36 @@ class InternalMapTest {
         assertThat(cache.getIfPresent("k")).as("it landed").isEqualTo("x");
     }
 
+    @Test
+    void with_the_store_down_an_atomic_method_writing_nothing_answers_from_the_held_copy() {
+        DistributedCache<String, String> cache = cache();
+        cache.put("k", "v");
+        database.setDown(true);
+        try {
+            // at once, the copy most likely still trusted (the confirming read fails), and once the outage is
+            // noticed, the copy untrusted (the read deciding on it fails)
+            assertAnsweredFromTheHeldCopy(cache);
+            await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.DEGRADED);
+            assertAnsweredFromTheHeldCopy(cache);
+        } finally {
+            database.setDown(false);
+        }
+    }
+
+    private static void assertAnsweredFromTheHeldCopy(DistributedCache<String, String> cache) {
+        Map<String, String> map = cache.asMap();
+        assertThat(map.putIfAbsent("k", "x")).isEqualTo("v");
+        assertThat(map.replace("k", "other", "x")).isFalse();
+        assertThat(map.remove("k", "other")).isFalse();
+        assertThat(map.computeIfPresent("k", (key, value) -> value)).isEqualTo("v");
+        assertThat(map.computeIfAbsent("k", key -> "x")).as("as before").isEqualTo("v");
+        // a decision to write throws, as every write while the store is down; so does a key not held
+        assertThatThrownBy(() -> map.replace("k", "x")).isInstanceOf(StoreException.class);
+        assertThatThrownBy(() -> map.remove("k", "v")).isInstanceOf(StoreException.class);
+        assertThatThrownBy(() -> map.putIfAbsent("absent", "x")).isInstanceOf(StoreException.class);
+        assertThat(held(cache)).isEqualTo("v");
+    }
+
     // the whole map, local
 
     @Test

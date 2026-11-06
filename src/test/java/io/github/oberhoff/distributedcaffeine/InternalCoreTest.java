@@ -1111,6 +1111,85 @@ public class InternalCoreTest {
         await(() -> cache.estimatedSize() == 1);
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void a_refresh_whose_write_fails_returns_the_source_value_held_unconfirmed(boolean outcomeUnknown)
+            throws Exception {
+        // the in-memory store's faults: skipped on a real database before anything is set up
+        InMemoryDatabase faults = backend.faults();
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> cache = loading(key -> "v" + loads.incrementAndGet());
+        assertThat(cache.get("k")).isEqualTo("v1");
+        faults.failNextWrites(InternalStoreGuard.ATTEMPTS, outcomeUnknown); // every attempt of the refresh's write
+
+        assertThat(cache.refresh("k").get(5, TimeUnit.SECONDS)).as("the store's failure does not fail the refresh")
+                .isEqualTo("v2");
+        if (!outcomeUnknown) {
+            // held, unconfirmed (a write that landed after all may already have dropped it with its own message)
+            await(() -> "v2".equals(cache.policy().getIfPresentQuietly("k")));
+        }
+        faults.failNextWrites(0, false); // the store answers again
+
+        // checked against the store: the refreshed value where the failed write landed after all, the stored one
+        // where it did not
+        assertThat(cache.get("k")).isEqualTo(outcomeUnknown ? "v2" : "v1");
+        assertThat(loads).hasValue(2);
+    }
+
+    @Test
+    void a_refresh_finding_nothing_whose_removal_fails_removes_the_key_here_only() throws Exception {
+        // the in-memory store's faults: skipped on a real database before anything is set up
+        InMemoryDatabase faults = backend.faults();
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> cache = loading(key -> loads.incrementAndGet() == 1 ? "v1" : null);
+        assertThat(cache.get("k")).isEqualTo("v1");
+        faults.failNextWrites(InternalStoreGuard.ATTEMPTS, false); // every attempt of the tombstone's write
+
+        assertThat(cache.refresh("k").get(5, TimeUnit.SECONDS)).isNull();
+
+        await(() -> cache.policy().getIfPresentQuietly("k") == null);
+        assertThat(cache.get("k")).as("the store kept its value").isEqualTo("v1");
+        assertThat(loads).hasValue(2);
+    }
+
+    @Test
+    void a_refresh_of_a_key_not_held_finding_nothing_whose_removal_fails_answers_absent() throws Exception {
+        // the in-memory store's faults: skipped on a real database before anything is set up
+        InMemoryDatabase faults = backend.faults();
+        plain().put("k", "stored");
+        DistributedLoadingCache<String, String> cache = loading(key -> null);
+        faults.failNextWrites(InternalStoreGuard.ATTEMPTS, false); // every attempt of the tombstone's write
+
+        assertThat(cache.refresh("k").get(5, TimeUnit.SECONDS)).isNull();
+
+        assertThat(cache.policy().getIfPresentQuietly("k")).isNull();
+        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).as("the store kept its value")
+                .isEqualTo("stored");
+    }
+
+    @Test
+    void refreshAfterWrite_with_the_store_down_holds_the_source_value_and_calls_the_source_once() {
+        // the in-memory store's faults: skipped on a real database before anything is set up
+        InMemoryDatabase faults = backend.faults();
+        AtomicLong nanos = new AtomicLong();
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> cache = builder(LONG)
+                .withCaffeine(caffeine -> caffeine.ticker(nanos::get).refreshAfterWrite(Duration.ofMinutes(1)))
+                .build(key -> "v" + loads.incrementAndGet());
+        closeables.add(cache);
+        assertThat(cache.get("k")).isEqualTo("v1");
+        faults.setDown(true);
+        nanos.addAndGet(TimeUnit.MINUTES.toNanos(2));
+
+        await(() -> "v2".equals(cache.get("k"))); // the first read starts the refresh
+        for (int i = 0; i < 10; i++) {
+            assertThat(cache.get("k")).isEqualTo("v2");
+        }
+        // a failed refresh would keep the old value with its timer: every read would call the source again
+        assertThat(loads).as("the refreshed value's timer starts over").hasValue(2);
+        faults.setDown(false);
+    }
+
     // guards the core's Loader, which has no bulk path (it does not override asyncLoadAll): should Caffeine ever
     // refresh in bulk, this fails, and the Loader needs a tested bulk path to follow it
     @Test

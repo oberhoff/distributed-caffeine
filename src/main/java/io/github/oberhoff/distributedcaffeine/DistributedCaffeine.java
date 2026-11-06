@@ -154,7 +154,9 @@ public final class DistributedCaffeine<K, V> {
      * Remembers, for the given time, keys whose load found nothing, so that repeated requests for a missing key reach
      * neither the store nor the source. A value written through any instance ends the absence at once (without
      * distribution, only one written through this instance); a value that appears only in the source is found after
-     * this time. Up to 100,000 keys per instance. Off by default, as Caffeine caches no missing value.
+     * this time. An absence belongs to the key: it answers every later load of it, whichever loader or mapping
+     * function that load would call. Up to 100,000 keys per instance. Off by default, as Caffeine caches no missing
+     * value.
      *
      * @param expiry how long an absence is remembered (positive; keep it short)
      * @return this builder
@@ -358,6 +360,8 @@ public final class DistributedCaffeine<K, V> {
         try {
             InternalSerializer<K> keySerializer = serializers.keySerializer();
             InternalSerializer<V> valueSerializer = serializers.valueSerializer();
+            // where the cache lives, as its log messages begin with it
+            String name = String.valueOf(adapter);
             Executor executor = requireNonNullElseGet(store().executor(), InternalExecutors::defaultStoreExecutor);
             created = adapter.createStore(new StoreSettings(keySerializer.format(), valueSerializer.format(),
                     store().operationTimeout()));
@@ -373,14 +377,14 @@ public final class DistributedCaffeine<K, V> {
                             + ", or the heartbeat takes the pause between polls for a silent feed");
                 }
                 Duration overlap = InternalPollingStore.POLL_OVERLAP;
-                created = new InternalPollingStore(created, scan, store().pollInterval(), overlap,
+                created = new InternalPollingStore(name, created, scan, store().pollInterval(), overlap,
                         InternalMaintenance.TOMBSTONE_RETENTION.minus(overlap), store().operationTimeout(), executor,
                         environment);
             }
             // no copy outlives the store's maximum age, also where no message drops it (none sent, or one lost); with
             // the maximum age for the store only, the copies expire as Caffeine's expiry says
             boolean forStoreOnly = store().maximumAgeForStoreOnly();
-            return new InternalCore<>(created,
+            return new InternalCore<>(name, created,
                     caffeine.caffeine(forStoreOnly ? StoreConfigurer.UNBOUNDED_AGE : store().maximumAge()),
                     new InternalHasher<>(hashProvider), keySerializer,
                     valueSerializer, store().maximumAge(), forStoreOnly, executor, caffeine.refreshAfterWrite(),

@@ -193,7 +193,7 @@ public final class RedisAdapter<K, V> implements Adapter<K, V> {
 
     @Override
     public String toString() {
-        return "RedisAdapter[" + keys.name() + ", " + driver + "]";
+        return "Redis " + keys.name();
     }
 
     /**

@@ -604,6 +604,11 @@ Accepted: a value younger than R when loaded is refreshed at an age below 2R rat
 per-entry refresh interval), documented as "refreshed by an age of at most 2R". Parallel source calls across
 instances happen only when timers line up.
 
+While the store does not answer, a refresh degrades as a load does: the source's value is held unconfirmed (checked on
+the first read with the store back, which takes the store's value unless the write landed after all), and `null`
+removes the key on this instance only. Failing the refresh instead would keep the old value with its timer, so that
+every read past R called the source again.
+
 ### Serialization: part of the cache configuration
 
 The serializer describes the user's types, not the store, so it is configured per cache (one for keys, one for
@@ -1176,7 +1181,7 @@ both report `DEGRADED`, and the reason goes into the log (a state per reason wou
 |----------------|--------------------|----------------------------------------------------------|--------------------------------------|----------|
 | L1 hits        | served (confirmed) | served unconfirmed                                       | each access checks the version first | throws   |
 | Misses         | L1 → L2 → loader   | loader only, held in L1, not written to L2               | L2 → loader                          | throws   |
-| Writes         | normal             | refused (`invalidate` drops the local copy, then throws) | normal                               | throws   |
+| Writes         | normal             | refused (`invalidate` drops the local copy, then throws); an atomic method writing nothing answers from a held copy | normal                               | throws   |
 | Back to normal | –                  | guard closes, reconnect, revalidation                    | reconnect, revalidation              | –        |
 
 - **Store down** (the store guard is open; the subscription is usually down too): nobody can write, so held values
@@ -1685,8 +1690,10 @@ row, returned with a refusal (as DynamoDB returns the item on a failed condition
 
 ### Operations
 
-**Logging** (`System.Logger`, name `io.github.oberhoff.distributedcaffeine`; settled 2026-11-06): what is thrown is
-not logged, the caller decides; what happens without a caller is logged once per incident, not per call, with the
+**Logging** (`System.Logger`, named after the package, derived from `DistributedCaffeine` or the adapter class;
+settled 2026-11-06): every message of a cache begins with its name, its adapter's `toString()` (`MongoDB
+orders.cache/default`: product, place, discriminator, never connection details); what is thrown is not logged, the
+caller decides; what happens without a caller is logged once per incident, not per call, with the
 recovery at INFO: the change feed lost and resumed, polling failing and succeeding again, listener callbacks
 failing, the store not answering (the store guard opening; reads fall back to the source without a trace, so an
 outage would go unnoticed otherwise) and answering again, and maintenance failing as many runs in a row as the guard
@@ -1794,9 +1801,13 @@ Caffeine, which never caches `null`; switched on with `withNegativeCaching(Durat
 - **A separate, purely local set per cache:** a small Caffeine cache of hashes (two `long`s) with its own short
   `expireAfterWrite` and a size limit. Not in L1, not in L2, not distributed.
 - **Filled when a load finds nothing:** neither L2 nor the loader (or mapping function) has a value, the loader
-  returning `null`. An exception records nothing.
-- **Checked before every L2 read:** in the internal loader, in `getIfPresent` and in `containsKey`; a hit answers
-  `null` (or `false`) at once, without an L2 read and without the loader.
+  returning `null`, or a bulk loader not returning the key; also while the store does not answer, from the loader
+  alone. An exception records nothing.
+- **Checked before every L2 read:** in the internal loader, in `getAll`, in `getIfPresent` and in `containsKey`; a
+  hit answers `null` (or `false`) at once, without an L2 read and without the loader. Only while the feed delivers,
+  as a held value is trusted only then: otherwise the store is read first (a value found wins and ends the absence,
+  none confirms it without the loader), and while the store does not answer the absence is served unconfirmed. A
+  refresh asks the source regardless (refresh rule 1) and ends the absence.
 - **Only loads fill it; `getIfPresent`, `getAllPresent` and `containsKey` only read it.** An entry means "the source
   had nothing recently, and nobody has written the key since" (any write anywhere would have removed it by its
   message), so L2 holds no value either and the read paths may answer from it, saving the round trip. Without a

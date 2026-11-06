@@ -306,6 +306,23 @@ class InternalAsyncTest {
     }
 
     @Test
+    void a_put_whose_write_fails_leaves_the_key_absent_and_fails_no_reader() throws Exception {
+        DistributedAsyncCache<String, String> cache = cache();
+        CompletableFuture<String> value = new CompletableFuture<>();
+        cache.put("k", value);
+        CompletableFuture<@Nullable String> reader = cache.getIfPresent("k"); // waits on the put's future
+        database.setDown(true);
+        try {
+            value.complete("v");
+
+            assertThat(get(reader)).as("the write failed, which no reader is to blame for").isNull();
+            assertThat(get(cache.getIfPresent("k"))).isNull();
+        } finally {
+            database.setDown(false);
+        }
+    }
+
+    @Test
     void getAll_answers_held_keys_at_once_and_loads_the_rest_in_one_call() throws Exception {
         DistributedAsyncCache<String, String> cache = cache();
         cache.synchronous().putAll(Map.of("a", "1", "b", "2"));

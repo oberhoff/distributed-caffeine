@@ -95,7 +95,7 @@ public final class MySqlAdapter<K, V> implements Adapter<K, V> {
 
     @Override
     public String toString() {
-        return "MySqlAdapter[" + tableName + ", " + discriminator + "]";
+        return "MySQL " + tableName + "/" + discriminator;
     }
 
     /**

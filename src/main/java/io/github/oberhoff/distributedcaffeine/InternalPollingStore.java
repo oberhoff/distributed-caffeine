@@ -68,6 +68,8 @@ final class InternalPollingStore implements Store, ChangeFeed {
 
     static final Duration POLL_OVERLAP = Duration.ofSeconds(2);
 
+    // the cache's, for its log messages (Adapter#toString)
+    private final String name;
     private final Store store;
     private final ChangeScan scan;
     private final Duration interval;
@@ -84,8 +86,9 @@ final class InternalPollingStore implements Store, ChangeFeed {
     // environment: the timing of polls and the scheduling of the next one
     // each a setting of its own, all given by the builder: an object would only group them
     @SuppressWarnings("java:S107")
-    InternalPollingStore(Store store, ChangeScan scan, Duration interval, Duration overlap, Duration grace,
-                         Duration timeout, Executor executor, InternalEnvironment environment) {
+    InternalPollingStore(String name, Store store, ChangeScan scan, Duration interval, Duration overlap,
+                         Duration grace, Duration timeout, Executor executor, InternalEnvironment environment) {
+        this.name = name;
         this.store = store;
         this.scan = scan;
         this.interval = interval;
@@ -327,16 +330,16 @@ final class InternalPollingStore implements Store, ChangeFeed {
                 }
             }
             if (began != null) {
-                LOGGER.log(System.Logger.Level.WARNING, "Polling the store for changes failed; changes may be missed "
-                        + "until a poll succeeds: " + began.getMessage());
+                LOGGER.log(System.Logger.Level.WARNING, name + ": Polling the store for changes failed; changes may "
+                        + "be missed until a poll succeeds: " + began.getMessage());
             }
             if (failure != null) {
                 listener.onLost(failure);
                 return;
             }
             if (gap) {
-                LOGGER.log(System.Logger.Level.INFO, "Polling the store for changes succeeded again; revalidating what "
-                        + "is held");
+                LOGGER.log(System.Logger.Level.INFO, name + ": Polling the store for changes succeeded again; "
+                        + "revalidating what is held");
                 listener.onGap();
             }
             if (!messages.isEmpty()) {

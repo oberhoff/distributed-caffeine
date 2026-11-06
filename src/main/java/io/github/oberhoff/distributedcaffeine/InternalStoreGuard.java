@@ -49,6 +49,7 @@ final class InternalStoreGuard {
         READ, WRITE, PUT
     }
 
+    private final String name;
     private final InternalStatsCounter stats;
     private final InternalEnvironment environment;
     @GuardedBy("this")
@@ -61,7 +62,9 @@ final class InternalStoreGuard {
     private long openedAt;
 
     // environment: the timing of calls, the suspension and the back-off
-    InternalStoreGuard(InternalStatsCounter stats, InternalEnvironment environment) {
+    // name: the cache's, for its log messages (Adapter#toString)
+    InternalStoreGuard(String name, InternalStatsCounter stats, InternalEnvironment environment) {
+        this.name = name;
         this.stats = stats;
         this.environment = environment;
     }
@@ -178,7 +181,7 @@ final class InternalStoreGuard {
             probing = false;
         }
         if (wasOpen) {
-            LOGGER.log(System.Logger.Level.INFO, "The store answers again; calls to it resume");
+            LOGGER.log(System.Logger.Level.INFO, name + ": The store answers again; calls to it resume");
         }
     }
 
@@ -198,8 +201,9 @@ final class InternalStoreGuard {
             }
         }
         if (opened) {
-            String message = "The store is not answering (" + cause.getMessage() + "); calls to it are refused, with a "
-                    + "probe every second, until it answers again (distributedPolicy().getSynchronizationState())";
+            String message = name + ": The store is not answering (" + cause.getMessage() + "); calls to it are "
+                    + "refused, with a probe every second, until it answers again (distributedPolicy()"
+                    + ".getSynchronizationState())";
             if (isUnexpected(cause)) {
                 LOGGER.log(System.Logger.Level.WARNING, message, cause);
             } else {

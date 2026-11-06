@@ -57,10 +57,14 @@ final class InternalDelivery implements ChangeListener {
     private final AtomicBoolean draining = new AtomicBoolean();
     // the messages queued and not yet taken, and whether that number went beyond the maximum
     private final AtomicInteger pending = new AtomicInteger();
+    private final String name;
     private final AtomicBoolean overflowed = new AtomicBoolean();
     private volatile boolean closed;
 
-    InternalDelivery(Executor executor, Consumer<List<Change>> onMessages, Runnable onGap, Runnable onLost) {
+    // name: the cache's, for its log messages (Adapter#toString)
+    InternalDelivery(String name, Executor executor, Consumer<List<Change>> onMessages, Runnable onGap,
+                     Runnable onLost) {
+        this.name = name;
         this.executor = executor;
         this.onMessages = onMessages;
         this.onGap = onGap;
@@ -86,7 +90,7 @@ final class InternalDelivery implements ChangeListener {
 
     @Override
     public void onLost(Throwable cause) {
-        LOGGER.log(System.Logger.Level.WARNING, "The change feed lost delivery; resuming", cause);
+        LOGGER.log(System.Logger.Level.WARNING, name + ": The change feed lost delivery; resuming", cause);
         queue.add(Marker.LOST);
         schedule();
     }
