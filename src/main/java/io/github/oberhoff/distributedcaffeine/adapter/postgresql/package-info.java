@@ -13,11 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 /**
- * A store adapter for PostgreSQL: the store, its change feed through LISTEN/NOTIFY (a listening session per data
- * source), and the schema of its table.
+ * The adapter for PostgreSQL ({@link PostgresAdapter}), distributing changes through {@code LISTEN}/{@code NOTIFY}.
  *
  * @author Andreas Oberhoff
+ * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
  */
 @NullMarked
 package io.github.oberhoff.distributedcaffeine.adapter.postgresql;

@@ -146,7 +146,7 @@ The store's settings have defaults that suit most uses:
   local expiry counts; a miss after the maximum age calls the source (default: off). For a store too small or too
   expensive for the working set. Requires a maximum age and distribution.
 * `withMaximumSize(...)`: how many values the store keeps (default: unbounded).
-* `withOperationTimeout(...)`: how long a call waits for the store before it fails (default: 30 seconds).
+* `withOperationTimeout(...)`: how long a call waits for the store before it fails (default: 10 seconds).
 * `withExecutor(...)`: the executor of the blocking store calls, such as virtual threads (default: daemon threads).
 * `withMaintenanceInterval(...)`: how often values beyond the maximum age or size are removed (default: one minute).
 * `withHeartbeatInterval(...)`: how often an instance checks that distribution still works (default: ten seconds).
@@ -277,10 +277,12 @@ instance's copies.
       if they cannot recognize their own write (on stores that assign versions themselves, or when another write
       raced), since deciding again would apply the remapping twice.
     * Loads and refreshes repeat it.
-* A write fails with a `StoreException` while the store does not answer; after repeated failures, writes are refused at
-  once instead of waiting for the store. `distributedPolicy().getSynchronizationState()` cannot tell beforehand whether
-  a write will succeed (`DEGRADED` also covers an interrupted change feed, and the store can fail right after the
-  check), so a caller that must not fail catches the exception:
+* A write fails with a `StoreException` while the store does not answer. Reads don't: they serve held values, and a miss
+  is loaded from the loader or mapping function (if any), or else stays a miss; only `getFromStore` and
+  `getAllFromStore` throw. After repeated failures, writes are refused at once instead of waiting for the store.
+  `distributedPolicy().getSynchronizationState()` cannot tell beforehand whether a write will succeed (`DEGRADED` also
+  covers an interrupted change feed, and the store can fail right after the check), so a caller that must not fail
+  catches the exception:
   `try { cache.put(key, value); } catch (StoreException e) { ... }`.
 
 ## Requirements

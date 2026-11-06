@@ -35,16 +35,18 @@ import static java.util.Objects.requireNonNull;
 import static java.util.Objects.requireNonNullElseGet;
 
 /**
- * The builder of a distributed cache: a Caffeine cache per instance, read through a shared store.
- * <pre>{@code
- * DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
+ * The builder of a distributed cache. Each instance keeps a local Caffeine cache; a miss reads the shared store before
+ * the source, and a change reaches the copies of the other instances. Configured with Caffeine's builder methods and
+ * the store's settings, built as any of Caffeine's cache variants.
+ * <pre>
+ * {@code DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
  *     .withCaffeine(caffeine -> caffeine
- *         .maximumSize(10_000)
  *         .expireAfterWrite(Duration.ofMinutes(5)))
+ *         .maximumSize(10_000)
  *     .withStore(store -> store
  *         .withMaximumAge(Duration.ofHours(1))
  *         .withMaximumSize(1_000_000))
- *     .build(key -> repository.load(key));
+ *     .build(key -> loadExpensiveValue(key));
  * }</pre>
  *
  * @param <K> the key type, fixed by the adapter
@@ -282,7 +284,7 @@ public final class DistributedCaffeine<K, V> {
         InternalCore.AsyncSingleLoader<K, V> asyncSingle = key -> loader.asyncLoad(key, executor);
         InternalCore.AsyncBulkLoader<K, V> asyncBulk = bulk
                 ? keys -> (CompletableFuture<? extends Map<? extends K, ? extends V>>) loader
-                        .asyncLoadAll(keys, executor)
+                .asyncLoadAll(keys, executor)
                 : null;
         InternalCore.AsyncReloader<K, V> asyncReloader = (key, oldValue) -> loader.asyncReload(key, oldValue, executor);
         InternalCore.SingleLoader<K, V> single = key ->

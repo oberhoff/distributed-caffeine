@@ -13,12 +13,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 /**
- * Distributed Caffeine: a Caffeine cache whose instances share a store, built with {@link DistributedCaffeine}.
+ * Distributed Caffeine adds distribution and a shared second level to Caffeine, through a store the application may
+ * already use: MongoDB, PostgreSQL, Redis (also Valkey, Dragonfly, Kvrocks), MariaDB or MySQL.
+ * <p>
+ * A cache is built by {@link DistributedCaffeine#newBuilder(Adapter)} from an adapter for its store
+ * ({@code MongoAdapter}, {@code PostgresAdapter}, ... in the {@code adapter} packages), configured with Caffeine's
+ * builder methods and the store's settings, and used through Caffeine's cache interfaces.
  *
  * @author Andreas Oberhoff
+ * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
  */
 @NullMarked
 package io.github.oberhoff.distributedcaffeine;
 
+import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import org.jspecify.annotations.NullMarked;

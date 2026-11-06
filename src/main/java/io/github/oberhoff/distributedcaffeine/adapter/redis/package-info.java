@@ -15,11 +15,12 @@
  */
 
 /**
- * The adapter for Redis (also Valkey, Dragonfly, Kvrocks), {@link RedisAdapter}, with an entry class per client library
- * ({@link LettuceRedis}, {@link JedisRedis}, {@link RedissonRedis}), so that only the client library in use must be on
- * the classpath.
+ * The adapter for Redis, Valkey, Dragonfly and Kvrocks ({@link RedisAdapter}), distributing changes through Redis
+ * Streams. Its client comes through an entry class per client library ({@link LettuceRedis}, {@link JedisRedis},
+ * {@link RedissonRedis}), so that only the library in use must be on the classpath.
  *
  * @author Andreas Oberhoff
+ * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
  */
 @NullMarked
 package io.github.oberhoff.distributedcaffeine.adapter.redis;
