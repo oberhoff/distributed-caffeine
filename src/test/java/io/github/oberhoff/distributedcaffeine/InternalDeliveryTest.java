@@ -57,7 +57,7 @@ class InternalDeliveryTest {
 
     private final HeldExecutor executor = new HeldExecutor();
     private final List<String> events = new ArrayList<>();
-    private final InternalDelivery delivery = new InternalDelivery(executor,
+    private final InternalDelivery delivery = new InternalDelivery("test", executor,
             messages -> events.add("messages " + messages.size()), () -> events.add("gap"),
             () -> events.add("lost"));
 
@@ -105,7 +105,7 @@ class InternalDeliveryTest {
             throw new RejectedExecutionException("shut down");
         };
         List<String> received = new ArrayList<>();
-        InternalDelivery refused = new InternalDelivery(refusing, messages -> received.add("messages"), () -> {
+        InternalDelivery refused = new InternalDelivery("test", refusing, messages -> received.add("messages"), () -> {
         }, () -> {
         });
 

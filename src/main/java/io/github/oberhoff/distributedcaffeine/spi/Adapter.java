@@ -19,7 +19,9 @@ package io.github.oberhoff.distributedcaffeine.spi;
  * What a user passes to {@code DistributedCaffeine.newBuilder}, and what provides the store of each cache instance:
  * it describes where one cache lives (client, database, table or collection, discriminator) and is used for one cache
  * only. It is typed with the cache's key and value types so that the builder infers them; the types are not used by
- * the adapter itself, which only handles bytes.
+ * the adapter itself, which only handles bytes. Its {@code toString()} names where the cache lives, as the cache's
+ * log messages and errors begin with it: the product, the place and the discriminator (such as
+ * {@code MongoDB orders.cache/default}), never connection details, which may carry credentials.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache

@@ -92,7 +92,7 @@ class InternalPollingTest {
     // a polling store as the core builds it, on a given store, with a short overlap and grace period
     private InternalPollingStore polling(Store storage, Duration grace) {
         InMemoryStore scanned = track(database.openFeed("cache"));
-        return track(new InternalPollingStore(storage, scanned, POLL, Duration.ofMillis(20), grace,
+        return track(new InternalPollingStore("test", storage, scanned, POLL, Duration.ofMillis(20), grace,
                 Duration.ofMillis(20), executor, InternalEnvironment.REAL));
     }
 

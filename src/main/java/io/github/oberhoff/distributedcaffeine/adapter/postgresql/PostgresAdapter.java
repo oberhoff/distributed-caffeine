@@ -94,7 +94,7 @@ public final class PostgresAdapter<K, V> implements Adapter<K, V> {
 
     @Override
     public String toString() {
-        return "PostgresAdapter[" + schemaName + "." + tableName + ", discriminator " + discriminator + "]";
+        return "PostgreSQL " + schemaName + "." + tableName + "/" + discriminator;
     }
 
     /**

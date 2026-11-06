@@ -96,7 +96,7 @@ public final class MariaDbAdapter<K, V> implements Adapter<K, V> {
 
     @Override
     public String toString() {
-        return "MariaDbAdapter[" + tableName + ", " + discriminator + "]";
+        return "MariaDB " + tableName + "/" + discriminator;
     }
 
     /**

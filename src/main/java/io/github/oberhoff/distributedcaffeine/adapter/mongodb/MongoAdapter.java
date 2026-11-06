@@ -96,7 +96,7 @@ public final class MongoAdapter<K, V> implements Adapter<K, V> {
 
     @Override
     public String toString() {
-        return "MongoAdapter[" + databaseName + "." + collectionName + ", discriminator " + discriminator + "]";
+        return "MongoDB " + databaseName + "." + collectionName + "/" + discriminator;
     }
 
     /**

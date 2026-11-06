@@ -21,6 +21,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import io.github.oberhoff.distributedcaffeine.testing.StoreProfile;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
@@ -33,6 +34,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -73,6 +75,10 @@ public class InternalDistributionTest {
     }
 
     private DistributedCaffeine<String, String> builder(Function<Store, Store> wrapping) {
+        return builder(backend, wrapping);
+    }
+
+    private static DistributedCaffeine<String, String> builder(CacheBackend backend, Function<Store, Store> wrapping) {
         Adapter<String, String> adapter = settings -> wrapping.apply(backend.open(settings));
         return DistributedCaffeine.newBuilder(InternalCoreTest.offered(adapter))
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
@@ -558,6 +564,115 @@ public class InternalDistributionTest {
 
         assertThat(load.get(5, TimeUnit.SECONDS)).isNull();
         assertThat(first.get("k")).as("no absence was recorded").isEqualTo("written");
+    }
+
+    @Test
+    void getAll_answers_and_remembers_absences_as_get_does() {
+        AtomicInteger loads = new AtomicInteger();
+        AtomicInteger bulkLoads = new AtomicInteger();
+        DistributedLoadingCache<String, String> cache = track(builder(Function.identity())
+                .withNegativeCaching(Duration.ofMinutes(1)).build(new CacheLoader<>() {
+                    @Override
+                    public @Nullable String load(String key) {
+                        loads.incrementAndGet();
+                        return null;
+                    }
+
+                    @Override
+                    public Map<String, String> loadAll(Set<? extends String> keys) {
+                        bulkLoads.incrementAndGet();
+                        return Map.of();
+                    }
+                }));
+
+        assertThat(cache.getAll(List.of("a"))).isEmpty();
+        assertThat(cache.getAll(List.of("a"))).as("remembered by getAll").isEmpty();
+        assertThat(cache.get("a")).as("remembered by getAll, answered to get").isNull();
+        assertThat(cache.get("b")).isNull();
+        assertThat(cache.getAll(List.of("b"))).as("remembered by get, answered to getAll").isEmpty();
+
+        assertThat(bulkLoads).hasValue(1);
+        assertThat(loads).hasValue(1);
+    }
+
+    @Test
+    void with_the_store_down_a_miss_is_remembered_as_with_the_store_up() {
+        // the in-memory store's faults: skipped on a real database before anything is set up
+        InMemoryDatabase faults = backend.faults();
+        AtomicInteger loads = new AtomicInteger();
+        AtomicInteger bulkLoads = new AtomicInteger();
+        DistributedLoadingCache<String, String> cache = track(builder(Function.identity())
+                .withNegativeCaching(Duration.ofMinutes(1)).build(new CacheLoader<>() {
+                    @Override
+                    public @Nullable String load(String key) {
+                        loads.incrementAndGet();
+                        return null;
+                    }
+
+                    @Override
+                    public Map<String, String> loadAll(Set<? extends String> keys) {
+                        bulkLoads.incrementAndGet();
+                        return Map.of();
+                    }
+                }));
+        faults.setDown(true);
+        try {
+            assertThat(cache.get("a")).isNull();
+            assertThat(cache.get("a")).isNull();
+            assertThat(cache.getAll(List.of("b"))).isEmpty();
+            assertThat(cache.getAll(List.of("b"))).isEmpty();
+
+            assertThat(loads).as("the source protected while it is all there is").hasValue(1);
+            assertThat(bulkLoads).hasValue(1);
+        } finally {
+            faults.setDown(false);
+        }
+    }
+
+    @Test
+    void while_the_feed_is_down_an_absence_is_checked_against_the_store_as_a_held_value() {
+        // the in-memory store's faults (skipped on a real database before anything is set up), on a store with a feed
+        backend.faults();
+        InMemoryDatabase faults = new InMemoryDatabase(StoreProfile.POSTGRESQL);
+        CacheBackend feed = CacheBackend.of(faults);
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> first = track(builder(feed, Function.identity())
+                .withNegativeCaching(Duration.ofMinutes(1)).build(key -> {
+                    loads.incrementAndGet();
+                    return null;
+                }));
+        DistributedCache<String, String> second = track(builder(feed, Function.identity()).build());
+        track(feed); // closed after the caches
+        List<String> keys = List.of("viaGet", "viaGetIfPresent", "viaContainsKey", "viaGetAll", "unwritten");
+        keys.forEach(key -> assertThat(first.get(key)).isNull());
+        faults.interruptSubscriptions();
+        try {
+            await(() -> first.distributedPolicy().getSynchronizationState() == SynchronizationState.DEGRADED);
+            // no message can end these absences
+            List.of("viaGet", "viaGetIfPresent", "viaContainsKey", "viaGetAll").forEach(key -> second.put(key, "written"));
+
+            assertThat(first.get("viaGet")).isEqualTo("written");
+            assertThat(first.getIfPresent("viaGetIfPresent")).isEqualTo("written");
+            assertThat(first.asMap()).containsKey("viaContainsKey");
+            assertThat(first.getAll(List.of("viaGetAll"))).containsExactly(Map.entry("viaGetAll", "written"));
+            assertThat(first.get("unwritten")).as("confirmed by the store").isNull();
+            assertThat(loads).as("a confirmed absence asks no source").hasValue(keys.size());
+        } finally {
+            faults.resumeSubscriptions(false);
+        }
+    }
+
+    @Test
+    void a_refresh_asks_the_source_also_for_a_key_remembered_absent() throws Exception {
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> cache = track(builder(Function.identity())
+                .withNegativeCaching(Duration.ofMinutes(1))
+                .build(key -> loads.incrementAndGet() == 1 ? null : "found"));
+        assertThat(cache.get("k")).isNull();
+
+        assertThat(cache.refresh("k").get(5, TimeUnit.SECONDS)).isEqualTo("found");
+
+        assertThat(cache.get("k")).isEqualTo("found");
     }
 
     @Test

@@ -54,7 +54,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class InternalRetryTest {
 
     // the retries of the store guard alone, as the core's maintenance runs them
-    private static final InternalStoreGuard GUARD = new InternalStoreGuard(InternalStatsCounter.of(false),
+    private static final InternalStoreGuard GUARD = new InternalStoreGuard("test", InternalStatsCounter.of(false),
             InternalEnvironment.REAL);
 
     private static final Duration LONG = Duration.ofHours(1);
