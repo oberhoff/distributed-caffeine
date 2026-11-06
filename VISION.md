@@ -1116,7 +1116,7 @@ Rejected alternatives:
 
 **Start: `build()` connects synchronously and fails fast.**
 
-- Within a timeout (30 s by default, as today) `build()` checks the connection, the table's schema marker and the
+- Within a timeout (10 s by default, 30 s until 2026-11-06) `build()` checks the connection, the table's schema marker and the
   subscription, and returns a cache in `SYNCHRONIZED` state only when all of it is in place.
 - Configuration errors always throw: a missing driver, wrong credentials, a schema that does not match, no DDL
   rights without an existing table.
@@ -1278,8 +1278,10 @@ core's, the same for every adapter:
 
 What the cache needs from every store is configured once on the cache, not per adapter, and handed to the adapter
 when it creates the store: `createStore(StoreSettings(keyFormat, valueFormat, operationTimeout))`. So far the
-formats (from the serializers) and the operation timeout (`withStore(store -> store.withOperationTimeout(...))`, 30 s
-by default; it was `withTimeout` on each adapter's builder before, then `withTimeout` on the store configurer). The
+formats (from the serializers) and the operation timeout (`withStore(store -> store.withOperationTimeout(...))`, 10 s
+by default since 2026-11-06, 30 s before: a hung store costs a caller up to the timeout until the store guard opens,
+and a cache read slower than that is worse than the source; 10 s still rides out a typical failover and is twice the
+longest maintenance batch measured; it was `withTimeout` on each adapter's builder before, then `withTimeout` on the store configurer). The
 adapter applies the timeout to every operation and to its checks on creation, to the cache's own operations only, so
 caches sharing a client or data source may have different ones: MongoDB as the client-side operation timeout of the
 cache's database handle, unless the client sets its own (`timeoutMS`), PostgreSQL as the network timeout of each
@@ -1651,7 +1653,7 @@ overwrite a newer write of another instance.
 deduplicates by the session's transaction number, so a retry never applies twice, which removes the unknown case
 even for unconditional puts. With CSOT, every read iterates its cursor with the timeout per batch
 (`TimeoutMode.ITERATION`), not for the whole read, which a large pruning would exceed. Without a client timeout,
-every store operation gets the cache's (`withStore(store -> store.withOperationTimeout(...))`, 30 s by default), since the driver waits for good on a
+every store operation gets the cache's (`withStore(store -> store.withOperationTimeout(...))`, 10 s by default), since the driver waits for good on a
 silent network otherwise. Nothing that timed out is retried (it waited its whole time already: for a server, a
 pooled connection, or the answer); a write that timed out has an unknown outcome, because the driver's timeout
 does not tell waiting for a server from waiting for the answer. The README recommends CSOT
@@ -1764,7 +1766,7 @@ before the release, the heartbeat in particular):
 |------------------------------------------------|-----------------------------------------------------------------|---------------------------------------------------|
 | Maintenance interval (expiry, pruning)         | 1 min ±20 % jitter                                              | yes: part of the maximum-age bound                |
 | Tombstone retention                            | 5 min                                                           | no                                                |
-| `build()` timeout                              | 30 s                                                            | yes                                               |
+| `build()` timeout                              | 10 s                                                            | yes                                               |
 | Store guard                                    | opens after 3 failures, probe after 1 s                         | no                                                |
 | Feed heartbeat (reserved-key invalidate, core) | every 10 s ±20 % jitter                                         | yes: bounds how long a silent feed goes unnoticed |
 | Resume after a loss (core)                     | at once, then from 250 ms, doubling, at most 30 s, ±20 % jitter | no                                                |

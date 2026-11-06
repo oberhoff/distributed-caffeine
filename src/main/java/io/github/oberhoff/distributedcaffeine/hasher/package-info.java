@@ -13,8 +13,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 /**
- * This package contains classes and interfaces that provide hashing functionality.
+ * Hashing of keys, by which the store finds them. {@link String}, {@link Long}, {@link Integer} and
+ * {@link java.util.UUID} keys are hashed built in; other keys implement {@link Hashable}, or the cache gets a
+ * {@link HashProvider}. Both compute the hash with a {@link Hasher}.
  *
  * @author Andreas Oberhoff
  * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>

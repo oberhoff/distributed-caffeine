@@ -13,20 +13,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 /**
- * The service provider interface between the core and a store adapter: a {@link
- * io.github.oberhoff.distributedcaffeine.spi.Store} for reads, writes and maintenance, and, for distribution, a
- * {@link io.github.oberhoff.distributedcaffeine.spi.ChangeFeed} announcing those writes, which a store implements
- * only if it can, or else a {@link io.github.oberhoff.distributedcaffeine.spi.ChangeScan} the core polls. The
- * contract every implementation must fulfil is written out on {@link
- * io.github.oberhoff.distributedcaffeine.spi.Store} (storage, failures, settings), {@link
- * io.github.oberhoff.distributedcaffeine.spi.ChangeFeed} (announcements, delivery, supervision) and {@link
- * io.github.oberhoff.distributedcaffeine.spi.ChangeScan} (the changes of a window), each point checked
- * by the contract tests of its name; {@link io.github.oberhoff.distributedcaffeine.spi.StoreException} and {@link
- * ChangeSubscription} hold the details of failures and resuming. The design
- * behind it: {@code VISION.md}, "SPI: a write is the message".
+ * The service provider interface between the cache and a store adapter. A {@link Store} reads, writes and maintains
+ * the values; for distribution, it also implements a {@link ChangeFeed} announcing its writes, or else a
+ * {@link ChangeScan} the cache polls. The contract every implementation must fulfil is written out on {@link Store}
+ * (storage, failures, settings), {@link ChangeFeed} (announcements, delivery, supervision) and {@link ChangeScan} (the
+ * changes of a window), each point checked by the contract tests of its name; {@link StoreException} and
+ * {@link ChangeSubscription} hold the details of failures and resuming.
  *
  * @author Andreas Oberhoff
+ * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
  */
 @NullMarked
 package io.github.oberhoff.distributedcaffeine.spi;

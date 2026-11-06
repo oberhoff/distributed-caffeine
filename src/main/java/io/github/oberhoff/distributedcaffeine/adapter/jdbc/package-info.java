@@ -13,12 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 /**
- * The store adapters for MariaDB ({@link io.github.oberhoff.distributedcaffeine.adapter.jdbc.MariaDbAdapter}) and MySQL
- * ({@link io.github.oberhoff.distributedcaffeine.adapter.jdbc.MySqlAdapter}) through JDBC: reads, conditional writes and
- * maintenance in SQL, without a change feed (the cache polls the changes).
+ * The adapters for MariaDB ({@link MariaDbAdapter}) and MySQL ({@link MySqlAdapter}), through JDBC. Neither database
+ * announces changes, so the cache polls for them.
  *
  * @author Andreas Oberhoff
+ * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
  */
 @NullMarked
 package io.github.oberhoff.distributedcaffeine.adapter.jdbc;

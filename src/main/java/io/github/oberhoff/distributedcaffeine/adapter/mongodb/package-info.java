@@ -13,11 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 /**
- * A store adapter for MongoDB: the store, its change feed through change streams (one watcher per client and
- * database), and the schema of its collection.
+ * The adapter for MongoDB ({@link MongoAdapter}), distributing changes through change streams.
  *
  * @author Andreas Oberhoff
+ * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
  */
 @NullMarked
 package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
