@@ -38,9 +38,8 @@ import static io.github.oberhoff.distributedcaffeine.testing.Topology.Tests.RUNS
  * Sentinel (Redis's) and as a cluster of three primaries with a replica each (its layout pushed by the tests, as its
  * controller does). Refused at store creation ({@link RedisRefusalTests}): Dragonfly 1.3.0 (no {@code XREAD}) and
  * Kvrocks 2.15.0 (no approximate MINID, though it reports Redis 7.0.0; earlier releases report 4.0.0). With
- * {@code -DrunsOnGitHub=true}, only the latest Redis runs on every topology (single server, Sentinel, cluster), and the
- * latest Valkey, Dragonfly and Kvrocks on a single server: Sentinel and the cluster are the same code paths on every
- * server, and their failover suites take most of the time.
+ * {@code -DrunsOnGitHub=true}, only the latest Redis, Valkey, Dragonfly and Kvrocks run, each on a single server:
+ * Sentinel and the cluster carry the long failover suites, which run in the full matrix.
  *
  * @author Andreas Oberhoff
  */
@@ -159,6 +158,7 @@ class RedisIntegrationTest {
 
     @Nested
     @DisplayName("Redis 8 latest (Primary, Replica and Sentinel)")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
     class Redis_8_latest__Sentinel extends RedisSentinelTests {
 
         Redis_8_latest__Sentinel() {
@@ -168,6 +168,7 @@ class RedisIntegrationTest {
 
     @Nested
     @DisplayName("Redis 8 latest (Cluster)")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
     class Redis_8_latest__Cluster extends RedisClusterTests {
 
         Redis_8_latest__Cluster() {

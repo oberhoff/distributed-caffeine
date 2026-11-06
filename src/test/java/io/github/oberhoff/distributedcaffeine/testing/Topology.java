@@ -38,7 +38,8 @@ public interface Topology {
     interface Tests {
 
         /**
-         * The system property that leaves only the latest image of each store running (as on GitHub).
+         * The system property that leaves only the latest image of each store running, on its single-server
+         * topologies (as on GitHub).
          */
         String RUNS_ON_GITHUB = "runsOnGitHub";
 

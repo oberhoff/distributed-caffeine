@@ -90,7 +90,7 @@ public final class RedisAdapter<K, V> implements Adapter<K, V> {
     // a takeover, Lettuce's cluster client could not refresh its view for over a minute. Not tested: Kvrocks's
     // controller, replication without Sentinel, TLS, managed services, other servers speaking the protocol.
 
-    private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine.adapter.redis");
+    private static final Logger LOGGER = System.getLogger(RedisAdapter.class.getPackageName());
     // the layout of this version (RedisKeys, RedisScripts); a cache written by another one is refused
     private static final String MARKER = "1";
 

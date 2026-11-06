@@ -74,7 +74,7 @@ import static java.util.Objects.requireNonNull;
  */
 final class RedisFeed {
 
-    private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine.adapter.redis");
+    private static final Logger LOGGER = System.getLogger(RedisAdapter.class.getPackageName());
     // every command of the reader answers within this, beyond its block time. Fixed, unlike a cache's operation
     // timeout: no caller waits for the reader, which is shared by caches with different timeouts, and its failures are
     // recovered (or noticed by the heartbeat) by the library, so the bound follows from its own waits (as MongoWatcher)

@@ -50,7 +50,7 @@ final class InternalDelivery implements ChangeListener {
     private final Executor executor;
     private final Consumer<List<Change>> onMessages;
     private final Runnable onGap;
-    private static final System.Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine");
+    private static final System.Logger LOGGER = System.getLogger(DistributedCaffeine.class.getPackageName());
 
     private final Runnable onLost;
     private final Queue<Object> queue = new ConcurrentLinkedQueue<>();

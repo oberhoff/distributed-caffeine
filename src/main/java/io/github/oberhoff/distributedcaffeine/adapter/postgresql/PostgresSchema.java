@@ -43,7 +43,7 @@ import java.util.Objects;
 @SuppressWarnings({"SqlNoDataSourceInspection", "java:S2077", "SqlSourceToSinkFlow"})
 final class PostgresSchema {
 
-    private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine.adapter.postgresql");
+    private static final Logger LOGGER = System.getLogger(PostgresAdapter.class.getPackageName());
     private static final String INSUFFICIENT_PRIVILEGE = "42501";
 
     private PostgresSchema() {

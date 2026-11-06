@@ -81,7 +81,7 @@ import java.util.concurrent.TimeoutException;
 @SuppressWarnings({"SqlNoDataSourceInspection", "java:S2077", "SqlSourceToSinkFlow"})
 final class PostgresListener {
 
-    private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine.adapter.postgresql");
+    private static final Logger LOGGER = System.getLogger(PostgresAdapter.class.getPackageName());
     // fixed, unlike a cache's operation timeout: no caller waits for the listening session, which is shared by caches
     // with different timeouts, and its failures are recovered (or noticed by the heartbeat) by the library, so the
     // bounds follow from its own commands (LISTEN, UNLISTEN, the probe of a notification), not from anyone's latency

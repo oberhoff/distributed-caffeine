@@ -94,12 +94,21 @@ public class InternalCoreTest {
     private final CacheBackend backend = backend();
     private final List<AutoCloseable> closeables = new ArrayList<>();
 
+    // the tests' own work in the background, not on the common pool: with few CPUs (2 on GitHub's runners) it has one
+    // thread, which a slow load holds, and every other task would wait for it (found: the slow-load tests timing out)
+    private final ExecutorService background = Executors.newCachedThreadPool(runnable -> {
+        Thread thread = new Thread(runnable, "test-background");
+        thread.setDaemon(true);
+        return thread;
+    });
+
     @AfterEach
     void tearDown() throws Exception {
         for (AutoCloseable closeable : closeables) {
             closeable.close();
         }
         backend.close();
+        background.shutdownNow();
     }
 
     // the store under test: the in-memory store here, a real database in the subclasses
@@ -452,7 +461,7 @@ public class InternalCoreTest {
             }
             return "v-" + key;
         });
-        CompletableFuture<@Nullable String> slow = CompletableFuture.supplyAsync(() -> cache.get("slow"));
+        CompletableFuture<@Nullable String> slow = CompletableFuture.supplyAsync(() -> cache.get("slow"), background);
         pause(100);
 
         long start = System.nanoTime();
@@ -476,7 +485,7 @@ public class InternalCoreTest {
             assertThat(release.await(5, TimeUnit.SECONDS)).isTrue();
             return "v";
         });
-        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> cache.get("k"));
+        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> cache.get("k"), background);
         assertThat(loading.await(5, TimeUnit.SECONDS)).isTrue();
 
         long start = System.nanoTime();
@@ -588,15 +597,15 @@ public class InternalCoreTest {
     }
 
     // while the slow load waits, every other key is answered; the slow load is released in any case
-    private static void otherKeysAnsweredDuring(CountDownLatch loading, CountDownLatch release,
-                                                Function<String, @Nullable String> get) throws Exception {
+    private void otherKeysAnsweredDuring(CountDownLatch loading, CountDownLatch release,
+                                         Function<String, @Nullable String> get) throws Exception {
         try {
             assertThat(loading.await(5, TimeUnit.SECONDS)).isTrue();
             CompletableFuture.runAsync(() -> {
                 for (int i = 0; i < OTHER_KEYS; i++) {
                     assertThat(get.apply("other " + i)).isEqualTo("loaded other " + i);
                 }
-            }).get(10, TimeUnit.SECONDS);
+            }, background).get(10, TimeUnit.SECONDS);
         } finally {
             release.countDown();
         }
@@ -615,7 +624,8 @@ public class InternalCoreTest {
             }
         };
         DistributedCache<String, String> cache = plain();
-        CompletableFuture<@Nullable String> slow = CompletableFuture.supplyAsync(() -> cache.get("slow", function));
+        CompletableFuture<@Nullable String> slow = CompletableFuture.supplyAsync(() -> cache.get("slow", function),
+                background);
 
         otherKeysAnsweredDuring(loading, release, key -> cache.get(key, function));
 
@@ -627,10 +637,12 @@ public class InternalCoreTest {
         CountDownLatch loading = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         DistributedAsyncLoadingCache<String, String> cache = builder(LONG)
+                .withCaffeine(caffeine -> caffeine.executor(background)) // the loads too, not on the common pool
                 .buildAsync(slowFor(new AtomicBoolean(true), loading, release));
         closeables.add(cache);
         // started from another thread: a regression running the load inside the compute would hold this one
-        CompletableFuture<@Nullable String> slow = CompletableFuture.supplyAsync(() -> cache.get("slow").join());
+        CompletableFuture<@Nullable String> slow = CompletableFuture.supplyAsync(() -> cache.get("slow").join(),
+                background);
 
         otherKeysAnsweredDuring(loading, release, key -> cache.get(key).join());
 
@@ -642,7 +654,8 @@ public class InternalCoreTest {
         CountDownLatch loading = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         DistributedLoadingCache<String, String> cache = loading(slowFor(new AtomicBoolean(true), loading, release));
-        CompletableFuture<Map<String, String>> slow = CompletableFuture.supplyAsync(() -> cache.getAll(List.of("slow")));
+        CompletableFuture<Map<String, String>> slow = CompletableFuture.supplyAsync(
+                () -> cache.getAll(List.of("slow")), background);
 
         otherKeysAnsweredDuring(loading, release, key -> cache.getAll(List.of(key)).get(key));
 
@@ -677,7 +690,7 @@ public class InternalCoreTest {
             return "loaded, possibly outdated";
         });
         DistributedCache<String, String> second = plain();
-        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> first.get("k"));
+        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> first.get("k"), background);
         assertThat(loading.await(5, TimeUnit.SECONDS)).isTrue();
 
         second.put("k", "newer");
@@ -702,7 +715,7 @@ public class InternalCoreTest {
             return "fresh";
         });
         DistributedCache<String, String> second = plain();
-        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> first.get("k"));
+        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> first.get("k"), background);
         assertThat(loading.await(5, TimeUnit.SECONDS)).isTrue();
 
         second.invalidate("k");
@@ -776,7 +789,7 @@ public class InternalCoreTest {
                         .withMaximumAge(LONG).withMaximumSize(10)).build();
         closeables.add(cache);
 
-        CompletableFuture<Void> slow = CompletableFuture.runAsync(() -> cache.put("k", "slow"));
+        CompletableFuture<Void> slow = CompletableFuture.runAsync(() -> cache.put("k", "slow"), background);
         assertThat(slowWritten.await(5, TimeUnit.SECONDS)).isTrue();
         cache.put("k", "fast");
         fastCommitted.countDown();
@@ -818,9 +831,9 @@ public class InternalCoreTest {
                         .withMaximumAge(LONG).withMaximumSize(10)).build();
         closeables.add(cache);
 
-        CompletableFuture<Void> invalidating = CompletableFuture.runAsync(() -> cache.invalidate("k"));
+        CompletableFuture<Void> invalidating = CompletableFuture.runAsync(() -> cache.invalidate("k"), background);
         assertThat(tombstoneWritten.await(5, TimeUnit.SECONDS)).isTrue();
-        CompletableFuture<Void> slow = CompletableFuture.runAsync(() -> cache.put("k", "slow"));
+        CompletableFuture<Void> slow = CompletableFuture.runAsync(() -> cache.put("k", "slow"), background);
         assertThat(slowWritten.await(5, TimeUnit.SECONDS)).as("written after the tombstone").isTrue();
         cache.put("k", "new");
         invalidateGoes.countDown();

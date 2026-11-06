@@ -33,7 +33,8 @@ import static io.github.oberhoff.distributedcaffeine.testing.Topology.Tests.RUNS
  * each major version's first release and its latest; for 9.6 the first image that still starts (9.6.0 to 9.6.4 crash in
  * their gosu, built with a Go runtime of 2016). The pooler on the oldest and the latest, the small notification
  * queue from 17 on (where it can be configured), on the latest of a major version. With {@code -DrunsOnGitHub=true},
- * only the latest image runs.
+ * only the latest image runs, on its single-server topologies (single server, small notify queue, pooler): the
+ * standbys carry the long failover suites, which run in the full matrix.
  *
  * @author Andreas Oberhoff
  */
@@ -462,12 +463,14 @@ class PostgresIntegrationTest {
     @Nested
     @DisplayName("PostgreSQL 18 latest (Primary with Asynchronous Standby)")
     @Setup(image = "postgres:18", topology = PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
     class Postgres_18_latest__Primary_with_Asynchronous_Standby extends PostgresTopologyTests {
     }
 
     @Nested
     @DisplayName("PostgreSQL 18 latest (Primary with Synchronous Standby)")
     @Setup(image = "postgres:18", topology = PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
     class Postgres_18_latest__Primary_with_Synchronous_Standby extends PostgresTopologyTests {
     }
 

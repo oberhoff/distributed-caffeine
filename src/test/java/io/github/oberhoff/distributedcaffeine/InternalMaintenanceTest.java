@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import io.github.oberhoff.distributedcaffeine.testing.LogCapture;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -34,6 +35,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.await;
+import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.pause;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -66,11 +68,17 @@ class InternalMaintenanceTest {
         }
     }
 
+    // whether expire throws what no store should (a bug's exception)
+    private volatile boolean failExpiry;
+
     // the store, with its maintenance calls recorded
     private Store recording() {
         Store store = database.openStore("cache");
         return (Store) Proxy.newProxyInstance(Store.class.getClassLoader(), new Class<?>[]{Store.class},
                 (proxy, method, arguments) -> {
+                    if (failExpiry && method.getName().equals("expire")) {
+                        throw new IllegalStateException("expiry broke");
+                    }
                     Object result;
                     try {
                         result = method.invoke(store, arguments);
@@ -104,6 +112,22 @@ class InternalMaintenanceTest {
         }
         cache.putAll(values);
         return cache;
+    }
+
+    @Test
+    void an_unexpected_failure_of_maintenance_is_logged_at_once_with_its_stack_trace_and_once_only() {
+        try (LogCapture log = new LogCapture()) {
+            failExpiry = true;
+            cache(10);
+            await(() -> log.count("Maintenance of the store (expiry, pruning) failed") == 1);
+            pause(500); // several more runs
+
+            assertThat(log.count("Maintenance of the store (expiry, pruning) failed")).isEqualTo(1);
+            assertThat(log.text()).contains("java.lang.IllegalStateException: expiry broke").contains("\tat ");
+
+            failExpiry = false;
+            await(() -> log.count("Maintenance of the store succeeded again") == 1);
+        }
     }
 
     @Test

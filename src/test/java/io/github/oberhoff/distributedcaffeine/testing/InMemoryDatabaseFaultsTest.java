@@ -221,12 +221,16 @@ class InMemoryDatabaseFaultsTest {
             store.subscribe(observer);
             database.setDeliveryDelay(Duration.ofMillis(200));
 
+            // each batch is delayed by a random duration up to the maximum: writes awaited one by one, so that each
+            // is a batch of its own, as quick writes would arrive as one batch with one draw, below 10 ms one time in
+            // 20 (found on GitHub's runners); five draws together stay below it far less than once in a million
             long start = System.nanoTime();
-            int writes = 20;
+            int writes = 5;
             for (int i = 0; i < writes; i++) {
                 store.write(List.of(entry("h" + i, "v")));
+                int written = i + 1;
+                observer.await(m -> m.size() == written, TIMEOUT);
             }
-            observer.await(m -> m.size() == writes, TIMEOUT);
 
             assertThat(Duration.ofNanos(System.nanoTime() - start)).isGreaterThan(Duration.ofMillis(10));
         }
