@@ -22,9 +22,9 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
-import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.testing.Ports;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.testcontainers.DockerClientFactory;
@@ -203,7 +203,7 @@ final class JdbcTestDatabase implements AutoCloseable {
     }
 
     static Store open(String table, String discriminator) {
-        return adapter(dataSource(), table, discriminator).createStore(StoreSettings.of(Format.TEXT, Format.TEXT));
+        return adapter(dataSource(), table, discriminator).createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT));
     }
 
     // the adapter of the product under test
