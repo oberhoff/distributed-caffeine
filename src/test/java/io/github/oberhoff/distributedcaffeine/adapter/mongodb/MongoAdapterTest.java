@@ -30,10 +30,10 @@ import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.State;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
-import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.testing.SilencingProxy;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.bson.BsonDocument;
 import org.bson.Document;
 import org.jspecify.annotations.NullMarked;
@@ -360,7 +360,7 @@ abstract class MongoAdapterTest {
                         .timeout(2, TimeUnit.SECONDS)
                         .build()));
         var store = track(MongoAdapter.newBuilder(timed, "adapter", collection).build()
-                .createStore(StoreSettings.of(Format.TEXT, Format.TEXT)));
+                .createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT)));
         // 24 MB of values: a read of all of them takes several batches
         String value = "x".repeat(3_000);
         List<Document> rows = new ArrayList<>();
@@ -411,12 +411,12 @@ abstract class MongoAdapterTest {
         com.mongodb.client.MongoClient proxied = track(com.mongodb.client.MongoClients.create(
                 "mongodb://127.0.0.1:" + proxy.port() + "/?directConnection=true&maxIdleTimeMS=200"));
         MongoAdapter<String, String> adapter = MongoAdapter.newBuilder(proxied, "adapter", collection).build();
-        Store writer = track(adapter().build().createStore(StoreSettings.of(Format.TEXT, Format.TEXT)));
+        Store writer = track(adapter().build().createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT)));
         RecordingListener resuming = new RecordingListener();
         RecordingListener other = new RecordingListener();
         ChangeSubscription subscription = track(((ChangeFeed) track(adapter.createStore(
-                StoreSettings.of(Format.TEXT, Format.TEXT)))).subscribe(resuming));
-        track(((ChangeFeed) track(adapter.createStore(StoreSettings.of(Format.TEXT, Format.TEXT))))
+                TestStoreSettings.of(Format.TEXT, Format.TEXT)))).subscribe(resuming));
+        track(((ChangeFeed) track(adapter.createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT))))
                 .subscribe(other));
 
         proxy.silenceOpenConnections();
@@ -589,7 +589,7 @@ abstract class MongoAdapterTest {
 
         await(() -> holder.policy().getIfPresentQuietly("k") == null);
         assertThat(holder.getIfPresent("k")).isEqualTo("new");
-        try (var store = adapter().build().createStore(StoreSettings.of(Format.TEXT, Format.TEXT))) {
+        try (var store = adapter().build().createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT))) {
             List<String> foreign = List.of("foreign");
             assertThatThrownBy(() -> store.read(foreign, LONG)).isInstanceOf(StoreException.class)
                     .hasMessageContaining("UNKNOWN");
@@ -598,7 +598,7 @@ abstract class MongoAdapterTest {
 
     @Test
     void maintenance_leaves_reserved_documents_alone_and_deletes_what_the_control_row_hides() {
-        try (var store = adapter().build().createStore(StoreSettings.of(Format.TEXT, Format.TEXT))) {
+        try (var store = adapter().build().createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT))) {
             byte[] bytes = "x".getBytes(StandardCharsets.UTF_8);
             // any versions: the store only stores them
             store.write(List.of(Write.value("hidden", bytes, bytes, 1)));
@@ -614,7 +614,7 @@ abstract class MongoAdapterTest {
 
     @Test
     void a_bulk_write_reports_each_writes_outcome_and_a_write_on_a_pruned_version_leaves_no_value() {
-        try (var store = adapter().build().createStore(StoreSettings.of(Format.TEXT, Format.TEXT))) {
+        try (var store = adapter().build().createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT))) {
             byte[] bytes = "x".getBytes(StandardCharsets.UTF_8);
             byte[] newer = "y".getBytes(StandardCharsets.UTF_8);
             store.write(List.of(Write.value("matching", bytes, bytes, 1), Write.value("other", bytes, bytes, 1),

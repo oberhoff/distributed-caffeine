@@ -17,8 +17,8 @@ package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
 
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreContractTest;
-import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.jspecify.annotations.NullMarked;
 
 /**
@@ -48,7 +48,7 @@ abstract class MongoStoreContractTest extends StoreContractTest {
         return new Fixture() {
             @Override
             public Store openStore() {
-                return adapter.createStore(StoreSettings.of(Format.BINARY, Format.BINARY));
+                return adapter.createStore(TestStoreSettings.of(Format.BINARY, Format.BINARY));
             }
 
             @Override
@@ -66,7 +66,7 @@ abstract class MongoStoreContractTest extends StoreContractTest {
 
             @Override
             public Store openStoreOfAnotherCache() {
-                return other.createStore(StoreSettings.of(Format.BINARY, Format.BINARY));
+                return other.createStore(TestStoreSettings.of(Format.BINARY, Format.BINARY));
             }
 
             @Override

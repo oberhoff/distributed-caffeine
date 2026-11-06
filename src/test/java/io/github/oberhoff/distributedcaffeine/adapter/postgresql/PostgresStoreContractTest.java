@@ -20,8 +20,8 @@ import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
 import io.github.oberhoff.distributedcaffeine.spi.RecordingListener;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreContractTest;
-import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.jspecify.annotations.NullMarked;
 
 /**
@@ -56,7 +56,7 @@ abstract class PostgresStoreContractTest extends StoreContractTest {
         return new Fixture() {
             @Override
             public Store openStore() {
-                return adapter.createStore(StoreSettings.of(Format.BINARY, Format.BINARY));
+                return adapter.createStore(TestStoreSettings.of(Format.BINARY, Format.BINARY));
             }
 
             // another instance re-establishes the shared session, which seemed alive to it: the others delivering
@@ -87,7 +87,7 @@ abstract class PostgresStoreContractTest extends StoreContractTest {
 
             @Override
             public Store openStoreOfAnotherCache() {
-                return other.createStore(StoreSettings.of(Format.BINARY, Format.BINARY));
+                return other.createStore(TestStoreSettings.of(Format.BINARY, Format.BINARY));
             }
 
             @Override

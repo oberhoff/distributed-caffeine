@@ -19,9 +19,9 @@ import io.github.oberhoff.distributedcaffeine.DistributedCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
-import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
@@ -233,7 +233,7 @@ abstract class RedisFailoverTests {
         put(writer, "kept");
         assertThat(holder.getIfPresent(KEY)).isEqualTo("kept");
         converges(holder, "kept");
-        RedisStore store = (RedisStore) track(adapter().createStore(StoreSettings.of(Format.TEXT, Format.TEXT)));
+        RedisStore store = (RedisStore) track(adapter().createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT)));
         // the kept value on the replica too, or the failover loses it as well
         topology.awaitInSync(row);
 
@@ -269,7 +269,7 @@ abstract class RedisFailoverTests {
         DistributedCache<String, String> holder = cache();
         put(writer, "kept");
         converges(holder, "kept");
-        RedisStore store = (RedisStore) track(adapter().createStore(StoreSettings.of(Format.TEXT, Format.TEXT)));
+        RedisStore store = (RedisStore) track(adapter().createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT)));
         topology.awaitInSync(row);
 
         byte[] lostValue = "lost".getBytes(StandardCharsets.UTF_8);

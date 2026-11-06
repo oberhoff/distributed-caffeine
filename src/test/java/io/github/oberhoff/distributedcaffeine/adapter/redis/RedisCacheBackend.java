@@ -19,6 +19,7 @@ import io.github.oberhoff.distributedcaffeine.CacheBackend;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 
@@ -61,7 +62,7 @@ final class RedisCacheBackend implements CacheBackend {
     private synchronized RedisStore probe() {
         RedisStore current = probe;
         if (current == null) {
-            current = (RedisStore) open(StoreSettings.of(Format.TEXT, Format.TEXT));
+            current = (RedisStore) open(TestStoreSettings.of(Format.TEXT, Format.TEXT));
             probe = current;
         }
         return current;

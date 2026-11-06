@@ -22,9 +22,9 @@ import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
-import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
@@ -151,14 +151,14 @@ abstract class JdbcRetryTest {
     // counting starts after the schema's check
     private Store store() {
         Store store = JdbcTestDatabase.adapter(faulty(), JdbcTestDatabase.freshTable(),
-                JdbcTestDatabase.DEFAULT_DISCRIMINATOR).createStore(StoreSettings.of(Format.TEXT, Format.TEXT));
+                JdbcTestDatabase.DEFAULT_DISCRIMINATOR).createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT));
         executions.set(0);
         return store;
     }
 
     private static Store store(DataSource dataSource, String table) {
         return JdbcTestDatabase.adapter(dataSource, table, JdbcTestDatabase.DEFAULT_DISCRIMINATOR)
-                .createStore(StoreSettings.of(Format.TEXT, Format.TEXT));
+                .createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT));
     }
 
     // no maintenance meanwhile, which would run statements of its own

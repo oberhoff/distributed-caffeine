@@ -19,6 +19,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.TestInstance;
@@ -61,7 +62,7 @@ abstract class RedisRefusalTests {
         };
         RedisAdapter<String, String> adapter = RedisAdapter.newBuilder(driver, RedisTestServer.freshName()).build();
 
-        StoreSettings settings = StoreSettings.of(Format.TEXT, Format.TEXT);
+        StoreSettings settings = TestStoreSettings.of(Format.TEXT, Format.TEXT);
         assertThatThrownBy(() -> {
             try (Store ignored = adapter.createStore(settings)) {
                 throw new AssertionError("the store was created");

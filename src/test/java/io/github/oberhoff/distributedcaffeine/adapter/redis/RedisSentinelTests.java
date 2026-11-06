@@ -17,8 +17,8 @@ package io.github.oberhoff.distributedcaffeine.adapter.redis;
 
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
-import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Nested;
@@ -69,7 +69,7 @@ abstract class RedisSentinelTests {
                     .build();
 
             assertThatThrownBy(() -> {
-                try (Store ignored = adapter.createStore(StoreSettings.of(Format.TEXT, Format.TEXT))) {
+                try (Store ignored = adapter.createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT))) {
                     throw new AssertionError("the store was created");
                 }
             }).isInstanceOfSatisfying(StoreException.class, e -> {

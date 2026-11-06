@@ -27,9 +27,9 @@ import io.github.oberhoff.distributedcaffeine.spi.ChangeFeed;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
-import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.testing.SilencingProxy;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -305,7 +305,8 @@ abstract class PostgresConnectionTest {
     void a_listener_failing_on_a_notification_leaves_the_others_on_the_session_undisturbed() {
         DataSource shared = listener(application());
         AtomicInteger failed = new AtomicInteger();
-        Store raw = track(adapter(database.dataSource, shared).createStore(StoreSettings.of(Format.TEXT, Format.TEXT)));
+        Store raw = track(adapter(database.dataSource, shared)
+                .createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT)));
         track(((ChangeFeed) raw).subscribe(new ChangeListener() {
             @Override
             public void onChanges(List<Change> messages) {
@@ -460,7 +461,8 @@ abstract class PostgresConnectionTest {
         config.setMaximumPoolSize(1);
         config.setConnectionTimeout(1_000);
         HikariDataSource pool = track(new HikariDataSource(config));
-        Store store = track(adapter(pool, database.listener).createStore(StoreSettings.of(Format.TEXT, Format.TEXT)));
+        Store store = track(adapter(pool, database.listener)
+                .createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT)));
 
         try (Connection held = pool.getConnection()) {
             assertThat(held.isValid(1)).isTrue();

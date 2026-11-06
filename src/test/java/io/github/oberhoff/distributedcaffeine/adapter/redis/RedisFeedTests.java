@@ -24,8 +24,8 @@ import io.github.oberhoff.distributedcaffeine.spi.Change;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeFeed;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
-import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import io.lettuce.core.Range;
 import io.lettuce.core.StreamMessage;
 import io.lettuce.core.XTrimArgs;
@@ -106,7 +106,7 @@ abstract class RedisFeedTests {
     // a raw subscription on the shared reader, its listener as given
     private void subscribe(ChangeListener listener) {
         Store raw = track(RedisAdapter.newBuilder(shared, name).build()
-                .createStore(StoreSettings.of(Format.TEXT, Format.TEXT)));
+                .createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT)));
         track(((ChangeFeed) raw).subscribe(listener));
     }
 
