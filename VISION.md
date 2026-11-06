@@ -1685,6 +1685,15 @@ row, returned with a refusal (as DynamoDB returns the item on a failed condition
 
 ### Operations
 
+**Logging** (`System.Logger`, name `io.github.oberhoff.distributedcaffeine`; settled 2026-11-06): what is thrown is
+not logged, the caller decides; what happens without a caller is logged once per incident, not per call, with the
+recovery at INFO: the change feed lost and resumed, polling failing and succeeding again, listener callbacks
+failing, the store not answering (the store guard opening; reads fall back to the source without a trace, so an
+outage would go unnoticed otherwise) and answering again, and maintenance failing as many runs in a row as the guard
+needs to count the store down, while the store otherwise answers (a batch always timing out, a missing right to
+delete), and succeeding again. Plus one-off notices (a schema reset dropping a table, a missing index, an evicting
+Redis, a clock far ahead).
+
 **Threads** (all library threads daemon, named `distributed-caffeine-<role>`):
 
 - One listening thread per shared session or cursor, not per cache (follows from connection sharing).
@@ -4462,6 +4471,13 @@ complex"), the race accepted and documented in the README. To close it fully, if
   holds the bin's lock from read to write; FusionCache, JetCache and Redisson have no atomic `compute` across
   instances. Caffeine discards a refresh whose entry was invalidated meanwhile; here a refresh racing an
   `invalidateAll` elsewhere survives it.
+- **Reaching further back (found 2026-11-06 by the property test with size pruning, accepted the same day):** a load
+  whose write is conditioned on "missing" is refused by a newer write elsewhere, but maintenance deletes the rows an
+  `invalidateAll` hides at once (`pruneTombstones`, no grace), that write's row too; the load's value then lands,
+  older than the write before the `invalidateAll`. Reproduced in `InternalInvalidateAllRaceTest` (disabled as
+  accepted); the property test's freshness oracle allows every value the source held before an `invalidateAll`; the
+  README says so. Closing it: `pruneTombstones` sparing hidden rows for the prune grace, an SPI change in every
+  adapter that narrows the race without ending it.
 
 **Compared.**
 

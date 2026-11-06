@@ -33,7 +33,9 @@ import static io.github.oberhoff.distributedcaffeine.testing.Topology.Tests.RUNS
  * Every MongoDB image and topology the suites run on, one at a time: from 4.4, the oldest supported, to the latest,
  * each major version's first release and its latest. The sharded cluster and the small oplog on the latest of each
  * major version (and 4.4.0). A standalone server on 4.4.0 (asked with {@code isMaster}) and the latest (asked with
- * {@code hello}). With {@code -DrunsOnGitHub=true}, only the latest image runs.
+ * {@code hello}). With {@code -DrunsOnGitHub=true}, only the latest image runs, on its single-server topologies
+ * (single node, small oplog, standalone): the multi-node ones carry the long failover and sharding suites, which run
+ * in the full matrix.
  *
  * @author Andreas Oberhoff
  */
@@ -371,18 +373,21 @@ class MongoIntegrationTest {
     @Nested
     @DisplayName("MongoDB 9 latest (Three-Node Replica Set)")
     @Setup(image = "mongo:9", topology = THREE_NODE_REPLICA_SET)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
     class Mongo_9_latest__Three_Node_Replica_Set extends MongoTopologyTests {
     }
 
     @Nested
     @DisplayName("MongoDB 9 latest (Three-Node Replica Set with Arbiter)")
     @Setup(image = "mongo:9", topology = THREE_NODE_REPLICA_SET_WITH_ARBITER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
     class Mongo_9_latest__Three_Node_Replica_Set_with_Arbiter extends MongoTopologyTests {
     }
 
     @Nested
     @DisplayName("MongoDB 9 latest (Sharded Cluster with Two Shards)")
     @Setup(image = "mongo:9", topology = SHARDED_CLUSTER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
     class Mongo_9_latest__Sharded_Cluster_with_Two_Shards extends MongoTopologyTests {
     }
 

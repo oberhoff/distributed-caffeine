@@ -108,7 +108,7 @@ import static java.util.Objects.requireNonNull;
 @SuppressWarnings({"java:S6539", "java:S3776", "java:S107"})
 final class InternalCore<K, V> {
 
-    private static final System.Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine");
+    private static final System.Logger LOGGER = System.getLogger(DistributedCaffeine.class.getPackageName());
     private static final long RESUME_MIN_MILLIS = 250;
     private static final long RESUME_MAX_MILLIS = 30_000;
 
@@ -258,6 +258,10 @@ final class InternalCore<K, V> {
     // null without distribution, like the subscription
     private final @Nullable InternalHeartbeat heartbeat;
     private final Duration heartbeatInterval;
+    // the maintenance runs that failed in a row, and whether that was logged (maintenanceFailed); runs follow one
+    // another, each on the store executor
+    private final AtomicInteger maintenanceFailures = new AtomicInteger();
+    private volatile boolean maintenanceFailing;
     private final AtomicReference<@Nullable ScheduledFuture<?>> maintenanceTask = new AtomicReference<>();
     private final AtomicReference<@Nullable ScheduledFuture<?>> heartbeatTask = new AtomicReference<>();
     // supervising the subscription: whether resume attempts are under way, the losses reported so far (a loss during
@@ -2361,11 +2365,20 @@ final class InternalCore<K, V> {
                     break;
                 }
             }
+            if (next == 3) {
+                maintenanceFailures.set(0);
+                if (maintenanceFailing) {
+                    maintenanceFailing = false;
+                    LOGGER.log(System.Logger.Level.INFO, "Maintenance of the store succeeded again");
+                }
+            }
         } catch (StoreException e) {
-            guard.failure();
+            guard.failure(e);
+            maintenanceFailed(e, InternalStoreGuard.isUnexpected(e));
             next = 3;
         } catch (RuntimeException e) {
             // keeps maintenance alive; the next run tries again
+            maintenanceFailed(e, true);
             next = 3;
         }
         if (next < 3) {
@@ -2376,6 +2389,27 @@ final class InternalCore<K, V> {
             }
         } else {
             scheduleMaintenance();
+        }
+    }
+
+    // a run failed: a failure that recurs every run (a batch always timing out, a missing right to delete) would leave
+    // expiry and pruning undone without a trace, so it is logged once as many runs in a row failed as the store guard
+    // needs to count the store down, and then not until a run succeeds again. Not while the store is not answering
+    // at all, which the guard logs (on an instance without other calls, maintenance's failures are what it counts);
+    // an unexpected failure at once, with its stack trace
+    private void maintenanceFailed(RuntimeException e, boolean unexpected) {
+        int failedRuns = maintenanceFailures.incrementAndGet();
+        if (maintenanceFailing
+                || (!unexpected && (failedRuns < InternalStoreGuard.THRESHOLD || guard.isOpen()))) {
+            return;
+        }
+        maintenanceFailing = true;
+        String message = "Maintenance of the store (expiry, pruning) failed; it is tried again every maintenance "
+                + "interval: " + e.getMessage();
+        if (unexpected) {
+            LOGGER.log(System.Logger.Level.WARNING, message, e);
+        } else {
+            LOGGER.log(System.Logger.Level.WARNING, message);
         }
     }
 

@@ -84,8 +84,10 @@ import static org.assertj.core.api.Assertions.fail;
  * <ul>
  *     <li><b>Freshness</b> (of L2): after each phase, the store holds for every key either no value or the source's
  *     current one. A stale load that slipped past a write (ordering rules 4 and 6) leaves an old token. Allowed: a
- *     token the source held when an {@code invalidateAll} began, which a load that read it before and wrote after
- *     leaves behind (the race accepted since 2026-10-28).</li>
+ *     token the source held before an {@code invalidateAll}, which a load that read it before and wrote after leaves
+ *     behind (the race accepted since 2026-10-28), also one a later write replaced before the {@code invalidateAll}:
+ *     maintenance deletes the rows an {@code invalidateAll} hides at once, so that write's row no longer refuses the
+ *     load's write on "missing" (found 2026-11-06, InternalInvalidateAllRaceTest).</li>
  *     <li><b>Presence</b> (of L2): a key whose last confirmed write (put, {@code putAll}, compute, replace) was not
  *     invalidated since holds exactly that value in the store. Freshness allows no value, so a write lost or hidden
  *     (by a filter hiding too much) passes it; writes and {@code invalidateAll} never overlap in this model, so the
@@ -119,10 +121,14 @@ public class InternalPropertyTest {
     private final Map<String, String> keysByHash = new ConcurrentHashMap<>();
     // the presence oracle: per key, the value of the last confirmed write since its last invalidation
     private final Map<String, String> confirmed = new ConcurrentHashMap<>();
-    // per key, the source's values at each invalidateAll: a load that read one before it and writes after it leaves it
-    // behind, the race accepted (VISION.md, "Target design: invalidateAll by the store's time, hidden on read"), so the
-    // freshness oracle allows them; tokens are unique, and a later write of the key replaces such a value in the store
+    // per key, every value the source held before an invalidateAll: a load that read one before it and writes after it
+    // leaves it behind, the race accepted (VISION.md, "Target design: invalidateAll by the store's time, hidden on
+    // read"), also one a write replaced before the invalidateAll (whose row maintenance then deletes, so that it no
+    // longer refuses the load's write on "missing"), so the freshness oracle allows them; tokens are unique, and a
+    // later write of the key replaces such a value in the store
     private final Map<String, Set<String>> beforeInvalidateAll = new ConcurrentHashMap<>();
+    // per key, every value the source held so far
+    private final Map<String, Set<String>> sourceHeld = new ConcurrentHashMap<>();
     // the pruning variant: a maximum size below the number of keys and maintenance every few milliseconds, so that
     // size pruning deletes rows silently while the instances work (presence then cannot be asked for); only rows
     // older than its grace (4 s here), so that no poll misses a write and no load's write on "missing" applies over a
@@ -352,8 +358,8 @@ public class InternalPropertyTest {
             // the source changes broadly, then everything is invalidated: a load that read the source before
             // must not leave its value behind
             lockAll(() -> {
-                source.forEach((k, value) -> beforeInvalidateAll
-                        .computeIfAbsent(k, ignored -> ConcurrentHashMap.newKeySet()).add(value));
+                sourceHeld.forEach((k, values) -> beforeInvalidateAll
+                        .computeIfAbsent(k, ignored -> ConcurrentHashMap.newKeySet()).addAll(values));
                 for (int changed = 0; changed < KEYS; changed++) {
                     double change = random.nextDouble();
                     if (change < 0.5) {
@@ -585,6 +591,7 @@ public class InternalPropertyTest {
         if (value == null) {
             source.remove(key);
         } else {
+            sourceHeld.computeIfAbsent(key, ignored -> ConcurrentHashMap.newKeySet()).add(value);
             source.put(key, value);
         }
     }

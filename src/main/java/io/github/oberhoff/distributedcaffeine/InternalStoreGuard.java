@@ -42,6 +42,7 @@ final class InternalStoreGuard {
     static final long SUSPENSION_NANOS = TimeUnit.SECONDS.toNanos(1);
     static final int ATTEMPTS = 3;
     private static final long BACKOFF_MILLIS = 20;
+    private static final System.Logger LOGGER = System.getLogger(DistributedCaffeine.class.getPackageName());
 
     // what a call does, which decides whether repeating it is safe
     enum Operation {
@@ -97,7 +98,7 @@ final class InternalStoreGuard {
         try {
             result = retrying(call, operation, repeatingUnknown);
         } catch (StoreException e) {
-            failure();
+            failure(e);
             stats.increment(InternalStatsCounter.Counter.STORE_FAILURE);
             if (write && e.isOutcomeUnknown()) {
                 stats.increment(InternalStatsCounter.Counter.UNKNOWN_OUTCOME);
@@ -128,8 +129,7 @@ final class InternalStoreGuard {
             } catch (StoreException e) {
                 failure = e;
             } catch (RuntimeException e) {
-                failure = new StoreException("The store failed unexpectedly: " + e, e,
-                        operation != Operation.READ, false);
+                failure = new Unexpected(e, operation != Operation.READ);
             }
             unknown |= operation != Operation.READ && failure.isOutcomeUnknown();
             boolean again = failure.isRetryable() && attempt < ATTEMPTS
@@ -167,21 +167,61 @@ final class InternalStoreGuard {
         return open;
     }
 
-    synchronized void success() {
-        failures = 0;
-        open = false;
-        probing = false;
+    // the store answered; logged once where it had not answered before: reads fall back to the source without a
+    // trace, so an outage would otherwise go unnoticed
+    void success() {
+        boolean wasOpen;
+        synchronized (this) {
+            wasOpen = open;
+            failures = 0;
+            open = false;
+            probing = false;
+        }
+        if (wasOpen) {
+            LOGGER.log(System.Logger.Level.INFO, "The store answers again; calls to it resume");
+        }
     }
 
-    synchronized void failure() {
-        failures++;
-        probing = false;
-        if (open) {
-            openedAt = environment.nanoTime();
-        } else if (failures >= THRESHOLD) {
-            open = true;
-            openedAt = environment.nanoTime();
-            stats.increment(InternalStatsCounter.Counter.GUARD_OPEN);
+    // the store failed; logged once when it counts as not answering, not per call
+    void failure(StoreException cause) {
+        boolean opened = false;
+        synchronized (this) {
+            failures++;
+            probing = false;
+            if (open) {
+                openedAt = environment.nanoTime();
+            } else if (failures >= THRESHOLD) {
+                open = true;
+                opened = true;
+                openedAt = environment.nanoTime();
+                stats.increment(InternalStatsCounter.Counter.GUARD_OPEN);
+            }
+        }
+        if (opened) {
+            String message = "The store is not answering (" + cause.getMessage() + "); calls to it are refused, with a "
+                    + "probe every second, until it answers again (distributedPolicy().getSynchronizationState())";
+            if (isUnexpected(cause)) {
+                LOGGER.log(System.Logger.Level.WARNING, message, cause);
+            } else {
+                LOGGER.log(System.Logger.Level.WARNING, message);
+            }
+        }
+    }
+
+    // whether the store threw what no store should (not a StoreException): a bug, logged with its stack trace
+    static boolean isUnexpected(StoreException failure) {
+        return failure instanceof Unexpected;
+    }
+
+    // what a store threw other than a StoreException, taken for a failure that is not retryable, a write's outcome
+    // unknown
+    private static final class Unexpected extends StoreException {
+
+        @java.io.Serial
+        private static final long serialVersionUID = 1L;
+
+        Unexpected(RuntimeException cause, boolean write) {
+            super("The store failed unexpectedly: " + cause, cause, write, false);
         }
     }
 

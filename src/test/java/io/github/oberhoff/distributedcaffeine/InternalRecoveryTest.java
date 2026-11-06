@@ -25,6 +25,7 @@ import io.github.oberhoff.distributedcaffeine.spi.VersionsResult;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import io.github.oberhoff.distributedcaffeine.testing.LogCapture;
 import io.github.oberhoff.distributedcaffeine.testing.StoreProfile;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
@@ -414,6 +415,59 @@ public class InternalRecoveryTest {
         await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
         assertThat(cache.get("k")).as("the source-only value is checked and loaded properly").isEqualTo("k-5");
         assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("k-5");
+    }
+
+    // logging: what happens without a caller, once per incident and its end, not per call
+
+    private static final String NOT_ANSWERING = "The store is not answering";
+    private static final String ANSWERS_AGAIN = "The store answers again";
+    private static final String MAINTENANCE_FAILED = "Maintenance of the store (expiry, pruning) failed";
+    private static final String MAINTENANCE_AGAIN = "Maintenance of the store succeeded again";
+
+    @Test
+    void a_store_not_answering_is_logged_once_and_once_more_when_it_answers_again() {
+        // the in-memory store's faults: skipped on a real database before anything is set up
+        InMemoryDatabase faults = backend.faults();
+        DistributedLoadingCache<String, String> cache = track(counted(LONG, 1_000, Duration.ofMillis(50))
+                .build(key -> "source-" + key));
+        try (LogCapture log = new LogCapture()) {
+            faults.setDown(true);
+            for (int i = 0; i < 10 * InternalStoreGuard.THRESHOLD; i++) {
+                assertThat(cache.get("miss" + i)).isEqualTo("source-miss" + i);
+            }
+            pause(300); // maintenance runs failing meanwhile
+
+            assertThat(log.count(NOT_ANSWERING)).as("once, not per call\n%s", log.text()).isEqualTo(1);
+            assertThat(log.count(MAINTENANCE_FAILED)).as("the guard's warning covers it\n%s", log.text()).isZero();
+
+            faults.setDown(false);
+            await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
+            await(() -> log.count(ANSWERS_AGAIN) == 1);
+            assertThat(log.count(NOT_ANSWERING)).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void maintenance_failing_while_the_store_answers_is_logged_once_and_once_more_when_it_succeeds_again() {
+        // the in-memory store's faults: skipped on a real database before anything is set up
+        InMemoryDatabase faults = backend.faults();
+        DistributedLoadingCache<String, String> cache = track(counted(Duration.ofMillis(200), 1_000,
+                Duration.ofMillis(50)).build(key -> "v"));
+        cache.put("k", "v");
+        try (LogCapture log = new LogCapture()) {
+            faults.failNextWrites(Integer.MAX_VALUE, false); // every write fails, maintenance's too, reads answer
+            for (int i = 0; i < 40; i++) {
+                cache.distributedPolicy().getFromStore("k");
+                pause(10);
+            }
+
+            assertThat(log.count(MAINTENANCE_FAILED)).as("once, not per run\n%s", log.text()).isEqualTo(1);
+            assertThat(log.count(NOT_ANSWERING)).as("the store answers\n%s", log.text()).isZero();
+
+            faults.failNextWrites(0, false);
+            await(() -> log.count(MAINTENANCE_AGAIN) == 1);
+            assertThat(log.count(MAINTENANCE_FAILED)).isEqualTo(1);
+        }
     }
 
     // maintenance

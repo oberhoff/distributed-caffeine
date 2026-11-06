@@ -64,7 +64,7 @@ import static java.util.Objects.requireNonNull;
  */
 final class InternalPollingStore implements Store, ChangeFeed {
 
-    private static final System.Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine");
+    private static final System.Logger LOGGER = System.getLogger(DistributedCaffeine.class.getPackageName());
 
     static final Duration POLL_OVERLAP = Duration.ofSeconds(2);
 

@@ -82,7 +82,7 @@ import java.util.function.Consumer;
  */
 final class MongoWatcher {
 
-    private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine.adapter.mongodb");
+    private static final Logger LOGGER = System.getLogger(MongoAdapter.class.getPackageName());
     private static final String LISTENER_FAILED = "A listener failed";
     private static final long MAX_AWAIT_MILLIS = 100;
     // the flag of an update that wrote a value, in its changed fields (a name no document field has)

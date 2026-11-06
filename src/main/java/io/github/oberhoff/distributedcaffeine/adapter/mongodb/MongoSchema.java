@@ -49,7 +49,7 @@ import java.util.function.UnaryOperator;
  */
 final class MongoSchema {
 
-    private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine.adapter.mongodb");
+    private static final Logger LOGGER = System.getLogger(MongoAdapter.class.getPackageName());
     private static final int COMMAND_NOT_FOUND = 59;
     // the hash last, so that pruning to size ranks by the index alone (write time, ties by hash): without it, every
     // batch sorted all the cache's values in memory (a million in 194 s, measured)

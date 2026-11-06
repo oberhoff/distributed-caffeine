@@ -268,8 +268,9 @@ instance's copies.
   read of a key on each instance reads the store; `getAll(keys)` warms an instance up in one store read.
 * `invalidateAll()` is not atomic with operations of other instances in flight: a load that read the source before it,
   or an atomic `asMap()` method (`compute`, `merge`, `replace`, ...) that decided on a value present before it, may
-  write its result after it, which then stays until the key is written again or reaches the store's maximum age.
-  Caffeine leaves loads in flight during `invalidateAll` undefined as well.
+  write its result after it, even one older than a write made before the `invalidateAll`, which then stays until the
+  key is written again or reaches the store's maximum age. Caffeine leaves loads in flight during `invalidateAll`
+  undefined as well.
 * A write whose outcome the store leaves unknown (a timeout, or a connection lost after sending) drops the key locally,
   and the call may throw a `StoreException` whose `isOutcomeUnknown()` is `true`:
     * `put` throws, since repeating it could overwrite a newer value.

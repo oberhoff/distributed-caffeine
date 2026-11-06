@@ -17,6 +17,7 @@ package io.github.oberhoff.distributedcaffeine;
 
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
+import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
@@ -136,6 +137,36 @@ class InternalInvalidateAllRaceTest {
 
         assertThat(stored(other)).isIn(null, "new");
         assertThat(raced).as("the invalidateAll ran between the read and the write").isTrue();
+    }
+
+    // found by InternalPropertyTest (with size pruning, 2026-11-06): the load's write is conditioned on the row it read
+    // missing, and a newer write elsewhere since would refuse it, but maintenance deletes the rows an invalidateAll
+    // hides at once, that write's too: the load's value lands, older than the write before the invalidateAll. The
+    // race accepted, reaching further back (closing it: pruneTombstones sparing hidden rows for the prune grace, an
+    // SPI change in every adapter, which narrows the race without ending it)
+    @Test
+    @Disabled(RACE_ACCEPTED)
+    void a_load_racing_a_write_and_an_invalidate_all_elsewhere_leaves_no_value_older_than_the_write() {
+        DistributedLoadingCache<String, String> loader = loading();
+        DistributedCache<String, String> other = plain();
+        Store maintenance = track(database.openStore("cache"));
+        source.put("k", "old");
+        AtomicBoolean raced = new AtomicBoolean();
+        database.setBeforeConditionalWrite(() -> {
+            if (raced.compareAndSet(false, true)) {
+                source.put("k", "newer");
+                other.put("k", "newer");
+                source.remove("k");
+                other.invalidateAll();
+                // maintenance deletes the rows the invalidateAll hides at once: the newer write's too
+                maintenance.pruneTombstones(Duration.ofMinutes(5), 1_000);
+            }
+        });
+
+        loader.get("k");
+
+        assertThat(raced).as("the write and the invalidateAll ran between the read and the write").isTrue();
+        assertThat(stored(other)).as("nothing older than the write before the invalidateAll").isNotEqualTo("old");
     }
 
     @Test

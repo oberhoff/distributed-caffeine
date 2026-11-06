@@ -27,6 +27,7 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.testing.LogCapture;
 import io.github.oberhoff.distributedcaffeine.testing.SilencingProxy;
 import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.jspecify.annotations.NullMarked;
@@ -101,8 +102,8 @@ abstract class JdbcAdapterTest {
     }
 
     @Test
-    @SuppressWarnings("SqlNoDataSourceInspection") // the SQL runs against the test database, unknown to the IDE
-    void a_table_of_the_earlier_layout_is_refused_naming_the_remedy() throws SQLException {
+    void a_table_without_the_schema_marker_is_refused_naming_the_remedy_and_the_ddl() throws SQLException {
+        // the layout of a pre-release version (stamp and basis columns), without a marker
         try (Connection connection = JdbcTestDatabase.dataSource().getConnection();
              java.sql.Statement statement = connection.createStatement()) {
             statement.execute("CREATE TABLE " + table + " (discriminator VARCHAR(200) NOT NULL, "
@@ -111,7 +112,58 @@ abstract class JdbcAdapterTest {
         }
 
         assertThatThrownBy(() -> cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR)).isInstanceOf(StoreException.class)
-                .hasMessageContaining("earlier version").hasMessageContaining("drop it");
+                .hasMessageContaining("without the schema marker").hasMessageContaining("drop it")
+                .hasMessageContaining("COMMENT='" + JdbcStore.MARKER + "'");
+    }
+
+    @Test
+    void a_table_of_this_layout_is_refused_without_its_marker_and_used_with_it() throws SQLException {
+        cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR).close();
+        comment("");
+        assertThatThrownBy(() -> cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR)).isInstanceOf(StoreException.class)
+                .hasMessageContaining("without the schema marker");
+
+        comment(JdbcStore.MARKER); // as the DDL in the message creates it by hand
+        DistributedCache<String, String> cache = cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR);
+        cache.put("k", "v");
+        assertThat(cache.getIfPresent("k")).isEqualTo("v");
+    }
+
+    private void comment(String comment) throws SQLException {
+        try (Connection connection = JdbcTestDatabase.dataSource().getConnection();
+             java.sql.Statement statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE " + table + " COMMENT='" + comment + "'");
+        }
+    }
+
+    @Test
+    void a_table_without_its_index_is_used_and_warned_of() throws Exception {
+        cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR).close();
+        try (Connection connection = JdbcTestDatabase.dataSource().getConnection();
+             java.sql.Statement statement = connection.createStatement()) {
+            statement.execute("DROP INDEX " + table + "_written ON " + table);
+        }
+
+        try (LogCapture log = new LogCapture()) {
+            DistributedCache<String, String> cache = cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR);
+            cache.put("k", "v");
+
+            assertThat(cache.getIfPresent("k")).isEqualTo("v");
+            assertThat(log.count("has no index on (discriminator, write_time)")).as(log.text()).isEqualTo(1);
+        }
+        try (LogCapture log = new LogCapture()) {
+            cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR);
+            assertThat(log.count("has no index")).as("checked at every start, so warned again").isEqualTo(1);
+        }
+    }
+
+    @Test
+    void a_table_with_its_index_is_not_warned_of() {
+        cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR);
+        try (LogCapture log = new LogCapture()) {
+            cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR);
+            assertThat(log.count("has no index")).as(log.text()).isZero();
+        }
     }
 
     @Test

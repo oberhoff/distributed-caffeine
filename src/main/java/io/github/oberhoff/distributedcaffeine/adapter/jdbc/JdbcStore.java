@@ -68,6 +68,10 @@ import static java.util.Objects.requireNonNull;
 @SuppressWarnings({"SqlNoDataSourceInspection", "java:S2077"})
 final class JdbcStore extends PrimitiveStore {
 
+    private static final System.Logger LOGGER = System.getLogger(JdbcStore.class.getPackageName());
+    // the schema marker, the table's comment: the version of the table's layout this version writes
+    static final String MARKER = "distributed-caffeine schema 1";
+
     private static final int CHUNK = 1_000;
 
     private final DataSource dataSource;
@@ -81,7 +85,8 @@ final class JdbcStore extends PrimitiveStore {
     private final int timeoutSeconds;
 
     // server: the identity the schema's check found (ensure)
-    @SuppressWarnings("java:S2637") // every field is assigned here, the volatile server included
+    @SuppressWarnings("java:S2637")
+    // every field is assigned here, the volatile server included
     JdbcStore(DataSource dataSource, Dialect dialect, String server, String table, String discriminator,
               Duration timeout) {
         this.dataSource = dataSource;
@@ -102,7 +107,10 @@ final class JdbcStore extends PrimitiveStore {
         MARIADB("MariaDB", "MariaDbAdapter", 10, 2, "MySQL Connector/J"),
         MYSQL("MySQL", "MySqlAdapter", 5, 7, null);
 
-        // a BLOB holds 64 KB only
+        // a BLOB holds 64 KB only. Every format (bytes, text, JSON) is stored as bytes here, so a table fits any
+        // serializers. If a format ever gets a column type of its own (TEXT, JSON), check an existing table's column
+        // types against the serializers at start, as PostgresSchema#checkShape does, or a cache with other
+        // serializers writes into a table that cannot hold its values
         final String bytes = "LONGBLOB";
         // a DATETIME in UTC, with no time zone of the session in between
         final String timestamp = "DATETIME(6)";
@@ -185,9 +193,9 @@ final class JdbcStore extends PrimitiveStore {
         return discriminator;
     }
 
-    // the schema: the table and its index for scans by write time, created where missing. A table of the layout
-    // before 2026-10-28 (with stamp and basis columns for the cut-off of invalidateAll) is refused, naming the
-    // remedy: its rows cannot be written without them. First the server is checked: the dialect's product (the
+    // the schema: the table and its index for scans by write time, created where missing, with the schema marker. A
+    // table without the marker is refused, naming the remedy; a missing index is warned of. First the server is
+    // checked: the dialect's product (the
     // other one refused, naming its adapter) at its floor or later, reached by a driver the dialect takes. Returns
     // the answering server's identity: taken before the store reads anything, as a value read before the first scan
     // may be lost by a failover too, which the first scan would not notice if it learnt the identity itself (found:
@@ -231,21 +239,12 @@ final class JdbcStore extends PrimitiveStore {
                     + "Connector/J (org.mariadb.jdbc:mariadb-java-client)", false);
         }
         if (exists(connection, table)) {
-            requireLayout(connection, table);
+            requireMarker(connection, dialect, table);
+            checkIndex(connection, table);
             return server;
         }
         try {
-            statement.execute("""
-                    CREATE TABLE %1$s (
-                        discriminator VARCHAR(200) NOT NULL,
-                        id VARCHAR(200) NOT NULL,
-                        k %2$s,
-                        v %2$s,
-                        state VARCHAR(16) NOT NULL,
-                        version BIGINT NOT NULL,
-                        write_time %3$s NOT NULL,
-                        PRIMARY KEY (discriminator, id))""".formatted(table, dialect.bytes, dialect.timestamp));
-            statement.execute("CREATE INDEX %1$s_written ON %1$s (discriminator, write_time)".formatted(table));
+            statement.execute(ddl(dialect, table));
         } catch (SQLException e) {
             if (!exists(connection, table)) { // not just another instance creating it at the same time
                 throw e;
@@ -254,15 +253,66 @@ final class JdbcStore extends PrimitiveStore {
         return server;
     }
 
-    private static void requireLayout(Connection connection, String table) throws SQLException {
-        try (ResultSet columns = connection.getMetaData().getColumns(connection.getCatalog(), null, "%", "%")) {
-            while (columns.next()) {
-                if (table.equalsIgnoreCase(columns.getString("TABLE_NAME"))
-                        && "stamp".equalsIgnoreCase(columns.getString("COLUMN_NAME"))) {
-                    throw new StoreException("The table " + table + " has the layout of an earlier version (stamp "
-                            + "and basis columns); drop it while no cache uses it, and it is created anew", false);
+    // the table with its index and the schema marker in one statement, so that another instance starting at the same
+    // time finds all of them or nothing
+    static String ddl(Dialect dialect, String table) {
+        return """
+                CREATE TABLE %1$s (
+                    discriminator VARCHAR(200) NOT NULL,
+                    id VARCHAR(200) NOT NULL,
+                    k %2$s,
+                    v %2$s,
+                    state VARCHAR(16) NOT NULL,
+                    version BIGINT NOT NULL,
+                    write_time %3$s NOT NULL,
+                    PRIMARY KEY (discriminator, id),
+                    INDEX %1$s_written (discriminator, write_time)) COMMENT='%4$s'"""
+                .formatted(table, dialect.bytes, dialect.timestamp, MARKER);
+    }
+
+    // a table this version did not create: of another version of this library (whose layout may not fit), of an
+    // earlier one without a marker, or created by hand without it. Refused, naming the remedy and the DDL
+    private static void requireMarker(Connection connection, Dialect dialect, String table) throws SQLException {
+        String marker = null;
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() "
+                        + "AND TABLE_NAME = ?")) {
+            statement.setString(1, table);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (resultSet.next()) {
+                    marker = resultSet.getString(1);
                 }
             }
+        }
+        if (!MARKER.equals(marker)) {
+            throw new StoreException("Table " + table + " exists without the schema marker '" + MARKER + "' (e.g. a "
+                    + "table of another version of distributed-caffeine, or created by hand without it). Stop all "
+                    + "instances using it, then drop it or configure another name; to create it by hand:\n"
+                    + ddl(dialect, table), false);
+        }
+    }
+
+    // a table created by hand, or whose index was dropped: maintenance and every poll then scan the whole table, slower
+    // as the cache grows, so warned of (as by the other adapters); the index needs to start with these two columns
+    private static void checkIndex(Connection connection, String table) throws SQLException {
+        Map<String, Map<Integer, String>> indexes = new LinkedHashMap<>();
+        try (ResultSet columns = connection.getMetaData().getIndexInfo(connection.getCatalog(), null, table, false,
+                true)) {
+            while (columns.next()) {
+                String index = columns.getString("INDEX_NAME");
+                String column = columns.getString("COLUMN_NAME");
+                if (index != null && column != null) {
+                    indexes.computeIfAbsent(index, ignored -> new LinkedHashMap<>())
+                            .put((int) columns.getShort("ORDINAL_POSITION"), column);
+                }
+            }
+        }
+        boolean found = indexes.values().stream().anyMatch(columns -> "discriminator".equalsIgnoreCase(columns.get(1))
+                && "write_time".equalsIgnoreCase(columns.get(2)));
+        if (!found) {
+            LOGGER.log(System.Logger.Level.WARNING, "Table {0} has no index on (discriminator, write_time); expiry, "
+                    + "pruning and polling will be slow. Create it: CREATE INDEX {0}_written ON {0} (discriminator, "
+                    + "write_time)", table);
         }
     }
 
