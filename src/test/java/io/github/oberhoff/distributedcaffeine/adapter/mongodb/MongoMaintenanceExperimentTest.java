@@ -19,8 +19,8 @@ import com.mongodb.client.MongoCollection;
 import com.mongodb.client.model.Filters;
 import io.github.oberhoff.distributedcaffeine.experiments.MaintenanceExperiment;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
-import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.bson.Document;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
@@ -49,13 +49,13 @@ class MongoMaintenanceExperimentTest {
         try (MongoTestDatabase database = MongoTestDatabase.start("mongo:9", MongoTopology.SINGLE_NODE_REPLICA_SET)) {
             MongoAdapter<String, String> adapter = MongoAdapter.newBuilder(database.client, "maintenance", "cache")
                     .build();
-            adapter.createStore(StoreSettings.of(Format.TEXT, Format.TEXT)).close(); // creates the collection
+            adapter.createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT)).close(); // creates the collection
             MongoCollection<Document> collection = database.client.getDatabase("maintenance").getCollection("cache");
             MaintenanceExperiment.run("MongoDB 9 (single-node replica set, local container)",
                     new MaintenanceExperiment.Backend() {
                         @Override
                         public Store open() {
-                            return adapter.createStore(StoreSettings.of(Format.TEXT, Format.TEXT));
+                            return adapter.createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT));
                         }
 
                         @Override

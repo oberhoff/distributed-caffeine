@@ -27,8 +27,8 @@ import io.github.oberhoff.distributedcaffeine.spi.ChangeFeed;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
-import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
@@ -390,7 +390,7 @@ abstract class MongoFailoverTest {
         MongoClient client = client(Duration.ofSeconds(30));
         AtomicInteger failed = new AtomicInteger();
         Store raw = track(MongoAdapter.newBuilder(client, "failover", collection).build()
-                .createStore(StoreSettings.of(Format.TEXT, Format.TEXT)));
+                .createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT)));
         track(((ChangeFeed) raw).subscribe(new ChangeListener() {
             @Override
             public void onChanges(List<Change> messages) {

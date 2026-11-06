@@ -28,6 +28,7 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.testing.SilencingProxy;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -128,7 +129,7 @@ abstract class JdbcAdapterTest {
     void the_other_products_adapter_is_refused_naming_the_right_one() {
         String right = JdbcTestDatabase.mysql() ? "MySqlAdapter" : "MariaDbAdapter";
         Adapter<String, String> other = JdbcTestDatabase.otherAdapter(table);
-        StoreSettings settings = StoreSettings.of(Format.TEXT, Format.TEXT);
+        StoreSettings settings = TestStoreSettings.of(Format.TEXT, Format.TEXT);
         assertThatThrownBy(() -> other.createStore(settings))
                 .isInstanceOf(StoreException.class).hasMessageContaining("use " + right);
     }
@@ -144,7 +145,7 @@ abstract class JdbcAdapterTest {
 
         Adapter<String, String> adapter =
                 JdbcTestDatabase.adapter(connectorJ, table, JdbcTestDatabase.DEFAULT_DISCRIMINATOR);
-        StoreSettings settings = StoreSettings.of(Format.TEXT, Format.TEXT);
+        StoreSettings settings = TestStoreSettings.of(Format.TEXT, Format.TEXT);
         assertThatThrownBy(() -> adapter.createStore(settings))
                 .isInstanceOf(StoreException.class)
                 .hasMessageMatching("(?s).*(use MariaDB Connector/J|Creating the table " + table + " failed).*");
@@ -226,7 +227,8 @@ abstract class JdbcAdapterTest {
     void a_connection_goes_back_to_the_data_source_as_it_came() throws SQLException {
         try (Connection shared = JdbcTestDatabase.dataSource().getConnection();
              Store store = JdbcTestDatabase.<String, String>adapter(sharing(shared), table,
-                     JdbcTestDatabase.DEFAULT_DISCRIMINATOR).createStore(StoreSettings.of(Format.TEXT, Format.TEXT))) {
+                     JdbcTestDatabase.DEFAULT_DISCRIMINATOR)
+                     .createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT))) {
             store.write(List.of(write(1)));
             assertThat(shared.getAutoCommit()).as("written in a transaction, then auto-commit again").isTrue();
 

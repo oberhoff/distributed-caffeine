@@ -20,8 +20,8 @@ import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
-import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import io.lettuce.core.RedisCommandExecutionException;
 import io.lettuce.core.RedisURI;
 import io.lettuce.core.cluster.api.sync.RedisClusterCommands;
@@ -181,7 +181,7 @@ abstract class RedisAclTests {
                     RedisTestServer.freshName()).build();
 
             assertThatThrownBy(() -> {
-                try (Store ignored = adapter.createStore(StoreSettings.of(Format.TEXT, Format.TEXT))) {
+                try (Store ignored = adapter.createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT))) {
                     throw new AssertionError("the store was created");
                 }
             }).isInstanceOfSatisfying(StoreException.class, e -> {

@@ -26,8 +26,8 @@ import io.github.oberhoff.distributedcaffeine.SynchronizationState;
 import io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
-import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
@@ -268,7 +268,7 @@ abstract class PostgresAdapterTest {
         database.execute("INSERT INTO adapter.\"" + table + "\" (discriminator, id, state, version, write_time) "
                 + "VALUES ('" + PostgresAdapter.DEFAULT_DISCRIMINATOR + "', 'foreign', 'UNKNOWN', 5, now())");
 
-        try (var store = adapter().build().createStore(StoreSettings.of(Format.TEXT, Format.TEXT))) {
+        try (var store = adapter().build().createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT))) {
             List<String> foreign = List.of("foreign");
             assertThatThrownBy(() -> store.read(foreign, LONG)).isInstanceOf(StoreException.class)
                     .hasMessageContaining("UNKNOWN");

@@ -20,10 +20,10 @@ import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
 import io.github.oberhoff.distributedcaffeine.spi.RecordingListener;
 import io.github.oberhoff.distributedcaffeine.spi.State;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
-import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import io.lettuce.core.KillArgs;
 import io.lettuce.core.api.sync.RedisCommands;
 import org.jspecify.annotations.NullMarked;
@@ -76,7 +76,7 @@ abstract class RedisStoreTests {
 
     private RedisStore open() {
         Store store = RedisAdapter.newBuilder(driver, name).build()
-                .createStore(StoreSettings.of(Format.BINARY, Format.BINARY));
+                .createStore(TestStoreSettings.of(Format.BINARY, Format.BINARY));
         closeables.add(store);
         return (RedisStore) store;
     }
@@ -179,7 +179,7 @@ abstract class RedisStoreTests {
             try (RedisSession session = LettuceRedis.of(client).open(Duration.ofSeconds(5))) {
                 assertThat(RedisAdapter.evicts(session.server())).as("reported as eviction").isTrue();
                 Store store = RedisAdapter.newBuilder(LettuceRedis.of(client), name).build()
-                        .createStore(StoreSettings.of(Format.BINARY, Format.BINARY));
+                        .createStore(TestStoreSettings.of(Format.BINARY, Format.BINARY));
                 store.close();
             } finally {
                 client.shutdown();

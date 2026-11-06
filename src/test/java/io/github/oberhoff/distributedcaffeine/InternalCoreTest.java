@@ -42,6 +42,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -498,6 +500,29 @@ public class InternalCoreTest {
 
         assertThat(cache.get("k")).as("not trusted: checked, found missing, loaded properly").isEqualTo("v2");
         assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("v2");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void a_value_loaded_whose_write_fails_is_returned_held_unconfirmed_and_checked_on_the_next_read(
+            boolean outcomeUnknown) {
+        // the in-memory store's faults: skipped on a real database before anything is set up
+        InMemoryDatabase faults = backend.faults();
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> cache = loading(key -> "v" + loads.incrementAndGet());
+        faults.failNextWrites(InternalStoreGuard.ATTEMPTS, outcomeUnknown); // every attempt of the load's write
+
+        assertThat(cache.get("k")).as("the store's failure does not fail the read").isEqualTo("v1");
+        if (!outcomeUnknown) {
+            // held, unconfirmed (a write that landed after all may already have dropped it with its own message)
+            assertThat(cache.policy().getIfPresentQuietly("k")).isEqualTo("v1");
+        }
+        faults.failNextWrites(0, false); // the store answers again
+
+        // checked against the store: kept where the failed write landed after all, loaded properly where it did not
+        assertThat(cache.get("k")).isEqualTo(outcomeUnknown ? "v1" : "v2");
+        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value())
+                .isEqualTo(outcomeUnknown ? "v1" : "v2");
     }
 
     @Test

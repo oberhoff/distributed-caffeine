@@ -20,6 +20,7 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import io.github.oberhoff.distributedcaffeine.testing.StoreProfile;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Assumptions;
@@ -47,7 +48,7 @@ public interface CacheBackend extends AutoCloseable {
      * @return the store
      */
     default Store open() {
-        return open(StoreSettings.of(Format.TEXT, Format.TEXT));
+        return open(TestStoreSettings.of(Format.TEXT, Format.TEXT));
     }
 
     /**

@@ -20,9 +20,9 @@ import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
-import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 
@@ -119,7 +119,7 @@ abstract class PostgresRetryTest {
     // counting starts after the schema check
     private Store store() {
         Store store = PostgresAdapter.newBuilder(faulty(), "retry", PostgresTestDatabase.freshTable()).build()
-                .createStore(StoreSettings.of(Format.TEXT, Format.TEXT));
+                .createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT));
         executions.set(0);
         return store;
     }

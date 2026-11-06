@@ -94,7 +94,7 @@ class DistributedCaffeineTest {
         assertThat(builder.store().maximumSize()).isEqualTo(StoreConfigurer.UNBOUNDED_SIZE);
         assertThat(builder.store().maintenanceInterval()).isEqualTo(Duration.ofMinutes(1));
         assertThat(builder.store().heartbeatInterval()).isEqualTo(Duration.ofSeconds(10));
-        assertThat(builder.store().operationTimeout()).isEqualTo(Duration.ofSeconds(30));
+        assertThat(builder.store().operationTimeout()).isEqualTo(Duration.ofSeconds(10));
         assertThat(builder.distributionMode()).isEqualTo(DistributionMode.INVALIDATE);
         assertThat(builder.negativeCachingExpiry()).isNull();
         assertThat(builder.store().executor()).isNull();
