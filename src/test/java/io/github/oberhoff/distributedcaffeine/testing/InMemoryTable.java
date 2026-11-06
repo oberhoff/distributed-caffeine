@@ -279,10 +279,11 @@ final class InMemoryTable {
         return deleted.size();
     }
 
-    // the changes written within the window, by the store's clock: the latest state of each row, without values
+    // the changes written within the window, by the store's clock: the latest state of each row, without values. Not
+    // failed by an injected read failure, which is meant for reads only (InMemoryDatabase#failNextReads): a poll every
+    // few milliseconds would otherwise take it before the read a test aims it at
     synchronized List<Change> changedWithin(Duration within) {
         checkUp();
-        checkRead();
         long now = database.nowMicros();
         long micros = within.toNanos() / 1_000;
         List<Change> changes = new ArrayList<>();

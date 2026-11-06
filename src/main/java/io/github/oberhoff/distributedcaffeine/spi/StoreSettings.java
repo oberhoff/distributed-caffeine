@@ -39,7 +39,7 @@ public record StoreSettings(Format keyFormat, Format valueFormat, Duration opera
     /**
      * The operation timeout a cache uses unless configured otherwise.
      */
-    public static final Duration DEFAULT_OPERATION_TIMEOUT = Duration.ofSeconds(30);
+    public static final Duration DEFAULT_OPERATION_TIMEOUT = Duration.ofSeconds(10);
 
     /**
      * Validates the settings.
@@ -55,17 +55,6 @@ public record StoreSettings(Format keyFormat, Format valueFormat, Duration opera
         if (operationTimeout.isNegative() || operationTimeout.isZero()) {
             throw new IllegalArgumentException("operationTimeout must be positive");
         }
-    }
-
-    /**
-     * Returns settings with the given formats and the default operation timeout.
-     *
-     * @param keyFormat   how serialized keys are stored
-     * @param valueFormat how serialized values are stored
-     * @return the settings
-     */
-    public static StoreSettings of(Format keyFormat, Format valueFormat) {
-        return new StoreSettings(keyFormat, valueFormat, DEFAULT_OPERATION_TIMEOUT);
     }
 
     /**

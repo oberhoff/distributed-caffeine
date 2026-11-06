@@ -33,7 +33,7 @@ final class InternalMaintenance {
     // the cache turning over its whole maximum size meanwhile may leave an older value, up to the maximum age
     static final Duration PRUNE_GRACE = Duration.ofSeconds(4);
     // the rows one maintenance call changes at most (Store#expire): a call over a million rows took 7 to 41 s, and
-    // one statement over a few million would outlast the store's default timeout of 30 s, every run again (VISION.md,
+    // one statement over a few million would outlast the store's default timeout of 10 s, every run again (VISION.md,
     // "Maintenance in paced batches"). Expiry announces every row, and an instance falling more than 100,000 messages
     // behind drops them and revalidates (InternalDelivery): 10,000 per batch, tens to hundreds of milliseconds each.
     // Pruning is silent: 100,000, which brought a million rows close to one call's total (PostgreSQL 2.7 against
