@@ -328,13 +328,14 @@ public abstract class ChangeFeedContractTest extends AbstractContractTest {
         RecordingListener observer = new RecordingListener();
         ChangeSubscription subscription = subscribe(open(), observer);
         assumeTrue(fixture.induceLoss(), "the fixture cannot induce a loss");
-        observer.awaitLosses(1, TIMEOUT);
+        assertThat(observer.awaitLosses(1, TIMEOUT)).as("the loss reported").isPositive();
         writer.write(List.of(entry("h1", "while lost")));
 
         resume(subscription);
 
         long after = written(writer, entry("h1", "after"));
-        observer.await(m -> m.stream().anyMatch(x -> x.version() == after), TIMEOUT);
+        assertThat(observer.await(m -> m.stream().anyMatch(x -> x.version() == after), TIMEOUT))
+                .as("delivered again").extracting(Change::version).contains(after);
     }
 
     @Test
@@ -347,7 +348,8 @@ public abstract class ChangeFeedContractTest extends AbstractContractTest {
         resume(subscription);
 
         long after = written(writer, entry("h1", "after"));
-        observer.await(m -> m.stream().anyMatch(x -> x.version() == after), TIMEOUT);
+        assertThat(observer.await(m -> m.stream().anyMatch(x -> x.version() == after), TIMEOUT))
+                .as("still delivered").extracting(Change::version).contains(after);
     }
 
     // a subscription suspecting its delivery silent may resume it while it still delivers (the core's heartbeat): the

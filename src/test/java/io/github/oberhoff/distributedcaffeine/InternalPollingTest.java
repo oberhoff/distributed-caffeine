@@ -168,8 +168,9 @@ class InternalPollingTest {
         assertThat(holder.getIfPresent("k")).isEqualTo("v");
 
         // the expiry's message arrives (the copy may have expired locally before it, at the same maximum age)
-        await(() -> holder.distributedPolicy().stats().expiredMessageCount() > 0);
-        assertThat(holder.policy().getIfPresentQuietly("k")).isNull();
+        // counted before it is applied
+        await(() -> holder.distributedPolicy().stats().expiredMessageCount() > 0
+                && holder.policy().getIfPresentQuietly("k") == null);
     }
 
     @Test

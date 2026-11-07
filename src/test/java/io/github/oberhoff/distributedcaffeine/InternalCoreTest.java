@@ -1127,6 +1127,9 @@ public class InternalCoreTest {
         if (!outcomeUnknown) {
             // held, unconfirmed (a write that landed after all may already have dropped it with its own message)
             await(() -> "v2".equals(cache.policy().getIfPresentQuietly("k")));
+        } else {
+            // the refresh's future completes before Caffeine installs its value: v1 until it is installed or dropped
+            await(() -> !"v1".equals(cache.policy().getIfPresentQuietly("k")));
         }
         faults.failNextWrites(0, false); // the store answers again
 

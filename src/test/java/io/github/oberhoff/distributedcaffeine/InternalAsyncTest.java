@@ -157,8 +157,10 @@ class InternalAsyncTest {
         refusing.set(true);
         value.complete("v");
 
-        await(() -> core(cache).reservedKeys() == 0);
+        // reserved only once the write runs, so no reservation says nothing until the store has the value
+        await(() -> stored(cache, "k") != null && core(cache).reservedKeys() == 0);
         assertThat(stored(cache, "k")).as("written on a thread of its own").isEqualTo("v");
+        assertThat(core(cache).reservedKeys()).isZero();
         refusing.set(false);
     }
 
