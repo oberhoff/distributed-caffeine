@@ -146,9 +146,10 @@ public final class PostgresAdapter<K, V> implements Adapter<K, V> {
         }
 
         /**
-         * Drops and recreates the table if another version of this library created it. Only while no instance of any
-         * cache in the table runs. Meant for a migration: remove it afterwards, or a later upgrade drops the table
-         * again.
+         * Drops and recreates the table if distributed-caffeine 0.x created it, or if it is empty; one of another
+         * version of this generation, or holding other rows, is never dropped. Meant for the migration from 0.x:
+         * instances of 0.x still running fail on the new table, so stop them first or accept their errors until they
+         * are replaced. Remove it once the migration is done.
          *
          * @return this builder
          */

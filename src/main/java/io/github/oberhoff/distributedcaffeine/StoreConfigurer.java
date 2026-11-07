@@ -56,8 +56,9 @@ public final class StoreConfigurer {
     /**
      * Sets how old a value may get, counted from its write by the store's clock. The store never returns an older
      * value, and the instances drop their copies of it within about one maintenance interval, however their own expiry
-     * is set (unless {@link #withMaximumAgeForStoreOnly()}). It also bounds how long a local copy is served at most
-     * when a change reaches no instance (a message lost without a gap noticed, {@link DistributionMode#NONE}).
+     * is set (unless {@link #withMaximumAgeForStoreOnly()}). An instance that hears of no change (with
+     * {@link DistributionMode#NONE}, or after a message lost unnoticed) still drops a copy at the maximum age after it
+     * got it, so an outdated copy is served no longer than that.
      * Optional: unbounded by default, as with {@code ChronoUnit.FOREVER.getDuration()}.
      *
      * @param maximumAge the maximum age (positive)

@@ -34,8 +34,8 @@ import java.util.Objects;
 /**
  * On start (VISION.md, "Adapter setup" and "Migration"): a table with the schema marker of this version and the
  * expected shape is used; a missing one is created (with its schema, index and marker) under an advisory lock, or the
- * start is refused with the DDL if the rights are missing; one without the marker is refused, or dropped and recreated
- * with withSchemaReset(). A missing index only warns.
+ * start is refused with the DDL if the rights are missing; one without the marker is refused or, with withSchemaReset()
+ * and if it may be dropped (see requireResettable), dropped and recreated. A missing index only warns.
  *
  * @author Andreas Oberhoff
  */
@@ -66,16 +66,57 @@ final class PostgresSchema {
         PostgresStore.requirePrimary(connection);
         String marker = marker(connection, table);
         if (marker == null || !marker.equals(PostgresTable.MARKER)) {
-            boolean exists = exists(connection, table);
-            if (exists && !schemaReset) {
-                throw new StoreException("Table " + table + " exists without the schema marker '"
-                        + PostgresTable.MARKER + "' (e.g. a table of distributed-caffeine 0.x). Stop all instances "
-                        + "using it, then drop it or configure another name, or enable withSchemaReset().", false);
+            if (exists(connection, table)) {
+                requireResettable(connection, table, marker, schemaReset); // checked again under the lock
             }
             create(connection, table, schemaReset);
         }
         checkShape(connection, table);
         checkIndex(connection, table);
+    }
+
+    // What withSchemaReset() may drop: a table of distributed-caffeine 0.x (no comment, and its columns discriminator,
+    // hash, status and timestamp), or an empty one. Never one of another version of this library, even with the
+    // option: two versions left with it on would drop each other's table on every start (a later version decides
+    // itself which earlier markers it resets). Never a foreign table with rows either.
+    private static void requireResettable(Connection connection, PostgresTable table, @Nullable String marker,
+            boolean schemaReset) throws SQLException {
+        if (marker != null && marker.startsWith(PostgresTable.MARKER_PREFIX)) {
+            throw new StoreException("Table " + table + " was created by another version of distributed-caffeine ('"
+                    + marker + "'; this one uses '" + PostgresTable.MARKER + "'). Stop all instances of that version, "
+                    + "then drop it or configure another name. withSchemaReset() never drops it, so that two versions "
+                    + "cannot drop each other's table.", false);
+        }
+        if (!schemaReset) {
+            throw new StoreException("Table " + table + " exists without the schema marker '" + PostgresTable.MARKER
+                    + "' (e.g. a table of distributed-caffeine 0.x). Stop all instances using it, then drop it or "
+                    + "configure another name, or enable withSchemaReset().", false);
+        }
+        if (marker == null && hasColumns(connection, table, "discriminator", "hash", "status", "timestamp")) {
+            return;
+        }
+        try (Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("SELECT 1 FROM " + table.qualified + " LIMIT 1")) {
+            if (resultSet.next()) {
+                throw new StoreException("Table " + table + " holds rows that are not distributed-caffeine's; "
+                        + "withSchemaReset() drops only tables of distributed-caffeine. Configure another name, or "
+                        + "drop it if it is no longer needed.", false);
+            }
+        }
+    }
+
+    private static boolean hasColumns(Connection connection, PostgresTable table, String... names)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT count(*) FROM pg_attribute
+                WHERE attrelid = to_regclass(?) AND attnum > 0 AND NOT attisdropped AND attname = ANY (?)""")) {
+            statement.setString(1, table.qualified);
+            statement.setArray(2, connection.createArrayOf("text", names));
+            try (ResultSet resultSet = statement.executeQuery()) {
+                resultSet.next();
+                return resultSet.getInt(1) == names.length;
+            }
+        }
     }
 
     // the table's comment: null where it has none, or does not exist
@@ -122,10 +163,7 @@ final class PostgresSchema {
             }
             try (Statement statement = connection.createStatement()) {
                 if (exists(connection, table)) {
-                    if (!schemaReset) {
-                        throw new StoreException("Table " + table + " was created meanwhile without the schema marker",
-                                false);
-                    }
+                    requireResettable(connection, table, marker, schemaReset);
                     LOGGER.log(Level.WARNING, "Dropping table {0}, which has no schema marker (withSchemaReset)", table);
                     statement.execute("DROP TABLE " + table.qualified);
                 }

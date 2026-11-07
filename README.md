@@ -11,8 +11,8 @@ or MySQL.
 
 * **Distribution:** a change on one instance reaches the copies on all others.
 * **Second level:** a miss reads the shared store before calling the source.
-* **Consistency:** versions keep racing writes, slow loads and late messages from bringing back outdated values.
 * **Compatibility:** Caffeine's cache interfaces, configured with Caffeine's builder methods.
+* **Consistency:** versions keep racing writes, slow loads and late messages from bringing back outdated values.
 * **Resilience:** if the store fails, instances keep serving what they hold and recover by themselves.
 
 ## Table of contents
@@ -34,17 +34,40 @@ level, L2):
 * **Changes:** writes, invalidations and expiries make the other instances drop, replace or keep their copy, depending
   on the [distribution mode](#configuration-of-the-distribution-mode).
 
-Every write carries a version, so a slow load, a change that arrives late or a racing write never replaces a newer
-value. With distribution on, an instance serves an outdated copy only until the change reaches it. If distribution
-stops, an instance notices within about two heartbeat intervals and checks its copies against the store until
-distribution works again. The store can be bounded by a maximum age and a maximum size. An instance keeps a copy at
-most for the maximum age after it got it, unless the maximum age is set for the store only.
+With distribution on, an instance serves an outdated copy only until the change reaches it. If distribution stops, the
+instances notice and check their copies against the store until it works again.
 
 If the store stops answering, the instances keep serving what they hold, misses load straight from the source, and
 writes fail. Once the store answers again, the instances recover by themselves and check what they hold against the
 store, for changes they may have missed.
 
 ## Usage
+
+### TL;DR
+
+Build an adapter for the store, then the cache as with Caffeine, and use it as a Caffeine cache:
+
+```java
+MongoAdapter<String, Value> adapter = MongoAdapter.newBuilder(mongoClient, databaseName, collectionName).build();
+
+DistributedLoadingCache<String, Value> cache = DistributedCaffeine.newBuilder(adapter)
+        .withCaffeine(caffeine -> caffeine.maximumSize(10_000)) // the local cache of each instance
+        .withStore(store -> store.withMaximumAge(Duration.ofHours(1))) // the shared store
+        .build(key -> loadExpensiveValue(key)); // called on a miss in both
+
+Value value = cache.get(key); // local cache, then the store, then the loader
+cache.
+
+invalidate(key); // gone on every instance
+
+cache.
+
+close(); // on shutdown, releases the cache's connections
+```
+
+The other stores differ only in the adapter (see [Adapters](#adapters)). Keys of type `String`, `Long`, `Integer` or
+`UUID` and values of any type work by default; other key types need a hash (see
+[Configuration of hashing](#configuration-of-hashing-for-keys)).
 
 ### Adapters
 
@@ -61,7 +84,8 @@ MySQL are polled:
 
 Every adapter is built from the client or data source the application might already use, and a name for the place of the
 cache (a collection, a table or a keyspace). Several caches can share that place, told apart by a discriminator. The
-collection, table or keyspace is created as needed, and a setup that cannot work is refused right away with an explanation.
+collection, table or keyspace is created as needed, and a setup that cannot work is refused right away with an
+explanation.
 
 ```java
 MongoAdapter<Key, Value> adapter = MongoAdapter.newBuilder(mongoClient, databaseName, collectionName)
@@ -78,8 +102,8 @@ PostgresAdapter<Key, Value> adapter = PostgresAdapter.newBuilder(dataSource, sch
 ```java
 // with LettuceRedis, JedisRedis or RedissonRedis, whichever client library is in use
 RedisAdapter<Key, Value> adapter = RedisAdapter.newBuilder(LettuceRedis.of(redisClient), keyspaceName)
-        .withDiscriminator(discriminator) // optional (used if different caches share a keyspace)
-        .build();
+                .withDiscriminator(discriminator) // optional (used if different caches share a keyspace)
+                .build();
 ```
 
 ```java
@@ -116,9 +140,10 @@ Note: Building connects to the store and checks it, so a misconfiguration fails 
 Caffeine's builder methods configure the local cache of each instance, with their usual meaning. The store has bounds
 of its own, and the two relate as follows:
 
-* **Age:** a copy expires at its local expiry or at the store's maximum age after this instance got it, whichever comes
-  first.
-* **Size:** only the local `maximumSize` or `maximumWeight` bounds the local cache; the store's maximum size does not.
+* **Age:** the store's maximum age overrules a longer local expiry: a copy expires at its local expiry or at the store's
+  maximum age after this instance got it, whichever comes first (unless `withMaximumAgeForStoreOnly()`).
+* **Size:** the bounds are independent: only the local `maximumSize` or `maximumWeight` bounds the local cache, and the
+  store pruning to its maximum size leaves the local copies alone.
 
 ```java
 DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
@@ -140,8 +165,8 @@ Note: The store's bounds are optional, as Caffeine's are, but recommended (see
 
 The store's settings have defaults that suit most uses:
 
-* `withMaximumAge(...)`: how old a value may get, counted from its write, and how long a copy is served at most when a
-  change does not reach an instance (default: unbounded).
+* `withMaximumAge(...)`: how long the store serves a value after its write, which bounds the local copies too (default:
+  unbounded).
 * `withMaximumAgeForStoreOnly()`: the maximum age bounds the store's values but not the local copies, for which only the
   local expiry counts; a miss after the maximum age calls the source (default: off). For a store too small or too
   expensive for the working set. Requires a maximum age and distribution.
@@ -149,7 +174,9 @@ The store's settings have defaults that suit most uses:
 * `withOperationTimeout(...)`: how long a call waits for the store before it fails (default: 10 seconds).
 * `withExecutor(...)`: the executor of the blocking store calls, such as virtual threads (default: daemon threads).
 * `withMaintenanceInterval(...)`: how often values beyond the maximum age or size are removed (default: one minute).
-* `withHeartbeatInterval(...)`: how often an instance checks that distribution still works (default: ten seconds).
+* `withHeartbeatInterval(...)`: how often an instance checks that distribution still works (default: ten seconds). A
+  stop is noticed within about two intervals, after which the instance checks its copies against the store until
+  distribution works again.
 * `withPollInterval(...)`: how often an instance polls MariaDB or MySQL for changes (default: one second).
 
 #### Configuration of the distribution mode
@@ -255,50 +282,55 @@ instance's copies.
 
 ## Remarks
 
-* All instances of a cache must be configured alike, in particular the store's bounds, the serializers and the hashing.
-  Changing the key or value classes, their serializers or the hashing can make the stored values unusable: remove them
-  first (`invalidateAll()`), or give the cache a new place. A serializer that stores another format (bytes, text or
-  JSON) needs a new table on PostgreSQL.
-* Synchronization runs in background threads of the application. Platforms that allocate CPU only while a request is
-  handled, as is common for serverless deployments, should allocate it permanently, otherwise instances fall behind
-  while idle.
-* Reference-based eviction using Caffeine's
-  [weak or soft references](https://github.com/ben-manes/caffeine/wiki/Eviction#reference-based) is not supported.
-* Whatever concerns the cache as a whole concerns this instance's copies only: `estimatedSize()`, the sizes and
-  iteration of `asMap()` and its views, `stats()`, `cleanUp()` and what `policy()` reports. Changes through the views or
-  `policy()`, `invalidateAll()` and `asMap().clear()` act on every instance. There is no eviction across instances
-  either: each local cache evicts by its own bounds, the store by its own. The first read of a key on each instance
-  reads the store; `getAll(keys)` warms an instance up in one store read.
-* `refreshAfterWrite` counts from when an instance got its copy, not from the write: a copy already older when read
-  from the store is refreshed at once, so a value is refreshed at an age of at most twice the duration. Instances
-  refreshing a key at the same time each call the loader; the first result written wins.
-* `invalidateAll()` is not atomic with operations of other instances in flight: a load that read the source before it,
-  or an atomic `asMap()` method (`compute`, `merge`, `replace`, ...) that decided on a value present before it, may
-  write its result after it, even one older than a write made before the `invalidateAll`, which then stays until the
-  key is written again or reaches the store's maximum age. Caffeine leaves loads in flight during `invalidateAll`
-  undefined as well.
-* While the store does not answer, whatever can be answered without it is answered, and the rest fails with a
+* **Same configuration on every instance:** all instances of a cache must be configured alike, in particular the
+  store's bounds, the serializers and the hashing. After a change of the key or value classes, their serializers or the
+  hashing, the stored values may no longer be
+  readable: remove them first (`invalidateAll()`), or give the cache a new place.
+* **No reference-based eviction:** Caffeine's
+  [weak or soft references](https://github.com/ben-manes/caffeine/wiki/Eviction#reference-based) are not supported.
+* **What is local and what is shared:**
+    * Only this instance's copies are reported by `estimatedSize()`, the sizes and iteration of `asMap()` and its
+      views, `stats()`, `cleanUp()` and `policy()`.
+    * Every instance is reached by changes through the views or `policy()`, by `invalidateAll()` and by
+      `asMap().clear()`.
+    * Eviction is not shared: each local cache evicts by its own bounds, the store by its own.
+    * The first read of a key on an instance reads the store; `getAll(keys)` warms an instance up with one store read.
+* **Refresh timing:** `refreshAfterWrite` counts from when an instance got its copy, not from the write. A copy that is
+  already older when read from the store is refreshed at once, so a value is refreshed at an age of at most twice the
+  duration. Instances refreshing a key at the same time each call the loader; the first result written wins.
+* **Invalidating everything:** `invalidateAll()` is not atomic with operations in flight on other instances. Two kinds
+  can write their result after it:
+    * a load that read the source before it;
+    * an atomic `asMap()` method (`compute`, `merge`, `replace`, ...) that decided on a value present before it.
+
+  Such a result can even be older than a write made before the `invalidateAll()`. It stays until the key is written
+  again or reaches the store's maximum age. Caffeine, too, leaves loads in flight during `invalidateAll` undefined.
+* **Store not answering:** the cache answers what it can without the store, and the rest fails with a
   `StoreException`:
-    * Reads serve held values. A miss is loaded from the loader or mapping function (if any), or else stays a miss; a
-      refresh calls the loader as usual. What the loader returns is held unconfirmed, without being written, and
-      checked against the store once it answers again. An atomic `asMap()` method that writes nothing for a key held
-      (`putIfAbsent` on a present key, `replace` or `remove` whose value does not match) answers from the held value.
-    * Writes and removals fail (a removal drops the local copy first), and so do `getFromStore` and
-      `getAllFromStore`. `AsyncCache.put(key, future)` cannot tell its caller: the key is absent here, and the
-      failure is logged. A loaded value is a copy of the source, which any instance can load again; a written value or
-      a removal exists only in the cache, and kept locally it would be lost or leave the other instances serving the
-      old value without an error.
+    * Reads serve held values. A miss is loaded from the loader or mapping function, if there is one, or else stays a
+      miss; a refresh calls the loader as usual. A loaded value is held unconfirmed, not written, and checked against
+      the store once it answers again.
+    * Atomic `asMap()` methods that write nothing for a held key (`putIfAbsent` on a present key, `replace` or `remove`
+      whose value does not match) answer from the held value.
+    * Writes and removals fail (a removal drops the local copy first), and so do `getFromStore` and `getAllFromStore`.
+      `AsyncCache.put(key, future)` cannot tell its caller: the key is absent here, and the failure is logged.
+    * Why loads succeed and writes fail: a loaded value is a copy of the source, which any instance can load again. A
+      written value or a removal exists only in the cache; kept locally, it would be lost, or the other instances
+      would serve the old value without an error.
     * After repeated failures, calls to the store are refused at once instead of waiting for it.
-      `distributedPolicy().getSynchronizationState()` cannot tell beforehand whether a write will succeed (`DEGRADED`
-      also covers an interrupted change feed, and the store can fail right after the check), so a caller that must not
+    * `distributedPolicy().getSynchronizationState()` cannot tell beforehand whether a write will succeed: `DEGRADED`
+      also covers an interrupted change feed, and the store can fail right after the check. A caller that must not
       fail catches the exception: `try { cache.put(key, value); } catch (StoreException e) { ... }`.
-* A write whose outcome the store leaves unknown (a timeout, or a connection lost after sending) drops the key locally,
-  and the call may throw a `StoreException` whose `isOutcomeUnknown()` is `true`:
+* **Unknown write outcome:** a write whose outcome the store leaves unknown (a timeout, or a connection lost after
+  sending) drops the key locally. The call may throw a `StoreException` whose `isOutcomeUnknown()` is `true`:
     * `put` throws, since repeating it could overwrite a newer value.
-    * The atomic `asMap()` methods (`putIfAbsent`, `replace`, `compute`, `merge`, ...) repeat the write and throw only
-      if they cannot recognize their own write (on stores that assign versions themselves, or when another write
+    * The atomic `asMap()` methods (`putIfAbsent`, `replace`, `compute`, `merge`, ...) repeat the write. They throw
+      only if they cannot recognize their own write (on stores that assign versions themselves, or when another write
       raced), since deciding again would apply the remapping twice.
-    * Loads and refreshes repeat it.
+    * Loads and refreshes repeat the write.
+* **CPU allocation:** synchronization runs in background threads of the application. Platforms that allocate CPU only
+  while a request is handled (common for serverless deployments) need it allocated permanently, or idle instances fall
+  behind.
 
 ## Requirements
 

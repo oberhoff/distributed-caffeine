@@ -13,10 +13,14 @@ keeps a connection open for listening. In short:
 
 The table, its index and a sequence for its versions are created when the first cache is built. If the user lacks the
 rights to create them, building fails with the DDL to run instead, which also suits migration tools. A table created by
-another version of this library is refused; `withSchemaReset()` drops and recreates it, which is only safe while no
-instance of any cache in the table runs. It is meant for a migration: remove it afterwards, or a later upgrade drops the
-table again. A table's columns follow what the serializers of its caches store (bytes, text or JSON), so a cache whose
-serializers store another format needs a table of its own.
+another version of this library is refused. `withSchemaReset()` is meant for the migration from 0.x: it drops and
+recreates a table of 0.x (or an empty one), never one of another version of this generation or one holding other rows.
+Instances of 0.x still running fail on the new table, so stop them before the first new instance starts, or accept
+their errors until they are replaced. Remove `withSchemaReset()` once the migration is done.
+
+A table holds one format (bytes, text or JSON): its `key` and `value` columns are `bytea`, `text` or `jsonb`, after what
+the serializers of its first cache store. Caches sharing a table need serializers of the same format, and a cache whose
+serializers switch format needs another table; building refuses a table created for another format.
 
 ## Listening
 

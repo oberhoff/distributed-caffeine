@@ -20,8 +20,12 @@ periodic journal flush and arrive about a hundred times later.
 ## Collection and change streams
 
 The collection and its index are created when the first cache is built. A collection created by another version of this
-library is refused; `withSchemaReset()` drops and recreates it, which is only safe while no instance of any cache in the
-collection runs. It is meant for a migration: remove it afterwards, or a later upgrade drops the collection again.
+library is refused. `withSchemaReset()` is meant for the migration from 0.x: it drops and recreates a collection of 0.x
+(or an empty one), never one of another version of this generation or one holding other documents. During a rolling
+update, the instances of 0.x still running go on among themselves, apart from the new ones, so their values can be
+outdated until the last of them is stopped. Documents they write after the drop are removed when a cache is built, with
+or without `withSchemaReset()`; this cleanup is temporary and goes away in a later release. Remove `withSchemaReset()`
+once the migration is done.
 
 The caches on one client share one change stream per database, whatever the number of caches and collections.
 

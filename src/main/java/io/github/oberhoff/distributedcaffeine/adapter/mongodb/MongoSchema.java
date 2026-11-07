@@ -31,6 +31,7 @@ import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import org.bson.BsonDocument;
 import org.bson.BsonInt32;
 import org.bson.BsonString;
+import org.bson.BsonType;
 import org.bson.Document;
 
 import java.lang.System.Logger;
@@ -43,7 +44,8 @@ import java.util.function.UnaryOperator;
  * On start (VISION.md, "Adapter setup" and "Migration"): a replica set with majority reads is required, sharded
  * collections are refused; a collection with the schema marker of this version is used, a missing one is created (the
  * marker document first, which creates the collection, so a concurrent start sees either nothing or the marker), one
- * without the marker is refused or dropped and recreated with withSchemaReset(). A missing index only warns.
+ * without the marker is refused or, with withSchemaReset() and if it may be dropped (see requireResettable), dropped
+ * and recreated. A missing index only warns.
  *
  * @author Andreas Oberhoff
  */
@@ -87,12 +89,7 @@ final class MongoSchema {
             boolean exists = database.listCollectionNames().into(new java.util.ArrayList<>())
                     .contains(location.collectionName);
             if (exists && !hasMarker(collection)) {
-                if (!schemaReset) {
-                    throw new StoreException("Collection " + location + " exists without the schema marker '"
-                            + MongoLocation.MARKER + "' (e.g. a collection of distributed-caffeine 0.x). Stop all "
-                            + "instances using it, then drop it or configure another name, or enable withSchemaReset().",
-                            false);
-                }
+                requireResettable(collection, location, schemaReset);
                 LOGGER.log(Level.WARNING, "Dropping collection {0}, which has no schema marker (withSchemaReset)",
                         location);
                 collection.drop();
@@ -104,8 +101,31 @@ final class MongoSchema {
                 collection.createIndex(INDEX, new IndexOptions().name("distributed-caffeine"));
             }
             checkIndex(collection, location);
+            removeOldGeneration(collection, location);
         } catch (MongoException e) {
             throw new StoreException("Checking collection " + location + " failed: " + e.getMessage(), e, false);
+        }
+    }
+
+    // The documents of distributed-caffeine 0.7.x that a rolling update with withSchemaReset() leaves behind: written
+    // by old instances still running after the first new one dropped their collection, and ignored by this generation
+    // forever. Only theirs have an ObjectId as _id (the server assigns it to their upserts; ours are the marker's
+    // string and {d, h} documents), so the built-in _id index finds them without a scan (explain on MongoDB 4.4 and 9:
+    // only their keys examined, none once they are gone). Run on every start, as a start after the rollout removes
+    // what the last old instances wrote: running old instances lose their store copies, as with the drop. Best
+    // effort: a failure (a timeout after a long rollout) only warns, deleteMany keeps what it removed, the next start
+    // goes on. Deletes are outside the change stream's filter, so no cache of this generation hears of them.
+    // To be removed in a later release, once no rollout from 0.7.x is expected (VISION.md, "Migration").
+    private static void removeOldGeneration(MongoCollection<BsonDocument> collection, MongoLocation location) {
+        try {
+            long removed = collection.deleteMany(Filters.type("_id", BsonType.OBJECT_ID)).getDeletedCount();
+            if (removed > 0) {
+                LOGGER.log(Level.INFO, "Removed {0} documents of distributed-caffeine 0.7.x from collection {1}",
+                        removed, location);
+            }
+        } catch (MongoException e) {
+            LOGGER.log(Level.WARNING, "Removing documents of distributed-caffeine 0.7.x from collection {0} failed; "
+                    + "the next start goes on: {1}", location, e.getMessage());
         }
     }
 
@@ -145,6 +165,36 @@ final class MongoSchema {
                 throw new StoreException("Collection " + location + " is sharded, which distributed-caffeine does "
                         + "not support", false);
             }
+        }
+    }
+
+    // What withSchemaReset() may drop: a collection of distributed-caffeine 0.x (its documents have a top-level
+    // discriminator), one of this version whose marker was lost (a value's _id is {d, h}; a start dropping it while
+    // another one set it up recreates it so on the next write), or an empty one. Never one of another version of
+    // this library, even with the option: two versions left with it on would drop each other's collection on every
+    // start (a later version decides itself which earlier markers it resets). Never foreign documents either.
+    private static void requireResettable(MongoCollection<BsonDocument> collection, MongoLocation location,
+            boolean schemaReset) {
+        BsonDocument marker = collection.find(Filters.eq("_id", MongoLocation.MARKER_ID)).first();
+        if (marker != null) {
+            throw new StoreException("Collection " + location + " was created by another version of "
+                    + "distributed-caffeine (" + (marker.isString("schema") ? "'" + marker.getString("schema")
+                    .getValue() + "'" : "an unknown schema") + "; this one uses '" + MongoLocation.MARKER + "'). Stop "
+                    + "all instances of that version, then drop it or configure another name. withSchemaReset() "
+                    + "never drops it, so that two versions cannot drop each other's collection.", false);
+        }
+        if (!schemaReset) {
+            throw new StoreException("Collection " + location + " exists without the schema marker '"
+                    + MongoLocation.MARKER + "' (e.g. a collection of distributed-caffeine 0.x). Stop all "
+                    + "instances using it, then drop it or configure another name, or enable withSchemaReset().",
+                    false);
+        }
+        boolean empty = collection.find().limit(1).first() == null;
+        if (!empty && collection.find(Filters.or(Filters.exists("discriminator"), Filters.exists("_id.d")))
+                .limit(1).first() == null) {
+            throw new StoreException("Collection " + location + " holds documents that are not distributed-"
+                    + "caffeine's; withSchemaReset() drops only collections of distributed-caffeine. Configure "
+                    + "another name, or drop it if it is no longer needed.", false);
         }
     }
 

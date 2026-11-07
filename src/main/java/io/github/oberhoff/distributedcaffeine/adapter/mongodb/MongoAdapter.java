@@ -146,9 +146,10 @@ public final class MongoAdapter<K, V> implements Adapter<K, V> {
         }
 
         /**
-         * Drops and recreates the collection if another version of this library created it. Only while no instance of
-         * any cache in the collection runs. Meant for a migration: remove it afterwards, or a later upgrade drops the
-         * collection again.
+         * Drops and recreates the collection if distributed-caffeine 0.x created it, or if it is empty; one of another
+         * version of this generation, or holding other documents, is never dropped. Meant for the migration from 0.x:
+         * instances of 0.x still running go on among themselves, apart from the new ones, until they are stopped.
+         * Remove it once the migration is done.
          *
          * @return this builder
          */

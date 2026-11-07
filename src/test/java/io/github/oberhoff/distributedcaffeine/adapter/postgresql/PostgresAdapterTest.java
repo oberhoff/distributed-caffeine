@@ -347,6 +347,36 @@ abstract class PostgresAdapterTest {
     }
 
     @Test
+    void a_reset_drops_a_table_of_distributed_caffeine_0_x_with_rows() {
+        database.execute("CREATE SCHEMA IF NOT EXISTS adapter");
+        database.execute("CREATE TABLE adapter.\"" + table + "\" (discriminator text, hash text, operation text, "
+                + "status text, timestamp timestamptz, PRIMARY KEY (discriminator, hash))");
+        database.execute("INSERT INTO adapter.\"" + table + "\" VALUES ('', '1', null, 'CACHED', now())");
+
+        DistributedCache<String, String> reset = track(strings(adapter().withSchemaReset().build()).build());
+        reset.put("k", "v");
+        assertThat(reset.getIfPresent("k")).isEqualTo("v");
+    }
+
+    @Test
+    void a_reset_never_drops_a_foreign_table_with_rows_or_a_table_of_another_version() throws SQLException {
+        database.execute("CREATE SCHEMA IF NOT EXISTS adapter");
+        database.execute("CREATE TABLE adapter.\"" + table + "\" (id text)");
+        database.execute("INSERT INTO adapter.\"" + table + "\" VALUES ('foreign')");
+        assertThatThrownBy(() -> track(strings(adapter().withSchemaReset().build()).build()))
+                .isInstanceOf(StoreException.class).hasMessageContaining("not distributed-caffeine's");
+        assertThat(query("SELECT count(*) FROM adapter.\"" + table + "\"")).as("kept").isEqualTo("1");
+
+        database.execute("COMMENT ON TABLE adapter.\"" + table + "\" IS 'distributed-caffeine schema 2'");
+        for (boolean reset : new boolean[] {false, true}) {
+            PostgresAdapter.Builder builder = reset ? adapter().withSchemaReset() : adapter();
+            assertThatThrownBy(() -> track(strings(builder.build()).build())).isInstanceOf(StoreException.class)
+                    .hasMessageContaining("another version").hasMessageContaining("schema 2");
+        }
+        assertThat(query("SELECT count(*) FROM adapter.\"" + table + "\"")).as("kept").isEqualTo("1");
+    }
+
+    @Test
     void a_table_created_for_other_serializers_is_refused() {
         cache(Function.identity());
 

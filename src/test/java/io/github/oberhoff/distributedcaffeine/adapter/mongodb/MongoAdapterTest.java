@@ -662,7 +662,9 @@ abstract class MongoAdapterTest {
 
     @Test
     void a_collection_without_the_marker_is_refused_unless_it_is_reset() {
-        database.client.getDatabase("adapter").getCollection(collection).insertOne(new Document("_id", "legacy"));
+        // as distributed-caffeine 0.x writes it
+        database.client.getDatabase("adapter").getCollection(collection)
+                .insertOne(new Document("discriminator", "").append("hash", 1L));
 
         Function<DistributedCaffeine<String, String>, DistributedCaffeine<String, String>> unchanged =
                 Function.identity();
@@ -673,7 +675,44 @@ abstract class MongoAdapterTest {
         reset.put("k", "v");
         assertThat(reset.getIfPresent("k")).isEqualTo("v");
         assertThat(database.client.getDatabase("adapter").getCollection(collection)
-                .countDocuments(new Document("_id", "legacy"))).isZero();
+                .countDocuments(new Document("discriminator", new Document("$exists", true)))).isZero();
+    }
+
+    @Test
+    void a_reset_never_drops_foreign_documents_or_a_collection_of_another_version() {
+        var documents = database.client.getDatabase("adapter").getCollection(collection);
+        documents.insertOne(new Document("_id", "foreign"));
+        assertThatThrownBy(() -> track(strings(adapter().withSchemaReset().build()).build()))
+                .isInstanceOf(StoreException.class).hasMessageContaining("not distributed-caffeine's");
+        assertThat(documents.countDocuments(new Document("_id", "foreign"))).as("kept").isOne();
+
+        documents.drop();
+        documents.insertOne(new Document("_id", MongoLocation.MARKER_ID)
+                .append("schema", "distributed-caffeine schema 2"));
+        for (boolean reset : new boolean[] {false, true}) {
+            MongoAdapter.Builder builder = reset ? adapter().withSchemaReset() : adapter();
+            assertThatThrownBy(() -> track(strings(builder.build()).build())).isInstanceOf(StoreException.class)
+                    .hasMessageContaining("another version").hasMessageContaining("schema 2");
+        }
+        assertThat(documents.countDocuments()).as("kept").isOne();
+    }
+
+    // to be removed with the cleanup (MongoSchema#removeOldGeneration)
+    @Test
+    void a_start_removes_the_documents_of_the_previous_generation_and_nothing_else() {
+        DistributedCache<String, String> first = cache(Function.identity());
+        first.put("k", "v");
+        var documents = database.client.getDatabase("adapter").getCollection(collection);
+        // as 0.7.x writes them after the reset dropped its collection: an upsert, so an ObjectId as _id
+        documents.insertMany(List.of(new Document("discriminator", "").append("hash", 1L),
+                new Document("discriminator", "").append("hash", 2L)));
+        long ours = documents.countDocuments() - 2;
+
+        cache(Function.identity());
+
+        assertThat(documents.countDocuments(new Document("discriminator", new Document("$exists", true)))).isZero();
+        assertThat(documents.countDocuments()).isEqualTo(ours);
+        assertThat(first.getIfPresent("k")).isEqualTo("v");
     }
 
     @Test

@@ -882,7 +882,16 @@ the old table, written with write time = now) only if someone needs it.
   all old instances, then drop it or configure another name, or enable `withSchemaReset()`.").
 - **Opt-in `withSchemaReset()`** drops and recreates the table when no matching marker is found. Concurrent starts
   are serialized with an advisory lock on PostgreSQL; on MongoDB the drop is idempotent and creating the collection
-  plus inserting the marker is safe to race. Only when every old instance of every cache in that table is stopped.
+  plus inserting the marker is safe to race. Only when every old instance of every cache in that table is stopped
+  (on MongoDB a rolling update works, see below).
+- **Narrowed 2026-11-07:** the reset drops only a collection or table of 0.x (MongoDB: a document with a top-level
+  `discriminator`, or one of this version whose marker was lost, `_id.d`; PostgreSQL: no comment, and the columns
+  `discriminator`, `hash`, `status`, `timestamp`) or an empty one. It always refuses another version's marker
+  (`distributed-caffeine schema N`), also with the option: two versions both left with it on would otherwise drop each
+  other's collection on every start, in turns, until one is gone. A later layout change decides itself which earlier
+  markers its reset accepts. It also refuses foreign data, with or without the option. So forgetting to remove the
+  option after the migration costs nothing; the READMEs still say to remove it. Tests: `MongoAdapterTest` and
+  `PostgresAdapterTest` (`a_reset_never_drops_...`).
 - Why not delete automatically: old instances still running on the table fail (errors on PostgreSQL, an
   `invalidate` event ending their change streams on MongoDB) and may recreate it, so the generations would drop
   each other's table in turns; caches sharing the table via the discriminator would be hit too; concurrent new
@@ -906,8 +915,23 @@ instance drops the old collection; the running old instances resume their change
 (an ObjectId `_id`, no `{d, h}`); neither sees the other's writes. An old instance starting after the reset fails: the
 new generation has two documents at once (marker and start document), so the old unique index on `(discriminator,
 hash)` finds two `null` pairs and its build fails (E11000), creating nothing; the new generation is unaffected. So a
-rollback to 0.7.x needs the collection dropped first. Old documents written during the rollout stay behind:
-`db.<collection>.deleteMany({discriminator: {$exists: true}})` removes them once the last old instance is gone.
+rollback to 0.7.x needs the collection dropped first. Old documents written during the rollout would stay behind,
+ignored for good: `db.<collection>.deleteMany({discriminator: {$exists: true}})` removes them once the last old
+instance is gone.
+
+**The leftovers removed on every start (built 2026-11-07, temporary):** each `build()` of a MongoDB cache, with or
+without `withSchemaReset()`, deletes the documents with an ObjectId `_id` after the marker check (`MongoSchema
+#removeOldGeneration`). Only 0.7.x documents have one (the server assigns it to their upserts; this generation's are the
+marker's string and `{d, h}` documents). The built-in `_id` index bounds `$type: "objectId"` to the ObjectId range:
+`explain` on MongoDB 4.4 and 9 with 100,000 new and 1,000 old documents examined the 1,000 old ones only, and no key
+once they were gone, so a start after the rollout costs one index probe. Considered first: the cleanup in the
+reset (finds nothing: the drop has just removed everything, the leftovers come later) and in maintenance (a run
+forever for a one-time migration). Running old instances lose their store copies, as with the drop, so no grace
+period; a start after the rollout removes what the last old instances wrote. Best effort: a failure (a timeout after
+a long rollout) only warns, the next start goes on. Deletes are outside the change stream's filter, so no new cache
+hears of them; 0.7.0 instances keep their local copies (`MigrationExperimentTest`, and `MongoAdapterTest` without the
+release). **To be removed** in a later release, once no rollout from 0.7.x is expected (listed under step 7 of the
+build plan).
 
 **Configuration: a migration guide.**
 
@@ -5887,7 +5911,11 @@ at the end.
    - capabilities for further stores (the drawbacks per store are under the one-number design's fallback);
    - session tokens;
    - write combining;
-   - an issue upstream at pgjdbc.
+   - an issue upstream at pgjdbc;
+   - **remove the cleanup of 0.7.x documents** on MongoDB (`MongoSchema#removeOldGeneration`, its test in
+     `MongoAdapterTest` and the step in `MigrationExperimentTest`, the sentence in the MongoDB README; see "Migration
+     from the current generation", built 2026-11-07 as temporary) in a later release, once no rollout from 0.7.x is
+     expected.
 
 The frame for every step: "Positioning and the complexity budget".
 

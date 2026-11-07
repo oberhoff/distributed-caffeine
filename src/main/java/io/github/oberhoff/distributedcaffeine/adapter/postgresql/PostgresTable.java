@@ -33,7 +33,8 @@ final class PostgresTable {
 
     static final int MAXIMUM_NAME_BYTES = 63;
     // the layout of this generation; a later layout change gets a new number, refused by this one and the other way
-    static final String MARKER = "distributed-caffeine schema 1";
+    static final String MARKER_PREFIX = "distributed-caffeine schema "; // every version's, telling ours from others
+    static final String MARKER = MARKER_PREFIX + "1";
 
     final String schemaName;
     final String tableName;

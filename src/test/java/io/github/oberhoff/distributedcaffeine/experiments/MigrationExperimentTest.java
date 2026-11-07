@@ -56,8 +56,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * collection with {@code withSchemaReset()}: the first new instance drops the old collection while old instances
  * still run. Checks what the code of both says should happen: the old instances keep working among themselves, the
  * generations do not see each other's documents, an old instance cannot start once the new generation is there
- * (its unique index on fields new documents lack fails), and the old documents left behind are removed by one
- * command.
+ * (its unique index on fields new documents lack fails), and every start of a new instance removes the old documents
+ * written since the drop.
  * <p>
  * The release runs in a class loader of its own (both generations share packages), driven by reflection. Its
  * classpath is resolved first:
@@ -134,15 +134,15 @@ class MigrationExperimentTest {
         await(() -> "old-2".equals(oldB.getIfPresent("k2")));
         assertThat(collection().countDocuments(OLD_DOCUMENTS)).as("written into the new collection").isEqualTo(1);
 
-        // the new generation works, a second instance finding the marker and dropping nothing
+        // the new generation works, a second instance finding the marker, dropping nothing and removing the old
+        // documents written since the drop
         newA.put("k3", "new-3");
         DistributedCache<String, String> newB = newCache();
         assertThat(newB.get("k3", key -> "loaded")).isEqualTo("new-3");
+        assertThat(collection().countDocuments(OLD_DOCUMENTS)).as("removed by the second new instance").isZero();
         for (int i = 0; i < 10; i++) {
             newA.put("n" + i, "new");
         }
-        assertThat(collection().countDocuments(OLD_DOCUMENTS)).as("the old documents survived the second new instance")
-                .isEqualTo(1);
 
         // neither generation sees the other's writes (a 0.7.0 cache without persistence keeps only synchronization
         // records in the collection, so what an old instance sees is what it holds)
@@ -155,17 +155,18 @@ class MigrationExperimentTest {
         assertThat(storedValue(newB, "k3")).as("not reached by the old generation's write").isEqualTo("new-3");
         assertThat(newB.getIfPresent("k3")).isEqualTo("new-3");
 
-        // after the rollout: the old documents left behind, removed by one command, the new ones untouched
+        // after the rollout: the old documents left behind, removed by the next start of a new instance, the new ones
+        // untouched
         oldA.close();
         oldB.close();
-        assertThat(collection().countDocuments(OLD_DOCUMENTS)).isEqualTo(2);
-        long newDocuments = collection().countDocuments() - 2;
-        collection().deleteMany(OLD_DOCUMENTS);
-        assertThat(collection().countDocuments(OLD_DOCUMENTS)).isZero();
+        assertThat(collection().countDocuments(OLD_DOCUMENTS)).isEqualTo(1);
+        long newDocuments = collection().countDocuments() - 1;
+        DistributedCache<String, String> newC = newCache();
+        assertThat(collection().countDocuments(OLD_DOCUMENTS)).as("removed by a start after the rollout").isZero();
         assertThat(collection().countDocuments()).isEqualTo(newDocuments);
-        assertThat(storedValue(newA, "k3")).isEqualTo("new-3");
+        assertThat(storedValue(newC, "k3")).isEqualTo("new-3");
         newA.put("k4", "new-4");
-        assertThat(newB.get("k4", key -> "loaded")).isEqualTo("new-4");
+        assertThat(newC.get("k4", key -> "loaded")).isEqualTo("new-4");
     }
 
     @Test
