@@ -17,30 +17,48 @@ package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.Expiry;
 
-import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
-import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
+import java.time.Duration;
+
 import static java.util.Objects.requireNonNull;
 
-class InternalExpiry<K, V> implements Expiry<InternalKey<K>, InternalValue<V>> {
+/**
+ * The user's Expiry, on the local level's wrapped keys and values, every duration at most what is left of the store's
+ * maximum age since the copy was installed (CaffeineConfigurer#caffeine): a value created or replaced may live that
+ * long at most, a read never lengthens it beyond.
+ *
+ * @author Andreas Oberhoff
+ */
+final class InternalExpiry<K, V> implements Expiry<InternalKey<K>, InternalValue<V>> {
 
-    private final Expiry<K, V> expiry;
+    private final Expiry<? super K, ? super V> expiry;
+    private final long maximumAge;
 
-    InternalExpiry(Expiry<K, V> expiry) {
+    InternalExpiry(Expiry<? super K, ? super V> expiry, Duration maximumAge) {
         this.expiry = requireNonNull(expiry);
+        this.maximumAge = maximumAge.toNanos();
     }
 
     @Override
     public long expireAfterCreate(InternalKey<K> key, InternalValue<V> value, long currentTime) {
-        return expiry.expireAfterCreate(k(key), v(value), currentTime);
+        return installed(value, currentTime, expiry.expireAfterCreate(key.key(), value.value(), currentTime));
     }
 
     @Override
     public long expireAfterUpdate(InternalKey<K> key, InternalValue<V> value, long currentTime, long currentDuration) {
-        return expiry.expireAfterUpdate(k(key), v(value), currentTime, currentDuration);
+        return installed(value, currentTime,
+                expiry.expireAfterUpdate(key.key(), value.value(), currentTime, currentDuration));
     }
 
     @Override
     public long expireAfterRead(InternalKey<K> key, InternalValue<V> value, long currentTime, long currentDuration) {
-        return expiry.expireAfterRead(k(key), v(value), currentTime, currentDuration);
+        long left = Math.max(0, value.latestExpiry() - currentTime);
+        return Math.min(left, expiry.expireAfterRead(key.key(), value.value(), currentTime, currentDuration));
+    }
+
+    // a copy installed now: it goes at the store's maximum age at the latest
+    private long installed(InternalValue<V> value, long currentTime, long duration) {
+        long latest = currentTime + maximumAge;
+        value.latestExpiry(latest < currentTime ? Long.MAX_VALUE : latest); // saturated
+        return Math.min(duration, maximumAge);
     }
 }

@@ -16,93 +16,66 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Policy;
-import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import org.jspecify.annotations.Nullable;
 
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentMap;
 import java.util.function.Function;
 
 /**
- * Interface representing a distributed cache instance. Cache entries are added manually and remain in the cache until
- * either invalidated or evicted.
- * <p>
- * <b>Note:</b> Invalidations are distributed to other cache instances independently of what this cache instance holds.
+ * A Caffeine {@link Cache} whose instances share a store. Each instance holds its own copies, reads a key from the
+ * store when it holds none, and drops or updates its copies when the key changes elsewhere. Behaves as Caffeine's
+ * cache, except where a method documents otherwise.
  *
- * @param <K> the key type of the cache
- * @param <V> the value type of the cache
+ * @param <K> the key type
+ * @param <V> the value type
  * @author Andreas Oberhoff
  */
-public interface DistributedCache<K, V> extends Cache<K, V> {
+public interface DistributedCache<K, V> extends Cache<K, V>, AutoCloseable {
 
+    /**
+     * Returns the distributed side of this cache: its synchronization state, its stats and direct reads of the store.
+     *
+     * @return the distributed policy
+     */
+    DistributedPolicy<K, V> distributedPolicy();
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * If this instance holds no usable copy, the store is read, and a value found there is returned and kept by this
+     * instance. The loader is never called. If the store does not answer, the key counts as absent. To look at this
+     * instance's copy only, use {@code policy().getIfPresentQuietly(key)}.
+     */
     @Override
     @Nullable V getIfPresent(K key);
 
+    /**
+     * {@inheritDoc}
+     * <p>
+     * As {@link #getIfPresent}: the keys this instance holds no usable copy of are read from the store, in one batch.
+     */
     @Override
     Map<K, V> getAllPresent(Iterable<? extends K> keys);
 
+    /**
+     * {@inheritDoc}
+     * <p>
+     * A computed value is cached only if no instance wrote or removed the key during the computation. If one wrote it,
+     * that value is returned instead; if one removed it, the value is computed again. After three such removals in a
+     * row, the last computed value is returned without being cached
+     * ({@code distributedPolicy().stats().uncachedLoadCount()}).
+     */
+    // a mapping function resolving to null is accepted (as by ConcurrentMap.computeIfAbsent) and caches nothing.
+    // Caffeine documents a null result ("or null if the computed value is null") but cannot express it for a value
+    // type that is not nullable; declaring the value type nullable would declare every other method nullable too
     @Override
     @SuppressWarnings({"java:S2638", "NullAway"})
     @Nullable V get(K key, Function<? super K, ? extends @Nullable V> mappingFunction);
 
-    @Override
-    Map<K, V> getAll(Iterable<? extends K> keys, Function<? super Set<? extends K>,
-            ? extends Map<? extends K, ? extends V>> mappingFunction);
-
-    @Override
-    void put(K key, V value);
-
-    @Override
-    void putAll(Map<? extends K, ? extends V> map);
-
     /**
-     * {@inheritDoc}
-     * <p>
-     * <b>Note:</b> Invalidation is distributed to other cache instances even if this cache instance does not hold a
-     * mapping for the specified key.
+     * Closes this cache instance and releases its connections to the store. Afterwards every operation throws
+     * {@link IllegalStateException}, except {@code distributedPolicy().getSynchronizationState()}. Idempotent.
      */
     @Override
-    void invalidate(K key);
-
-    /**
-     * {@inheritDoc}
-     * <p>
-     * <b>Note:</b> Invalidations are distributed to other cache instances even if this cache instance holds mappings
-     * for only some or none of the specified keys.
-     */
-    @Override
-    void invalidateAll(Iterable<? extends K> keys);
-
-    /**
-     * {@inheritDoc}
-     * <p>
-     * <b>Note:</b> Invalidating all mappings is distributed to other cache instances, so that they remove their
-     * mappings as well.
-     */
-    @Override
-    void invalidateAll();
-
-    @Override
-    long estimatedSize();
-
-    @Override
-    CacheStats stats();
-
-    @Override
-    ConcurrentMap<K, V> asMap();
-
-    @Override
-    void cleanUp();
-
-    @Override
-    Policy<K, V> policy();
-
-    /**
-     * Returns an access point for inspecting and performing low-level operations on the cache instance.
-     *
-     * @return the distributed policy as an access point
-     */
-    DistributedPolicy<K, V> distributedPolicy();
+    void close();
 }

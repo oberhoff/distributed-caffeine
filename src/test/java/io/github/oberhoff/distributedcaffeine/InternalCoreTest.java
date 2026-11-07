@@ -1,0 +1,1327 @@
+/*
+ * Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.oberhoff.distributedcaffeine;
+
+import com.github.benmanes.caffeine.cache.AsyncCacheLoader;
+import com.github.benmanes.caffeine.cache.AsyncLoadingCache;
+import com.github.benmanes.caffeine.cache.CacheLoader;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.Expiry;
+import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
+import io.github.oberhoff.distributedcaffeine.spi.Adapter;
+import io.github.oberhoff.distributedcaffeine.spi.Change;
+import io.github.oberhoff.distributedcaffeine.spi.ChangeFeed;
+import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
+import io.github.oberhoff.distributedcaffeine.spi.ChangeScan;
+import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
+import io.github.oberhoff.distributedcaffeine.spi.Row;
+import io.github.oberhoff.distributedcaffeine.spi.State;
+import io.github.oberhoff.distributedcaffeine.spi.Store;
+import io.github.oberhoff.distributedcaffeine.spi.StoreException;
+import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
+import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import io.github.oberhoff.distributedcaffeine.testing.ScanOnlyStore;
+import io.github.oberhoff.distributedcaffeine.testing.StorageOnlyStore;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
+
+import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.await;
+import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.pause;
+import static java.util.Objects.requireNonNull;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+/**
+ * The core's read and write paths against the reference store: several instances of one cache, each with an adapter
+ * of its own on the same table. No distribution of messages yet (a later step), so an instance only learns about a
+ * change elsewhere through the store.
+ *
+ * @author Andreas Oberhoff
+ */
+@NullMarked
+@Timeout(30)
+@SuppressWarnings("resource") // every cache and store a test opens is closed after it (@AfterEach)
+public class InternalCoreTest {
+
+    private static final Duration LONG = Duration.ofHours(1);
+
+    private final CacheBackend backend = backend();
+    private final List<AutoCloseable> closeables = new ArrayList<>();
+
+    // the tests' own work in the background, not on the common pool: with few CPUs (2 on GitHub's runners) it has one
+    // thread, which a slow load holds, and every other task would wait for it (found: the slow-load tests timing out)
+    private final ExecutorService background = Executors.newCachedThreadPool(runnable -> {
+        Thread thread = new Thread(runnable, "test-background");
+        thread.setDaemon(true);
+        return thread;
+    });
+
+    @AfterEach
+    void tearDown() throws Exception {
+        for (AutoCloseable closeable : closeables) {
+            closeable.close();
+        }
+        backend.close();
+        background.shutdownNow();
+    }
+
+    // the store under test: the in-memory store here, a real database in the subclasses
+    protected CacheBackend backend() {
+        return CacheBackend.of(new InMemoryDatabase());
+    }
+
+    private Adapter<String, String> adapter() {
+        return adapter(backend);
+    }
+
+    private static Adapter<String, String> adapter(CacheBackend backend) {
+        return backend::open;
+    }
+
+    private DistributedCaffeine<String, String> builder(Duration maximumAge) {
+        return builder(backend, maximumAge);
+    }
+
+    private static DistributedCaffeine<String, String> builder(CacheBackend backend, Duration maximumAge) {
+        return builder(backend, maximumAge, 1_000);
+    }
+
+    private static DistributedCaffeine<String, String> builder(CacheBackend backend, Duration maximumAge,
+                                                               long maximumSize) {
+        return DistributedCaffeine.newBuilder(adapter(backend))
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(StringSerializer.ofString()))
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(maximumAge).withMaximumSize(maximumSize));
+    }
+
+    private DistributedLoadingCache<String, String> loading(CacheLoader<String, String> loader) {
+        DistributedLoadingCache<String, String> cache = builder(LONG).build(loader);
+        closeables.add(cache);
+        return cache;
+    }
+
+    private DistributedCache<String, String> plain() {
+        DistributedCache<String, String> cache = builder(LONG).build();
+        closeables.add(cache);
+        return cache;
+    }
+
+    private Store store() {
+        Store store = backend.open();
+        closeables.add(store);
+        return store;
+    }
+
+    private static String hash(String key) {
+        return new InternalHasher<String>(null).wrap(key).hash();
+    }
+
+    // reading through the store
+
+    // a store without bounds, as a Caffeine cache without its bounds: nothing expires and nothing is pruned, also with
+    // a maximum age at or beyond the cap (about 292 years), which every store and the local expiry compute with
+
+    private DistributedCache<String, String> unbounded(@Nullable Duration maximumAge,
+                                                       @Nullable Expiry<String, String> expiry) {
+        DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(adapter())
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(StringSerializer.ofString()))
+                .withCaffeine(caffeine -> expiry == null ? caffeine : caffeine.expireAfter(expiry))
+                .withStore(store -> {
+                    store.withPollInterval(Duration.ofMillis(10)).withMaintenanceInterval(Duration.ofMillis(50));
+                    return maximumAge == null ? store : store.withMaximumAge(maximumAge);
+                })
+                .build();
+        closeables.add(cache);
+        return cache;
+    }
+
+    @Test
+    void a_store_without_bounds_keeps_every_value_through_maintenance() {
+        DistributedCache<String, String> writer = unbounded(null, null);
+        DistributedCache<String, String> reader = unbounded(null, null);
+        for (int i = 0; i < 20; i++) {
+            writer.put("k" + i, "v" + i);
+        }
+
+        pause(300); // several maintenance runs: no expiry, no pruning to a size
+
+        for (int i = 0; i < 20; i++) {
+            assertThat(reader.get("k" + i, key -> "loaded")).isEqualTo("v" + i);
+        }
+        assertThat(requireNonNull(reader.distributedPolicy().getFromStore("k0")).value()).isEqualTo("v0");
+    }
+
+    @Test
+    void a_maximum_age_beyond_the_cap_works_with_every_store_and_a_local_expiry() {
+        DistributedCache<String, String> writer = unbounded(ChronoUnit.FOREVER.getDuration(), null);
+        DistributedCache<String, String> reader = unbounded(ChronoUnit.FOREVER.getDuration(),
+                Expiry.creating((key, value) -> Duration.ofDays(1)));
+        writer.put("k", "v");
+
+        pause(300); // several maintenance runs
+
+        assertThat(reader.get("k", key -> "loaded")).isEqualTo("v");
+        assertThat(reader.policy().getIfPresentQuietly("k")).as("held under the local expiry").isEqualTo("v");
+        StoredValue<String> stored = requireNonNull(writer.distributedPolicy().getFromStore("k"));
+        assertThat(stored.value()).isEqualTo("v");
+        assertThat(stored.age()).isLessThan(Duration.ofMinutes(1));
+        writer.put("k", "w");
+        await(() -> !"v".equals(reader.policy().getIfPresentQuietly("k")));
+    }
+
+    // the maximum age for the store only: a value expires in the store after the maximum age (short here), which
+    // answers the misses within it; after it, misses call the source, and the copies stay, also for the atomic methods
+
+    // the heartbeat at a fifth of it, one second: shorter, a beat missed on a loaded machine makes a gap, which drops
+    // the copies whose rows expired (as documented), and the copies these tests check are gone
+    private static final Duration STORE_AGE = Duration.ofSeconds(5);
+
+    // every removal from the local caches of these tests, for a failure to say who removed a copy and why
+    private final Queue<String> removals = new ConcurrentLinkedQueue<>();
+
+    private DistributedCaffeine<String, String> storeOnly(Duration maximumAge, long maximumSize) {
+        return DistributedCaffeine.newBuilder(adapter())
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(StringSerializer.ofString()))
+                .withCaffeine(caffeine -> caffeine.recordStats()
+                        .removalListener((key, value, cause) -> removals.add(cause + " " + key + "=" + value)))
+                .withStore(store -> store.withMaximumAge(maximumAge).withMaximumAgeForStoreOnly()
+                        .withMaximumSize(maximumSize).withPollInterval(Duration.ofMillis(10))
+                        .withHeartbeatInterval(STORE_AGE.dividedBy(5)).withMaintenanceInterval(Duration.ofMillis(50)));
+    }
+
+    private DistributedCache<String, String> storeOnlyCache() {
+        DistributedCache<String, String> cache = storeOnly(STORE_AGE, 1_000).build();
+        closeables.add(cache);
+        return cache;
+    }
+
+    private static void awaitGone(DistributedCache<String, String> cache) {
+        await(() -> cache.distributedPolicy().getFromStore("k") == null);
+        pause(300); // the expiry's messages delivered
+    }
+
+    @Test
+    void the_maximum_age_for_the_store_only_shares_a_value_within_it_and_keeps_the_copies_after_it() {
+        DistributedCache<String, String> writer = storeOnlyCache();
+        DistributedCache<String, String> reader = storeOnlyCache();
+        writer.put("k", "v");
+        // read once the put's message is here: a message arriving while the load is about to reserve its key drops
+        // the loaded copy on purpose (it is loaded again on the next read), which this test does not look at
+        await(() -> reader.distributedPolicy().stats().writtenMessageCount() >= 1);
+        assertThat(reader.get("k", key -> "loaded")).as("taken from the store").isEqualTo("v");
+
+        awaitGone(writer);
+
+        assertThat(writer.policy().getIfPresentQuietly("k"))
+                .as("not bounded by the store (%s, removals %s)", writer.distributedPolicy().stats(), removals)
+                .isEqualTo("v");
+        assertThat(reader.policy().getIfPresentQuietly("k"))
+                .as("not bounded by the store (%s, removals %s)", reader.distributedPolicy().stats(), removals)
+                .isEqualTo("v");
+        assertThat(reader.getIfPresent("k")).isEqualTo("v");
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> late = storeOnly(STORE_AGE, 1_000)
+                .build(key -> "loaded-" + loads.incrementAndGet());
+        closeables.add(late);
+        assertThat(late.get("k")).as("a miss after the maximum age calls the source").isEqualTo("loaded-1");
+        await(() -> writer.policy().getIfPresentQuietly("k") == null);
+        await(() -> reader.policy().getIfPresentQuietly("k") == null);
+        assertThat(reader.get("k", key -> "again")).isEqualTo("loaded-1");
+        assertThat(loads).hasValue(1);
+    }
+
+    @Test
+    void the_maximum_age_for_the_store_only_lets_the_atomic_methods_decide_on_a_held_copy_after_it() {
+        DistributedCache<String, String> first = storeOnlyCache();
+        DistributedCache<String, String> second = storeOnlyCache();
+        first.put("k", "1");
+        assertThat(second.get("k", key -> "loaded")).isEqualTo("1");
+        first.put("gone", "1");
+        awaitGone(first);
+
+        AtomicInteger runs = new AtomicInteger();
+        assertThat(first.asMap().merge("k", "2", (held, given) -> {
+            runs.incrementAndGet();
+            return held + given;
+        })).as("decided on the held copy (%s)", first.distributedPolicy().stats()).isEqualTo("12");
+        assertThat(runs).as("decided once, on a read").hasValue(1);
+        await(() -> second.policy().getIfPresentQuietly("k") == null);
+        assertThat(second.asMap().merge("k", "3", String::concat)).as("within the maximum age again")
+                .isEqualTo("123");
+        assertThat(first.asMap().computeIfPresent("gone", (key, value) -> value + "x")).isEqualTo("1x");
+        assertThat(first.asMap().remove("gone", "1x")).isTrue();
+        assertThat(first.asMap().putIfAbsent("gone", "2")).as("the removal left a tombstone").isNull();
+        await(() -> "123".equals(first.getIfPresent("k")));
+    }
+
+    @Test
+    void the_maximum_age_for_the_store_only_lets_the_atomic_methods_decide_on_a_held_copy_pruned_to_size() {
+        DistributedCache<String, String> cache = storeOnly(LONG, 1).build();
+        closeables.add(cache);
+        cache.put("k", "1");
+        cache.put("newer", "1");
+
+        awaitGone(cache); // pruned after the grace
+
+        assertThat(cache.asMap().merge("k", "2", String::concat))
+                .as("decided on the held copy (%s)", cache.distributedPolicy().stats()).isEqualTo("12");
+    }
+
+    @Test
+    void a_load_writes_the_store_and_another_instance_reads_it_instead_of_the_source() {
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> first = builder(LONG).withCaffeine(CaffeineConfigurer::recordStats)
+                .build(key -> "v-" + key + "-" + loads.incrementAndGet());
+        closeables.add(first);
+        DistributedLoadingCache<String, String> second = loading(key -> "v-" + key + "-" + loads.incrementAndGet());
+
+        assertThat(first.get("k")).isEqualTo("v-k-1");
+        assertThat(first.get("k")).isEqualTo("v-k-1");
+        assertThat(second.get("k")).isEqualTo("v-k-1");
+
+        assertThat(loads).hasValue(1);
+        assertThat(first.stats().missCount()).isEqualTo(1);
+        assertThat(first.stats().hitCount()).isEqualTo(1);
+        assertThat(first.stats().loadSuccessCount()).isEqualTo(1);
+    }
+
+    @Test
+    void getIfPresent_reads_through_the_store_but_never_loads() {
+        DistributedCache<String, String> first = plain();
+        DistributedCache<String, String> second = plain();
+        first.put("k", "v");
+
+        assertThat(second.getIfPresent("k")).isEqualTo("v");
+        assertThat(second.getIfPresent("missing")).isNull();
+        assertThat(second.estimatedSize()).isEqualTo(1);
+    }
+
+    @Test
+    void get_with_a_mapping_function_loads_once_and_writes_through() {
+        DistributedCache<String, String> first = plain();
+        DistributedCache<String, String> second = plain();
+        AtomicInteger calls = new AtomicInteger();
+
+        assertThat(first.get("k", key -> "mapped-" + calls.incrementAndGet())).isEqualTo("mapped-1");
+        assertThat(second.get("k", key -> "mapped-" + calls.incrementAndGet())).isEqualTo("mapped-1");
+        assertThat(calls).hasValue(1);
+    }
+
+    @Test
+    void the_loader_runs_in_the_callers_thread() {
+        Thread caller = Thread.currentThread();
+        Thread[] loading = new Thread[1];
+        DistributedLoadingCache<String, String> cache = loading(key -> {
+            loading[0] = Thread.currentThread();
+            return "v";
+        });
+
+        assertThat(cache.get("k")).isEqualTo("v");
+
+        assertThat(loading[0]).isSameAs(caller);
+    }
+
+    @Test
+    void a_null_load_is_neither_cached_nor_written() {
+        DistributedLoadingCache<String, String> cache = loading(key -> null);
+
+        assertThat(cache.get("k")).isNull();
+
+        assertThat(cache.estimatedSize()).isZero();
+        assertThat(store().read(List.of(hash("k")), LONG)).isEmpty();
+    }
+
+    @Test
+    void a_failing_load_propagates_and_caches_nothing() {
+        DistributedLoadingCache<String, String> cache = loading(key -> {
+            throw new IllegalStateException("source down");
+        });
+
+        assertThatThrownBy(() -> cache.get("k")).isInstanceOf(IllegalStateException.class).hasMessage("source down");
+        assertThat(cache.estimatedSize()).isZero();
+    }
+
+    @Test
+    void a_value_older_than_the_maximum_age_is_not_served_but_loaded_again() {
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> first = builder(Duration.ofMillis(100)).build(key -> "v" + loads.incrementAndGet());
+        closeables.add(first);
+        assertThat(first.get("k")).isEqualTo("v1");
+        pause(150);
+        DistributedLoadingCache<String, String> second = builder(Duration.ofMillis(100)).build(key -> "v" + loads.incrementAndGet());
+        closeables.add(second);
+
+        assertThat(second.get("k")).isEqualTo("v2");
+        assertThat(requireNonNull(second.distributedPolicy().getFromStore("k")).value())
+                .as("the fresh value replaced the old row")
+                .isEqualTo("v2");
+        assertThat(second.estimatedSize()).isEqualTo(1);
+    }
+
+    @Test
+    void an_unreadable_row_is_a_miss_and_the_load_replaces_it() {
+        Assumptions.assumeTrue(backend.inMemory() != null, "a real database refuses to store the unreadable bytes");
+        store().write(List.of(Write.value(hash("k"), "k".getBytes(StandardCharsets.UTF_8), new byte[]{(byte) 0xff},
+                new InternalVersion().fresh())));
+        DistributedCache<String, Long> cache = DistributedCaffeine.<String, Long>newBuilder(backend::open)
+                .withSerializers(serializers -> serializers.withValueSerializer(StringSerializer.ofLong()))
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(10))
+                .build();
+        closeables.add(cache);
+
+        assertThat(cache.getIfPresent("k")).isNull();
+        assertThat(cache.get("k", key -> 42L)).isEqualTo(42L);
+        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo(42L);
+    }
+
+    // one load per key and JVM
+
+    @Test
+    void concurrent_gets_of_one_key_share_one_load() throws Exception {
+        AtomicInteger loads = new AtomicInteger();
+        CountDownLatch release = new CountDownLatch(1);
+        DistributedLoadingCache<String, String> cache = loading(key -> {
+            loads.incrementAndGet();
+            assertThat(release.await(5, TimeUnit.SECONDS)).isTrue();
+            return "v";
+        });
+        ExecutorService executor = Executors.newFixedThreadPool(8);
+        try {
+            List<Future<@Nullable String>> futures = new ArrayList<>();
+            for (int i = 0; i < 8; i++) {
+                futures.add(executor.submit(() -> cache.get("k")));
+            }
+            pause(200);
+            release.countDown();
+            for (Future<String> future : futures) {
+                assertThat(future.get()).isEqualTo("v");
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+        assertThat(loads).hasValue(1);
+    }
+
+    @Test
+    void a_slow_load_does_not_block_other_keys() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        DistributedLoadingCache<String, String> cache = loading(key -> {
+            if (key.equals("slow")) {
+                assertThat(release.await(5, TimeUnit.SECONDS)).isTrue();
+            }
+            return "v-" + key;
+        });
+        CompletableFuture<@Nullable String> slow = CompletableFuture.supplyAsync(() -> cache.get("slow"), background);
+        pause(100);
+
+        long start = System.nanoTime();
+        for (int i = 0; i < 100; i++) {
+            assertThat(cache.get("fast" + i)).isEqualTo("v-fast" + i);
+        }
+
+        // blocked, the loop would wait out the slow loader's 5 s; the bound leaves room for a slow store (100 loads of
+        // a read and a conditional write each: 2.2 s on emulated MySQL 5.7 under the matrix's load)
+        assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(4));
+        release.countDown();
+        assertThat(slow.get(5, TimeUnit.SECONDS)).isEqualTo("v-slow");
+    }
+
+    @Test
+    void getIfPresent_answers_null_at_once_while_a_load_is_in_flight() throws Exception {
+        CountDownLatch loading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        DistributedLoadingCache<String, String> cache = loading(key -> {
+            loading.countDown();
+            assertThat(release.await(5, TimeUnit.SECONDS)).isTrue();
+            return "v";
+        });
+        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> cache.get("k"), background);
+        assertThat(loading.await(5, TimeUnit.SECONDS)).isTrue();
+
+        long start = System.nanoTime();
+        assertThat(cache.getIfPresent("k")).as("as in Caffeine: not present yet").isNull();
+        assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(1));
+
+        release.countDown();
+        assertThat(load.get(5, TimeUnit.SECONDS)).isEqualTo("v");
+    }
+
+    @Test
+    void a_value_loaded_from_the_source_alone_on_a_failed_read_is_checked_on_the_next_read() {
+        // the in-memory store's faults: skipped on a real database before anything is set up
+        InMemoryDatabase faults = backend.faults();
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> cache = loading(key -> "v" + loads.incrementAndGet());
+        faults.failNextReads(1);
+
+        assertThat(cache.get("k")).isEqualTo("v1");
+        assertThat(store().read(List.of(hash("k")), LONG)).as("the source-only value was not written").isEmpty();
+
+        assertThat(cache.get("k")).as("not trusted: checked, found missing, loaded properly").isEqualTo("v2");
+        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("v2");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void a_value_loaded_whose_write_fails_is_returned_held_unconfirmed_and_checked_on_the_next_read(
+            boolean outcomeUnknown) {
+        // the in-memory store's faults: skipped on a real database before anything is set up
+        InMemoryDatabase faults = backend.faults();
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> cache = loading(key -> "v" + loads.incrementAndGet());
+        faults.failNextWrites(InternalStoreGuard.ATTEMPTS, outcomeUnknown); // every attempt of the load's write
+
+        assertThat(cache.get("k")).as("the store's failure does not fail the read").isEqualTo("v1");
+        if (!outcomeUnknown) {
+            // held, unconfirmed (a write that landed after all may already have dropped it with its own message)
+            assertThat(cache.policy().getIfPresentQuietly("k")).isEqualTo("v1");
+        }
+        faults.failNextWrites(0, false); // the store answers again
+
+        // checked against the store: kept where the failed write landed after all, loaded properly where it did not
+        assertThat(cache.get("k")).isEqualTo(outcomeUnknown ? "v1" : "v2");
+        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value())
+                .isEqualTo(outcomeUnknown ? "v1" : "v2");
+    }
+
+    @Test
+    void a_loader_requesting_its_own_key_fails_at_once() {
+        AtomicReference<@Nullable DistributedLoadingCache<String, String>> self = new AtomicReference<>();
+        DistributedLoadingCache<String, String> cache = loading(key -> requireNonNull(self.get()).get(key));
+        self.set(cache);
+
+        assertThatThrownBy(() -> cache.get("k")).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Recursive load");
+    }
+
+    @Test
+    void loads_waiting_for_each_other_across_threads_finish_instead_of_hanging() throws Exception {
+        // each load asks for the other key once both loads are under way: whichever waits second would close the
+        // cycle, so it loads the other key by itself instead of waiting (as the current generation does)
+        CountDownLatch bothLoading = new CountDownLatch(2);
+        AtomicReference<@Nullable DistributedCache<String, String>> self = new AtomicReference<>();
+        Function<String, String> askingForTheOther = key -> {
+            bothLoading.countDown();
+            try {
+                assertThat(bothLoading.await(5, TimeUnit.SECONDS)).isTrue();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            String other = key.equals("a") ? "b" : "a";
+            return "outer " + key + " with " + requireNonNull(self.get()).get(other, inner -> "inner " + inner);
+        };
+        DistributedCache<String, String> cache = plain();
+        self.set(cache);
+        ExecutorService threads = Executors.newFixedThreadPool(2);
+        try {
+            Future<@Nullable String> a = threads.submit(() -> cache.get("a", askingForTheOther));
+            Future<@Nullable String> b = threads.submit(() -> cache.get("b", askingForTheOther));
+
+            assertThat(a.get(10, TimeUnit.SECONDS)).startsWith("outer a");
+            assertThat(b.get(10, TimeUnit.SECONDS)).startsWith("outer b");
+            assertThat(cache.getIfPresent("a")).isNotNull();
+            assertThat(cache.getIfPresent("b")).isNotNull();
+        } finally {
+            threads.shutdownNow();
+        }
+    }
+
+    // a slow load holds no lock of Caffeine's, on every path (the synchronous get: a_slow_load_does_not_block_other_keys):
+    // the function Caffeine runs inside ConcurrentHashMap.compute only installs an empty future, and the store round
+    // trips and the user's loader run after it. Otherwise a load would block every key in its hash bin for its whole
+    // duration, and every insert once the map resizes (the transfer locks each bin). A hundred other keys, starting
+    // from Caffeine's initial table of 16 bins, hit both cases
+
+    private static final int OTHER_KEYS = 100;
+
+    // loads "slow" only once armed, and then waits for the release
+    private static CacheLoader<String, String> slowFor(AtomicBoolean armed, CountDownLatch loading,
+                                                       CountDownLatch release) {
+        return key -> {
+            if (key.equals("slow") && armed.get()) {
+                loading.countDown();
+                assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+            }
+            return "loaded " + key;
+        };
+    }
+
+    // while the slow load waits, every other key is answered; the slow load is released in any case
+    private void otherKeysAnsweredDuring(CountDownLatch loading, CountDownLatch release,
+                                         Function<String, @Nullable String> get) throws Exception {
+        try {
+            assertThat(loading.await(5, TimeUnit.SECONDS)).isTrue();
+            CompletableFuture.runAsync(() -> {
+                for (int i = 0; i < OTHER_KEYS; i++) {
+                    assertThat(get.apply("other " + i)).isEqualTo("loaded other " + i);
+                }
+            }, background).get(10, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void a_slow_mapping_function_blocks_no_other_key() throws Exception {
+        CountDownLatch loading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CacheLoader<String, String> loader = slowFor(new AtomicBoolean(true), loading, release);
+        Function<String, String> function = key -> {
+            try {
+                return loader.load(key);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        DistributedCache<String, String> cache = plain();
+        CompletableFuture<@Nullable String> slow = CompletableFuture.supplyAsync(() -> cache.get("slow", function),
+                background);
+
+        otherKeysAnsweredDuring(loading, release, key -> cache.get(key, function));
+
+        assertThat(slow.get(5, TimeUnit.SECONDS)).isEqualTo("loaded slow");
+    }
+
+    @Test
+    void a_slow_asynchronous_load_blocks_no_other_key() throws Exception {
+        CountDownLatch loading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        DistributedAsyncLoadingCache<String, String> cache = builder(LONG)
+                .withCaffeine(caffeine -> caffeine.executor(background)) // the loads too, not on the common pool
+                .buildAsync(slowFor(new AtomicBoolean(true), loading, release));
+        closeables.add(cache);
+        // started from another thread: a regression running the load inside the compute would hold this one
+        CompletableFuture<@Nullable String> slow = CompletableFuture.supplyAsync(() -> cache.get("slow").join(),
+                background);
+
+        otherKeysAnsweredDuring(loading, release, key -> cache.get(key).join());
+
+        assertThat(slow.get(5, TimeUnit.SECONDS)).isEqualTo("loaded slow");
+    }
+
+    @Test
+    void a_slow_bulk_load_blocks_no_other_key() throws Exception {
+        CountDownLatch loading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        DistributedLoadingCache<String, String> cache = loading(slowFor(new AtomicBoolean(true), loading, release));
+        CompletableFuture<Map<String, String>> slow = CompletableFuture.supplyAsync(
+                () -> cache.getAll(List.of("slow")), background);
+
+        otherKeysAnsweredDuring(loading, release, key -> cache.getAll(List.of(key)).get(key));
+
+        assertThat(slow.get(5, TimeUnit.SECONDS)).containsEntry("slow", "loaded slow");
+    }
+
+    @Test
+    void a_slow_refresh_blocks_no_other_key() throws Exception {
+        // Caffeine calls asyncReload inside a computeIfAbsent of its own map of refreshes
+        AtomicBoolean armed = new AtomicBoolean();
+        CountDownLatch loading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        DistributedLoadingCache<String, String> cache = loading(slowFor(armed, loading, release));
+        assertThat(cache.get("slow")).isEqualTo("loaded slow");
+        armed.set(true);
+        CompletableFuture<@Nullable String> slow = cache.refresh("slow");
+
+        otherKeysAnsweredDuring(loading, release, cache::get);
+
+        assertThat(slow.get(5, TimeUnit.SECONDS)).isEqualTo("loaded slow");
+    }
+
+    // races between a load and a change elsewhere (ordering rule 6)
+
+    @Test
+    void a_put_elsewhere_during_a_load_wins_over_the_loaded_value() throws Exception {
+        CountDownLatch loading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        DistributedLoadingCache<String, String> first = loading(key -> {
+            loading.countDown();
+            assertThat(release.await(5, TimeUnit.SECONDS)).isTrue();
+            return "loaded, possibly outdated";
+        });
+        DistributedCache<String, String> second = plain();
+        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> first.get("k"), background);
+        assertThat(loading.await(5, TimeUnit.SECONDS)).isTrue();
+
+        second.put("k", "newer");
+        release.countDown();
+
+        assertThat(load.get(5, TimeUnit.SECONDS)).isEqualTo("newer");
+        assertThat(first.getIfPresent("k")).isEqualTo("newer");
+        assertThat(requireNonNull(first.distributedPolicy().getFromStore("k")).value()).isEqualTo("newer");
+    }
+
+    @Test
+    void an_invalidation_elsewhere_during_a_load_makes_it_load_again() throws Exception {
+        AtomicInteger loads = new AtomicInteger();
+        CountDownLatch loading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        DistributedLoadingCache<String, String> first = loading(key -> {
+            if (loads.incrementAndGet() == 1) {
+                loading.countDown();
+                assertThat(release.await(5, TimeUnit.SECONDS)).isTrue();
+                return "outdated";
+            }
+            return "fresh";
+        });
+        DistributedCache<String, String> second = plain();
+        CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> first.get("k"), background);
+        assertThat(loading.await(5, TimeUnit.SECONDS)).isTrue();
+
+        second.invalidate("k");
+        release.countDown();
+
+        assertThat(load.get(5, TimeUnit.SECONDS)).isEqualTo("fresh");
+        assertThat(requireNonNull(first.distributedPolicy().getFromStore("k")).value()).isEqualTo("fresh");
+        assertThat(loads).hasValue(2);
+    }
+
+    @Test
+    void invalidations_on_every_attempt_return_the_last_value_uncached() {
+        Store other = store();
+        InternalVersion otherClock = new InternalVersion();
+        CacheLoader<String, String> invalidatedWhileLoading = key -> {
+            // another instance, with a clock of its own: above what it finds, as its write is refused otherwise
+            Row row = other.read(List.of(hash(key)), LONG).get(hash(key));
+            other.write(List.of(Write.tombstone(hash(key), row == null ? otherClock.fresh()
+                    : otherClock.next(row.version()))));
+            return "outdated";
+        };
+        DistributedLoadingCache<String, String> cache = builder(LONG).withCaffeine(CaffeineConfigurer::recordStats)
+                .build(invalidatedWhileLoading);
+        closeables.add(cache);
+
+        assertThat(cache.get("k")).isEqualTo("outdated");
+
+        assertThat(cache.estimatedSize()).isZero();
+        assertThat(cache.distributedPolicy().stats().uncachedLoadCount()).isOne();
+        assertThat(store().read(List.of(hash("k")), LONG).get(hash("k")).state()).isEqualTo(State.TOMBSTONE);
+    }
+
+    // writes
+
+    @Test
+    void put_writes_through_and_a_newer_held_value_is_never_replaced_by_an_older_one() {
+        DistributedCache<String, String> first = plain();
+        DistributedCache<String, String> second = plain();
+
+        first.put("k", "a");
+        second.put("k", "b");
+
+        assertThat(first.getIfPresent("k")).as("its own write until the newer one is announced").isIn("a", "b");
+        assertThat(requireNonNull(first.distributedPolicy().getFromStore("k")).value()).isEqualTo("b");
+        assertThat(plain().getIfPresent("k")).isEqualTo("b");
+    }
+
+    @Test
+    void a_slower_put_of_an_older_write_never_replaces_a_newer_held_value() throws Exception {
+        CountDownLatch slowWritten = new CountDownLatch(1);
+        CountDownLatch fastCommitted = new CountDownLatch(1);
+        Adapter<String, String> delaying = settings -> new DelegatingStore(backend.open(settings)) {
+            @Override
+            public WriteResult write(java.util.Collection<Write> writes) {
+                WriteResult conflicts = super.write(writes);
+                byte[] value = writes.iterator().next().value();
+                if (value != null && new String(value, StandardCharsets.UTF_8).equals("slow")) {
+                    slowWritten.countDown();
+                    try {
+                        assertThat(fastCommitted.await(5, TimeUnit.SECONDS)).isTrue();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                return conflicts;
+            }
+        };
+        DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(offered(delaying))
+                .withSerializers(serializers -> serializers.withValueSerializer(StringSerializer.ofString()))
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(10)).build();
+        closeables.add(cache);
+
+        CompletableFuture<Void> slow = CompletableFuture.runAsync(() -> cache.put("k", "slow"), background);
+        assertThat(slowWritten.await(5, TimeUnit.SECONDS)).isTrue();
+        cache.put("k", "fast");
+        fastCommitted.countDown();
+        slow.get(5, TimeUnit.SECONDS);
+
+        assertThat(cache.getIfPresent("k")).as("the store applied fast after slow").isEqualTo("fast");
+    }
+
+    @Test
+    void an_invalidate_never_removes_a_value_written_after_its_tombstone() throws Exception {
+        // found by Lincheck (stress): the invalidate removed whatever L1 held at its end, a newer value too, and a
+        // slower put written between the tombstone and that newer value installed its older value in the gap
+        CountDownLatch tombstoneWritten = new CountDownLatch(1);
+        CountDownLatch invalidateGoes = new CountDownLatch(1);
+        CountDownLatch slowWritten = new CountDownLatch(1);
+        CountDownLatch slowGoes = new CountDownLatch(1);
+        Adapter<String, String> pausing = settings -> new DelegatingStore(backend.open(settings)) {
+            @Override
+            public WriteResult write(java.util.Collection<Write> writes) {
+                WriteResult result = super.write(writes);
+                Write write = writes.iterator().next();
+                byte[] value = write.value();
+                if (write.isTombstone() && !write.hash().startsWith("#")) {
+                    tombstoneWritten.countDown();
+                    awaitQuietly(invalidateGoes);
+                } else if (value != null && new String(value, StandardCharsets.UTF_8).equals("slow")) {
+                    slowWritten.countDown();
+                    awaitQuietly(slowGoes);
+                }
+                return result;
+            }
+        };
+        // without distribution: no echo of the newer put, which would otherwise raise the slower put's minimum in
+        // time, mostly (the race then depends on how fast the echo comes)
+        DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(offered(pausing))
+                .withSerializers(serializers -> serializers.withValueSerializer(StringSerializer.ofString()))
+                .withDistributionMode(DistributionMode.NONE)
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(10)).build();
+        closeables.add(cache);
+
+        CompletableFuture<Void> invalidating = CompletableFuture.runAsync(() -> cache.invalidate("k"), background);
+        assertThat(tombstoneWritten.await(5, TimeUnit.SECONDS)).isTrue();
+        CompletableFuture<Void> slow = CompletableFuture.runAsync(() -> cache.put("k", "slow"), background);
+        assertThat(slowWritten.await(5, TimeUnit.SECONDS)).as("written after the tombstone").isTrue();
+        cache.put("k", "new");
+        invalidateGoes.countDown();
+        invalidating.get(5, TimeUnit.SECONDS);
+        slowGoes.countDown();
+        slow.get(5, TimeUnit.SECONDS);
+
+        assertThat(cache.getIfPresent("k")).as("the store applied new last").isEqualTo("new");
+    }
+
+    private static void awaitQuietly(CountDownLatch latch) {
+        try {
+            assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    @Test
+    void putAll_and_getAllPresent() {
+        DistributedCache<String, String> first = plain();
+        DistributedCache<String, String> second = plain();
+        first.putAll(Map.of("a", "1", "b", "2"));
+
+        assertThat(second.getAllPresent(List.of("b", "missing", "a"))).containsExactly(Map.entry("b", "2"), Map.entry("a", "1"));
+    }
+
+    @Test
+    void invalidate_removes_everywhere_through_the_store() {
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> first = loading(key -> "v" + loads.incrementAndGet());
+        assertThat(first.get("k")).isEqualTo("v1");
+        DistributedLoadingCache<String, String> second = loading(key -> "v" + loads.incrementAndGet());
+
+        first.invalidate("k");
+
+        assertThat(second.get("k")).isEqualTo("v2");
+    }
+
+    @Test
+    void invalidateAll_tombstones_every_value() {
+        DistributedCache<String, String> first = plain();
+        first.putAll(Map.of("a", "1", "b", "2"));
+
+        first.invalidateAll();
+
+        assertThat(first.estimatedSize()).isZero();
+        assertThat(plain().getAllPresent(List.of("a", "b"))).isEmpty();
+    }
+
+    @Test
+    void a_put_with_an_unknown_outcome_drops_the_key_and_throws() {
+        // the in-memory store's faults: skipped on a real database before anything is set up
+        InMemoryDatabase faults = backend.faults();
+        DistributedCache<String, String> cache = plain();
+        cache.put("k", "old");
+        faults.failNextWrites(1, true);
+
+        assertThatThrownBy(() -> cache.put("k", "new")).isInstanceOf(StoreException.class);
+
+        assertThat(cache.getIfPresent("k")).as("read through the store again").isEqualTo("new");
+    }
+
+    @Test
+    void a_put_certainly_not_committed_keeps_the_held_value() {
+        // the in-memory store's faults: skipped on a real database before anything is set up
+        InMemoryDatabase faults = backend.faults();
+        DistributedCache<String, String> cache = plain();
+        cache.put("k", "old");
+        faults.failNextWrites(1, false);
+
+        assertThatThrownBy(() -> cache.put("k", "new")).isInstanceOf(StoreException.class);
+
+        assertThat(cache.getIfPresent("k")).isEqualTo("old");
+    }
+
+    // several keys
+
+    @Test
+    void getAll_reads_the_store_once_and_loads_the_rest_in_bulk() {
+        DistributedCache<String, String> first = plain();
+        first.put("stored", "s");
+        AtomicInteger bulkCalls = new AtomicInteger();
+        Map<String, Set<String>> requested = new ConcurrentHashMap<>();
+        DistributedLoadingCache<String, String> second = loading(new CacheLoader<>() {
+            @Override
+            public String load(String key) {
+                throw new AssertionError("loadAll expected");
+            }
+
+            @Override
+            public Map<String, String> loadAll(Set<? extends String> keys) {
+                bulkCalls.incrementAndGet();
+                requested.put("keys", Set.copyOf(keys));
+                Map<String, String> result = new HashMap<>();
+                keys.forEach(key -> result.put(key, "loaded-" + key));
+                result.put("extra", "unasked");
+                return result;
+            }
+        });
+
+        Map<String, String> values = second.getAll(List.of("a", "stored", "b"));
+
+        assertThat(values).containsExactly(Map.entry("a", "loaded-a"), Map.entry("stored", "s"), Map.entry("b", "loaded-b"));
+        assertThat(bulkCalls).hasValue(1);
+        assertThat(requested.get("keys")).containsExactlyInAnyOrder("a", "b");
+        assertThat(second.getIfPresent("extra")).as("an extra key the store held no value for is kept").isEqualTo("unasked");
+    }
+
+    @Test
+    void an_extra_key_never_overwrites_a_value_the_store_holds() {
+        DistributedCache<String, String> first = plain();
+        first.put("extra", "newer");
+        DistributedLoadingCache<String, String> second = loading(new CacheLoader<>() {
+            @Override
+            public String load(String key) {
+                return "loaded-" + key;
+            }
+
+            @Override
+            public Map<String, String> loadAll(Set<? extends String> keys) {
+                Map<String, String> result = new LinkedHashMap<>();
+                keys.forEach(key -> result.put(key, "loaded-" + key));
+                result.put("extra", "outdated");
+                return result;
+            }
+        });
+
+        assertThat(second.getAll(List.of("a"))).isEqualTo(Map.of("a", "loaded-a"));
+
+        assertThat(requireNonNull(first.distributedPolicy().getFromStore("extra")).value()).isEqualTo("newer");
+        assertThat(second.getIfPresent("extra")).isEqualTo("newer");
+    }
+
+    @Test
+    void getAll_without_a_bulk_loader_loads_key_by_key() {
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> cache = loading(key -> {
+            loads.incrementAndGet();
+            return "v-" + key;
+        });
+
+        assertThat(cache.getAll(List.of("a", "b", "c"))).hasSize(3);
+        assertThat(loads).hasValue(3);
+    }
+
+    @Test
+    void getAll_with_a_mapping_function() {
+        DistributedCache<String, String> cache = plain();
+        Function<Set<? extends String>, Map<String, String>> mapping = keys -> {
+            Map<String, String> result = new HashMap<>();
+            keys.forEach(key -> result.put(key, "m-" + key));
+            return result;
+        };
+
+        assertThat(cache.getAll(List.of("a", "b"), mapping)).containsExactly(Map.entry("a", "m-a"), Map.entry("b", "m-b"));
+        assertThat(plain().getAllPresent(List.of("a", "b"))).hasSize(2);
+    }
+
+    @Test
+    @Timeout(300) // MongoDB writes one document per round trip, MariaDB and MySQL one row per transaction
+    void batches_far_larger_than_one_statement_are_written_read_and_removed_whole() {
+        // beyond what one statement may carry (PostgreSQL binds at most 65,535 parameters) and the stores' chunks
+        Map<String, String> values = new LinkedHashMap<>();
+        for (int index = 0; index < backend.largeBatch(); index++) {
+            values.put("k" + index, "v" + index);
+        }
+        // room for every row: where writing them outlasts the pruning grace (4 s; one row per transaction), the store
+        // would otherwise prune the oldest to its maximum size while the rest are still written (found on MariaDB)
+        DistributedCache<String, String> writer = builder(backend, LONG, 50_000).build();
+        DistributedCache<String, String> reader = builder(backend, LONG, 50_000).build();
+        closeables.add(writer);
+        closeables.add(reader);
+
+        writer.putAll(values);
+        assertThat(reader.getAllPresent(values.keySet())).isEqualTo(values);
+        Map<String, String> loaded = reader.getAll(values.keySet(), keys -> Map.of());
+        assertThat(loaded).isEqualTo(values);
+
+        writer.invalidateAll(values.keySet());
+        assertThat(reader.distributedPolicy().getAllFromStore(values.keySet())).isEmpty();
+    }
+
+    // refresh
+
+    @Test
+    void refresh_goes_to_the_source_and_writes_conditionally() throws Exception {
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> cache = loading(key -> "v" + loads.incrementAndGet());
+        assertThat(cache.get("k")).isEqualTo("v1");
+
+        assertThat(cache.refresh("k").get(5, TimeUnit.SECONDS)).isEqualTo("v2");
+
+        // Caffeine completes the refresh future first and updates its map in a callback after it
+        await(() -> "v2".equals(cache.getIfPresent("k")));
+        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("v2");
+    }
+
+    @Test
+    void a_refresh_overtaken_by_a_put_elsewhere_takes_the_newer_value() throws Exception {
+        CountDownLatch reloading = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        DistributedLoadingCache<String, String> first = loading(new CacheLoader<>() {
+            @Override
+            public String load(String key) {
+                return "initial";
+            }
+
+            @Override
+            public String reload(String key, String oldValue) throws Exception {
+                reloading.countDown();
+                assertThat(release.await(5, TimeUnit.SECONDS)).isTrue();
+                return "reloaded, possibly outdated";
+            }
+        });
+        assertThat(first.get("k")).isEqualTo("initial");
+        CompletableFuture<@Nullable String> refresh = first.refresh("k");
+        assertThat(reloading.await(5, TimeUnit.SECONDS)).isTrue();
+
+        plain().put("k", "newer");
+        release.countDown();
+
+        assertThat(refresh.get(5, TimeUnit.SECONDS)).isEqualTo("newer");
+        assertThat(requireNonNull(first.distributedPolicy().getFromStore("k")).value()).isEqualTo("newer");
+    }
+
+    @Test
+    void a_value_read_from_the_store_at_least_refreshAfterWrite_old_is_served_and_refreshed_in_the_background() {
+        // the store's clock moves on alone, so that L1's own refreshAfterWrite never fires during the test
+        Assumptions.assumeTrue(backend.inMemory() != null, "moves the in-memory store's clock");
+        AtomicLong clockMicros = new AtomicLong(TimeUnit.MILLISECONDS.toMicros(System.currentTimeMillis()));
+        CacheBackend aging = CacheBackend.of(new InMemoryDatabase(clockMicros::get, 1));
+        DistributedCache<String, String> writer = builder(aging, LONG).build();
+        closeables.add(writer);
+        writer.put("viaGet", "stored");
+        writer.put("viaGetIfPresent", "stored");
+        clockMicros.addAndGet(TimeUnit.MINUTES.toMicros(30));
+        writer.put("young", "stored");
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> reader = builder(aging, LONG)
+                .withCaffeine(caffeine -> caffeine.refreshAfterWrite(Duration.ofMinutes(1)))
+                .build(key -> {
+                    loads.incrementAndGet();
+                    return "fresh";
+                });
+        closeables.add(reader);
+
+        assertThat(reader.get("viaGet")).as("served at once").isEqualTo("stored");
+        assertThat(reader.getIfPresent("viaGetIfPresent")).as("served at once").isEqualTo("stored");
+        assertThat(reader.get("young")).isEqualTo("stored");
+
+        await(() -> "fresh".equals(reader.getIfPresent("viaGet"))
+                && "fresh".equals(reader.getIfPresent("viaGetIfPresent")));
+        assertThat(requireNonNull(reader.distributedPolicy().getFromStore("viaGet")).value()).isEqualTo("fresh");
+        assertThat(requireNonNull(reader.distributedPolicy().getFromStore("viaGetIfPresent")).value())
+                .isEqualTo("fresh");
+        assertThat(reader.getIfPresent("young")).as("younger than refreshAfterWrite").isEqualTo("stored");
+        assertThat(loads).hasValue(2);
+    }
+
+    @Test
+    void refreshAll_removes_a_key_the_source_no_longer_has_everywhere() throws Exception {
+        DistributedCache<String, String> other = plain();
+        other.put("gone", "old");
+        other.put("kept", "old");
+        DistributedLoadingCache<String, String> cache = loading(key -> "gone".equals(key) ? null : "new");
+        assertThat(cache.getAll(List.of("gone", "kept"))).hasSize(2);
+
+        assertThat(cache.refreshAll(List.of("gone", "kept")).get(5, TimeUnit.SECONDS))
+                .containsExactly(Map.entry("kept", "new"));
+
+        assertThat(cache.distributedPolicy().getFromStore("gone")).isNull();
+        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("kept")).value()).isEqualTo("new");
+        await(() -> other.getIfPresent("gone") == null); // once the other instance applied the message
+        await(() -> cache.estimatedSize() == 1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void a_refresh_whose_write_fails_returns_the_source_value_held_unconfirmed(boolean outcomeUnknown)
+            throws Exception {
+        // the in-memory store's faults: skipped on a real database before anything is set up
+        InMemoryDatabase faults = backend.faults();
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> cache = loading(key -> "v" + loads.incrementAndGet());
+        assertThat(cache.get("k")).isEqualTo("v1");
+        faults.failNextWrites(InternalStoreGuard.ATTEMPTS, outcomeUnknown); // every attempt of the refresh's write
+
+        assertThat(cache.refresh("k").get(5, TimeUnit.SECONDS)).as("the store's failure does not fail the refresh")
+                .isEqualTo("v2");
+        if (!outcomeUnknown) {
+            // held, unconfirmed (a write that landed after all may already have dropped it with its own message)
+            await(() -> "v2".equals(cache.policy().getIfPresentQuietly("k")));
+        } else {
+            // the refresh's future completes before Caffeine installs its value: v1 until it is installed or dropped
+            await(() -> !"v1".equals(cache.policy().getIfPresentQuietly("k")));
+        }
+        faults.failNextWrites(0, false); // the store answers again
+
+        // checked against the store: the refreshed value where the failed write landed after all, the stored one
+        // where it did not
+        assertThat(cache.get("k")).isEqualTo(outcomeUnknown ? "v2" : "v1");
+        assertThat(loads).hasValue(2);
+    }
+
+    @Test
+    void a_refresh_finding_nothing_whose_removal_fails_removes_the_key_here_only() throws Exception {
+        // the in-memory store's faults: skipped on a real database before anything is set up
+        InMemoryDatabase faults = backend.faults();
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> cache = loading(key -> loads.incrementAndGet() == 1 ? "v1" : null);
+        assertThat(cache.get("k")).isEqualTo("v1");
+        faults.failNextWrites(InternalStoreGuard.ATTEMPTS, false); // every attempt of the tombstone's write
+
+        assertThat(cache.refresh("k").get(5, TimeUnit.SECONDS)).isNull();
+
+        await(() -> cache.policy().getIfPresentQuietly("k") == null);
+        assertThat(cache.get("k")).as("the store kept its value").isEqualTo("v1");
+        assertThat(loads).hasValue(2);
+    }
+
+    @Test
+    void a_refresh_of_a_key_not_held_finding_nothing_whose_removal_fails_answers_absent() throws Exception {
+        // the in-memory store's faults: skipped on a real database before anything is set up
+        InMemoryDatabase faults = backend.faults();
+        plain().put("k", "stored");
+        DistributedLoadingCache<String, String> cache = loading(key -> null);
+        faults.failNextWrites(InternalStoreGuard.ATTEMPTS, false); // every attempt of the tombstone's write
+
+        assertThat(cache.refresh("k").get(5, TimeUnit.SECONDS)).isNull();
+
+        assertThat(cache.policy().getIfPresentQuietly("k")).isNull();
+        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).as("the store kept its value")
+                .isEqualTo("stored");
+    }
+
+    @Test
+    void refreshAfterWrite_with_the_store_down_holds_the_source_value_and_calls_the_source_once() {
+        // the in-memory store's faults: skipped on a real database before anything is set up
+        InMemoryDatabase faults = backend.faults();
+        AtomicLong nanos = new AtomicLong();
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> cache = builder(LONG)
+                .withCaffeine(caffeine -> caffeine.ticker(nanos::get).refreshAfterWrite(Duration.ofMinutes(1)))
+                .build(key -> "v" + loads.incrementAndGet());
+        closeables.add(cache);
+        assertThat(cache.get("k")).isEqualTo("v1");
+        faults.setDown(true);
+        nanos.addAndGet(TimeUnit.MINUTES.toNanos(2));
+
+        await(() -> "v2".equals(cache.get("k"))); // the first read starts the refresh
+        for (int i = 0; i < 10; i++) {
+            assertThat(cache.get("k")).isEqualTo("v2");
+        }
+        // a failed refresh would keep the old value with its timer: every read would call the source again
+        assertThat(loads).as("the refreshed value's timer starts over").hasValue(2);
+        faults.setDown(false);
+    }
+
+    // guards the core's Loader, which has no bulk path (it does not override asyncLoadAll): should Caffeine ever
+    // refresh in bulk, this fails, and the Loader needs a tested bulk path to follow it
+    @Test
+    void caffeine_refreshes_key_by_key_and_never_through_the_bulk_loader() throws Exception {
+        AtomicInteger bulkLoads = new AtomicInteger();
+        List<String> reloaded = Collections.synchronizedList(new ArrayList<>());
+        AsyncLoadingCache<String, String> caffeine = Caffeine.newBuilder().executor(Runnable::run)
+                .buildAsync(new AsyncCacheLoader<>() {
+                    @Override
+                    public CompletableFuture<String> asyncLoad(String key, Executor executor) {
+                        return CompletableFuture.completedFuture("loaded");
+                    }
+
+                    @Override
+                    public CompletableFuture<Map<String, String>> asyncLoadAll(Set<? extends String> keys,
+                                                                              Executor executor) {
+                        bulkLoads.incrementAndGet();
+                        Map<String, String> loaded = new HashMap<>();
+                        keys.forEach(key -> loaded.put(key, "bulk"));
+                        return CompletableFuture.completedFuture(loaded);
+                    }
+
+                    @Override
+                    public CompletableFuture<String> asyncReload(String key, String oldValue, Executor executor) {
+                        reloaded.add(key);
+                        return CompletableFuture.completedFuture("reloaded");
+                    }
+                });
+        caffeine.synchronous().putAll(Map.of("a", "1", "b", "2"));
+
+        assertThat(caffeine.synchronous().refreshAll(List.of("a", "b", "absent")).get(5, TimeUnit.SECONDS))
+                .containsOnly(Map.entry("a", "reloaded"), Map.entry("b", "reloaded"), Map.entry("absent", "loaded"));
+        assertThat(bulkLoads).hasValue(0);
+        assertThat(reloaded).containsExactlyInAnyOrder("a", "b");
+    }
+
+    // lifecycle
+
+    @Test
+    void after_close_every_operation_throws_and_the_adapter_can_be_used_again() {
+        Adapter<String, String> adapter = adapter();
+        DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(adapter)
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(10)).build();
+        cache.put("k", "v");
+
+        DistributedCaffeine<String, String> second = DistributedCaffeine.newBuilder(adapter)
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(10));
+        assertThatThrownBy(second::build).isInstanceOf(IllegalStateException.class).hasMessageContaining("adapter");
+
+        cache.close();
+        cache.close();
+
+        assertThatThrownBy(() -> cache.getIfPresent("k")).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> cache.put("k", "v")).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(cache::estimatedSize).isInstanceOf(IllegalStateException.class);
+        assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.CLOSED);
+        DistributedCache<String, String> again = DistributedCaffeine.newBuilder(adapter)
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(10)).build();
+        closeables.add(again);
+        assertThat(again.getIfPresent("k")).isEqualTo("v");
+    }
+
+    @Test
+    void a_failing_store_fails_the_build_and_releases_the_adapter() {
+        // the in-memory store's faults: skipped on a real database before anything is set up
+        InMemoryDatabase faults = backend.faults();
+        faults.setDown(true);
+        Adapter<String, String> failing = settings -> {
+            throw new StoreException("unreachable", false);
+        };
+
+        DistributedCaffeine<String, String> builder = DistributedCaffeine.newBuilder(failing)
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(10));
+        assertThatThrownBy(builder::build).isInstanceOf(StoreException.class);
+        faults.setDown(false);
+        DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(adapter())
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(10)).build();
+        closeables.add(cache);
+    }
+
+    @Test
+    void getFromStore_returns_value_and_age_without_filling_the_local_level() {
+        plain().put("k", "v");
+        DistributedCache<String, String> cache = plain();
+
+        StoredValue<String> stored = cache.distributedPolicy().getFromStore("k");
+
+        assertThat(requireNonNull(stored).value()).isEqualTo("v");
+        assertThat(stored.age()).isLessThan(Duration.ofSeconds(5));
+        assertThat(cache.estimatedSize()).isZero();
+        assertThat(cache.distributedPolicy().getAllFromStore(List.of("k", "missing"))).containsOnlyKeys("k");
+    }
+
+    // a store that delegates everything, its change feed and its scan too, for wrapping single methods in tests;
+    // offered as an adapter would (offered), so that a delegate without a feed is polled through the wrapper
+    static class DelegatingStore extends StorageOnlyStore implements ChangeFeed, ChangeScan {
+
+        private final Store delegate;
+
+        DelegatingStore(Store delegate) {
+            super(delegate);
+            this.delegate = delegate;
+        }
+
+        @Override
+        public ChangeSubscription subscribe(
+                ChangeListener listener) {
+            return ((ChangeFeed) delegate).subscribe(listener);
+        }
+
+        @Override
+        public List<Change> changedWithin(Duration within) {
+            return ((ChangeScan) delegate).changedWithin(within);
+        }
+    }
+
+    // the adapter offering its stores as the store they wrap can serve: a DelegatingStore over a store without a feed
+    // (a polled profile, StoreProfile.Changes.SCAN) as storage and scan only, so that the core polls it through the
+    // wrapper; anything else as it is
+    static <K, V> Adapter<K, V> offered(Adapter<K, V> adapter) {
+        return settings -> {
+            Store store = adapter.createStore(settings);
+            return store instanceof DelegatingStore wrapper && !(wrapper.delegate instanceof ChangeFeed)
+                    ? new ScanOnlyStore(wrapper) : store;
+        };
+    }
+}

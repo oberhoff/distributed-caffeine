@@ -19,10 +19,8 @@ import java.util.UUID;
 import java.util.function.Supplier;
 
 /**
- * Interface representing an object that provides a hash.
- * <p>
- * <b>Note:</b> Keys of type {@link String}, {@link Long}, {@link Integer} or {@link UUID} are hashed out of the box, so
- * only keys of other types have to implement this interface, unless a {@link HashProvider} is specified.
+ * A key that computes its own hash; needed for key types other than {@link String}, {@link Long}, {@link Integer} and
+ * {@link UUID}, unless a {@link HashProvider} is set. Keys that are equal must have the same hash.
  *
  * @author Andreas Oberhoff
  */
@@ -30,9 +28,9 @@ import java.util.function.Supplier;
 public interface Hashable {
 
     /**
-     * Returns a hash for the implementing object using the supplied hasher for computing.
+     * Returns the hash of this key, typically computed with a fresh hasher from the supplier.
      *
-     * @param hasher the supplier for a hasher to compute the hash
+     * @param hasher the supplier of a fresh hasher
      * @return the hash
      */
     String getHash(Supplier<Hasher> hasher);

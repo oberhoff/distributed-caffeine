@@ -13,8 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 /**
- * This package contains an adapter based on PostgreSQL.
+ * The adapter for PostgreSQL ({@link PostgresAdapter}), distributing changes through {@code LISTEN}/{@code NOTIFY}.
  *
  * @author Andreas Oberhoff
  * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>

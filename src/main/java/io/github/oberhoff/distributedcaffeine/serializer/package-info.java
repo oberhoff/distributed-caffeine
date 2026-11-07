@@ -14,25 +14,10 @@
  * limitations under the License.
  */
 /**
- * This package contains classes and interfaces that provide serializing/deserializing functionality.
- * <p>
- * Already built-in serializers:
- * <ul>
- *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.ForySerializer}</li>
- *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer}</li>
- *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JavaObjectSerializer}</li>
- * </ul>
- * <p>
- * If custom serializers are required, they must either extend one of the aforementioned serializers or implement one of
- * the following interfaces:
- * <ul>
- *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.ByteArraySerializer} for serializing an object to a
- *      byte array representation</li>
- *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.StringSerializer} for serializing an object to a
- *      string representation</li>
- *      <li>{@link io.github.oberhoff.distributedcaffeine.serializer.JsonSerializer} for serializing an object to a JSON
- *      representation (encoded as String or BSON)</li>
- * </ul>
+ * Serializers of keys and values for the store: {@link ForySerializer} (the default), {@link JacksonSerializer},
+ * {@link JavaObjectSerializer}, and the plain ones of {@link StringSerializer} and {@link ByteArraySerializer}. A
+ * custom serializer must implement {@link ByteArraySerializer}, {@link StringSerializer} or {@link JsonSerializer},
+ * so the store holds its result as bytes, text or JSON.
  *
  * @author Andreas Oberhoff
  * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>

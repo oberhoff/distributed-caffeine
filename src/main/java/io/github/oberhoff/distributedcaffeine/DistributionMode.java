@@ -16,75 +16,31 @@
 package io.github.oberhoff.distributedcaffeine;
 
 /**
- * Modes for defining the scope of distributed synchronization. Each mode includes/excludes different types of cache
- * operations (population, invalidation, eviction) which are then considered or not considered for distributed
- * synchronization between cache instances.
- * <p>
- * <b>Note:</b> Invalidations are distributed to other cache instances independently of what this cache instance holds.
+ * How the instances of a cache react to changes made elsewhere ({@code withDistributionMode}): any write, invalidation
+ * or expiry of a key. Every mode reads and writes the store alike; the mode decides what happens to the copies other
+ * instances hold. No mode creates a copy on an instance that does not hold the key yet.
  *
  * @author Andreas Oberhoff
  */
 public enum DistributionMode {
 
     /**
-     * Includes population (manual or loading), invalidation (explicit removal) and eviction (size- or time-based
-     * removal). This is the default distribution mode.
+     * No distribution: a copy changed elsewhere stays until it expires or is evicted, at the store's maximum age at the
+     * latest; the next read then takes the value from the store, or else from the loader or mapping function (if any).
      */
-    POPULATION_AND_INVALIDATION_AND_EVICTION(true, true, true),
+    NONE,
 
     /**
-     * Includes population (manual or loading) and invalidation (explicit removal), but excludes eviction (size- or
-     * time-based removal).
+     * The default: a change elsewhere drops this instance's copy of the key; the next read takes the value from the
+     * store, or else from the loader or mapping function (if any). Costs a listening connection, shared by the caches on
+     * the same client, and a store read only for keys read again.
      */
-    POPULATION_AND_INVALIDATION(true, true, false),
+    INVALIDATE,
 
     /**
-     * Includes invalidation (explicit removal) and eviction (size- or time-based removal), but excludes population
-     * (manual or loading).
+     * As {@link #INVALIDATE}, but a write elsewhere replaces this instance's copy with the new value at once, if this
+     * instance holds the key; an invalidation or an expiry still drops it. Saves the next read a round trip, at one
+     * store read per write and instance holding the key.
      */
-    INVALIDATION_AND_EVICTION(false, true, true),
-
-    /**
-     * Includes invalidation (explicit removal), but excludes population (manual or loading) and eviction (size- or
-     * time-based removal).
-     */
-    INVALIDATION(false, true, false);
-
-    private final boolean isPopulationConsidered;
-    private final boolean isInvalidationConsidered;
-    private final boolean isEvictionConsidered;
-
-    @SuppressWarnings("SameParameterValue")
-    DistributionMode(boolean isPopulationConsidered, boolean isInvalidationConsidered, boolean isEvictionConsidered) {
-        this.isPopulationConsidered = isPopulationConsidered;
-        this.isInvalidationConsidered = isInvalidationConsidered;
-        this.isEvictionConsidered = isEvictionConsidered;
-    }
-
-    /**
-     * Indicates whether population is considered for distributed synchronization between cache instances or not.
-     *
-     * @return {@code true} if population is considered, otherwise {@code false}
-     */
-    public boolean isPopulationConsidered() {
-        return isPopulationConsidered;
-    }
-
-    /**
-     * Indicates whether invalidation is considered for distributed synchronization between cache instances or not.
-     *
-     * @return {@code true} if invalidation is considered, otherwise {@code false}
-     */
-    public boolean isInvalidationConsidered() {
-        return isInvalidationConsidered;
-    }
-
-    /**
-     * Indicates whether eviction is considered for distributed synchronization between cache instances or not.
-     *
-     * @return {@code true} if eviction is considered, otherwise {@code false}
-     */
-    public boolean isEvictionConsidered() {
-        return isEvictionConsidered;
-    }
+    UPDATE
 }

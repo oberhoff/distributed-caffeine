@@ -15,127 +15,231 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-import dev.failsafe.CircuitBreaker;
-import dev.failsafe.CircuitBreakerOpenException;
-import dev.failsafe.Failsafe;
-import dev.failsafe.FailsafeException;
-import io.github.oberhoff.distributedcaffeine.InternalUtils.FailableRunnable;
-import io.github.oberhoff.distributedcaffeine.InternalUtils.FailableSupplier;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
+import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 
 import java.time.Duration;
-
-import static java.lang.String.format;
-import static java.util.Objects.nonNull;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 /**
- * What one cache instance knows about whether its underlying store is answering, shared by everything that talks
- * to it. A store that is gone does not refuse a call, it fails to answer one - and waiting for that answer is what
- * costs, because the driver waits its own timeout (30 seconds by default on both adapters) and the write path
- * holds the synchronization lock while it does. Without this, that bill is paid once per operation for as long as
- * the outage lasts.
+ * The store guard, as in the current generation (measured and tested): it opens after 3 consecutive failures; while
+ * open, store calls are refused at once instead of waiting for timeouts; after 1 s the next call goes through as the
+ * probe; a successful call, or the maintenance worker's success, closes it. Reads are guarded as well as writes.
  * <p>
- * Shared rather than one per class, because there is one store and one question about it: a write that failed is
- * evidence for the next read, and a read that answered is evidence for the next write. Separate guards would each
- * have to find out for themselves, at a timeout apiece.
- * <p>
- * Two ways to use it, and which one fits follows from who is waiting. What the library does of its own accord is
- * {@code guarded}: refused outright while the store is known to be down, because the caller asked for a cache
- * operation and the cache cannot carry it out. What a caller asked of the store itself is {@code observed}: tried
- * whatever this knows, because the answer is what they came for - but its outcome is still recorded here, so that
- * asking the store directly teaches the same lesson as everything else.
+ * And the retries (VISION.md, "Write retries"): a store does not retry, it classifies its failures; a call is tried up
+ * to 3 times with jitter (20 ms base) while the failure is retryable and repeating the call is safe: always for reads
+ * and every write but the unconditional put, for which an unknown outcome is final (a repetition could overwrite a
+ * newer write of another instance). A write whose outcome was unknown in any attempt stays unknown. Anything else a
+ * store throws is a failure that is not retryable, a write's outcome unknown. One logical call counts once, for the
+ * guard and in the stats.
+ *
+ * @author Andreas Oberhoff
  */
-// java:S112 - what the store raised is what a caller is handed back, and the failable interfaces this is built
-// on are declared to throw Throwable for exactly that reason (see InternalUtils). Narrowing it here would not
-// narrow what a store can raise, only what this class is able to pass on: the wrapping is decided where the
-// call is caught, which is the one place that knows what the caller already expects
-@SuppressWarnings("java:S112")
-class InternalStoreGuard {
+final class InternalStoreGuard {
 
-    // How many calls in a row have to fail before the store is left alone. Three, because the point is to stop
-    // paying the driver's timeout once per operation, and fewer would let one unlucky call stand for a store that is
-    // gone. Calls are counted whichever thread makes them, and writes to different keys are under way at the same
-    // time: where several are waiting when the store goes, they time out together and the breaker opens after a
-    // single timeout of 30 seconds, and only a lone caller pays three of them in a row. Everything arriving once it
-    // is open is refused outright
-    private static final int FAILURE_THRESHOLD = 3;
-    // How long it is left alone for. Short, because this is exactly the window in which an operation is refused
-    // although it would have worked - and nothing is spent on finding out, since the next operation is the probe
-    private static final Duration SUSPENSION = Duration.ofSeconds(1);
+    static final int THRESHOLD = 3;
+    static final long SUSPENSION_NANOS = TimeUnit.SECONDS.toNanos(1);
+    static final int ATTEMPTS = 3;
+    private static final long BACKOFF_MILLIS = 20;
+    private static final System.Logger LOGGER = System.getLogger(DistributedCaffeine.class.getPackageName());
 
-    // Object rather than a narrower result type, because the same breaker carries both a call that returns
-    // something and one that does not: Failsafe ties the executor's result type to the policy's, so anything
-    // narrower would admit only that type. Nothing here decides on a result anyway - what counts as a failure is
-    // a throwable and nothing else
-    private final CircuitBreaker<Object> circuitBreaker;
-    private final InternalDistributedStatsCounter distributedStatsCounter;
-
-    InternalStoreGuard(InternalDistributedStatsCounter distributedStatsCounter) {
-        this.distributedStatsCounter = distributedStatsCounter;
-        this.circuitBreaker = CircuitBreaker.builder()
-                .handle(Throwable.class)
-                .withFailureThreshold(FAILURE_THRESHOLD)
-                .withDelay(SUSPENSION)
-                .withSuccessThreshold(1)
-                .build();
+    // what a call does, which decides whether repeating it is safe
+    enum Operation {
+        READ, WRITE, PUT
     }
 
-    void runGuarded(String identifier, FailableRunnable runnable) throws Throwable {
+    private final String name;
+    private final InternalStatsCounter stats;
+    private final InternalEnvironment environment;
+    @GuardedBy("this")
+    private int failures;
+    @GuardedBy("this")
+    private boolean open;
+    @GuardedBy("this")
+    private boolean probing;
+    @GuardedBy("this")
+    private long openedAt;
+
+    // environment: the timing of calls, the suspension and the back-off
+    // name: the cache's, for its log messages (Adapter#toString)
+    InternalStoreGuard(String name, InternalStatsCounter stats, InternalEnvironment environment) {
+        this.name = name;
+        this.stats = stats;
+        this.environment = environment;
+    }
+
+    // a read call (values or versions), timed and counted
+    <T> T read(Supplier<T> call) {
+        return call(call, Operation.READ, () -> {
+        });
+    }
+
+    // a write call that may be repeated (conditional writes, invalidations), timed and counted
+    <T> T write(Supplier<T> call) {
+        return call(call, Operation.WRITE, () -> {
+        });
+    }
+
+    // as write, telling the caller before each repetition of an attempt whose outcome was unknown: a conditional write
+    // repeated after its first attempt landed is refused by its own row
+    <T> T write(Supplier<T> call, Runnable repeatingUnknown) {
+        return call(call, Operation.WRITE, repeatingUnknown);
+    }
+
+    // the unconditional put, timed and counted: not repeated once its outcome is unknown
+    <T> T put(Supplier<T> call) {
+        return call(call, Operation.PUT, () -> {
+        });
+    }
+
+    private <T> T call(Supplier<T> call, Operation operation, Runnable repeatingUnknown) {
+        admit();
+        boolean write = operation != Operation.READ;
+        long start = environment.nanoTime();
+        T result;
         try {
-            Failsafe.with(circuitBreaker).run(runnable::run);
-        } catch (CircuitBreakerOpenException e) {
-            distributedStatsCounter.recordStoreRejection();
-            throw suspended(identifier, e);
-        } catch (FailsafeException e) {
-            throw unwrapped(e);
+            result = retrying(call, operation, repeatingUnknown);
+        } catch (StoreException e) {
+            failure(e);
+            stats.increment(InternalStatsCounter.Counter.STORE_FAILURE);
+            if (write && e.isOutcomeUnknown()) {
+                stats.increment(InternalStatsCounter.Counter.UNKNOWN_OUTCOME);
+            }
+            throw e;
+        } finally {
+            stats.increment(write ? InternalStatsCounter.Counter.STORE_WRITE : InternalStatsCounter.Counter.STORE_READ);
+            stats.add(write ? InternalStatsCounter.Counter.STORE_WRITE_TIME : InternalStatsCounter.Counter.STORE_READ_TIME,
+                    environment.nanoTime() - start);
+        }
+        success();
+        return result;
+    }
+
+    // the call with the retries, unguarded (maintenance calls the store this way: it is how the guard learns that the
+    // store answers again)
+    <T> T retrying(Supplier<T> call, Operation operation) {
+        return retrying(call, operation, () -> {
+        });
+    }
+
+    private <T> T retrying(Supplier<T> call, Operation operation, Runnable repeatingUnknown) {
+        boolean unknown = false;
+        for (int attempt = 1; ; attempt++) {
+            StoreException failure;
+            try {
+                return call.get();
+            } catch (StoreException e) {
+                failure = e;
+            } catch (RuntimeException e) {
+                failure = new Unexpected(e, operation != Operation.READ);
+            }
+            unknown |= operation != Operation.READ && failure.isOutcomeUnknown();
+            boolean again = failure.isRetryable() && attempt < ATTEMPTS
+                    && !(operation == Operation.PUT && failure.isOutcomeUnknown());
+            if (!again) {
+                throw given(failure, attempt, unknown);
+            }
+            if (failure.isOutcomeUnknown()) {
+                repeatingUnknown.run();
+            }
+            backoff(attempt, unknown);
         }
     }
 
-    <T> T getGuarded(String identifier, FailableSupplier<T> supplier) throws Throwable {
+    // the failure as the caller gets it: as it came after a single attempt, otherwise with the attempts made and
+    // whether any of them had an unknown outcome
+    private static StoreException given(StoreException failure, int attempt, boolean unknown) {
+        if (attempt == 1 && unknown == failure.isOutcomeUnknown()) {
+            return failure;
+        }
+        return new StoreException(failure.getMessage() + " (after " + attempt + " attempts)", failure, unknown,
+                failure.isRetryable());
+    }
+
+    private void backoff(int attempt, boolean unknown) {
         try {
-            return Failsafe.with(circuitBreaker).get(supplier::get);
-        } catch (CircuitBreakerOpenException e) {
-            distributedStatsCounter.recordStoreRejection();
-            throw suspended(identifier, e);
-        } catch (FailsafeException e) {
-            throw unwrapped(e);
+            environment.sleep(Duration.ofMillis(BACKOFF_MILLIS * attempt + environment.random(BACKOFF_MILLIS)));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new StoreException("Interrupted while waiting to retry", e, unknown, false);
         }
     }
 
-    private static IllegalStateException suspended(String identifier, CircuitBreakerOpenException e) {
-        return new IllegalStateException(format("The underlying store was not contacted for cache at '%s', "
-                + "because the last %d attempts to contact it failed", identifier, FAILURE_THRESHOLD), e);
+    synchronized boolean isOpen() {
+        return open;
     }
 
-    // what a caller is owed is what the store raised, not the news that Failsafe carried the call out - which it
-    // wraps only for a checked exception, the very case the caller wraps in turn
-    private static Throwable unwrapped(FailsafeException e) {
-        return nonNull(e.getCause()) ? e.getCause() : e;
-    }
-
-    // Carried out whatever this knows, and what happens to it is remembered. A caller reaching for the store
-    // itself is answered rather than turned away - and an answer is better evidence than anything this could
-    // gather on its own, so a successful one ends the suspension outright
-    <T> T observed(FailableSupplier<T> supplier) throws Throwable {
-        try {
-            T result = supplier.get();
-            reportReachable();
-            return result;
-        } catch (Throwable t) {
-            circuitBreaker.recordFailure();
-            throw t;
+    // the store answered; logged once where it had not answered before: reads fall back to the source without a
+    // trace, so an outage would otherwise go unnoticed
+    void success() {
+        boolean wasOpen;
+        synchronized (this) {
+            wasOpen = open;
+            failures = 0;
+            open = false;
+            probing = false;
+        }
+        if (wasOpen) {
+            LOGGER.log(System.Logger.Level.INFO, name + ": The store answers again; calls to it resume");
         }
     }
 
-    // Whether the store is being left alone, which is the one thing about it this knows for certain: it follows
-    // from calls that were actually made, rather than from anything asked on the side
-    boolean isStoreUnreachable() {
-        return circuitBreaker.isOpen();
+    // the store failed; logged once when it counts as not answering, not per call
+    void failure(StoreException cause) {
+        boolean opened = false;
+        synchronized (this) {
+            failures++;
+            probing = false;
+            if (open) {
+                openedAt = environment.nanoTime();
+            } else if (failures >= THRESHOLD) {
+                open = true;
+                opened = true;
+                openedAt = environment.nanoTime();
+                stats.increment(InternalStatsCounter.Counter.GUARD_OPEN);
+            }
+        }
+        if (opened) {
+            String message = name + ": The store is not answering (" + cause.getMessage() + "); calls to it are "
+                    + "refused, with a probe every second, until it answers again (distributedPolicy()"
+                    + ".getSynchronizationState())";
+            if (isUnexpected(cause)) {
+                LOGGER.log(System.Logger.Level.WARNING, message, cause);
+            } else {
+                LOGGER.log(System.Logger.Level.WARNING, message);
+            }
+        }
     }
 
-    // The store answered somebody, so there is no reason left to go on refusing. Used by whatever contacts it
-    // outside the paths above - the maintenance worker above all, which does so every minute on a fixed interval
-    // and is therefore the cheapest evidence there is
-    void reportReachable() {
-        circuitBreaker.close();
+    // whether the store threw what no store should (not a StoreException): a bug, logged with its stack trace
+    static boolean isUnexpected(StoreException failure) {
+        return failure instanceof Unexpected;
+    }
+
+    // what a store threw other than a StoreException, taken for a failure that is not retryable, a write's outcome
+    // unknown
+    private static final class Unexpected extends StoreException {
+
+        @java.io.Serial
+        private static final long serialVersionUID = 1L;
+
+        Unexpected(RuntimeException cause, boolean write) {
+            super("The store failed unexpectedly: " + cause, cause, write, false);
+        }
+    }
+
+    private void admit() {
+        synchronized (this) {
+            if (!open) {
+                return;
+            }
+            if (!probing && environment.nanoTime() - openedAt >= SUSPENSION_NANOS) {
+                probing = true;
+                return;
+            }
+        }
+        stats.increment(InternalStatsCounter.Counter.REFUSED);
+        throw new StoreException("The store is not answering; calls are refused until it answers again", false);
     }
 }

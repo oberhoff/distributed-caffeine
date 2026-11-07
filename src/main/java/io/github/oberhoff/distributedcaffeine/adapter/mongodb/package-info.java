@@ -13,8 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 /**
- * This package contains an adapter based on MongoDB.
+ * The adapter for MongoDB ({@link MongoAdapter}), distributing changes through change streams.
  *
  * @author Andreas Oberhoff
  * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
