@@ -2291,8 +2291,9 @@ final class InternalCore<K, V> {
 
     // delivery stopped: until it is resumed, every access checks the held version against the store
     private void lost() {
-        stats.increment(Counter.INTERRUPTION);
+        // counted once in effect: whoever sees the count sees the cache degraded
         subscriptionUp = false;
+        stats.increment(Counter.INTERRUPTION);
         superviseResume();
     }
 
