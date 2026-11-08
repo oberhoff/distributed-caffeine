@@ -33,6 +33,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
+import java.util.stream.Collectors;
 
 import static java.util.Objects.requireNonNull;
 
@@ -468,7 +469,7 @@ final class RedisFeed {
                     } catch (RuntimeException e) {
                         // an entry this reader cannot parse, or a listener failing: the others go on
                         LOGGER.log(Logger.Level.WARNING, "Delivering the changes of " + registration.stream
-                                + " failed; reported as a gap", e);
+                                + " failed; the cache checks what it holds against the store", e);
                         registration.listener.onGap();
                     }
                 }
@@ -525,8 +526,11 @@ final class RedisFeed {
                 lost.forEach(registration -> registration.lost = true);
             }
             used.close();
-            LOGGER.log(Logger.Level.WARNING, "Reading the changes on Redis failed; delivery lost until resumed: "
-                    + cause.getMessage());
+            String server = lost.isEmpty() ? "the server" : lost.get(0).store.product();
+            String keyspaces = lost.stream().map(registration -> registration.keyspace).distinct().sorted()
+                    .collect(Collectors.joining(", "));
+            LOGGER.log(Logger.Level.WARNING, "Reading the changes on " + server + " failed (keyspaces " + keyspaces
+                    + "); delivery lost until resumed: " + cause.getMessage());
             lost.forEach(registration -> registration.listener.onLost(cause));
         }
 

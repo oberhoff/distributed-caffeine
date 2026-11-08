@@ -338,8 +338,7 @@ final class InternalPollingStore implements Store, ChangeFeed {
                 return;
             }
             if (gap) {
-                LOGGER.log(System.Logger.Level.INFO, name + ": Polling the store for changes succeeded again; "
-                        + "revalidating what is held");
+                LOGGER.log(System.Logger.Level.INFO, name + ": Polling the store for changes succeeded again");
                 listener.onGap();
             }
             if (!messages.isEmpty()) {

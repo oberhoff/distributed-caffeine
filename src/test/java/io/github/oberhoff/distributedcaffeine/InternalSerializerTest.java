@@ -97,7 +97,6 @@ class InternalSerializerTest {
     }
 
     @Test
-    @SuppressWarnings("NullableProblems") // on purpose: a serializer breaking its contract, which must be caught
     void null_results_are_failures() {
         InternalSerializer<String> serializer = InternalSerializer.of(new StringSerializer<>() {
             @Override

@@ -32,6 +32,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.testing.LogCapture;
 import io.github.oberhoff.distributedcaffeine.testing.SilencingProxy;
 import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.bson.BsonDocument;
@@ -647,8 +648,11 @@ abstract class MongoAdapterTest {
 
     @Test
     void the_collection_is_created_with_marker_and_index_and_reused() {
-        cache(Function.identity()).put("k", "v");
-        cache(Function.identity());
+        try (LogCapture log = new LogCapture()) {
+            cache(Function.identity()).put("k", "v");
+            cache(Function.identity());
+            assertThat(log.count("Created collection")).as("once, by the first: " + log.text()).isEqualTo(1);
+        }
 
         var created = database.client.getDatabase("adapter").getCollection(collection);
         assertThat(requireNonNull(created.find(new Document("_id", MongoLocation.MARKER_ID)).first()).getString("schema"))
@@ -658,6 +662,20 @@ abstract class MongoAdapterTest {
                         .append("_id.h", 1)));
         assertThat(created.countDocuments(new Document("_id.c", MongoLocation.START))).as("one per discriminator")
                 .isEqualTo(1);
+    }
+
+    @Test
+    void a_collection_without_its_index_is_used_and_warned_of_with_the_command() {
+        cache(Function.identity()).close();
+        database.client.getDatabase("adapter").getCollection(collection).dropIndex("distributed-caffeine");
+
+        try (LogCapture log = new LogCapture()) {
+            DistributedCache<String, String> cache = cache(Function.identity());
+            cache.put("k", "v");
+            assertThat(cache.getIfPresent("k")).isEqualTo("v");
+            assertThat(log.count("has no index on (_id.d, state, writeTime, _id.h)")).as(log.text()).isEqualTo(1);
+            assertThat(log.text()).contains("createIndex");
+        }
     }
 
     @Test
@@ -682,7 +700,8 @@ abstract class MongoAdapterTest {
     void a_reset_never_drops_foreign_documents_or_a_collection_of_another_version() {
         var documents = database.client.getDatabase("adapter").getCollection(collection);
         documents.insertOne(new Document("_id", "foreign"));
-        assertThatThrownBy(() -> track(strings(adapter().withSchemaReset().build()).build()))
+        DistributedCaffeine<String, String> resetting = strings(adapter().withSchemaReset().build());
+        assertThatThrownBy(resetting::build)
                 .isInstanceOf(StoreException.class).hasMessageContaining("not distributed-caffeine's");
         assertThat(documents.countDocuments(new Document("_id", "foreign"))).as("kept").isOne();
 
@@ -690,8 +709,9 @@ abstract class MongoAdapterTest {
         documents.insertOne(new Document("_id", MongoLocation.MARKER_ID)
                 .append("schema", "distributed-caffeine schema 2"));
         for (boolean reset : new boolean[] {false, true}) {
-            MongoAdapter.Builder builder = reset ? adapter().withSchemaReset() : adapter();
-            assertThatThrownBy(() -> track(strings(builder.build()).build())).isInstanceOf(StoreException.class)
+            DistributedCaffeine<String, String> builder = strings((reset ? adapter().withSchemaReset() : adapter())
+                    .build());
+            assertThatThrownBy(builder::build).isInstanceOf(StoreException.class)
                     .hasMessageContaining("another version").hasMessageContaining("schema 2");
         }
         assertThat(documents.countDocuments()).as("kept").isOne();

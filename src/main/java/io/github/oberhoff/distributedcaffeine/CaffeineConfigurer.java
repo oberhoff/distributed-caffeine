@@ -292,7 +292,7 @@ public final class CaffeineConfigurer<K, V> {
 
     /**
      * See {@link Caffeine#removalListener(RemovalListener)}. Also notified when a change elsewhere removes or replaces
-     * an entry this instance holds.
+     * an entry this instance holds; not for the entries {@code close()} drops.
      *
      * @param removalListener the listener
      * @return this configurer
@@ -392,6 +392,9 @@ public final class CaffeineConfigurer<K, V> {
             // itself is discarded by Caffeine as overtaken: both are marked
             if (cause == RemovalCause.REPLACED && value != null && value.isReplacementSilent()) {
                 return;
+            }
+            if (value != null && value.isRemovalSilent()) {
+                return; // emptied by close()
             }
             Object userKey = userKey(key, value);
             if (key != null && userKey == null) {

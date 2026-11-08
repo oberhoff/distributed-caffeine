@@ -33,7 +33,7 @@ public enum DistributionMode {
     /**
      * The default: a change elsewhere drops this instance's copy of the key; the next read takes the value from the
      * store, or else from the loader or mapping function (if any). Costs a listening connection, shared by the caches on
-     * the same client, and a store read only for keys read again.
+     * the same client (on MariaDB and MySQL, a poll per interval instead), and a store read only for keys read again.
      */
     INVALIDATE,
 

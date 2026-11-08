@@ -52,7 +52,7 @@ public final class LettuceRedis {
 
     /**
      * Wraps a client of a cluster. Lettuce follows slot moves and failovers by itself through adaptive topology
-     * refresh, on by default since Lettuce 7 (before, enable it in {@code ClusterTopologyRefreshOptions}).
+     * refresh, on by default.
      *
      * @param client the client
      * @return the driver

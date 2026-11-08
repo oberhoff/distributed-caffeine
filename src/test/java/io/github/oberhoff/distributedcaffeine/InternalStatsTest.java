@@ -22,6 +22,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import io.github.oberhoff.distributedcaffeine.testing.LogCapture;
 import io.github.oberhoff.distributedcaffeine.testing.StoreProfile;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
@@ -355,6 +356,28 @@ class InternalStatsTest {
     }
 
     @Test
+    void maintenance_counts_what_it_prunes_and_expires() {
+        Adapter<String, String> adapter = settings -> database.openStore("cache");
+        DistributedCache<String, String> cache = track(DistributedCaffeine.newBuilder(adapter)
+                .withCaffeine(CaffeineConfigurer::recordStats)
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(StringSerializer.ofString()))
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10)).withMaximumAge(LONG)
+                        .withMaximumSize(2).withMaintenanceInterval(Duration.ofMillis(50)))
+                .build());
+        for (int i = 0; i < 5; i++) {
+            cache.put("k" + i, "v");
+        }
+
+        // past the grace that spares the youngest rows from pruning
+        clockMicros.addAndGet(TimeUnit.SECONDS.toMicros(30));
+        await(() -> stats(cache).maintenancePrunedCount() == 3);
+        clockMicros.addAndGet(LONG.plusHours(1).toNanos() / 1_000);
+        await(() -> stats(cache).maintenanceExpiredCount() == 2);
+        assertThat(stats(cache).maintenancePrunedCount()).as("tombstones pruned are not counted").isEqualTo(3);
+    }
+
+    @Test
     void recovery_counts_gaps_interruptions_and_revalidations() {
         assumeTrue(database.profile().changes() == StoreProfile.Changes.FEED, "counts the store's feed messages");
         DistributedCache<String, String> writer = cache();
@@ -402,6 +425,26 @@ class InternalStatsTest {
         assertThat(stats.guardOpenCount()).isEqualTo(1);
         assertThat(stats.refusedCount()).isEqualTo(1);
         assertThat(stats.storeFailureCount()).isEqualTo(1 + InternalStoreGuard.THRESHOLD);
+    }
+
+    @Test
+    void an_unreadable_value_is_logged_at_most_once_a_minute_also_without_stats() {
+        DistributedCache<String, String> writer = cache();
+        Adapter<String, Long> numbers = settings -> database.openStore("cache");
+        DistributedCache<String, Long> reader = track(DistributedCaffeine.newBuilder(numbers)
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(StringSerializer.ofLong()))
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(1_000)).build());
+        writer.put("a", "not a number");
+        writer.put("b", "nor this");
+
+        try (LogCapture log = new LogCapture()) {
+            assertThat(reader.getIfPresent("a")).isNull();
+            assertThat(reader.getIfPresent("b")).isNull();
+            assertThat(log.count("A stored value could not be read")).as(log.text()).isEqualTo(1);
+            assertThat(log.text()).contains("different serializers or value classes");
+        }
     }
 
     @Test

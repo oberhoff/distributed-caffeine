@@ -72,9 +72,9 @@ final class InternalHasher<K> {
         } else if (key instanceof UUID uuid) {
             stream.putUUID(uuid);
         } else {
-            throw new IllegalStateException(("Keys of type %s are not hashable out of the box (only String, Long, "
-                    + "Integer and UUID are), keys have to implement the Hashable interface or a HashProvider has to "
-                    + "be specified.").formatted(key.getClass().getSimpleName()));
+            throw new IllegalStateException(("Keys of type %s cannot be hashed out of the box (only String, Long, "
+                    + "Integer and UUID can): implement Hashable in the key class, or set withHashProvider(...) on the "
+                    + "builder").formatted(key.getClass().getSimpleName()));
         }
         HashValue128 value = stream.get();
         // Hasher.getHash() formats toByteArray(), which holds the least significant half first, then the most

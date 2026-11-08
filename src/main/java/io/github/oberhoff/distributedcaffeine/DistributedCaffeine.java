@@ -41,8 +41,8 @@ import static java.util.Objects.requireNonNullElseGet;
  * <pre>
  * {@code DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
  *     .withCaffeine(caffeine -> caffeine
- *         .expireAfterWrite(Duration.ofMinutes(5)))
- *         .maximumSize(10_000)
+ *         .expireAfterWrite(Duration.ofMinutes(5))
+ *         .maximumSize(10_000))
  *     .withStore(store -> store
  *         .withMaximumAge(Duration.ofHours(1))
  *         .withMaximumSize(1_000_000))
@@ -164,7 +164,7 @@ public final class DistributedCaffeine<K, V> {
     public DistributedCaffeine<K, V> withNegativeCaching(Duration expiry) {
         requireNonNull(expiry, "expiry cannot be null");
         if (expiry.isNegative() || expiry.isZero()) {
-            throw new IllegalArgumentException("expiry must be positive");
+            throw new IllegalArgumentException("the negative caching expiry must be positive");
         }
         if (negativeCachingExpiry != null) {
             throw new IllegalStateException("negative caching was already configured");
@@ -360,11 +360,12 @@ public final class DistributedCaffeine<K, V> {
         try {
             InternalSerializer<K> keySerializer = serializers.keySerializer();
             InternalSerializer<V> valueSerializer = serializers.valueSerializer();
-            // where the cache lives, as its log messages begin with it
-            String name = String.valueOf(adapter);
             Executor executor = requireNonNullElseGet(store().executor(), InternalExecutors::defaultStoreExecutor);
             created = adapter.createStore(new StoreSettings(keySerializer.format(), valueSerializer.format(),
                     store().operationTimeout()));
+            // where the cache lives, as its log messages begin with it; taken once the store exists, as an adapter may
+            // name the server's product only after asking it (Valkey or Kvrocks behind a Redis client, say)
+            String name = String.valueOf(adapter);
             if (distributionMode() != DistributionMode.NONE && !(created instanceof ChangeFeed)) {
                 if (!(created instanceof ChangeScan scan)) {
                     throw new IllegalStateException(adapter + " offers no change feed and no change scan, so it "

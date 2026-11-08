@@ -15,9 +15,11 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import io.github.oberhoff.distributedcaffeine.InternalStatsCounter.Counter;
 import org.jspecify.annotations.Nullable;
 
-import java.util.Arrays;
+import java.util.EnumMap;
+import java.util.Map;
 
 /**
  * A snapshot of one cache instance's store and synchronization activity, from {@code distributedPolicy().stats()};
@@ -32,15 +34,13 @@ import java.util.Arrays;
  */
 public final class DistributedStats {
 
-    private static final DistributedStats EMPTY = new DistributedStats(new long[34]);
+    private static final DistributedStats EMPTY = new DistributedStats(new EnumMap<>(Counter.class));
 
-    private final long[] values;
+    // by counter; a counter missing counts zero
+    private final Map<Counter, Long> values;
 
-    DistributedStats(long[] values) {
-        if (values.length != 34) {
-            throw new IllegalArgumentException("expected 34 values");
-        }
-        this.values = values.clone();
+    DistributedStats(Map<Counter, Long> values) {
+        this.values = values.isEmpty() ? new EnumMap<>(Counter.class) : new EnumMap<>(values);
     }
 
     /**
@@ -58,7 +58,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long storeReadCount() {
-        return values[0];
+        return value(Counter.STORE_READ);
     }
 
     /**
@@ -68,7 +68,7 @@ public final class DistributedStats {
      * @return the time in nanoseconds
      */
     public long totalStoreReadTime() {
-        return values[1];
+        return value(Counter.STORE_READ_TIME);
     }
 
     /**
@@ -77,7 +77,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long storeHitCount() {
-        return values[2];
+        return value(Counter.STORE_HIT);
     }
 
     /**
@@ -87,7 +87,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long storeMissCount() {
-        return values[3];
+        return value(Counter.STORE_MISS);
     }
 
     /**
@@ -97,7 +97,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long sourceLoadCount() {
-        return values[4];
+        return value(Counter.SOURCE_LOAD);
     }
 
     /**
@@ -106,7 +106,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long sourceReloadCount() {
-        return values[5];
+        return value(Counter.SOURCE_RELOAD);
     }
 
     /**
@@ -115,7 +115,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long storeWriteCount() {
-        return values[6];
+        return value(Counter.STORE_WRITE);
     }
 
     /**
@@ -125,7 +125,7 @@ public final class DistributedStats {
      * @return the time in nanoseconds
      */
     public long totalStoreWriteTime() {
-        return values[7];
+        return value(Counter.STORE_WRITE_TIME);
     }
 
     /**
@@ -134,7 +134,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long putCount() {
-        return values[8];
+        return value(Counter.PUT);
     }
 
     /**
@@ -144,7 +144,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long conditionalWriteCount() {
-        return values[9];
+        return value(Counter.CONDITIONAL_WRITE);
     }
 
     /**
@@ -154,7 +154,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long conflictCount() {
-        return values[10];
+        return value(Counter.CONFLICT);
     }
 
     /**
@@ -163,7 +163,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long storeFailureCount() {
-        return values[11];
+        return value(Counter.STORE_FAILURE);
     }
 
     /**
@@ -172,7 +172,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long unknownOutcomeCount() {
-        return values[12];
+        return value(Counter.UNKNOWN_OUTCOME);
     }
 
     /**
@@ -182,7 +182,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long refusedCount() {
-        return values[13];
+        return value(Counter.REFUSED);
     }
 
     /**
@@ -191,7 +191,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long guardOpenCount() {
-        return values[14];
+        return value(Counter.GUARD_OPEN);
     }
 
     /**
@@ -200,7 +200,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long writtenMessageCount() {
-        return values[15];
+        return value(Counter.WRITTEN_MESSAGE);
     }
 
     /**
@@ -209,7 +209,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long invalidatedMessageCount() {
-        return values[16];
+        return value(Counter.INVALIDATED_MESSAGE);
     }
 
     /**
@@ -218,7 +218,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long expiredMessageCount() {
-        return values[17];
+        return value(Counter.EXPIRED_MESSAGE);
     }
 
     /**
@@ -227,7 +227,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long invalidatedAllMessageCount() {
-        return values[18];
+        return value(Counter.INVALIDATED_ALL_MESSAGE);
     }
 
     /**
@@ -237,7 +237,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long ignoredMessageCount() {
-        return values[19];
+        return value(Counter.IGNORED_MESSAGE);
     }
 
     /**
@@ -247,7 +247,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long replacedCount() {
-        return values[20];
+        return value(Counter.REPLACED);
     }
 
     /**
@@ -256,7 +256,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long invalidatedCount() {
-        return values[21];
+        return value(Counter.INVALIDATED);
     }
 
     /**
@@ -265,7 +265,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long expiredCount() {
-        return values[22];
+        return value(Counter.EXPIRED);
     }
 
     /**
@@ -275,7 +275,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long populationReadCount() {
-        return values[23];
+        return value(Counter.POPULATION_READ);
     }
 
     /**
@@ -284,7 +284,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long gapCount() {
-        return values[24];
+        return value(Counter.GAP);
     }
 
     /**
@@ -293,17 +293,17 @@ public final class DistributedStats {
      * @return the count
      */
     public long interruptionCount() {
-        return values[25];
+        return value(Counter.INTERRUPTION);
     }
 
     /**
      * Returns the number of held values whose version was checked against the store, after a gap or while
-     * delivery was interrupted.
+     * delivery was interrupted: the kept ones plus the dropped ones.
      *
      * @return the count
      */
     public long revalidatedCount() {
-        return values[26];
+        return value(Counter.REVALIDATION_KEPT) + value(Counter.REVALIDATION_DROPPED);
     }
 
     /**
@@ -312,7 +312,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long revalidationKeptCount() {
-        return values[27];
+        return value(Counter.REVALIDATION_KEPT);
     }
 
     /**
@@ -321,7 +321,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long revalidationDroppedCount() {
-        return values[28];
+        return value(Counter.REVALIDATION_DROPPED);
     }
 
     /**
@@ -330,7 +330,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long unreadableRowCount() {
-        return values[29];
+        return value(Counter.UNREADABLE_ROW);
     }
 
     /**
@@ -339,7 +339,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long negativeHitCount() {
-        return values[30];
+        return value(Counter.NEGATIVE_HIT);
     }
 
     /**
@@ -350,7 +350,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long versionRefusalCount() {
-        return values[31];
+        return value(Counter.VERSION_REFUSAL);
     }
 
     /**
@@ -360,7 +360,7 @@ public final class DistributedStats {
      * @return the count
      */
     public long uncachedLoadCount() {
-        return values[32];
+        return value(Counter.UNCACHED_LOAD);
     }
 
     /**
@@ -371,7 +371,28 @@ public final class DistributedStats {
      * @return the count
      */
     public long clockAheadCount() {
-        return values[33];
+        return value(Counter.CLOCK_AHEAD);
+    }
+
+    /**
+     * Returns the number of values this instance's maintenance expired in the store at the maximum age (announced to
+     * every instance, see {@link #expiredMessageCount()}).
+     *
+     * @return the count
+     */
+    public long maintenanceExpiredCount() {
+        return value(Counter.MAINTENANCE_EXPIRED);
+    }
+
+    /**
+     * Returns the number of values this instance's maintenance removed from the store to keep it within its maximum
+     * size, without notifying the instances, which may keep their copies. A steady count means the maximum size is
+     * smaller than the working set, so values are loaded from the source again.
+     *
+     * @return the count
+     */
+    public long maintenancePrunedCount() {
+        return value(Counter.MAINTENANCE_PRUNED);
     }
 
     /**
@@ -381,10 +402,12 @@ public final class DistributedStats {
      * @return the sum
      */
     public DistributedStats plus(DistributedStats other) {
-        long[] sum = new long[34];
-        for (int i = 0; i < values.length; i++) {
-            long result = values[i] + other.values[i];
-            sum[i] = ((values[i] ^ result) & (other.values[i] ^ result)) < 0 ? Long.MAX_VALUE : result;
+        Map<Counter, Long> sum = new EnumMap<>(Counter.class);
+        for (Counter counter : Counter.values()) {
+            long a = value(counter);
+            long b = other.value(counter);
+            long result = a + b;
+            sum.put(counter, ((a ^ result) & (b ^ result)) < 0 ? Long.MAX_VALUE : result);
         }
         return new DistributedStats(sum);
     }
@@ -396,58 +419,76 @@ public final class DistributedStats {
      * @return the difference
      */
     public DistributedStats minus(DistributedStats other) {
-        long[] difference = new long[34];
-        for (int i = 0; i < values.length; i++) {
-            difference[i] = Math.max(0, values[i] - other.values[i]);
+        Map<Counter, Long> difference = new EnumMap<>(Counter.class);
+        for (Counter counter : Counter.values()) {
+            difference.put(counter, Math.max(0, value(counter) - other.value(counter)));
         }
         return new DistributedStats(difference);
     }
 
+    private long value(Counter counter) {
+        return values.getOrDefault(counter, 0L);
+    }
+
     @Override
     public boolean equals(@Nullable Object o) {
-        return o instanceof DistributedStats other && Arrays.equals(values, other.values);
+        if (!(o instanceof DistributedStats other)) {
+            return false;
+        }
+        for (Counter counter : Counter.values()) {
+            if (value(counter) != other.value(counter)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override
     public int hashCode() {
-        return Arrays.hashCode(values);
+        int hash = 1;
+        for (Counter counter : Counter.values()) {
+            hash = 31 * hash + Long.hashCode(value(counter));
+        }
+        return hash;
     }
 
     @Override
     public String toString() {
-        return "DistributedStats{" + "storeReadCount=" + values[0] + ", "
-                + "totalStoreReadTime=" + values[1] + ", "
-                + "storeHitCount=" + values[2] + ", "
-                + "storeMissCount=" + values[3] + ", "
-                + "sourceLoadCount=" + values[4] + ", "
-                + "sourceReloadCount=" + values[5] + ", "
-                + "storeWriteCount=" + values[6] + ", "
-                + "totalStoreWriteTime=" + values[7] + ", "
-                + "putCount=" + values[8] + ", "
-                + "conditionalWriteCount=" + values[9] + ", "
-                + "conflictCount=" + values[10] + ", "
-                + "storeFailureCount=" + values[11] + ", "
-                + "unknownOutcomeCount=" + values[12] + ", "
-                + "refusedCount=" + values[13] + ", "
-                + "guardOpenCount=" + values[14] + ", "
-                + "writtenMessageCount=" + values[15] + ", "
-                + "invalidatedMessageCount=" + values[16] + ", "
-                + "expiredMessageCount=" + values[17] + ", "
-                + "invalidatedAllMessageCount=" + values[18] + ", "
-                + "ignoredMessageCount=" + values[19] + ", "
-                + "replacedCount=" + values[20] + ", "
-                + "invalidatedCount=" + values[21] + ", "
-                + "expiredCount=" + values[22] + ", "
-                + "populationReadCount=" + values[23] + ", "
-                + "gapCount=" + values[24] + ", "
-                + "interruptionCount=" + values[25] + ", "
-                + "revalidatedCount=" + values[26] + ", "
-                + "revalidationKeptCount=" + values[27] + ", "
-                + "revalidationDroppedCount=" + values[28] + ", "
-                + "unreadableRowCount=" + values[29] + ", "
-                + "negativeHitCount=" + values[30] + ", "
-                + "versionRefusalCount=" + values[31] + ", "
-                + "uncachedLoadCount=" + values[32] + ", "
-                + "clockAheadCount=" + values[33] + "}";
+        return "DistributedStats{" + "storeReadCount=" + value(Counter.STORE_READ) + ", "
+                + "totalStoreReadTime=" + value(Counter.STORE_READ_TIME) + ", "
+                + "storeHitCount=" + value(Counter.STORE_HIT) + ", "
+                + "storeMissCount=" + value(Counter.STORE_MISS) + ", "
+                + "sourceLoadCount=" + value(Counter.SOURCE_LOAD) + ", "
+                + "sourceReloadCount=" + value(Counter.SOURCE_RELOAD) + ", "
+                + "storeWriteCount=" + value(Counter.STORE_WRITE) + ", "
+                + "totalStoreWriteTime=" + value(Counter.STORE_WRITE_TIME) + ", "
+                + "putCount=" + value(Counter.PUT) + ", "
+                + "conditionalWriteCount=" + value(Counter.CONDITIONAL_WRITE) + ", "
+                + "conflictCount=" + value(Counter.CONFLICT) + ", "
+                + "storeFailureCount=" + value(Counter.STORE_FAILURE) + ", "
+                + "unknownOutcomeCount=" + value(Counter.UNKNOWN_OUTCOME) + ", "
+                + "refusedCount=" + value(Counter.REFUSED) + ", "
+                + "guardOpenCount=" + value(Counter.GUARD_OPEN) + ", "
+                + "writtenMessageCount=" + value(Counter.WRITTEN_MESSAGE) + ", "
+                + "invalidatedMessageCount=" + value(Counter.INVALIDATED_MESSAGE) + ", "
+                + "expiredMessageCount=" + value(Counter.EXPIRED_MESSAGE) + ", "
+                + "invalidatedAllMessageCount=" + value(Counter.INVALIDATED_ALL_MESSAGE) + ", "
+                + "ignoredMessageCount=" + value(Counter.IGNORED_MESSAGE) + ", "
+                + "replacedCount=" + value(Counter.REPLACED) + ", "
+                + "invalidatedCount=" + value(Counter.INVALIDATED) + ", "
+                + "expiredCount=" + value(Counter.EXPIRED) + ", "
+                + "populationReadCount=" + value(Counter.POPULATION_READ) + ", "
+                + "gapCount=" + value(Counter.GAP) + ", "
+                + "interruptionCount=" + value(Counter.INTERRUPTION) + ", "
+                + "revalidatedCount=" + revalidatedCount() + ", "
+                + "revalidationKeptCount=" + value(Counter.REVALIDATION_KEPT) + ", "
+                + "revalidationDroppedCount=" + value(Counter.REVALIDATION_DROPPED) + ", "
+                + "unreadableRowCount=" + value(Counter.UNREADABLE_ROW) + ", "
+                + "negativeHitCount=" + value(Counter.NEGATIVE_HIT) + ", "
+                + "versionRefusalCount=" + value(Counter.VERSION_REFUSAL) + ", "
+                + "uncachedLoadCount=" + value(Counter.UNCACHED_LOAD) + ", "
+                + "clockAheadCount=" + value(Counter.CLOCK_AHEAD) + ", "
+                + "maintenanceExpiredCount=" + value(Counter.MAINTENANCE_EXPIRED) + ", "
+                + "maintenancePrunedCount=" + value(Counter.MAINTENANCE_PRUNED) + "}";
     }
 }

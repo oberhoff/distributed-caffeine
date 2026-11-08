@@ -45,6 +45,8 @@ final class PostgresSchema {
 
     private static final Logger LOGGER = System.getLogger(PostgresAdapter.class.getPackageName());
     private static final String INSUFFICIENT_PRIVILEGE = "42501";
+    // PostgreSQL 9.6, the oldest supported release (README, Requirements), as server_version_num
+    private static final int MINIMUM_VERSION_NUM = 90600;
 
     private PostgresSchema() {
     }
@@ -58,11 +60,14 @@ final class PostgresSchema {
                 PostgresStore.unbound(connection, previousTimeout);
             }
         } catch (SQLException e) {
-            throw new StoreException("Checking table " + table + " failed: " + e.getMessage(), e, false);
+            // a store not reached is worth another try, as in every operation; anything else is the setup's
+            throw new StoreException("Checking table " + table + " failed: " + e.getMessage(), e, false,
+                    PostgresStore.connectionLost(e));
         }
     }
 
     private static void ensure(Connection connection, PostgresTable table, boolean schemaReset) throws SQLException {
+        requireVersion(connection);
         PostgresStore.requirePrimary(connection);
         String marker = marker(connection, table);
         if (marker == null || !marker.equals(PostgresTable.MARKER)) {
@@ -73,6 +78,19 @@ final class PostgresSchema {
         }
         checkShape(connection, table);
         checkIndex(connection, table);
+    }
+
+    // checked first, so that an old server is told so rather than failing a later statement unclearly
+    private static void requireVersion(Connection connection) throws SQLException {
+        try (Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery(
+                     "SELECT current_setting('server_version_num')::int, current_setting('server_version')")) {
+            resultSet.next();
+            if (resultSet.getInt(1) < MINIMUM_VERSION_NUM) {
+                throw new StoreException("PostgreSQL " + resultSet.getString(2) + " is older than the oldest "
+                        + "supported, 9.6", false);
+            }
+        }
     }
 
     // What withSchemaReset() may drop: a table of distributed-caffeine 0.x (no comment, and its columns discriminator,
@@ -92,7 +110,7 @@ final class PostgresSchema {
                     + "' (e.g. a table of distributed-caffeine 0.x). Stop all instances using it, then drop it or "
                     + "configure another name, or enable withSchemaReset().", false);
         }
-        if (marker == null && hasColumns(connection, table, "discriminator", "hash", "status", "timestamp")) {
+        if (marker == null && hasLegacyColumns(connection, table)) {
             return;
         }
         try (Statement statement = connection.createStatement();
@@ -105,8 +123,9 @@ final class PostgresSchema {
         }
     }
 
-    private static boolean hasColumns(Connection connection, PostgresTable table, String... names)
-            throws SQLException {
+    // the columns every table of distributed-caffeine 0.x has
+    private static boolean hasLegacyColumns(Connection connection, PostgresTable table) throws SQLException {
+        String[] names = {"discriminator", "hash", "status", "timestamp"};
         try (PreparedStatement statement = connection.prepareStatement("""
                 SELECT count(*) FROM pg_attribute
                 WHERE attrelid = to_regclass(?) AND attnum > 0 AND NOT attisdropped AND attname = ANY (?)""")) {
@@ -164,7 +183,8 @@ final class PostgresSchema {
             try (Statement statement = connection.createStatement()) {
                 if (exists(connection, table)) {
                     requireResettable(connection, table, marker, schemaReset);
-                    LOGGER.log(Level.WARNING, "Dropping table {0}, which has no schema marker (withSchemaReset)", table);
+                    LOGGER.log(Level.WARNING, "Dropping table {0} of distributed-caffeine 0.x, or empty "
+                            + "(withSchemaReset)", table);
                     statement.execute("DROP TABLE " + table.qualified);
                 }
                 if (!schemaExists(connection, table)) {
@@ -173,6 +193,7 @@ final class PostgresSchema {
                 statement.execute(table.ddl());
             }
             connection.commit();
+            LOGGER.log(Level.INFO, "Created table {0} with its index, version sequence and schema marker", table);
         } catch (SQLException e) {
             restore(connection, autoCommit, e);
             if (INSUFFICIENT_PRIVILEGE.equals(e.getSQLState())) {
@@ -260,7 +281,7 @@ final class PostgresSchema {
                 resultSet.next();
                 if (!resultSet.getBoolean(1)) {
                     LOGGER.log(Level.WARNING, "Table {0} has no index on (discriminator, state, write_time); "
-                            + "expiry and pruning will be slow. See the DDL:\n{1}", table, table.ddl());
+                            + "expiry and pruning will be slow. Create it as in the DDL:\n{1}", table, table.ddl());
                 }
             }
         }

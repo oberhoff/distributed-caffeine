@@ -36,7 +36,7 @@ import static java.util.Objects.requireNonNull;
  * }</pre>
  * An adapter serves one cache: building a second cache with the same adapter fails while the first is open.
  * <p>
- * Requires Redis 6.2 or later, Valkey, Dragonfly 1.4 or later, or Kvrocks, and a client library through its entry
+ * Requires Redis 6.2, Valkey 7.2, Dragonfly 1.4 or Kvrocks 2.16 or later, and a client library through its entry
  * class: {@link LettuceRedis}, {@link JedisRedis} or {@link RedissonRedis}. A single server, a primary behind Sentinel,
  * or a cluster through the library's cluster client; a replica is refused, as is a server lacking a command the cache
  * needs. In a cluster, all caches of a keyspace live on one node, and each application instance reads their changes
@@ -101,6 +101,9 @@ public final class RedisAdapter<K, V> implements Adapter<K, V> {
 
     private final RedisDriver driver;
     private final RedisKeys keys;
+    // the server's product (Redis, Valkey, Dragonfly, Kvrocks), as the cache's log messages begin with it; known once a
+    // store was created
+    private volatile String product = "Redis";
 
     private RedisAdapter(Builder builder) {
         this.driver = builder.driver;
@@ -123,6 +126,7 @@ public final class RedisAdapter<K, V> implements Adapter<K, V> {
         RedisSession session = driver.open(settings.operationTimeout());
         try {
             RedisServer server = session.server();
+            product = server.product();
             if (!server.supported()) {
                 throw new StoreException(server + " is not supported; distributed-caffeine needs Redis 6.2 or later, "
                         + "Valkey, Dragonfly 1.4 or later, or Kvrocks implementing Redis 6.2 or later", false);
@@ -157,10 +161,10 @@ public final class RedisAdapter<K, V> implements Adapter<K, V> {
                         + "distributed-caffeine (layout " + found + "); delete its keys (" + keys.prefix()
                         + "*) while no cache uses them, and they are created anew", false);
             }
-            return new RedisStore(driver, session, keys);
+            return new RedisStore(driver, session, keys, server.product());
         } catch (RedisCommandException e) {
             session.close();
-            throw RedisStore.failure(e, false, keys.name());
+            throw RedisStore.failure(e, false, keys.name(), product);
         } catch (RuntimeException e) {
             session.close();
             throw e;
@@ -193,7 +197,7 @@ public final class RedisAdapter<K, V> implements Adapter<K, V> {
 
     @Override
     public String toString() {
-        return "Redis " + keys.name();
+        return product + " " + keys.name();
     }
 
     /**

@@ -52,6 +52,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.stream.Collectors;
 
 /**
  * Listening on PostgreSQL through pgjdbc (VISION.md, "PostgreSQL listening without R2DBC" and "Connection sharing"):
@@ -203,6 +204,11 @@ final class PostgresListener {
         } catch (NoSuchFieldException | RuntimeException e) {
             return null;
         }
+    }
+
+    // a cache named by its channel: dc_<schema>.<table>.<discriminator> (shortened with a hash where too long)
+    private static String cacheOf(String channel) {
+        return channel.startsWith("dc_") ? channel.substring(3) : channel;
     }
 
     private static String listen(String channel) {
@@ -368,7 +374,7 @@ final class PostgresListener {
                 }
                 if (held == null || (!registration.lost && generation == registration.generation)) {
                     if (held != null) {
-                        LOGGER.log(Level.WARNING, "The PostgreSQL listener is suspected silent; reconnecting");
+                        LOGGER.log(Level.WARNING, "The PostgreSQL listener for {0} is suspected silent; reconnecting", serving());
                         discard(held);
                         forEachRegistration(other -> {
                             if (other != registration && !other.lost) {
@@ -377,7 +383,7 @@ final class PostgresListener {
                         });
                     }
                     connect();
-                    LOGGER.log(Level.INFO, "The PostgreSQL listener reconnected");
+                    LOGGER.log(Level.INFO, "The PostgreSQL listener for {0} reconnected", serving());
                     delivering.forEach(other -> other.generation = generation);
                 }
                 registration.generation = generation;
@@ -525,7 +531,7 @@ final class PostgresListener {
                 try {
                     registration.listener.onChanges(List.of(message));
                 } catch (RuntimeException e) {
-                    LOGGER.log(Level.WARNING, "A listener failed on a notification", e);
+                    LOGGER.log(Level.WARNING, "A listener for " + cacheOf(registration.channel) + " failed on a notification", e);
                 }
             }
         }
@@ -578,7 +584,8 @@ final class PostgresListener {
                     told.add(registration);
                 });
             }
-            LOGGER.log(Level.WARNING, "The PostgreSQL listener lost its connection ({0})", failure.getMessage());
+            LOGGER.log(Level.WARNING, "The PostgreSQL listener for {0} lost its connection ({1})", serving(),
+                    failure.getMessage());
             told.forEach(registration -> notify(() -> registration.listener.onLost(failure)));
         }
 
@@ -587,6 +594,11 @@ final class PostgresListener {
         private void discard(Held broken) {
             held = null;
             release(broken.connection);
+        }
+
+        // the caches it listens for, for its log messages: a session serves every cache on its data source
+        private String serving() {
+            return channels.keySet().stream().map(PostgresListener::cacheOf).sorted().collect(Collectors.joining(", "));
         }
 
         private static void notify(Runnable call) {

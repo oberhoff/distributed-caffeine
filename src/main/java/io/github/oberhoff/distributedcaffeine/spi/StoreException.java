@@ -18,9 +18,10 @@ package io.github.oberhoff.distributedcaffeine.spi;
 import org.jspecify.annotations.Nullable;
 
 /**
- * A store operation failed, classified by the store; the store does not retry. The core retries what is
- * retryable, as far as repeating the operation is safe (see "Write retries" in the design), with backoff, and takes
- * anything else a store throws for a failure that is not retryable, with the outcome of a write unknown.
+ * A call to the store failed. Unchecked; a cache throws it where it cannot answer without the store: a write or removal
+ * while the store does not answer, a write whose outcome is unknown, {@code getFromStore}, and {@code build()} when
+ * the store cannot be used. The cache has already retried what was safe to retry (a few attempts with backoff), so a
+ * caller sees it only once those are spent. Its flags tell what happened:
  * <ul>
  *     <li>{@link #isOutcomeUnknown()}: whether a write may have been applied, wholly or in part (a timeout or a
  *     connection broken after sending; a batch failing after part of it was written, see
@@ -29,6 +30,9 @@ import org.jspecify.annotations.Nullable;
  *     connection that could not be obtained or broke, a failover in progress); not, if it failed for good (a
  *     schema that does not fit, a row that cannot be read) or after waiting its whole timeout already.</li>
  * </ul>
+ * For adapter authors: a store classifies each failure with these flags and never retries itself; the cache retries
+ * what is retryable as far as repeating the call is safe, and takes anything else a store throws for a failure that
+ * is not retryable, with the outcome of a write unknown.
  *
  * @author Andreas Oberhoff
  */

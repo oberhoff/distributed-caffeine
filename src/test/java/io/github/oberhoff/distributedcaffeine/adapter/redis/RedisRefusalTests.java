@@ -29,9 +29,10 @@ import org.junit.jupiter.params.provider.ValueSource;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * A server the adapter refuses although its reported Redis version is supported (the subclass names its image): it
- * lacks a command the store needs, which the probe at store creation finds, through each client library. A server
- * running no scripts is refused alike ({@link RedisAclTests}, a user not allowed them).
+ * A server the adapter refuses at store creation, through each client library (the subclass names its image and the
+ * reason the refusal must give): one older than supported by its reported version, or one whose version is supported
+ * but that lacks a command the store needs, which the probe finds. A server running no scripts is refused alike
+ * ({@link RedisAclTests}, a user not allowed them).
  *
  * @author Andreas Oberhoff
  */
@@ -40,9 +41,16 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 abstract class RedisRefusalTests {
 
     private final RedisTestServer server;
+    private final String reason;
 
+    // refused by the probe for a missing command
     RedisRefusalTests(String image) {
+        this(image, "lacks commands the Redis adapter needs");
+    }
+
+    RedisRefusalTests(String image, String reason) {
         this.server = new RedisTestServer(image);
+        this.reason = reason;
     }
 
     @AfterAll
@@ -54,7 +62,7 @@ abstract class RedisRefusalTests {
     @ValueSource(strings = {"Lettuce", "Jedis", "Redisson"})
     // the store's close runs only once it was created, which the test fails on anyway
     @SuppressWarnings("java:S5778")
-    void a_server_lacking_a_stream_command_is_refused_at_store_creation(String library) {
+    void the_server_is_refused_at_store_creation_naming_why(String library) {
         RedisDriver driver = switch (library) {
             case "Lettuce" -> LettuceRedis.of(server.client);
             case "Jedis" -> JedisRedis.of(server.jedis);
@@ -69,7 +77,7 @@ abstract class RedisRefusalTests {
             }
         })
                 .isInstanceOf(StoreException.class)
-                .hasMessageContaining("lacks commands the Redis adapter needs")
+                .hasMessageContaining(reason)
                 .satisfies(e -> org.assertj.core.api.Assertions.assertThat(((StoreException) e).isRetryable())
                         .isFalse());
     }

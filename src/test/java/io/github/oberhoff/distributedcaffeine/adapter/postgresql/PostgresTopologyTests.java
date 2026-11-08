@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter.postgresql;
 
+import io.github.oberhoff.distributedcaffeine.AdapterConformanceTest;
 import io.github.oberhoff.distributedcaffeine.CacheBackend;
 import io.github.oberhoff.distributedcaffeine.CaffeineParityTest;
 import io.github.oberhoff.distributedcaffeine.InternalCoreTest;
@@ -143,6 +144,16 @@ abstract class PostgresTopologyTests implements Topology.Tests {
     @Nested
     @Suite(Kind.ADAPTER)
     class Adapter extends PostgresAdapterTest {
+    }
+
+    @Nested
+    @Suite(Kind.ADAPTER)
+    class Conformance extends AdapterConformanceTest {
+
+        @Override
+        protected AdapterConformance conformance() {
+            return new PostgresConformance();
+        }
     }
 
     @Nested

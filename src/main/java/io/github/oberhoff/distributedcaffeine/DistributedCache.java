@@ -24,7 +24,9 @@ import java.util.function.Function;
 /**
  * A Caffeine {@link Cache} whose instances share a store. Each instance holds its own copies, reads a key from the
  * store when it holds none, and drops or updates its copies when the key changes elsewhere. Behaves as Caffeine's
- * cache, except where a method documents otherwise.
+ * cache, except where a method documents otherwise. A call that needs the store and cannot reach it, or a write whose
+ * outcome is unknown, throws the unchecked {@link io.github.oberhoff.distributedcaffeine.spi.StoreException}; the
+ * README's remarks ("Store not answering", "Unknown write outcome") say which calls.
  *
  * @param <K> the key type
  * @param <V> the value type
@@ -73,8 +75,9 @@ public interface DistributedCache<K, V> extends Cache<K, V>, AutoCloseable {
     @Nullable V get(K key, Function<? super K, ? extends @Nullable V> mappingFunction);
 
     /**
-     * Closes this cache instance and releases its connections to the store. Afterwards every operation throws
-     * {@link IllegalStateException}, except {@code distributedPolicy().getSynchronizationState()}. Idempotent.
+     * Closes this cache instance and releases its connections to the store. The local copies are dropped without
+     * notifying the removal listener. Afterwards every operation throws {@link IllegalStateException}, except
+     * {@code distributedPolicy().getSynchronizationState()} and {@code distributedPolicy().stats()}. Idempotent.
      */
     @Override
     void close();

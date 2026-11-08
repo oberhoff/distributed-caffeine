@@ -186,8 +186,7 @@ public class CaffeineParityTest {
 
     // the null arguments and results are the point (both sides reject or skip them), and so are the views
     // (keySet().remove)
-    @SuppressWarnings({"NullArgumentForNonNullParameter", "DataFlowIssue", "RedundantCollectionOperation",
-            "NullableProblems"})
+    @SuppressWarnings({"NullArgumentForNonNullParameter", "DataFlowIssue", "RedundantCollectionOperation"})
     private static List<Operation> syncOperations(boolean withLocal) {
         List<Operation> operations = new ArrayList<>(List.of(
                 // Cache / LoadingCache
@@ -461,7 +460,7 @@ public class CaffeineParityTest {
     }
 
     // the futures are returned to outcome(), which waits for them; the null results are the point, as above
-    @SuppressWarnings({"FutureReturnValueIgnored", "NullableProblems"})
+    @SuppressWarnings("FutureReturnValueIgnored")
     private static List<Operation> asyncOperations(boolean withLocal) {
         List<Operation> operations = new ArrayList<>(List.of(
                 global("async.getIfPresent", random -> {

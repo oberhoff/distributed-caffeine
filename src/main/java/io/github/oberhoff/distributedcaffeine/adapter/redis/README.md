@@ -2,7 +2,9 @@
 
 Details of the Redis adapter beyond its configuration, which the [main README](../../../../../../../../../README.md)
 describes. It serves Redis (also Valkey, Dragonfly, Kvrocks). Every operation runs as one Lua script, and distribution
-uses Redis Streams. Building a cache fails right away with an explanation if the setup cannot support it.
+uses Redis Streams (versions: see
+[Requirements](../../../../../../../../../README.md#requirements)). A server without Lua scripts that call stream commands, such
+as Garnet, is refused. Building a cache fails right away with an explanation if the setup cannot support it.
 
 ## Client libraries
 
@@ -20,13 +22,18 @@ again. Each command is bounded by the cache's operation timeout, also where cach
 client.
 
 * Lettuce: The cache opens connections of its own through the client. In a cluster, Lettuce follows slot moves and
-  failovers through adaptive topology refresh, on by default since Lettuce 7 (before, enable it in
-  `ClusterTopologyRefreshOptions`).
+  failovers through adaptive topology refresh, on by default.
 * Jedis: The cache borrows a connection from the client's pool per command, and holds one for as long as it listens for
   changes, so the pool needs one connection more (in a cluster, the pool of the node holding the keyspace).
 * Redisson: Its own timeouts and retries apply within the cache's operation timeout. Redisson replaces a connection the
   network silently stopped carrying only when its ping fails (`pingConnectionInterval`, 30 seconds by default); until
   then, commands on it time out. A shorter interval, such as one second, recovers sooner.
+
+## Names
+
+The keyspace name has 1 to 100 letters, digits, `-`, `_`, `.` and `:` (no braces, which would break its hash tag);
+the discriminator has 1 to 100 letters, digits, `-`, `_` and `.` (no colon, so that one cache's keys never begin with
+another's). A name outside these is rejected when the adapter is built.
 
 ## Topologies
 
@@ -52,6 +59,13 @@ by one across its threads by default; with the flag, the keys of a keyspace are 
 about twice as fast and keeps a hot key from slowing down by orders of magnitude. The cache stays correct either way.
 
 Not supported: Dragonfly behind Sentinel, and failovers in a Dragonfly cluster.
+
+## Kvrocks
+
+Kvrocks keeps its data on disk (in RocksDB) and evicts nothing, so the advice on memory above does not apply; it has no
+ACL users either, only a password. Behind Sentinel it works (tested, though Kvrocks does not document it). A Kvrocks
+cluster takes its layout, and its failovers, from a controller such as `kvrocks-controller`; the cache follows them as
+in any cluster (tested with the layout pushed by the tests, not with `kvrocks-controller` itself).
 
 ## Access control
 

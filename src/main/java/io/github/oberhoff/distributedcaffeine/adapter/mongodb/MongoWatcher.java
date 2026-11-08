@@ -512,7 +512,8 @@ final class MongoWatcher {
 
         private void collectionGone(ChangeStreamDocument<BsonDocument> event) {
             String collection = event.getNamespace() == null ? null : event.getNamespace().getCollectionName();
-            LOGGER.log(Level.WARNING, "Collection {0} in {1} was dropped or renamed; gap", collection, databaseName);
+            LOGGER.log(Level.WARNING, "Collection {0} in {1} was dropped or renamed; the caches check what they hold "
+                    + "against the store", collection, databaseName);
             for (Map.Entry<String, List<Registration>> scope : scopes.entrySet()) {
                 if (collection == null || scope.getKey().startsWith(collection + "\0")) {
                     for (Registration registration : scope.getValue()) {
@@ -531,7 +532,8 @@ final class MongoWatcher {
             try {
                 dispatch(event);
             } catch (RuntimeException e) {
-                LOGGER.log(Level.WARNING, "A change event on " + databaseName + " could not be dispatched; gap", e);
+                LOGGER.log(Level.WARNING, "A change event on " + databaseName + " could not be dispatched; the caches "
+                        + "check what they hold against the store", e);
                 forEachRegistration(registration -> registration.listener.onGap());
             }
         }
@@ -603,7 +605,7 @@ final class MongoWatcher {
                 try {
                     registration.listener.onChanges(List.of(message));
                 } catch (RuntimeException e) {
-                    LOGGER.log(Level.WARNING, "A listener failed on a change event", e);
+                    LOGGER.log(Level.WARNING, "A listener on " + databaseName + " failed on a change event", e);
                 }
             }
         }
@@ -651,8 +653,8 @@ final class MongoWatcher {
 
         // the history lost: reopened at once without the token, a gap; if that fails, lost (a resume is a gap anyway)
         private void reopenFresh(Exception failure) {
-            LOGGER.log(Level.WARNING, "The change stream on {0} lost its history ({1}); reopening, gap",
-                    databaseName, failure.getMessage());
+            LOGGER.log(Level.WARNING, "The change stream on {0} lost its history ({1}); reopening, and the caches "
+                    + "check what they hold against the store", databaseName, failure.getMessage());
             List<Registration> told = new ArrayList<>();
             try {
                 synchronized (this) {

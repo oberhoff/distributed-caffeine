@@ -15,16 +15,22 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter.jdbc;
 
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
+import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
 import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.mariadb.jdbc.MariaDbDataSource;
+import org.testcontainers.mariadb.MariaDBContainer;
 
 import static io.github.oberhoff.distributedcaffeine.adapter.jdbc.JdbcTestDatabase.MARIADB_CONNECTOR_J;
 import static io.github.oberhoff.distributedcaffeine.adapter.jdbc.JdbcTestDatabase.MYSQL_CONNECTOR_J;
 import static io.github.oberhoff.distributedcaffeine.testing.Topology.Tests.RUNS_ON_GITHUB;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Every MariaDB and MySQL image the suites run on, one at a time (VISION.md, "MariaDB and MySQL", step 3): from the
@@ -185,6 +191,29 @@ class JdbcIntegrationTest {
 
         MariaDB_13_latest() {
             super("mariadb:13", MARIADB_CONNECTOR_J);
+        }
+    }
+
+    @Nested
+    @DisplayName("MariaDB 13 latest (Galera node, refused)")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    class MariaDB_13_latest__Galera_Refused {
+
+        // a cluster of one node, bootstrapped from the official image, which ships the Galera library
+        @Test
+        void a_galera_cluster_node_is_refused_naming_the_reason() throws Exception {
+            try (MariaDBContainer server = new MariaDBContainer("mariadb:13").withCommand("--wsrep-on=ON",
+                    "--wsrep-provider=/usr/lib/galera/libgalera_smm.so", "--wsrep-cluster-address=gcomm://",
+                    "--binlog-format=ROW", "--innodb-autoinc-lock-mode=2", "--character-set-server=utf8mb4")) {
+                server.start();
+                MariaDbDataSource dataSource = new MariaDbDataSource(server.getJdbcUrl());
+                dataSource.setUser(server.getUsername());
+                dataSource.setPassword(server.getPassword());
+                DistributedCaffeine<String, String> builder = DistributedCaffeine.newBuilder(
+                        MariaDbAdapter.newBuilder(dataSource, "cache").build());
+                assertThatThrownBy(builder::build).isInstanceOf(StoreException.class)
+                        .hasMessageContaining("Galera cluster node").hasMessageContaining("MDEV-38977");
+            }
         }
     }
 

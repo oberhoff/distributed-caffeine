@@ -16,6 +16,10 @@ jobs:
     steps:
       - name: Checkout branch
         uses: actions/checkout@v7
+      # JDK 25, not the baseline 17: Error Prone and NullAway, which the build runs, need JDK 21 or newer. The
+      # compiler's release 17 (pom.xml) still rejects any API newer than Java 17; the tests run on Java 17 in the
+      # nightly full matrix (nightly-full-matrix-tests.yml), and the release is built with JDK 17
+      # (continuous-delivery.yml)
       - name: Set up JDK 25
         uses: actions/setup-java@v6
         with:

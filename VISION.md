@@ -4034,7 +4034,7 @@ versions and stores that cannot; stores with a global counter and stores without
    | Applied     | Rule                                                        | Version                 | Refused                                    |
    |-------------|-------------------------------------------------------------|-------------------------|--------------------------------------------|
    | conditional | only if proposed > stored                                   | v = proposed            | when a version at least as large is stored |
-   | assigning   | always: v = max(stored + 1, proposed [, the server's time]) | v returned by the store | never                                      |
+   | assigning   | always: v = max(stored + 1, proposed, server time if any)   | v returned by the store | never                                      |
 
    The core treats both alike: it takes the version reported back (in L1, in its clock, as what its messages announce);
    on a refusal it reads and proposes again above (as now). No capability flags: a store that can do more is simply

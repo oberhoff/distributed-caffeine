@@ -82,8 +82,12 @@ final class InternalDelivery implements ChangeListener {
         schedule();
     }
 
+    // a gap the store reports (a history it could no longer resume from, its rows removed at once, a poll after
+    // failed ones): logged here, once for every store, whose adapters log the cause where they know it
     @Override
     public void onGap() {
+        LOGGER.log(System.Logger.Level.INFO, name + ": Changes may have been missed; what is held is checked against "
+                + "the store");
         queue.add(Marker.GAP);
         schedule();
     }
@@ -118,6 +122,9 @@ final class InternalDelivery implements ChangeListener {
 
     // fallen too far behind: what is pending is dropped (the markers kept, in order) and replaced by a gap
     private void dropPending() {
+        LOGGER.log(System.Logger.Level.WARNING, name + ": The cache fell behind the change feed (more than "
+                + MAXIMUM_PENDING + " changes pending); they are dropped, and what is held is checked against the "
+                + "store");
         queue.removeIf(item -> {
             if (item instanceof List<?> messages) {
                 pending.addAndGet(-messages.size());

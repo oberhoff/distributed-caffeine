@@ -418,7 +418,7 @@ final class PostgresStore implements Store, ChangeFeed {
             // the pool waited for a connection for its whole timeout already: waiting again only multiplies that
             throw new StoreException(accessing() + " failed: " + e.getMessage(), e, false, false);
         } catch (SQLException e) {
-            throw new StoreException("Connecting for " + table + " failed: " + e.getMessage(), e, false, true);
+            throw new StoreException("Connecting to " + table + " failed: " + e.getMessage(), e, false, true);
         }
         try (connection) {
             int previousTimeout = bound(connection, timeout);
@@ -540,7 +540,7 @@ final class PostgresStore implements Store, ChangeFeed {
     }
 
     // the connection broke during the statement: it may have committed
-    private static boolean connectionLost(SQLException e) {
+    static boolean connectionLost(SQLException e) {
         String state = e.getSQLState();
         return state != null && state.startsWith("08");
     }
@@ -566,8 +566,8 @@ final class PostgresStore implements Store, ChangeFeed {
              ResultSet resultSet = statement.executeQuery("SELECT pg_is_in_recovery()")) {
             resultSet.next();
             if (resultSet.getBoolean(1)) {
-                throw new StoreException("The data source reaches a standby; distributed-caffeine needs the primary",
-                        false);
+                throw new StoreException("The data source reaches a standby; distributed-caffeine needs the primary "
+                        + "(with several hosts in the URL, set targetServerType=primary)", false);
             }
         }
         PRIMARIES.put(physical, Boolean.TRUE);

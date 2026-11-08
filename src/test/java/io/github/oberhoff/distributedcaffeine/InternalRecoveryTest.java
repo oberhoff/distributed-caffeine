@@ -204,19 +204,23 @@ public class InternalRecoveryTest {
         assertThat(cache.distributedPolicy().stats().interruptionCount()).isZero();
         assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
 
-        // delivery stops without any error: the change is not announced, the copy would be served for good
-        faults.pauseDelivery();
-        other.put("k", "new");
+        try (LogCapture log = new LogCapture()) {
+            // delivery stops without any error: the change is not announced, the copy would be served for good
+            faults.pauseDelivery();
+            other.put("k", "new");
 
-        await(() -> cache.distributedPolicy().stats().interruptionCount() == 1);
-        assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
-        assertThat(cache.getIfPresent("k")).as("checked against the store").isEqualTo("new");
+            await(() -> cache.distributedPolicy().stats().interruptionCount() == 1);
+            assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+            assertThat(cache.getIfPresent("k")).as("checked against the store").isEqualTo("new");
+            assertThat(log.count("The change feed seems silent")).as("logged once: " + log.text()).isEqualTo(1);
 
-        // delivering again: the next beat ends the silence with a gap (after those of the resumes while silent)
-        long gaps = cache.distributedPolicy().stats().gapCount();
-        faults.resumeDelivery();
-        await(() -> cache.distributedPolicy().stats().gapCount() > gaps);
-        await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
+            // delivering again: the next beat ends the silence with a gap (after those of the resumes while silent)
+            long gaps = cache.distributedPolicy().stats().gapCount();
+            faults.resumeDelivery();
+            await(() -> cache.distributedPolicy().stats().gapCount() > gaps);
+            await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
+            assertThat(log.text()).as("the gap logged").contains("Changes may have been missed");
+        }
         assertThat(cache.distributedPolicy().stats().interruptionCount()).isEqualTo(1);
         assertThat(cache.distributedPolicy().stats().invalidatedMessageCount()).as("beats are not counted").isZero();
     }
@@ -451,12 +455,15 @@ public class InternalRecoveryTest {
     void maintenance_failing_while_the_store_answers_is_logged_once_and_once_more_when_it_succeeds_again() {
         // the in-memory store's faults: skipped on a real database before anything is set up
         InMemoryDatabase faults = backend.faults();
+        // maintenance every 200 ms, reads every 10 ms: the guard opens only after three failures in a row, so the
+        // maintenance runs alone must not come that close together (at 50 ms, a busy CI runner let three of them pass
+        // between two reads); the reads go on for a second, several failing runs
         DistributedLoadingCache<String, String> cache = track(counted(Duration.ofMillis(200), 1_000,
-                Duration.ofMillis(50)).build(key -> "v"));
+                Duration.ofMillis(200)).build(key -> "v"));
         cache.put("k", "v");
         try (LogCapture log = new LogCapture()) {
             faults.failNextWrites(Integer.MAX_VALUE, false); // every write fails, maintenance's too, reads answer
-            for (int i = 0; i < 40; i++) {
+            for (int i = 0; i < 100; i++) {
                 cache.distributedPolicy().getFromStore("k");
                 pause(10);
             }

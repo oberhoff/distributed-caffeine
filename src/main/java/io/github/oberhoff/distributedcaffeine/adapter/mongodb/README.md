@@ -6,9 +6,16 @@ cache fails right away with an explanation if the setup cannot support it.
 
 ## Deployments
 
-The adapter needs MongoDB 4.4 or newer as a replica set (a single node replica set is sufficient) or a sharded cluster
-through `mongos`, since change streams and majority reads need one. A standalone server is refused. In a sharded
-cluster, the collection itself must not be sharded; a sharded collection is refused.
+The adapter needs a replica set (a single node replica set is sufficient) or a sharded cluster through `mongos`, since
+change streams and majority reads need one (versions: see
+[Requirements](../../../../../../../../../README.md#requirements)). A standalone server is refused, as is an older
+one. In a sharded cluster, the collection itself must not be sharded; a sharded collection is refused.
+
+## Names
+
+The database name has up to 63 bytes, without `/`, `\`, `.`, space, `"`, `$`, `*`, `<`, `>`, `:`, `|` or `?`; the
+collection name has no `$` and does not begin with `system.`; together they have up to 255 bytes. The discriminator is
+not blank. A name outside these is rejected when the adapter is built.
 
 ## Consistency
 
@@ -29,9 +36,12 @@ once the migration is done.
 
 The caches on one client share one change stream per database, whatever the number of caches and collections.
 
+The user needs the built-in role `readWrite` on the database (through `mongos`, also `read` on the `config` database);
+without it, building a cache fails naming the role.
+
 ## Timeouts
 
-The cache's operation timeout (`withOperationTimeout(...)`, 30 seconds by default) becomes the driver's client-side
+The cache's operation timeout (`withOperationTimeout(...)`, 10 seconds by default) becomes the driver's client-side
 operation timeout for the cache's own operations, so caches sharing a client may have different ones, and the driver
 retries a write within it while the primary changes. A timeout set on the client itself (the connection string option
 `timeoutMS`) applies instead. The driver's wait for a pooled connection is covered by the timeout as well.
@@ -39,9 +49,11 @@ retries a write within it while the primary changes. A timeout set on the client
 ## Failovers
 
 While the primary changes, writes are retried by the driver until the operation timeout runs out, so a timeout above the
-duration of an election (for example 30 seconds) lets them through. Confirmed writes survive the failover (see
-[Consistency](#consistency)). On MongoDB 4.4.0, a new primary waits for catching up with an unreachable old one
-indefinitely by default; `catchUpTimeoutMillis` bounds that.
+duration of an election lets them through. The default of 10 seconds covers a planned step-down, but not always a
+primary that fails, which the others notice only after `electionTimeoutMillis` (10 seconds by default); 30 seconds lets
+writes ride that out as well. Confirmed writes survive the failover (see [Consistency](#consistency)). On MongoDB 4.4.0,
+a new primary waits for catching up with an unreachable old one indefinitely by default; `catchUpTimeoutMillis` bounds
+that.
 
 ## Change history
 

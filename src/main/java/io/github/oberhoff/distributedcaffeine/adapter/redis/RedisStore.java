@@ -76,11 +76,18 @@ final class RedisStore implements Store, ChangeFeed {
     private final RedisDriver driver;
     private final RedisSession session;
     private final RedisKeys keys;
+    private final String product;
 
-    RedisStore(RedisDriver driver, RedisSession session, RedisKeys keys) {
+    RedisStore(RedisDriver driver, RedisSession session, RedisKeys keys, String product) {
         this.driver = driver;
         this.session = session;
         this.keys = keys;
+        this.product = product;
+    }
+
+    // the server's product (Redis, Valkey, Dragonfly, Kvrocks), for log messages
+    String product() {
+        return product;
     }
 
     // reads
@@ -145,7 +152,12 @@ final class RedisStore implements Store, ChangeFeed {
 
     @Override
     public WriteResult write(Collection<Write> writes) {
-        return write(writes, UUID.randomUUID().toString());
+        return write(writes, newRequestId());
+    }
+
+    // the ID under which a write request is applied at most once, however often it is sent
+    private static String newRequestId() {
+        return UUID.randomUUID().toString();
     }
 
     // a request applied at most once under its ID, whoever sends it again (RedisScripts#WRITE)
@@ -360,7 +372,7 @@ final class RedisStore implements Store, ChangeFeed {
         try {
             return command.get();
         } catch (RedisCommandException e) {
-            throw failure(e, write, keys.name());
+            throw failure(e, write, keys.name(), product);
         } catch (StoreException e) {
             throw e;
         } catch (RuntimeException e) {
@@ -369,7 +381,7 @@ final class RedisStore implements Store, ChangeFeed {
         }
     }
 
-    static StoreException failure(RedisCommandException e, boolean write, String name) {
+    static StoreException failure(RedisCommandException e, boolean write, String name, String product) {
         String unknown = write ? ", the outcome unknown" : "";
         String accessing = "Accessing " + name;
         return switch (e.kind()) {
@@ -379,8 +391,8 @@ final class RedisStore implements Store, ChangeFeed {
                     + e.getMessage(), e, write, true);
             case UNAVAILABLE -> new StoreException(accessing + " was refused for now: " + e.getMessage(), e,
                     false, true);
-            case OUT_OF_MEMORY -> new StoreException("Redis is out of memory (maxmemory with noeviction) for " + name
-                    + ": " + e.getMessage(), e, false, false);
+            case OUT_OF_MEMORY -> new StoreException(product + " is out of memory (maxmemory with noeviction) for "
+                    + name + ": " + e.getMessage(), e, false, false);
             case SCRIPT -> new StoreException("A script failed on " + name + unknown + ": " + e.getMessage(), e, write,
                     false);
             case REFUSED -> new StoreException(accessing + " failed: " + e.getMessage(), e, false, false);

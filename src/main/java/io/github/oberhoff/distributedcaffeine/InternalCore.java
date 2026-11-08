@@ -188,9 +188,7 @@ final class InternalCore<K, V> {
     // what an atomic update found and left
     record Update<V>(@Nullable V oldValue, @Nullable V newValue) {
 
-        // the key removed: nothing new. Suppressed: the components are nullable themselves, but IntelliJ moves the null
-        // literal into the type argument
-        @SuppressWarnings("NullableProblems")
+        // the key removed: nothing new
         static <V> Update<V> removed(@Nullable V oldValue) {
             return new Update<>(oldValue, null);
         }
@@ -221,6 +219,7 @@ final class InternalCore<K, V> {
     private final InternalVersion clock;
     // when the last warning of a clock ahead was logged, at most one a minute
     private final AtomicLong clockAheadWarned = new AtomicLong();
+    private final AtomicLong unreadableWarned = new AtomicLong();
     // when a failed write of AsyncCache.put was last logged (asyncWriteLost)
     private final AtomicLong asyncWriteLostWarned = new AtomicLong();
     // the atomic map operations (compute, replace, merge and their kin) against this instance's own invalidateAll,
@@ -377,6 +376,15 @@ final class InternalCore<K, V> {
             }
             store.close();
         } finally {
+            // emptied so that a closed instance someone still references holds no memory; unseen by the user's
+            // removal listener, as these are no removals in the cache's sense (else a listener acting on removals
+            // would act on every copy at shutdown). A load still in flight completes unmarked and may be reported
+            for (CompletableFuture<InternalValue<V>> copy : l1.asMap().values()) {
+                InternalValue<V> value = completedValue(copy);
+                if (value != null) {
+                    value.removalSilent();
+                }
+            }
             l1.synchronous().invalidateAll();
             onClose.run();
         }
@@ -943,7 +951,8 @@ final class InternalCore<K, V> {
         long last = clockAheadWarned.get();
         if ((last == 0 || now - last > TimeUnit.MINUTES.toNanos(1)) && clockAheadWarned.compareAndSet(last, now)) {
             LOGGER.log(System.Logger.Level.WARNING, name + ": A version written by a clock "
-                    + Duration.ofMillis(aheadMillis) + " ahead of this instance's was seen"
+                    + Duration.ofMillis(aheadMillis) + " ahead of this instance's was seen (check the clocks of the "
+                    + "instances and the store servers)"
                     + (aheadMillis > InternalVersion.FOLLOW_LIMIT_MILLIS
                     ? "; more than a day: not followed, a write on such a key goes just above it"
                     : "; followed: the versions here move ahead with it") + " (distributedPolicy().stats()"
@@ -1165,8 +1174,8 @@ final class InternalCore<K, V> {
         Collection<Write> pending = new ArrayList<>(writes.values());
         for (int attempt = 1; !pending.isEmpty(); attempt++) {
             if (attempt > ADVANCE_ATTEMPTS) {
-                throw new StoreException("A write was refused " + ADVANCE_ATTEMPTS + " times by larger versions",
-                        null, false, true);
+                throw new StoreException("A write was refused " + ADVANCE_ATTEMPTS + " times, each time by a newer "
+                        + "version of the key written concurrently; it can be tried again", null, false, true);
             }
             Collection<Write> attempted = pending;
             WriteResult result = put ? guard.put(() -> store.write(attempted))
@@ -1524,7 +1533,7 @@ final class InternalCore<K, V> {
                         if (completedWhenPut) {
                             caffeineStats.skipLoadSuccess();
                         }
-                        owned.complete(new InternalValue<V>(value, version, writeEpoch).bind(internalKey));
+                        owned.complete(new InternalValue<>(value, version, writeEpoch).bind(internalKey));
                     } catch (StoreException e) {
                         // a write that failed, which the caller of put cannot be told: the key is absent here, as on
                         // the other instances (or as written, if the outcome is unknown: read from the store), so
@@ -1777,8 +1786,8 @@ final class InternalCore<K, V> {
                 return write.version();
             }
             stats.increment(Counter.UNKNOWN_OUTCOME);
-            throw new StoreException("A write whose answer was lost was refused when repeated, by its own row or "
-                    + "another writer's: its outcome unknown", null, true, false);
+            throw new StoreException("The store's answer to a write was lost, and repeating the write was refused, by "
+                    + "the write itself or by a concurrent one: its outcome is unknown", null, true, false);
         }
         stats.increment(Counter.CONFLICT);
         return REFUSED;
@@ -2336,7 +2345,7 @@ final class InternalCore<K, V> {
             }
             return;
         }
-        LOGGER.log(System.Logger.Level.INFO, name + ": The change feed resumed; revalidating what is held");
+        LOGGER.log(System.Logger.Level.INFO, name + ": The change feed resumed");
         queue.onGap();
         resuming.set(false);
         if (losses.get() != seen) {
@@ -2358,6 +2367,8 @@ final class InternalCore<K, V> {
     // again only after a gap
     private void silenced() {
         stats.increment(Counter.INTERRUPTION);
+        LOGGER.log(System.Logger.Level.WARNING, name + ": The change feed seems silent (no heartbeat arrived in time); "
+                + "it is re-established, and until then every read checks its copy against the store");
         superviseResume();
     }
 
@@ -2390,7 +2401,6 @@ final class InternalCore<K, V> {
             return value;
         }
         Long stored = versions.get(internalKey.hash());
-        stats.increment(Counter.REVALIDATED);
         if (stored != null && stored == value.version()) {
             stats.increment(Counter.REVALIDATION_KEPT);
             value.confirm(current);
@@ -2424,7 +2434,6 @@ final class InternalCore<K, V> {
         } catch (StoreException e) {
             return;
         }
-        stats.add(Counter.REVALIDATED, toCheck.size());
         toCheck.forEach((internalKey, held) -> {
             Long stored = versions.get(internalKey.hash());
             InternalValue<V> value = held.join();
@@ -2521,6 +2530,9 @@ final class InternalCore<K, V> {
                     default -> store.pruneTombstones(InternalMaintenance.TOMBSTONE_RETENTION, limit);
                 }, Operation.WRITE);
                 guard.success();
+                if (current < 2) { // tombstones are no values, so their pruning is not counted
+                    stats.add(current == 0 ? Counter.MAINTENANCE_EXPIRED : Counter.MAINTENANCE_PRUNED, changed);
+                }
                 if (changed >= limit) {
                     pause = Duration.ofNanos(environment.nanoTime() - start);
                     break;
@@ -2860,7 +2872,23 @@ final class InternalCore<K, V> {
             return valueSerializer.deserialize(requireNonNull(row.value()));
         } catch (InternalSerializer.SerializationException e) {
             stats.increment(Counter.UNREADABLE_ROW);
+            unreadable(e);
             return null;
+        }
+    }
+
+    // a stored value this instance cannot deserialize: counted, and logged at most once a minute, so that instances
+    // whose serializers or value classes differ are noticed also without stats (each such read becomes a load);
+    // expected for a while during a rolling update that changes them
+    private void unreadable(InternalSerializer.SerializationException e) {
+        long now = environment.nanoTime();
+        long last = unreadableWarned.get();
+        if ((last == 0 || now - last > TimeUnit.MINUTES.toNanos(1)) && unreadableWarned.compareAndSet(last, now)) {
+            Throwable cause = e.getCause();
+            LOGGER.log(System.Logger.Level.WARNING, name + ": A stored value could not be read and counts as a miss, "
+                    + "so it is loaded again: " + e.getMessage() + (cause == null ? "" : " (" + cause + ")")
+                    + ". The instances may use different serializers or value classes, which is expected during a "
+                    + "rolling update that changes them (distributedPolicy().stats().unreadableRowCount())");
         }
     }
 
@@ -2916,7 +2944,7 @@ final class InternalCore<K, V> {
 
     // a future that may complete with null (nothing found), handed to Caffeine as one of its values, which its types
     // cannot express for a value type that is not nullable; the very same instance
-    @SuppressWarnings({"NullableProblems", "NullAway"}) // the null Caffeine's types cannot express, see above
+    @SuppressWarnings("NullAway") // the null Caffeine's types cannot express, see above
     private static <T> CompletableFuture<T> heldFuture(CompletableFuture<@Nullable T> future) {
         return future;
     }

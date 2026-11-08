@@ -27,6 +27,7 @@ import io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
+import io.github.oberhoff.distributedcaffeine.testing.LogCapture;
 import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
@@ -316,8 +317,11 @@ abstract class PostgresAdapterTest {
 
     @Test
     void the_table_is_created_with_marker_index_and_columns_and_reused() throws SQLException {
-        cache(Function.identity()).put("k", "v");
-        cache(Function.identity());
+        try (LogCapture log = new LogCapture()) {
+            cache(Function.identity()).put("k", "v");
+            cache(Function.identity());
+            assertThat(log.count("Created table")).as("once, by the first: " + log.text()).isEqualTo(1);
+        }
 
         assertThat(query("SELECT obj_description(to_regclass('adapter.\"" + table + "\"')::oid, 'pg_class')"))
                 .isEqualTo(PostgresTable.MARKER);
@@ -329,6 +333,22 @@ abstract class PostgresAdapterTest {
         assertThat(columnType(table, "basis")).isNull();
         assertThat(query("SELECT to_regclass('adapter.\"" + table + "_versions\"') IS NOT NULL"))
                 .as("the version sequence").isEqualTo("t");
+    }
+
+    @Test
+    void a_table_without_its_index_is_used_and_warned_of_with_the_ddl() throws SQLException {
+        cache(Function.identity()).close();
+        String index = query("SELECT indexname FROM pg_indexes WHERE schemaname = 'adapter' AND tablename = '" + table
+                + "' AND indexdef NOT LIKE '%UNIQUE%'");
+        database.execute("DROP INDEX adapter.\"" + requireNonNull(index) + "\"");
+
+        try (LogCapture log = new LogCapture()) {
+            DistributedCache<String, String> cache = cache(Function.identity());
+            cache.put("k", "v");
+            assertThat(cache.getIfPresent("k")).isEqualTo("v");
+            assertThat(log.count("has no index on (discriminator, state, write_time)")).as(log.text()).isEqualTo(1);
+            assertThat(log.text()).contains("CREATE INDEX");
+        }
     }
 
     @Test
@@ -363,14 +383,16 @@ abstract class PostgresAdapterTest {
         database.execute("CREATE SCHEMA IF NOT EXISTS adapter");
         database.execute("CREATE TABLE adapter.\"" + table + "\" (id text)");
         database.execute("INSERT INTO adapter.\"" + table + "\" VALUES ('foreign')");
-        assertThatThrownBy(() -> track(strings(adapter().withSchemaReset().build()).build()))
+        DistributedCaffeine<String, String> resetting = strings(adapter().withSchemaReset().build());
+        assertThatThrownBy(resetting::build)
                 .isInstanceOf(StoreException.class).hasMessageContaining("not distributed-caffeine's");
         assertThat(query("SELECT count(*) FROM adapter.\"" + table + "\"")).as("kept").isEqualTo("1");
 
         database.execute("COMMENT ON TABLE adapter.\"" + table + "\" IS 'distributed-caffeine schema 2'");
         for (boolean reset : new boolean[] {false, true}) {
-            PostgresAdapter.Builder builder = reset ? adapter().withSchemaReset() : adapter();
-            assertThatThrownBy(() -> track(strings(builder.build()).build())).isInstanceOf(StoreException.class)
+            DistributedCaffeine<String, String> builder = strings((reset ? adapter().withSchemaReset() : adapter())
+                    .build());
+            assertThatThrownBy(builder::build).isInstanceOf(StoreException.class)
                     .hasMessageContaining("another version").hasMessageContaining("schema 2");
         }
         assertThat(query("SELECT count(*) FROM adapter.\"" + table + "\"")).as("kept").isEqualTo("1");

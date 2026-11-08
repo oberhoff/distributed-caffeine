@@ -209,7 +209,10 @@
             <version>${testcontainers.version}</version>
             <scope>test</scope>
         </dependency>
-        <!-- linearizability of the operations under concurrency: stress runs and model checking -->
+        <!-- linearizability of the operations under concurrency: stress runs and model checking. It brings ASM 9.9.1,
+             which IDEs flag for known vulnerabilities; keep it: Lincheck 3.7's model checking fails with ASM 9.11.1
+             (Caffeine's classes no longer initialize under its instrumentation, tried 2026-11-08), and ASM is used by
+             the tests only, on the project's own classes, never part of the library -->
         <dependency>
             <groupId>org.jetbrains.lincheck</groupId>
             <artifactId>lincheck</artifactId>

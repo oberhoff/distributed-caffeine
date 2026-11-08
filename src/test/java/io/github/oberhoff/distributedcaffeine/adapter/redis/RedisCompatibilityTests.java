@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter.redis;
 
+import io.github.oberhoff.distributedcaffeine.AdapterConformanceTest;
 import io.lettuce.core.cluster.api.sync.RedisClusterCommands;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterAll;
@@ -110,6 +111,15 @@ abstract class RedisCompatibilityTests {
         @Override
         protected RedisCommandException.Kind unreachable() {
             return RedisCommandException.Kind.TIMEOUT;
+        }
+    }
+
+    @Nested
+    class Conformance extends AdapterConformanceTest {
+
+        @Override
+        protected AdapterConformance conformance() {
+            return new RedisConformance(server);
         }
     }
 

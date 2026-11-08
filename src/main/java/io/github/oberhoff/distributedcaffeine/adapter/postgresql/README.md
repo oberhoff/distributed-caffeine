@@ -4,10 +4,10 @@ Details of the PostgreSQL adapter beyond its configuration, which the
 [main README](../../../../../../../../../README.md) describes. Distribution uses PostgreSQL's `LISTEN`/`NOTIFY`, which
 keeps a connection open for listening. In short:
 
-* Any data source that reaches the primary works.
+* Any data source that reaches the primary works (versions: see [Requirements](../../../../../../../../../README.md#requirements)).
 * Behind a pooler in transaction mode, listening needs a direct or session-mode connection, specified using
   `withListenerDataSource(...)`.
-* Building a cache checks both and fails right away with an explanation if either is not met.
+* Building a cache checks both, and the server's version, and fails right away with an explanation if one is not met.
 
 ## Table
 
@@ -18,9 +18,16 @@ recreates a table of 0.x (or an empty one), never one of another version of this
 Instances of 0.x still running fail on the new table, so stop them before the first new instance starts, or accept
 their errors until they are replaced. Remove `withSchemaReset()` once the migration is done.
 
-A table holds one format (bytes, text or JSON): its `key` and `value` columns are `bytea`, `text` or `jsonb`, after what
-the serializers of its first cache store. Caches sharing a table need serializers of the same format, and a cache whose
-serializers switch format needs another table; building refuses a table created for another format.
+A table's `key` column holds one format and its `value` column one format (bytes, text or JSON, as `bytea`, `text` or
+`jsonb`), after what the key and value serializers of its first cache store; the two may differ. Caches sharing a table
+need serializers of the same formats, and a cache whose serializers switch format needs another table (removing the
+values with `invalidateAll()` is not enough); building refuses a table created for other formats.
+
+## Names
+
+The schema and the table names have up to 63 bytes each and are quoted, so their case is kept (`Cache` and `cache` are
+two tables); the schema is created if missing. The discriminator is not blank. A name outside these is rejected when
+the adapter is built.
 
 ## Listening
 
@@ -55,7 +62,7 @@ on the primary there.
 
 ## Timeouts
 
-The cache's operation timeout (`withOperationTimeout(...)`, 30 seconds by default) becomes the network timeout of each
+The cache's operation timeout (`withOperationTimeout(...)`, 10 seconds by default) becomes the network timeout of each
 connection borrowed for an operation, restored before the connection goes back, so a connection the network silently
 stopped carrying fails the operation in time, and caches sharing a data source may have different timeouts. The wait for
 a pooled connection is the pool's own (such as HikariCP's `connectionTimeout`, 30 seconds by default): set it no higher

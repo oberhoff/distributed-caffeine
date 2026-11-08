@@ -34,7 +34,10 @@ import java.util.UUID;
 import java.util.function.ToLongFunction;
 
 /**
- * Computes a key's hash from its parts: put each value that {@code equals} compares, then call {@link #getHash()}.
+ * Computes a key's hash from its parts: put each value that {@code equals} compares, then call {@link #getHash()}. The
+ * hash is 128 bits (xxh3, from <a href="https://github.com/dynatrace-oss/hash4j">hash4j</a>, whose {@code HashSink}
+ * methods it offers); for a string, {@link #putString(String)} is the usual choice, as it also marks where the string
+ * ends, so that {@code ("ab", "c")} and {@code ("a", "bc")} hash differently.
  *
  * @author Andreas Oberhoff
  */
@@ -175,14 +178,14 @@ public final class Hasher implements HashSink {
     }
 
     @Override
-    public HashSink putCharsUTF8(CharSequence c) {
+    public Hasher putCharsUTF8(CharSequence c) {
         hashStream128.putCharsUTF8(c);
         hasData = true;
         return this;
     }
 
     @Override
-    public HashSink putStringUTF8(String s) {
+    public Hasher putStringUTF8(String s) {
         hashStream128.putStringUTF8(s);
         hasData = true;
         return this;

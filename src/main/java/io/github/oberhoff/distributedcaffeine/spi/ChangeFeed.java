@@ -17,8 +17,9 @@ package io.github.oberhoff.distributedcaffeine.spi;
 
 /**
  * The announcements of a store's writes, which distribution needs: a {@link Store} that can announce its writes
- * also implements this. A store that cannot (a plain key-value store without notifications, say) leaves it out, and
- * its caches then support only {@code DistributionMode.NONE}: building one with distribution fails at once.
+ * also implements this. A store that cannot (a database without notifications, say) leaves it out and implements
+ * {@link ChangeScan} instead, which the core polls; with neither, its caches support only
+ * {@code DistributionMode.NONE}: building one with distribution fails at once.
  * <p>
  * The contract; each point is checked by the tests named after it in {@code ChangeFeedContractTest}
  * ({@code contractN_...}):

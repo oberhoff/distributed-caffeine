@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter.jdbc;
 
+import io.github.oberhoff.distributedcaffeine.AdapterConformanceTest;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterAll;
@@ -61,6 +62,15 @@ abstract class JdbcCompatibilityTests {
 
     @Nested
     class ChangeScanContract extends JdbcChangeScanContractTest {
+    }
+
+    @Nested
+    class Conformance extends AdapterConformanceTest {
+
+        @Override
+        protected AdapterConformance conformance() {
+            return new JdbcConformance();
+        }
     }
 
     @Nested

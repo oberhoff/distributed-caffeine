@@ -70,7 +70,9 @@ final class JdbcStore extends PrimitiveStore {
 
     private static final System.Logger LOGGER = System.getLogger(JdbcStore.class.getPackageName());
     // the schema marker, the table's comment: the version of the table's layout this version writes
-    static final String MARKER = "distributed-caffeine schema 1";
+    // every version's marker begins so, telling a table of another version from one created by hand
+    static final String MARKER_PREFIX = "distributed-caffeine schema ";
+    static final String MARKER = MARKER_PREFIX + "1";
 
     private static final int CHUNK = 1_000;
 
@@ -187,8 +189,9 @@ final class JdbcStore extends PrimitiveStore {
     // a discriminator fitting its column
     static String requireDiscriminator(String discriminator) {
         requireNonNull(discriminator, "discriminator cannot be null");
-        if (discriminator.isEmpty() || discriminator.length() > 200) {
-            throw new IllegalArgumentException("discriminator must be 1 to 200 characters");
+        // not blank, as on the other adapters (a discriminator of spaces only is a mistake, not a name)
+        if (discriminator.isBlank() || discriminator.length() > 200) {
+            throw new IllegalArgumentException("discriminator must be 1 to 200 characters, not blank");
         }
         return discriminator;
     }
@@ -211,7 +214,9 @@ final class JdbcStore extends PrimitiveStore {
                 unbound(connection, previousTimeout);
             }
         } catch (SQLException e) {
-            throw new StoreException("Creating the table " + table + " failed: " + e.getMessage(), e, false);
+            // a store not reached is worth another try, as in every operation; anything else is the setup's
+            throw new StoreException("Creating the table " + table + " failed: " + e.getMessage(), e, false,
+                    connectionLost(e));
         }
     }
 
@@ -238,6 +243,30 @@ final class JdbcStore extends PrimitiveStore {
             throw new StoreException(driver + " is not supported for " + dialect.product + ": use MariaDB "
                     + "Connector/J (org.mariadb.jdbc:mariadb-java-client)", false);
         }
+        // Galera (MariaDB Galera Cluster, Percona XtraDB Cluster) allows lost updates and stale reads across nodes,
+        // also in a healthy cluster (Jepsen 2026; MariaDB's own known limitations; MDEV-38977 and MDEV-38976 still
+        // unresolved in 2026-11), which would break the conditional writes: refused rather than run on unknown ground.
+        // A single writer behind a proxy is untested. Plain MySQL has no wsrep_on, so no row
+        try (ResultSet resultSet = statement.executeQuery("SHOW VARIABLES LIKE 'wsrep_on'")) {
+            if (resultSet.next() && "ON".equalsIgnoreCase(resultSet.getString(2))) {
+                throw new StoreException(dialect.product + " " + version + " runs as a Galera cluster node (wsrep_on), "
+                        + "which distributed-caffeine does not support: Galera allows lost updates and stale reads "
+                        + "across nodes (MDEV-38977, MDEV-38976), which break the cache's conditional writes", false);
+            }
+        }
+        // a replica (read_only, as replicas usually run) would fail every write later, with 1290; refused now, as
+        // PostgreSQL's standby and Redis's replica are. Retryable: a primary is read-only for a moment while a failover
+        // demotes it
+        // MySQL and older MariaDB answer 0 or 1; newer MariaDB an enum (OFF, ON, NO_LOCK, NO_LOCK_NO_ADMIN), all but
+        // OFF read-only
+        try (ResultSet resultSet = statement.executeQuery("SELECT @@read_only")) {
+            String readOnly = resultSet.next() ? resultSet.getString(1) : null;
+            if (readOnly != null && !readOnly.equals("0") && !readOnly.equalsIgnoreCase("OFF")) {
+                throw new StoreException(dialect.product + " " + version + " is read-only (read_only=ON, as a replica "
+                        + "is); distributed-caffeine needs the primary (during a failover, try again)", null, false,
+                        true);
+            }
+        }
         if (exists(connection, table)) {
             requireMarker(connection, dialect, table);
             checkIndex(connection, table);
@@ -245,9 +274,12 @@ final class JdbcStore extends PrimitiveStore {
         }
         try {
             statement.execute(ddl(dialect, table));
+            LOGGER.log(System.Logger.Level.INFO, "Created table {0} with its index and schema marker", table);
         } catch (SQLException e) {
             if (!exists(connection, table)) { // not just another instance creating it at the same time
-                throw e;
+                // most often a user without the right to create tables (as for PostgreSQL, the DDL to run instead)
+                throw new StoreException("Table " + table + " is missing and could not be created (" + e.getMessage()
+                        + "). Where the user may not create tables, create it with:\n" + ddl(dialect, table), e, false);
             }
         }
         return server;
@@ -284,11 +316,15 @@ final class JdbcStore extends PrimitiveStore {
                 }
             }
         }
+        if (marker != null && !MARKER.equals(marker) && marker.startsWith(MARKER_PREFIX)) {
+            throw new StoreException("Table " + table + " was created by another version of distributed-caffeine ('"
+                    + marker + "'; this one uses '" + MARKER + "'). Stop all instances of that version, then drop it "
+                    + "or configure another name.", false);
+        }
         if (!MARKER.equals(marker)) {
-            throw new StoreException("Table " + table + " exists without the schema marker '" + MARKER + "' (e.g. a "
-                    + "table of another version of distributed-caffeine, or created by hand without it). Stop all "
-                    + "instances using it, then drop it or configure another name; to create it by hand:\n"
-                    + ddl(dialect, table), false);
+            throw new StoreException("Table " + table + " exists without the schema marker '" + MARKER + "' (e.g. "
+                    + "created by hand without it). Stop all instances using it, then drop it or configure another "
+                    + "name; to create it by hand:\n" + ddl(dialect, table), false);
         }
     }
 
@@ -311,8 +347,8 @@ final class JdbcStore extends PrimitiveStore {
                 && "write_time".equalsIgnoreCase(columns.get(2)));
         if (!found) {
             LOGGER.log(System.Logger.Level.WARNING, "Table {0} has no index on (discriminator, write_time); expiry, "
-                    + "pruning and polling will be slow. Create it: CREATE INDEX {0}_written ON {0} (discriminator, "
-                    + "write_time)", table);
+                    + "pruning and polling will be slow. Create it with: CREATE INDEX {0}_written ON {0} "
+                    + "(discriminator, write_time)", table);
         }
     }
 

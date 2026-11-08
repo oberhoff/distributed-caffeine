@@ -38,7 +38,7 @@ import static java.util.Objects.requireNonNull;
  * one second by default).
  * <p>
  * Requires MariaDB 10.2 or later. A MySQL server is refused (use {@link MySqlAdapter}), as is MySQL Connector/J, which
- * is not supported on MariaDB. Galera Cluster is not supported. A failover to an asynchronous replica, MariaDB's
+ * is not supported on MariaDB. A Galera cluster node is refused. A failover to an asynchronous replica, MariaDB's
  * default, may lose writes the primary had confirmed; the caches notice the failover and check what they hold against
  * the store.
  * <p>
@@ -117,7 +117,7 @@ public final class MariaDbAdapter<K, V> implements Adapter<K, V> {
          * Sets the discriminator, which tells the caches sharing the table apart. Optional:
          * {@value MariaDbAdapter#DEFAULT_DISCRIMINATOR} by default.
          *
-         * @param discriminator the discriminator (not empty, at most 200 characters)
+         * @param discriminator the discriminator (not blank, at most 200 characters)
          * @return this builder
          */
         public Builder withDiscriminator(String discriminator) {

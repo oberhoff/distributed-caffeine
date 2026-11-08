@@ -87,6 +87,32 @@ class DistributedCaffeineTest {
     }
 
     @Test
+    void closing_empties_the_local_cache_without_notifying_the_removal_listener() {
+        java.util.List<String> removed = new java.util.concurrent.CopyOnWriteArrayList<>();
+        DistributedCaffeine<String, String> builder = DistributedCaffeine.newBuilder(adapter)
+                .withCaffeine(caffeine -> caffeine.executor(Runnable::run)
+                        .removalListener((key, value, cause) -> removed.add(key + "=" + value + ":" + cause)))
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(StringSerializer.ofString()))
+                .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(100));
+        DistributedCache<String, String> cache = builder.build();
+        cache.put("k1", "v1");
+        cache.put("k2", "v2");
+        cache.invalidate("k1");
+        assertThat(removed).containsExactly("k1=v1:EXPLICIT");
+
+        cache.close();
+
+        assertThat(removed).as("nothing reported for the copies close() drops").containsExactly("k1=v1:EXPLICIT");
+        // the mark belongs to the dropped copies, not to the builder: a cache built again reports as usual
+        try (DistributedCache<String, String> again = builder.build()) {
+            assertThat(again.get("k2", key -> "loaded")).isEqualTo("v2");
+            again.invalidate("k2");
+            assertThat(removed).containsExactly("k1=v1:EXPLICIT", "k2=v2:EXPLICIT");
+        }
+    }
+
+    @Test
     void defaults() {
         DistributedCaffeine<String, String> builder = DistributedCaffeine.newBuilder(adapter);
 

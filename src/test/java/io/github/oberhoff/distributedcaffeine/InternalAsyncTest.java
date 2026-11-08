@@ -580,7 +580,6 @@ class InternalAsyncTest {
     }
 
     @Test
-    @SuppressWarnings("NullableProblems") // a loader resolving to null: absent, as Caffeine documents, not its types
     void getAll_without_a_bulk_loader_loads_key_by_key_and_leaves_out_what_the_source_lacks() throws Exception {
         List<String> loaded = Collections.synchronizedList(new ArrayList<>());
         DistributedAsyncLoadingCache<String, String> cache = loading((key, executor) -> {

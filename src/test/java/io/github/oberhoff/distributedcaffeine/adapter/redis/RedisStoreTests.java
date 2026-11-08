@@ -20,6 +20,7 @@ import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
 import io.github.oberhoff.distributedcaffeine.spi.RecordingListener;
 import io.github.oberhoff.distributedcaffeine.spi.State;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
+import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
@@ -89,6 +90,24 @@ abstract class RedisStoreTests {
 
     private long entries() {
         return admin.xlen(new RedisKeys(name, RedisAdapter.DEFAULT_DISCRIMINATOR).stream());
+    }
+
+    @Test
+    void the_adapter_names_the_servers_product_once_its_store_was_created() {
+        RedisAdapter<String, String> adapter = RedisAdapter.newBuilder(driver, name).build();
+        assertThat(adapter).as("before asking the server").hasToString("Redis " + name + "/default");
+        closeables.add(adapter.createStore(TestStoreSettings.of(Format.BINARY, Format.BINARY)));
+        String image = server.image.toLowerCase(java.util.Locale.ROOT);
+        String product = image.contains("valkey") ? "Valkey" : image.contains("dragonfly") ? "Dragonfly"
+                : image.contains("kvrocks") ? "Kvrocks" : "Redis";
+        assertThat(adapter).hasToString(product + " " + name + "/default");
+    }
+
+    @Test
+    void a_keyspace_written_by_another_version_is_refused_naming_what_to_delete() {
+        admin.set(new RedisKeys(name, RedisAdapter.DEFAULT_DISCRIMINATOR).schema(), "2");
+        assertThatThrownBy(this::open).isInstanceOf(StoreException.class).hasMessageContaining("another version")
+                .hasMessageContaining("delete its keys");
     }
 
     // a write request sent again

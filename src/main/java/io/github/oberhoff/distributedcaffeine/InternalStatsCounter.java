@@ -57,14 +57,15 @@ final class InternalStatsCounter {
         POPULATION_READ,
         GAP,
         INTERRUPTION,
-        REVALIDATED,
         REVALIDATION_KEPT,
         REVALIDATION_DROPPED,
         UNREADABLE_ROW,
         NEGATIVE_HIT,
         VERSION_REFUSAL,
         UNCACHED_LOAD,
-        CLOCK_AHEAD
+        CLOCK_AHEAD,
+        MAINTENANCE_EXPIRED,
+        MAINTENANCE_PRUNED
     }
 
     private static final InternalStatsCounter DISABLED = new InternalStatsCounter(false);
@@ -101,8 +102,8 @@ final class InternalStatsCounter {
         if (adders == null) {
             return DistributedStats.empty();
         }
-        // in the order of the counters, which is the order of DistributedStats
-        long[] values = adders.values().stream().mapToLong(LongAdder::sum).toArray();
+        Map<Counter, Long> values = new EnumMap<>(Counter.class);
+        adders.forEach((counter, adder) -> values.put(counter, adder.sum()));
         return new DistributedStats(values);
     }
 }

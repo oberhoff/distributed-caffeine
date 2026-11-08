@@ -15,11 +15,16 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter.postgresql;
 
+import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
 import io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresTopologyTests.Setup;
+import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
+import org.postgresql.ds.PGSimpleDataSource;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import static io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresTopology.PRIMARY_WITH_ASYNCHRONOUS_STANDBY;
 import static io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresTopology.PRIMARY_WITH_SYNCHRONOUS_STANDBY;
@@ -27,6 +32,7 @@ import static io.github.oberhoff.distributedcaffeine.adapter.postgresql.Postgres
 import static io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresTopology.SINGLE_SERVER_BEHIND_TRANSACTION_POOLER;
 import static io.github.oberhoff.distributedcaffeine.adapter.postgresql.PostgresTopology.SINGLE_SERVER_WITH_SMALL_NOTIFY_QUEUE;
 import static io.github.oberhoff.distributedcaffeine.testing.Topology.Tests.RUNS_ON_GITHUB;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Every PostgreSQL image and topology the suites run on, one at a time: from 9.6, the oldest supported, to the latest,
@@ -40,6 +46,27 @@ import static io.github.oberhoff.distributedcaffeine.testing.Topology.Tests.RUNS
  */
 @NullMarked
 class PostgresIntegrationTest {
+
+    @Nested
+    @DisplayName("PostgreSQL 9.5 (refused: older than 9.6)")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    class Postgres_9_5__Refused {
+
+        @Test
+        void a_server_older_than_the_oldest_supported_is_refused_naming_it() {
+            try (PostgreSQLContainer server = new PostgreSQLContainer("postgres:9.5")) {
+                server.start();
+                PGSimpleDataSource dataSource = new PGSimpleDataSource();
+                dataSource.setUrl(server.getJdbcUrl());
+                dataSource.setUser(server.getUsername());
+                dataSource.setPassword(server.getPassword());
+                DistributedCaffeine<String, String> builder = DistributedCaffeine.newBuilder(
+                        PostgresAdapter.newBuilder(dataSource, "refused", "cache").build());
+                assertThatThrownBy(builder::build).isInstanceOf(StoreException.class)
+                        .hasMessageContaining("older than the oldest supported, 9.6");
+            }
+        }
+    }
 
     @Nested
     @DisplayName("PostgreSQL 9.6.5 (Single Server)")

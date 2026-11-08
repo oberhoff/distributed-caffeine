@@ -119,6 +119,35 @@ final class JdbcTestDatabase implements AutoCloseable {
         return get().mysql;
     }
 
+    // statements needing more than the test user's rights on its database (users, grants); the containers set the
+    // root password to the test user's
+    static void asRoot(String... statements) throws SQLException {
+        JdbcTestDatabase database = get();
+        try (Connection connection = DriverManager.getConnection(database.urlOf(database.driver,
+                database.container.getHost(), database.container.getMappedPort(3306)), "root",
+                database.container.getPassword());
+             java.sql.Statement statement = connection.createStatement()) {
+            for (String sql : statements) {
+                statement.execute(sql);
+            }
+        }
+    }
+
+    // a pool of a user that may read and write the test database but not create tables in it, closed by the caller
+    static HikariDataSource readerDataSource() throws SQLException {
+        JdbcTestDatabase database = get();
+        asRoot("CREATE USER IF NOT EXISTS 'reader'@'%' IDENTIFIED BY 'reader'",
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + database.container.getDatabaseName()
+                        + ".* TO 'reader'@'%'");
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl(database.urlOf(database.driver, database.container.getHost(),
+                database.container.getMappedPort(3306)));
+        config.setUsername("reader");
+        config.setPassword("reader");
+        config.setMaximumPoolSize(2);
+        return new HikariDataSource(config);
+    }
+
     static String host() {
         return get().container.getHost();
     }

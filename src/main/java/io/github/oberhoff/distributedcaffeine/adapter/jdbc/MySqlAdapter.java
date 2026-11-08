@@ -38,9 +38,9 @@ import static java.util.Objects.requireNonNull;
  * one second by default).
  * <p>
  * Requires MySQL 5.7 or later, or a build of it such as Percona Server. A MariaDB server is refused (use
- * {@link MariaDbAdapter}). A failover to an asynchronous replica, MySQL's default, may lose writes the primary had
- * confirmed; the caches notice the failover and check what they hold against the store. Semi-synchronous replication
- * ({@code AFTER_SYNC}) loses no confirmed write.
+ * {@link MariaDbAdapter}), as is a Galera cluster node (Percona XtraDB Cluster). A failover to an asynchronous
+ * replica, MySQL's default, may lose writes the primary had confirmed; the caches notice the failover and check what
+ * they hold against the store. Semi-synchronous replication ({@code AFTER_SYNC}) loses no confirmed write.
  * <p>
  * The cache's operation timeout applies to each connection it borrows and to each statement (in whole seconds), so
  * caches sharing a data source may have different ones.
@@ -116,7 +116,7 @@ public final class MySqlAdapter<K, V> implements Adapter<K, V> {
          * Sets the discriminator, which tells the caches sharing the table apart. Optional:
          * {@value MySqlAdapter#DEFAULT_DISCRIMINATOR} by default.
          *
-         * @param discriminator the discriminator (not empty, at most 200 characters)
+         * @param discriminator the discriminator (not blank, at most 200 characters)
          * @return this builder
          */
         public Builder withDiscriminator(String discriminator) {

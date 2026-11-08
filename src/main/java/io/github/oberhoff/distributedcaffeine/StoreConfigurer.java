@@ -118,8 +118,9 @@ public final class StoreConfigurer {
     /**
      * Sets how long an operation waits for the store before it fails; without a bound, a network that silently stops
      * carrying would block callers for good. It bounds every call that reaches the store (a local miss, a write, a load
-     * writing its value) and the checks when the cache is built. A read that times out fails; a write fails with its
-     * outcome unknown. Neither is retried. With a JDBC connection pool, set the pool's wait for a connection (such as
+     * writing its value) and the checks when the cache is built. A read that times out fails. A write that times out
+     * has an unknown outcome: {@code put} fails, while the atomic {@code asMap()} methods, loads and refreshes repeat
+     * it and fail only if they cannot recognize their own write. With a JDBC connection pool, set the pool's wait for a connection (such as
      * HikariCP's {@code connectionTimeout}, 30 seconds by default) no higher, or an exhausted pool keeps callers
      * waiting longer. Optional: 10 seconds by default.
      *

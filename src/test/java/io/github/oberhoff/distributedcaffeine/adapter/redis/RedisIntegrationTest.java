@@ -296,6 +296,16 @@ class RedisIntegrationTest {
     }
 
     @Nested
+    @DisplayName("Redis 6.0 (refused: older than 6.2)")
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    class Redis_6_0__Refused extends RedisRefusalTests {
+
+        Redis_6_0__Refused() {
+            super("redis:6.0", "is not supported; distributed-caffeine needs Redis 6.2 or later");
+        }
+    }
+
+    @Nested
     @DisplayName("Kvrocks 2.15.0 (refused: no approximate MINID)")
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
     class Kvrocks_2_15_0 extends RedisRefusalTests {

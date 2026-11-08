@@ -87,8 +87,11 @@ abstract class JdbcAdapterTest {
 
     @Test
     void the_table_and_its_index_are_created_once() throws SQLException {
-        cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR);
-        cache("another");
+        try (LogCapture log = new LogCapture()) {
+            cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR);
+            cache("another");
+            assertThat(log.count("Created table")).as("once, by the first: " + log.text()).isEqualTo(1);
+        }
 
         // whatever case the database keeps names in (MySQL on Linux: as created, case-sensitive)
         try (Connection connection = JdbcTestDatabase.dataSource().getConnection();
@@ -117,11 +120,25 @@ abstract class JdbcAdapterTest {
     }
 
     @Test
+    void without_the_right_to_create_the_table_the_start_fails_with_the_ddl() throws SQLException {
+        try (HikariDataSource reader = JdbcTestDatabase.readerDataSource()) {
+            DistributedCaffeine<String, String> builder = DistributedCaffeine.newBuilder(
+                    JdbcTestDatabase.adapter(reader, table, JdbcTestDatabase.DEFAULT_DISCRIMINATOR));
+            assertThatThrownBy(builder::build)
+                    .isInstanceOf(StoreException.class).hasMessageContaining("create it with")
+                    .hasMessageContaining("COMMENT='" + JdbcStore.MARKER + "'");
+        }
+    }
+
+    @Test
     void a_table_of_this_layout_is_refused_without_its_marker_and_used_with_it() throws SQLException {
         cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR).close();
         comment("");
         assertThatThrownBy(() -> cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR)).isInstanceOf(StoreException.class)
                 .hasMessageContaining("without the schema marker");
+        comment(JdbcStore.MARKER_PREFIX + "2");
+        assertThatThrownBy(() -> cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR)).isInstanceOf(StoreException.class)
+                .hasMessageContaining("another version").hasMessageContaining("schema 2");
 
         comment(JdbcStore.MARKER); // as the DDL in the message creates it by hand
         DistributedCache<String, String> cache = cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR);
@@ -177,6 +194,19 @@ abstract class JdbcAdapterTest {
 
     // either driver reaches either server: the product is told by the server's version, and the adapter of the
     // other one refused, naming the right one
+    @Test
+    void a_read_only_server_is_refused_as_retryable_naming_the_primary() throws SQLException {
+        JdbcTestDatabase.asRoot("SET GLOBAL read_only = ON");
+        try {
+            assertThatThrownBy(() -> cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR))
+                    .isInstanceOfSatisfying(StoreException.class, e -> assertThat(e.isRetryable()).isTrue())
+                    .hasMessageContaining("read-only").hasMessageContaining("needs the primary");
+        } finally {
+            JdbcTestDatabase.asRoot("SET GLOBAL read_only = OFF");
+        }
+        cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR).put("k", "v");
+    }
+
     @Test
     void the_other_products_adapter_is_refused_naming_the_right_one() {
         String right = JdbcTestDatabase.mysql() ? "MySqlAdapter" : "MariaDbAdapter";

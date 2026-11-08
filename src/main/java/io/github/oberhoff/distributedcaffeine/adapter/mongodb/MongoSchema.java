@@ -17,6 +17,8 @@ package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
 
 import com.mongodb.MongoCommandException;
 import com.mongodb.MongoException;
+import com.mongodb.MongoSocketException;
+import com.mongodb.MongoTimeoutException;
 import com.mongodb.ReadConcern;
 import com.mongodb.ReadPreference;
 import com.mongodb.WriteConcern;
@@ -53,6 +55,11 @@ final class MongoSchema {
 
     private static final Logger LOGGER = System.getLogger(MongoAdapter.class.getPackageName());
     private static final int COMMAND_NOT_FOUND = 59;
+    private static final int UNAUTHORIZED = 13;
+    // the field of the marker document naming the schema
+    private static final String MARKER_FIELD = "schema";
+    // the wire version of MongoDB 4.4, the oldest supported release (README, Requirements)
+    private static final int MINIMUM_WIRE_VERSION = 9;
     // the hash last, so that pruning to size ranks by the index alone (write time, ties by hash): without it, every
     // batch sorted all the cache's values in memory (a million in 194 s, measured)
     private static final BsonDocument INDEX = new BsonDocument("_id.d", new BsonInt32(1))
@@ -90,20 +97,30 @@ final class MongoSchema {
                     .contains(location.collectionName);
             if (exists && !hasMarker(collection)) {
                 requireResettable(collection, location, schemaReset);
-                LOGGER.log(Level.WARNING, "Dropping collection {0}, which has no schema marker (withSchemaReset)",
-                        location);
+                LOGGER.log(Level.WARNING, "Dropping collection {0} of distributed-caffeine 0.x, or empty "
+                        + "(withSchemaReset)", location);
                 collection.drop();
                 exists = false;
             }
             if (!exists) {
                 collection.updateOne(Filters.eq("_id", MongoLocation.MARKER_ID),
-                        Updates.setOnInsert("schema", MongoLocation.MARKER), new UpdateOptions().upsert(true));
+                        Updates.setOnInsert(MARKER_FIELD, MongoLocation.MARKER), new UpdateOptions().upsert(true));
                 collection.createIndex(INDEX, new IndexOptions().name("distributed-caffeine"));
+                LOGGER.log(Level.INFO, "Created collection {0} with its schema marker and index", location);
             }
             checkIndex(collection, location);
             removeOldGeneration(collection, location);
         } catch (MongoException e) {
-            throw new StoreException("Checking collection " + location + " failed: " + e.getMessage(), e, false);
+            // a user without a right the cache needs, named as the other adapters name theirs (PostgreSQL and
+            // MariaDB/MySQL print their DDL): every operation of the cache falls under the built-in role readWrite
+            if (e.getCode() == UNAUTHORIZED) {
+                throw new StoreException("The user may not use collection " + location + " as the cache needs ("
+                        + e.getMessage() + "); grant it the role readWrite on database " + location.databaseName
+                        + " (through mongos also read on the config database)", e, false);
+            }
+            // a store not reached is worth another try, as in every operation; anything else is the setup's
+            throw new StoreException("Checking collection " + location + " failed: " + e.getMessage(), e, false,
+                    e instanceof MongoSocketException || e instanceof MongoTimeoutException);
         }
     }
 
@@ -146,6 +163,13 @@ final class MongoSchema {
     // could not keep the per-key order of its events
     private static void checkDeployment(MongoClient client, MongoDatabase database, MongoLocation location) {
         Document hello = hello(client.getDatabase("admin")::runCommand);
+        // checked first, so that an old server is told so rather than failing a later check or operation unclearly;
+        // hello reports the highest wire version the server speaks (through mongos, the router's)
+        int wireVersion = hello.getInteger("maxWireVersion", 0);
+        if (wireVersion < MINIMUM_WIRE_VERSION) {
+            throw new StoreException("MongoDB with wire version " + wireVersion + " is older than the oldest "
+                    + "supported, 4.4 (wire version " + MINIMUM_WIRE_VERSION + ")", false);
+        }
         boolean mongos = "isdbgrid".equals(hello.getString("msg"));
         if (!mongos && hello.getString("setName") == null) {
             throw new StoreException("MongoDB is a standalone server; distributed-caffeine needs a replica set "
@@ -154,6 +178,9 @@ final class MongoSchema {
         try {
             database.getCollection(location.collectionName).find().limit(1).first();
         } catch (MongoCommandException e) {
+            if (e.getCode() == UNAUTHORIZED) {
+                throw e; // a missing right, named by ensure
+            }
             throw new StoreException("MongoDB does not support majority read concern here: " + e.getMessage(), e,
                     false);
         }
@@ -178,7 +205,7 @@ final class MongoSchema {
         BsonDocument marker = collection.find(Filters.eq("_id", MongoLocation.MARKER_ID)).first();
         if (marker != null) {
             throw new StoreException("Collection " + location + " was created by another version of "
-                    + "distributed-caffeine (" + (marker.isString("schema") ? "'" + marker.getString("schema")
+                    + "distributed-caffeine (" + (marker.isString(MARKER_FIELD) ? "'" + marker.getString(MARKER_FIELD)
                     .getValue() + "'" : "an unknown schema") + "; this one uses '" + MongoLocation.MARKER + "'). Stop "
                     + "all instances of that version, then drop it or configure another name. withSchemaReset() "
                     + "never drops it, so that two versions cannot drop each other's collection.", false);
@@ -200,7 +227,7 @@ final class MongoSchema {
 
     private static boolean hasMarker(MongoCollection<BsonDocument> collection) {
         BsonDocument marker = collection.find(Filters.eq("_id", MongoLocation.MARKER_ID)).first();
-        return marker != null && new BsonString(MongoLocation.MARKER).equals(marker.get("schema"));
+        return marker != null && new BsonString(MongoLocation.MARKER).equals(marker.get(MARKER_FIELD));
     }
 
     private static void checkIndex(MongoCollection<BsonDocument> collection, MongoLocation location) {

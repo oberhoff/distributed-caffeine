@@ -40,6 +40,8 @@ final class InternalValue<V> {
     // no REPLACED event for this wrapper: replaced in L1 by a wrapper of the identical value instance (as in Caffeine),
     // or a refresh result installed by the core, which Caffeine then discards as overtaken
     private volatile boolean replacementSilent;
+    // no event at all for this wrapper: dropped by close(), which empties L1 only to free its memory
+    private volatile boolean removalSilent;
     // the user key of the entry holding this value: Caffeine's unbounded cache reports a removal with the key the
     // caller passed, which for a message is a lookup key holding the hash only
     private final AtomicReference<@Nullable Object> key = new AtomicReference<>();
@@ -63,7 +65,6 @@ final class InternalValue<V> {
 
     // a future of L1 as the user's: completing with null where nothing was found, as Caffeine's futures do, which its
     // types cannot express for a value type that is not nullable
-    @SuppressWarnings("DataFlowIssue") // the null Caffeine's types cannot express, see above
     static <V> CompletableFuture<V> valuesOf(CompletableFuture<InternalValue<V>> future) {
         return future.thenApply(InternalValue::valueOrNull);
     }
@@ -123,6 +124,14 @@ final class InternalValue<V> {
 
     void replacementSilent(boolean silent) {
         this.replacementSilent = silent;
+    }
+
+    boolean isRemovalSilent() {
+        return removalSilent;
+    }
+
+    void removalSilent() {
+        this.removalSilent = true;
     }
 
     @Override
