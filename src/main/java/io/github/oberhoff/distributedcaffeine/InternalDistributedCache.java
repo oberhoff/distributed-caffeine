@@ -63,7 +63,7 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V> {
 
     @Override
     public Map<K, V> getAll(Iterable<? extends K> keys,
-                            Function<? super Set<? extends K>, ? extends Map<? extends K, ? extends V>> mappingFunction) {
+            Function<? super Set<? extends K>, ? extends Map<? extends K, ? extends V>> mappingFunction) {
         requireNonNull(mappingFunction, "mappingFunction cannot be null");
         return core.getAll(keys, mappingFunction::apply);
     }

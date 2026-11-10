@@ -39,7 +39,8 @@ class PostgresMaintenanceExperimentTest {
 
     @Test
     void measures_one_maintenance_call_on_a_large_cache() throws Exception {
-        try (PostgresTestDatabase database = PostgresTestDatabase.start("postgres:18", PostgresTopology.SINGLE_SERVER)) {
+        try (PostgresTestDatabase database =
+                PostgresTestDatabase.start("postgres:18", PostgresTopology.SINGLE_SERVER)) {
             PostgresAdapter<String, String> adapter = PostgresAdapter.newBuilder(database.dataSource, "maintenance",
                     "cache").withListenerDataSource(database.listener).build();
             adapter.createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT)).close(); // creates the table
@@ -56,7 +57,8 @@ class PostgresMaintenanceExperimentTest {
                             database.execute("INSERT INTO \"maintenance\".\"cache\" (discriminator, id, key, value, "
                                     + "state, version, write_time) SELECT '" + PostgresAdapter.DEFAULT_DISCRIMINATOR
                                     + "', 'h' || g, 'k' || g, repeat('x', 100), 'VALUE', g, "
-                                    + "now() - interval '2 hours' + g * interval '1 microsecond' FROM generate_series(0, "
+                                    + "now() - interval '2 hours' + g * interval '1 microsecond' "
+                                    + "FROM generate_series(0, "
                                     + (rows - 1) + ") AS g"); // each its own write time, as in a cache
                             database.execute("VACUUM ANALYZE \"maintenance\".\"cache\"");
                         }

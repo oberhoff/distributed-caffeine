@@ -205,9 +205,11 @@ class InMemoryDatabaseFaultsTest {
             assertThat(messages.get(101)).isEqualTo(new Change(Change.Kind.WRITTEN, hash, after));
             List<Change> beforeInvalidateAll = messages.subList(0, 100);
             assertThat(beforeInvalidateAll).as("reordered").isNotEqualTo(committed);
-            Map<String, List<Long>> perKey = beforeInvalidateAll.stream().collect(Collectors.groupingBy(message -> requireNonNull(message.hash()),
+            Map<String, List<Long>> perKey = beforeInvalidateAll.stream().collect(Collectors.groupingBy(
+                    message -> requireNonNull(message.hash()),
                     Collectors.mapping(Change::version, Collectors.toList())));
-            Map<String, List<Long>> committedPerKey = committed.stream().collect(Collectors.groupingBy(message -> requireNonNull(message.hash()),
+            Map<String, List<Long>> committedPerKey = committed.stream().collect(Collectors.groupingBy(
+                    message -> requireNonNull(message.hash()),
                     Collectors.mapping(Change::version, Collectors.toList())));
             assertThat(perKey).isEqualTo(committedPerKey);
         }

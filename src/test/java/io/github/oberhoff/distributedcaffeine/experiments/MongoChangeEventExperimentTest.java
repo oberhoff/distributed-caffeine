@@ -64,10 +64,12 @@ class MongoChangeEventExperimentTest {
                 rows.drop();
                 rows.insertOne(new Document("_id", "warm-up"));
 
-                List<Bson> raw = List.of(Document.parse("{$match: {operationType: {$in: ['insert', 'update', 'replace', 'delete']}}}"));
+                List<Bson> raw = List.of(Document.parse(
+                        "{$match: {operationType: {$in: ['insert', 'update', 'replace', 'delete']}}}"));
                 List<Bson> projected = List.of(
                         Document.parse("{$match: {operationType: {$in: ['insert', 'update', 'replace']}}}"),
-                        Document.parse("{$project: {'fullDocument.value': 0, 'updateDescription.updatedFields.value': 0}}"));
+                        Document.parse("{$project: {'fullDocument.value': 0, "
+                                + "'updateDescription.updatedFields.value': 0}}"));
 
                 try (MongoChangeStreamCursor<ChangeStreamDocument<Document>> rawCursor =
                              rows.watch(raw).maxAwaitTime(200, TimeUnit.MILLISECONDS).cursor();
@@ -91,12 +93,15 @@ class MongoChangeEventExperimentTest {
                     List<ChangeStreamDocument<Document>> projectedEvents = drain(projectedCursor, steps.size() - 1);
 
                     StringBuilder out = new StringBuilder("\n=== ").append(image).append(" (")
-                            .append(client.getDatabase("admin").runCommand(new Document("buildInfo", 1)).getString("version"))
+                            .append(client.getDatabase("admin").runCommand(new Document("buildInfo", 1))
+                                    .getString("version"))
                             .append(") ===\n");
                     for (int i = 0; i < steps.size(); i++) {
-                        out.append(String.format("%-34s raw: %s%n", steps.get(i), i < rawEvents.size() ? describe(rawEvents.get(i)) : "<missing>"));
+                        out.append(String.format("%-34s raw: %s%n", steps.get(i),
+                                i < rawEvents.size() ? describe(rawEvents.get(i)) : "<missing>"));
                         if (i < steps.size() - 1) {
-                            out.append(String.format("%-34s prj: %s%n", "", i < projectedEvents.size() ? describe(projectedEvents.get(i)) : "<missing>"));
+                            out.append(String.format("%-34s prj: %s%n", "",
+                                    i < projectedEvents.size() ? describe(projectedEvents.get(i)) : "<missing>"));
                         }
                     }
                     System.out.println(out);
@@ -121,7 +126,8 @@ class MongoChangeEventExperimentTest {
                 for (boolean upsert : new boolean[]{false, true}) {
                     rows.drop();
                     rows.insertOne(new Document("_id", "warm-up"));
-                    List<Bson> raw = List.of(Document.parse("{$match: {operationType: {$in: ['insert', 'update', 'replace']}}}"));
+                    List<Bson> raw = List.of(
+                            Document.parse("{$match: {operationType: {$in: ['insert', 'update', 'replace']}}}"));
                     try (MongoChangeStreamCursor<ChangeStreamDocument<Document>> cursor =
                                  rows.watch(raw).maxAwaitTime(200, TimeUnit.MILLISECONDS).cursor()) {
                         UpdateOptions options = new UpdateOptions().upsert(upsert);
@@ -198,10 +204,12 @@ class MongoChangeEventExperimentTest {
                 for (int margin : new int[]{0, 1024, 64 * 1024, 1024 * 1024}) {
                     rows.deleteMany(new Document());
                     int valueSize = fitting - margin;
-                    List<Bson> raw = List.of(Document.parse("{$match: {operationType: {$in: ['insert', 'update', 'replace']}}}"));
+                    List<Bson> raw = List.of(
+                            Document.parse("{$match: {operationType: {$in: ['insert', 'update', 'replace']}}}"));
                     List<Bson> projected = List.of(
                             Document.parse("{$match: {operationType: {$in: ['insert', 'update', 'replace']}}}"),
-                            Document.parse("{$project: {'fullDocument.value': 0, 'updateDescription.updatedFields.value': 0}}"));
+                            Document.parse("{$project: {'fullDocument.value': 0, "
+                                    + "'updateDescription.updatedFields.value': 0}}"));
                     try (MongoChangeStreamCursor<ChangeStreamDocument<Document>> rawCursor =
                                  rows.watch(raw).maxAwaitTime(200, TimeUnit.MILLISECONDS).cursor();
                          MongoChangeStreamCursor<ChangeStreamDocument<Document>> projectedCursor =
@@ -227,7 +235,8 @@ class MongoChangeEventExperimentTest {
             }
             return types.toString();
         } catch (RuntimeException e) {
-            return "FAILED " + e.getClass().getSimpleName() + ": " + e.getMessage().replaceAll("\\s+", " ").substring(0, Math.min(140, e.getMessage().length()));
+            return "FAILED " + e.getClass().getSimpleName() + ": "
+                    + e.getMessage().replaceAll("\\s+", " ").substring(0, Math.min(140, e.getMessage().length()));
         }
     }
 
@@ -293,7 +302,8 @@ class MongoChangeEventExperimentTest {
                     ? Map.of() : new Document(event.getUpdateDescription().getUpdatedFields());
             text.append(" updated=").append(new TreeSet<>(updated.keySet()));
             if (updated.containsKey("state")) {
-                text.append(" state=").append(event.getUpdateDescription().getUpdatedFields().getString("state").getValue());
+                text.append(" state=")
+                        .append(event.getUpdateDescription().getUpdatedFields().getString("state").getValue());
             }
             text.append(" removed=").append(event.getUpdateDescription().getRemovedFields());
         }

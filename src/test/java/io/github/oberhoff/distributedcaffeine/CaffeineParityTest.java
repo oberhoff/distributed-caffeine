@@ -384,7 +384,8 @@ public class CaffeineParityTest {
                         return side.sync().estimatedSize();
                     })),
                     local("map.size", random -> new Named("asMap().size()", side -> side.sync().asMap().size())),
-                    local("map.isEmpty", random -> new Named("asMap().isEmpty()", side -> side.sync().asMap().isEmpty())),
+                    local("map.isEmpty", random -> new Named("asMap().isEmpty()",
+                            side -> side.sync().asMap().isEmpty())),
                     local("map.containsValue", random -> {
                         String value = value(random);
                         return new Named("asMap().containsValue(" + value + ")",
@@ -494,8 +495,9 @@ public class CaffeineParityTest {
                     String value = value(random);
                     boolean fail = random.nextInt(4) == 0;
                     return new Named("async put(" + key + ", " + (fail ? "failed" : value) + ")", side -> {
-                        side.async().put(key, fail ? CompletableFuture.failedFuture(
-                                new IllegalArgumentException("failed value")) : CompletableFuture.completedFuture(value));
+                        side.async().put(key, fail
+                                ? CompletableFuture.failedFuture(new IllegalArgumentException("failed value"))
+                                : CompletableFuture.completedFuture(value));
                         return null;
                     });
                 }),
@@ -602,7 +604,8 @@ public class CaffeineParityTest {
         }
     }
 
-    private record CaffeineSide(LoadingCache<String, String> sync, @Nullable AsyncLoadingCache<String, String> asyncCache,
+    private record CaffeineSide(LoadingCache<String, String> sync,
+                                @Nullable AsyncLoadingCache<String, String> asyncCache,
                                 Removals removals) implements Side {
 
         @Override
@@ -698,7 +701,8 @@ public class CaffeineParityTest {
                 awaitQuietly(() -> statsOf(instance.sync().stats()).equals(expectedStats));
                 assertThat(statsOf(instance.sync().stats())).as("stats, " + where).isEqualTo(expectedStats);
                 assertThat(distributedRemovals.sortedFrom(distributedRemovalCount))
-                        .as("removal events, " + where + "\nall distributed events: " + distributedRemovals.sortedFrom(0)
+                        .as("removal events, " + where + "\nall distributed events: "
+                                + distributedRemovals.sortedFrom(0)
                                 + "\nall caffeine events: " + caffeine.removals.sortedFrom(0))
                         .isEqualTo(caffeine.removals.sortedFrom(caffeineRemovalCount));
             }

@@ -27,7 +27,8 @@ import java.util.Set;
  */
 final class InternalClaims {
 
-    private static final Set<Object> CLAIMED = Collections.synchronizedSet(Collections.newSetFromMap(new IdentityHashMap<>()));
+    private static final Set<Object> CLAIMED =
+            Collections.synchronizedSet(Collections.newSetFromMap(new IdentityHashMap<>()));
 
     private InternalClaims() {
     }

@@ -47,9 +47,9 @@ import static java.util.stream.Collectors.joining;
 /**
  * A replica set of three members (test commands enabled for fail points), the last one an arbiter if asked for, on a
  * network of their own, each published on a free host port as the same port and announced as {@code memberN:port},
- * which the driver resolves to localhost; member 0 is the preferred primary. Members can be stopped, started again on their data, and
- * killed; the primary can be stepped down and handed back. Elections are shortened (2 s), so that a failover takes
- * seconds rather than the default's ten or more.
+ * which the driver resolves to localhost; member 0 is the preferred primary. Members can be stopped, started again on
+ * their data, and killed; the primary can be stepped down and handed back. Elections are shortened (2 s), so that a
+ * failover takes seconds rather than the default's ten or more.
  *
  * @author Andreas Oberhoff
  */
@@ -101,7 +101,8 @@ final class MongoReplicaSet implements AutoCloseable {
                     .withCreateContainerCmdModifier(cmd -> cmd
                             .withExposedPorts(ExposedPort.tcp(port))
                             .withHostConfig(Objects.requireNonNull(cmd.getHostConfig()).withPortBindings(
-                                    new PortBinding(com.github.dockerjava.api.model.Ports.Binding.bindPort(port), ExposedPort.tcp(port)))))
+                                    new PortBinding(com.github.dockerjava.api.model.Ports.Binding.bindPort(port),
+                                            ExposedPort.tcp(port)))))
                     .waitingFor(Wait.forLogMessage("(?is).*waiting for connections.*", 1)));
         }
         try {
@@ -253,6 +254,10 @@ final class MongoReplicaSet implements AutoCloseable {
      */
     void handBack() {
         require(() -> {
+            // primary already, by its priority: freezing a primary fails, so asking again would fail until the end
+            if (primary() == 0) {
+                return true;
+            }
             try (MongoClient preferred = direct(0)) {
                 MongoDatabase admin = preferred.getDatabase("admin");
                 admin.runCommand(new Document("replSetFreeze", 0));
@@ -323,9 +328,9 @@ final class MongoReplicaSet implements AutoCloseable {
         return described.toString();
     }
 
-    private static void require(BooleanSupplier condition, String what) {
+    private void require(BooleanSupplier condition, String what) {
         if (!awaitUpTo(condition, HEALTHY, Duration.ofMillis(250))) {
-            throw new AssertionError(what + " not reached within " + HEALTHY.toSeconds() + " s");
+            throw new AssertionError(what + " not reached within " + HEALTHY.toSeconds() + " s; " + describe());
         }
     }
 

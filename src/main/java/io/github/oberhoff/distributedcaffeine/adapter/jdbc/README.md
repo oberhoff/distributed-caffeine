@@ -43,6 +43,11 @@ connection borrowed for an operation, restored before the connection goes back, 
 is the pool's own (such as HikariCP's `connectionTimeout`, 30 seconds by default): set it no higher than the operation
 timeout, or an exhausted pool keeps callers waiting longer.
 
+The network timeout bounds waiting for an answer, not sending: Java sockets have no write timeout, so a write too large
+for the socket's buffer, such as a large `putAll`, sent to a server that vanished without closing the connection (a
+crashed host, a cut network), waits until the operating system gives up (about 15 minutes on Linux,
+`net.ipv4.tcp_retries2`) and fails only then.
+
 ## Replication and failovers
 
 A failover that promotes an asynchronous replica, the default replication of both databases, may lose writes the primary

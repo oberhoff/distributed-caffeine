@@ -374,7 +374,8 @@ final class PostgresListener {
                 }
                 if (held == null || (!registration.lost && generation == registration.generation)) {
                     if (held != null) {
-                        LOGGER.log(Level.WARNING, "The PostgreSQL listener for {0} is suspected silent; reconnecting", serving());
+                        LOGGER.log(Level.WARNING, "The PostgreSQL listener for {0} is suspected silent; reconnecting",
+                                serving());
                         discard(held);
                         forEachRegistration(other -> {
                             if (other != registration && !other.lost) {
@@ -531,7 +532,8 @@ final class PostgresListener {
                 try {
                     registration.listener.onChanges(List.of(message));
                 } catch (RuntimeException e) {
-                    LOGGER.log(Level.WARNING, "A listener for " + cacheOf(registration.channel) + " failed on a notification", e);
+                    LOGGER.log(Level.WARNING, "A listener for " + cacheOf(registration.channel)
+                            + " failed on a notification", e);
                 }
             }
         }

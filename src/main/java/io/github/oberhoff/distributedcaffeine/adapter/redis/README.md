@@ -24,7 +24,11 @@ client.
 * Lettuce: The cache opens connections of its own through the client. In a cluster, Lettuce follows slot moves and
   failovers through adaptive topology refresh, on by default.
 * Jedis: The cache borrows a connection from the client's pool per command, and holds one for as long as it listens for
-  changes, so the pool needs one connection more (in a cluster, the pool of the node holding the keyspace).
+  changes, so the pool needs one connection more (in a cluster, the pool of the node holding the keyspace). A command
+  whose connection broke, such as one the server closed while it sat in the pool after a restart, is sent once more on
+  another, as Lettuce and Redisson do. Its sockets block and have no write timeout: a write too large for the socket's
+  buffer, such as a large `putAll`, sent to a server that vanished without closing the connection, waits until the
+  operating system gives up (about 15 minutes on Linux, `net.ipv4.tcp_retries2`). Lettuce and Redisson bound it.
 * Redisson: Its own timeouts and retries apply within the cache's operation timeout. Redisson replaces a connection the
   network silently stopped carrying only when its ping fails (`pingConnectionInterval`, 30 seconds by default); until
   then, commands on it time out. A shorter interval, such as one second, recovers sooner.

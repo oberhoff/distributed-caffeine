@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.CacheLoader;
+import io.github.oberhoff.distributedcaffeine.InternalCoreTest.DelegatingStore;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.Row;
@@ -144,7 +145,7 @@ public class InternalDistributionTest {
         CountDownLatch populating = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         AtomicInteger readsSeen = new AtomicInteger();
-        DistributedCache<String, String> holder = track(builder(store -> new InternalCoreTest.DelegatingStore(store) {
+        DistributedCache<String, String> holder = track(builder(store -> new DelegatingStore(store) {
             @Override
             public Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
                 Map<String, Row> rows = super.read(hashes, maxAge);
@@ -180,7 +181,8 @@ public class InternalDistributionTest {
     private static final class BlockedLoad {
         final CountDownLatch called = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
-        final java.util.concurrent.atomic.AtomicReference<@Nullable String> source = new java.util.concurrent.atomic.AtomicReference<>();
+        final java.util.concurrent.atomic.AtomicReference<@Nullable String> source =
+                new java.util.concurrent.atomic.AtomicReference<>();
         final AtomicInteger calls = new AtomicInteger();
 
         @Nullable String load() throws InterruptedException {
@@ -237,7 +239,8 @@ public class InternalDistributionTest {
     void a_load_of_a_missing_key_overtaken_by_invalidateAll_is_invalidated_everywhere() throws Exception {
         BlockedLoad blocked = new BlockedLoad();
         blocked.source.set("old");
-        DistributedLoadingCache<String, String> loader = track(builder(Function.identity()).build(key -> blocked.load()));
+        DistributedLoadingCache<String, String> loader =
+                track(builder(Function.identity()).build(key -> blocked.load()));
         DistributedCache<String, String> invalidator = plain();
         DistributedCache<String, String> bystander = plain();
         CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> loader.get("k"));
@@ -267,7 +270,8 @@ public class InternalDistributionTest {
     void a_load_that_read_a_tombstone_overtaken_by_invalidateAll_is_hidden() throws Exception {
         BlockedLoad blocked = new BlockedLoad();
         blocked.source.set("old");
-        DistributedLoadingCache<String, String> loader = track(builder(Function.identity()).build(key -> blocked.load()));
+        DistributedLoadingCache<String, String> loader =
+                track(builder(Function.identity()).build(key -> blocked.load()));
         DistributedCache<String, String> invalidator = plain();
         invalidator.invalidate("k");
         CompletableFuture<@Nullable String> load = CompletableFuture.supplyAsync(() -> loader.get("k"));
@@ -310,7 +314,8 @@ public class InternalDistributionTest {
 
     @Test
     void extra_keys_are_written_only_where_no_row_exists_and_never_over_a_newer_value() throws Exception {
-        java.util.Map<String, String> source = new java.util.concurrent.ConcurrentHashMap<>(Map.of("a", "a1", "x", "x1"));
+        java.util.Map<String, String> source =
+                new java.util.concurrent.ConcurrentHashMap<>(Map.of("a", "a1", "x", "x1"));
         CountDownLatch called = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         DistributedLoadingCache<String, String> loader = track(builder(Function.identity()).build(new CacheLoader<>() {
@@ -345,7 +350,7 @@ public class InternalDistributionTest {
     @Test
     void an_extra_key_held_after_a_newer_write_was_announced_is_dropped_again() {
         DistributedCache<String, String> writer = plain();
-        DistributedLoadingCache<String, String> loader = track(builder(store -> new InternalCoreTest.DelegatingStore(store) {
+        DistributedLoadingCache<String, String> loader = track(builder(store -> new DelegatingStore(store) {
             @Override
             public io.github.oberhoff.distributedcaffeine.spi.WriteResult write(
                     Collection<io.github.oberhoff.distributedcaffeine.spi.Write> writes) {
@@ -404,7 +409,7 @@ public class InternalDistributionTest {
     @Test
     void the_writers_own_message_leaves_its_value_alone() {
         AtomicInteger reads = new AtomicInteger();
-        DistributedCache<String, String> writer = track(builder(store -> new InternalCoreTest.DelegatingStore(store) {
+        DistributedCache<String, String> writer = track(builder(store -> new DelegatingStore(store) {
             @Override
             public Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
                 reads.incrementAndGet();
@@ -467,7 +472,7 @@ public class InternalDistributionTest {
         CountDownLatch release = new CountDownLatch(1);
         DistributedCache<String, String> first = plain();
         first.put("k", "old");
-        DistributedCache<String, String> second = track(builder(store -> new InternalCoreTest.DelegatingStore(store) {
+        DistributedCache<String, String> second = track(builder(store -> new DelegatingStore(store) {
             @Override
             public Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
                 Map<String, Row> rows = super.read(hashes, maxAge);
@@ -495,7 +500,7 @@ public class InternalDistributionTest {
     void negative_caching_answers_repeated_misses_without_store_or_source() {
         AtomicInteger loads = new AtomicInteger();
         AtomicInteger reads = new AtomicInteger();
-        DistributedLoadingCache<String, String> cache = track(builder(store -> new InternalCoreTest.DelegatingStore(store) {
+        DistributedLoadingCache<String, String> cache = track(builder(store -> new DelegatingStore(store) {
             @Override
             public Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
                 reads.incrementAndGet();
@@ -649,7 +654,8 @@ public class InternalDistributionTest {
         try {
             await(() -> first.distributedPolicy().getSynchronizationState() == SynchronizationState.DEGRADED);
             // no message can end these absences
-            List.of("viaGet", "viaGetIfPresent", "viaContainsKey", "viaGetAll").forEach(key -> second.put(key, "written"));
+            List.of("viaGet", "viaGetIfPresent", "viaContainsKey", "viaGetAll")
+                    .forEach(key -> second.put(key, "written"));
 
             assertThat(first.get("viaGet")).isEqualTo("written");
             assertThat(first.getIfPresent("viaGetIfPresent")).isEqualTo("written");
@@ -684,7 +690,8 @@ public class InternalDistributionTest {
         Store maintenance = track(backend.open());
         pause(60);
 
-        assertThat(maintenance.expire(Duration.ofMillis(50), new InternalVersion().fresh(), Integer.MAX_VALUE)).isEqualTo(1);
+        assertThat(maintenance.expire(Duration.ofMillis(50), new InternalVersion().fresh(), Integer.MAX_VALUE))
+                .isEqualTo(1);
 
         await(() -> held(second, "k") == null && held(first, "k") == null);
     }

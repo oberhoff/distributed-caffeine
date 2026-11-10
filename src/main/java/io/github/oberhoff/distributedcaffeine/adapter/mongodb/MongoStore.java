@@ -542,7 +542,8 @@ final class MongoStore implements Store, ChangeFeed {
         return e instanceof MongoSocketException
                 || e instanceof MongoNotPrimaryException || e instanceof MongoNodeIsRecoveringException
                 || e instanceof MongoWriteConcernException || e instanceof MongoExecutionTimeoutException
-                || e instanceof MongoConnectionPoolClearedException || e.hasErrorLabel("RetryableWriteError") || e.hasErrorLabel("TransientTransactionError");
+                || e instanceof MongoConnectionPoolClearedException || e.hasErrorLabel("RetryableWriteError")
+                || e.hasErrorLabel("TransientTransactionError");
     }
 
     // sent, and broken before the answer: the write may have committed (a timeout is decided before, in run)
@@ -634,8 +635,8 @@ final class MongoStore implements Store, ChangeFeed {
                 ? MongoLocation.fromBson(value, location.valueFormat) : null;
         // a value projected away as too old: expired, at its version
         State state = stored == State.VALUE && bytes == null ? State.EXPIRED : stored;
-        return new Row(hash, key == null || key.isNull() ? new byte[0] : MongoLocation.fromBson(key, location.keyFormat),
-                bytes, state, document.getInt64(FIELD_VERSION).getValue(), age(document));
+        return new Row(hash, key == null || key.isNull() ? new byte[0] : MongoLocation.fromBson(key,
+                location.keyFormat), bytes, state, document.getInt64(FIELD_VERSION).getValue(), age(document));
     }
 
     private List<BsonValue> ids(Collection<String> hashes) {

@@ -36,9 +36,9 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * The PostgreSQL counterpart of {@link MongoPopulationExperimentTest}: one writer, N holders of one hot key, each holder
- * with its own LISTEN connection and its own read connection (as separate instances). A holder reads the held row
- * once per batch of notifications. Also the writer alone, with and without the notification in its statement.
+ * The PostgreSQL counterpart of {@link MongoPopulationExperimentTest}: one writer, N holders of one hot key, each
+ * holder with its own LISTEN connection and its own read connection (as separate instances). A holder reads the held
+ * row once per batch of notifications. Also the writer alone, with and without the notification in its statement.
  * <p>
  * Not run by default, only with {@code -Dexperiments=true}; run with
  * {@code mvn test -Dtest=PostgresPopulationExperimentTest -Dexperiments=true}.
@@ -118,7 +118,8 @@ class PostgresPopulationExperimentTest {
                             continue;
                         }
                         // one read for the batch, the only held key
-                        try (PreparedStatement statement = reader.prepareStatement(PostgresStatementExperimentTest.READ)) {
+                        try (PreparedStatement statement =
+                                reader.prepareStatement(PostgresStatementExperimentTest.READ)) {
                             statement.setArray(1, reader.createArrayOf("text", new String[]{"hot"}));
                             statement.setString(2, "1 hour");
                             try (ResultSet resultSet = statement.executeQuery()) {
@@ -147,7 +148,8 @@ class PostgresPopulationExperimentTest {
         Thread.sleep(300);
 
         try (Connection writer = connect(container)) {
-            String sql = notify ? PostgresStatementExperimentTest.UPSERT : PostgresStatementExperimentTest.UPSERT_WITHOUT_NOTIFY;
+            String sql = notify ? PostgresStatementExperimentTest.UPSERT
+                    : PostgresStatementExperimentTest.UPSERT_WITHOUT_NOTIFY;
             try (PreparedStatement statement = writer.prepareStatement(sql)) {
                 long begin = System.nanoTime();
                 for (int seq = 0; seq < total; seq++) {

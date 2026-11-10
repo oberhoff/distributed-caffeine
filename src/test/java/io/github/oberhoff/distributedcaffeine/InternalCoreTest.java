@@ -393,11 +393,13 @@ public class InternalCoreTest {
     @Test
     void a_value_older_than_the_maximum_age_is_not_served_but_loaded_again() {
         AtomicInteger loads = new AtomicInteger();
-        DistributedLoadingCache<String, String> first = builder(Duration.ofMillis(100)).build(key -> "v" + loads.incrementAndGet());
+        DistributedLoadingCache<String, String> first =
+                builder(Duration.ofMillis(100)).build(key -> "v" + loads.incrementAndGet());
         closeables.add(first);
         assertThat(first.get("k")).isEqualTo("v1");
         pause(150);
-        DistributedLoadingCache<String, String> second = builder(Duration.ofMillis(100)).build(key -> "v" + loads.incrementAndGet());
+        DistributedLoadingCache<String, String> second =
+                builder(Duration.ofMillis(100)).build(key -> "v" + loads.incrementAndGet());
         closeables.add(second);
 
         assertThat(second.get("k")).isEqualTo("v2");
@@ -576,11 +578,11 @@ public class InternalCoreTest {
         }
     }
 
-    // a slow load holds no lock of Caffeine's, on every path (the synchronous get: a_slow_load_does_not_block_other_keys):
-    // the function Caffeine runs inside ConcurrentHashMap.compute only installs an empty future, and the store round
-    // trips and the user's loader run after it. Otherwise a load would block every key in its hash bin for its whole
-    // duration, and every insert once the map resizes (the transfer locks each bin). A hundred other keys, starting
-    // from Caffeine's initial table of 16 bins, hit both cases
+    // a slow load holds no lock of Caffeine's, on every path (the synchronous get:
+    // a_slow_load_does_not_block_other_keys): the function Caffeine runs inside ConcurrentHashMap.compute only installs
+    // an empty future, and the store round trips and the user's loader run after it. Otherwise a load would block every
+    // key in its hash bin for its whole duration, and every insert once the map resizes (the transfer locks each bin).
+    // A hundred other keys, starting from Caffeine's initial table of 16 bins, hit both cases
 
     private static final int OTHER_KEYS = 100;
 
@@ -858,7 +860,8 @@ public class InternalCoreTest {
         DistributedCache<String, String> second = plain();
         first.putAll(Map.of("a", "1", "b", "2"));
 
-        assertThat(second.getAllPresent(List.of("b", "missing", "a"))).containsExactly(Map.entry("b", "2"), Map.entry("a", "1"));
+        assertThat(second.getAllPresent(List.of("b", "missing", "a")))
+                .containsExactly(Map.entry("b", "2"), Map.entry("a", "1"));
     }
 
     @Test
@@ -937,10 +940,12 @@ public class InternalCoreTest {
 
         Map<String, String> values = second.getAll(List.of("a", "stored", "b"));
 
-        assertThat(values).containsExactly(Map.entry("a", "loaded-a"), Map.entry("stored", "s"), Map.entry("b", "loaded-b"));
+        assertThat(values).containsExactly(Map.entry("a", "loaded-a"), Map.entry("stored", "s"),
+                Map.entry("b", "loaded-b"));
         assertThat(bulkCalls).hasValue(1);
         assertThat(requested.get("keys")).containsExactlyInAnyOrder("a", "b");
-        assertThat(second.getIfPresent("extra")).as("an extra key the store held no value for is kept").isEqualTo("unasked");
+        assertThat(second.getIfPresent("extra")).as("an extra key the store held no value for is kept")
+                .isEqualTo("unasked");
     }
 
     @Test
@@ -989,7 +994,8 @@ public class InternalCoreTest {
             return result;
         };
 
-        assertThat(cache.getAll(List.of("a", "b"), mapping)).containsExactly(Map.entry("a", "m-a"), Map.entry("b", "m-b"));
+        assertThat(cache.getAll(List.of("a", "b"), mapping))
+                .containsExactly(Map.entry("a", "m-a"), Map.entry("b", "m-b"));
         assertThat(plain().getAllPresent(List.of("a", "b"))).hasSize(2);
     }
 

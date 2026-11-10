@@ -38,9 +38,9 @@ import java.util.function.Function;
  * The core's races explored by Lincheck's model checking of whole scenarios (VISION.md, "Deterministic simulation",
  * D): two instances on the simulated in-memory store, the threads of a scenario and one delivering messages
  * meanwhile, every interleaving Lincheck chooses replayable. One invariant for all: once the delivery has caught up,
- * a read of the holder serves nothing or what the store holds (no value staler than the delivery). Each scenario reaches one
- * mechanism (a load's reservation, an invalidation, invalidateAll's epoch, a gap's revalidation), and a mutation of
- * that mechanism fails it. About a minute each; run with {@code -Dmodelchecking=true}.
+ * a read of the holder serves nothing or what the store holds (no value staler than the delivery). Each scenario
+ * reaches one mechanism (a load's reservation, an invalidation, invalidateAll's epoch, a gap's revalidation), and a
+ * mutation of that mechanism fails it. About a minute each; run with {@code -Dmodelchecking=true}.
  *
  * @author Andreas Oberhoff
  */

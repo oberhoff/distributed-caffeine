@@ -27,8 +27,9 @@ import org.junit.jupiter.api.TestInstance;
 
 /**
  * The suites on a cluster of one Redis, Valkey or Dragonfly image (the subclass names it): both contracts and the
- * failover of a cache's primary through each client library (not on Dragonfly, whose control plane fails over), the cache suites (core, distribution, recovery) through Lettuce; each
- * cache in a keyspace of its own, so on a slot of its own. The cluster is started with the class and stopped after its suites.
+ * failover of a cache's primary through each client library (not on Dragonfly, whose control plane fails over), the
+ * cache suites (core, distribution, recovery) through Lettuce; each cache in a keyspace of its own, so on a slot of its
+ * own. The cluster is started with the class and stopped after its suites.
  *
  * @author Andreas Oberhoff
  */

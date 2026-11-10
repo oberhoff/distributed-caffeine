@@ -64,8 +64,8 @@ public final class MaintenanceExperiment {
         Store open();
 
         /**
-         * Replaces the cache's rows by the given number of value rows, written two hours ago (older than {@link #LONG}),
-         * hashes {@code h0} to {@code h(n-1)}.
+         * Replaces the cache's rows by the given number of value rows, written two hours ago (older than {@link
+         * #LONG}), hashes {@code h0} to {@code h(n-1)}.
          *
          * @param rows the number of rows
          */

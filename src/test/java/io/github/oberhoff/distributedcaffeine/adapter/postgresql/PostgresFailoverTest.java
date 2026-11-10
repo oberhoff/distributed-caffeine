@@ -43,7 +43,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * The PostgreSQL adapter through a failover: a primary streaming to a standby, both reached through multi-host
  * connection details that look for the primary ({@code targetServerType=primary}), listened through as well, the
  * primary stopped and the standby promoted. Writing resumes on the new primary, the listening session reconnects to
- * it, and what was written before is still there. On a primary with a standby, built anew after each test, which breaks it.
+ * it, and what was written before is still there. On a primary with a standby, built anew after each test, which breaks
+ * it.
  *
  * @author Andreas Oberhoff
  */
@@ -90,7 +91,8 @@ abstract class PostgresFailoverTest {
                                 "cache").build())
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000).withOperationTimeout(Duration.ofSeconds(5)))
+                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(1_000)
+                        .withOperationTimeout(Duration.ofSeconds(5)))
                 .withDistributionMode(mode)
                 .build());
     }

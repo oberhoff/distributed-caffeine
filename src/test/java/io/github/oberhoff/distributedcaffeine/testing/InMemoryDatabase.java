@@ -220,6 +220,24 @@ public final class InMemoryDatabase {
     }
 
     /**
+     * Loses a value row's write in a failover and writes another value at its very version, as a store assigning
+     * versions does onto a new primary whose clock stands where the old one's stood (found 2026-11-10 on Valkey): the
+     * version alone no longer tells the two values apart. Every subscription is told about the gap, then the later
+     * write is announced. In every table holding the row as a value.
+     *
+     * @param hash  the row's hash
+     * @param value the later value, serialized
+     * @return whether a table held the row as a value
+     */
+    public boolean reuseVersion(String hash, byte[] value) {
+        boolean reused = false;
+        for (InMemoryTable table : tables.values()) {
+            reused |= table.reuseVersion(hash, value);
+        }
+        return reused;
+    }
+
+    /**
      * Sets the probability that a message is lost without a gap reported, as a feed losing messages silently does
      * (Redis pub/sub across a disconnect it did not notice).
      *
@@ -247,6 +265,16 @@ public final class InMemoryDatabase {
      */
     public void failNextReads(int count) {
         faults.failNextReads(count);
+    }
+
+    /**
+     * Makes the scans the core polls ({@link StoreProfile.Changes#SCAN}) fail, or answer again, while every other
+     * operation answers: the polling counterpart of {@link #interruptSubscriptions()}.
+     *
+     * @param failing whether the polls fail
+     */
+    public void setPollsFailing(boolean failing) {
+        faults.pollsFailing = failing;
     }
 
     /**
@@ -411,8 +439,8 @@ public final class InMemoryDatabase {
     }
 
     /**
-     * Runs a step before every batch with a conditional write ({@code Store#write}) is applied, outside the table's monitor:
-     * between an operation's read and its write, e.g. to run an {@code invalidateAll} there.
+     * Runs a step before every batch with a conditional write ({@code Store#write}) is applied, outside the table's
+     * monitor: between an operation's read and its write, e.g. to run an {@code invalidateAll} there.
      *
      * @param step the step, {@code null} for none
      */
@@ -530,6 +558,7 @@ public final class InMemoryDatabase {
         private boolean failingOutcomeUnknown;
         volatile boolean down;
         volatile boolean paused;
+        volatile boolean pollsFailing;
         volatile double duplicateProbability;
         volatile boolean reorderAcrossKeys;
         volatile long maxDelayNanos;

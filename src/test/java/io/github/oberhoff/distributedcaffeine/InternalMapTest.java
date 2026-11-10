@@ -210,7 +210,8 @@ class InternalMapTest {
 
     @Test
     void remove_without_a_value_still_defeats_a_load_in_flight() throws Exception {
-        java.util.concurrent.atomic.AtomicReference<@Nullable String> source = new java.util.concurrent.atomic.AtomicReference<>("old");
+        java.util.concurrent.atomic.AtomicReference<@Nullable String> source =
+                new java.util.concurrent.atomic.AtomicReference<>("old");
         CountDownLatch called = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         AtomicInteger calls = new AtomicInteger();
@@ -429,6 +430,11 @@ class InternalMapTest {
             assertAnsweredFromTheHeldCopy(cache);
             await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.DEGRADED);
             assertAnsweredFromTheHeldCopy(cache);
+
+            // a decision to remove throws as well, and drops the copy first, as invalidate does
+            Map<String, String> map = cache.asMap();
+            assertThatThrownBy(() -> map.remove("k", "v")).isInstanceOf(StoreException.class);
+            assertThat(held(cache)).isNull();
         } finally {
             database.setDown(false);
         }
@@ -441,9 +447,9 @@ class InternalMapTest {
         assertThat(map.remove("k", "other")).isFalse();
         assertThat(map.computeIfPresent("k", (key, value) -> value)).isEqualTo("v");
         assertThat(map.computeIfAbsent("k", key -> "x")).as("as before").isEqualTo("v");
-        // a decision to write throws, as every write while the store is down; so does a key not held
+        // a decision to write a value throws, as every write while the store is down, and leaves the copy held, as the
+        // store still holds it; so does a key not held
         assertThatThrownBy(() -> map.replace("k", "x")).isInstanceOf(StoreException.class);
-        assertThatThrownBy(() -> map.remove("k", "v")).isInstanceOf(StoreException.class);
         assertThatThrownBy(() -> map.putIfAbsent("absent", "x")).isInstanceOf(StoreException.class);
         assertThat(held(cache)).isEqualTo("v");
     }

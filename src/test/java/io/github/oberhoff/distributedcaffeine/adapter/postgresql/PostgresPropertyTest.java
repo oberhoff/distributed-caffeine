@@ -41,8 +41,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * The property test (freshness and convergence, see {@link InternalPropertyTest}) on PostgreSQL: real latency, real
- * notifications through a listening session of its own, and the faults PostgreSQL has: a terminated listening session (a
- * gap, as every reconnect is one), a statement rejected by the server (retried), and a connection broken during a
+ * notifications through a listening session of its own, and the faults PostgreSQL has: a terminated listening session
+ * (a gap, as every reconnect is one), a statement rejected by the server (retried), and a connection broken during a
  * statement (the outcome unknown).
  *
  * @author Andreas Oberhoff
@@ -140,7 +140,8 @@ abstract class PostgresPropertyTest {
             return (Connection) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
                     (self, method, args) -> {
                         Object result = invoke(real, method, args);
-                        if (method.getName().equals("prepareStatement") && ((String) args[0]).contains("discriminator")) {
+                        if (method.getName().equals("prepareStatement")
+                                && ((String) args[0]).contains("discriminator")) {
                             PreparedStatement statement = (PreparedStatement) result;
                             return Proxy.newProxyInstance(getClass().getClassLoader(),
                                     new Class<?>[]{PreparedStatement.class}, (p, m, a) -> {

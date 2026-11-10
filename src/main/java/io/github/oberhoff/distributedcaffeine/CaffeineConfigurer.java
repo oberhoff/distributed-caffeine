@@ -24,7 +24,6 @@ import com.github.benmanes.caffeine.cache.Ticker;
 import com.github.benmanes.caffeine.cache.Weigher;
 import com.github.benmanes.caffeine.cache.stats.ConcurrentStatsCounter;
 import com.github.benmanes.caffeine.cache.stats.StatsCounter;
-
 import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
@@ -81,8 +80,10 @@ public final class CaffeineConfigurer<K, V> {
     }
 
     /**
-     * See {@link Caffeine#executor(Executor)}. Runs the loader, listeners and refreshes; the store calls run on the
-     * store's executor ({@code StoreConfigurer.withExecutor}).
+     * See {@link Caffeine#executor(Executor)}.
+     * <p>
+     * <b>Distributed Caffeine:</b> Runs the loader, listeners and refreshes; the store calls run on the store's
+     * executor ({@code StoreConfigurer.withExecutor}).
      *
      * @param executor the executor
      * @return this configurer
@@ -105,7 +106,9 @@ public final class CaffeineConfigurer<K, V> {
     }
 
     /**
-     * See {@link Caffeine#maximumSize(long)}. Bounds this instance's copies; the store has its own maximum size.
+     * See {@link Caffeine#maximumSize(long)}.
+     * <p>
+     * <b>Distributed Caffeine:</b> Bounds this instance's copies; the store has its own maximum size.
      *
      * @param maximumSize the maximum number of entries this instance holds
      * @return this configurer
@@ -117,6 +120,8 @@ public final class CaffeineConfigurer<K, V> {
 
     /**
      * See {@link Caffeine#maximumWeight(long)}.
+     * <p>
+     * <b>Distributed Caffeine:</b> Bounds the weight of this instance's copies; the store has its own maximum size.
      *
      * @param maximumWeight the maximum total weight of the entries this instance holds
      * @return this configurer
@@ -140,7 +145,9 @@ public final class CaffeineConfigurer<K, V> {
     }
 
     /**
-     * Rejected: keys are matched by hash across instances, not by identity.
+     * See {@link Caffeine#weakKeys()}.
+     * <p>
+     * <b>Distributed Caffeine:</b> Rejected: keys are matched by hash across instances, not by identity.
      *
      * @return never
      * @throws UnsupportedOperationException always
@@ -152,7 +159,9 @@ public final class CaffeineConfigurer<K, V> {
     }
 
     /**
-     * Rejected: values are held in a wrapper the garbage collector would reclaim at once.
+     * See {@link Caffeine#weakValues()}.
+     * <p>
+     * <b>Distributed Caffeine:</b> Rejected: values are held in a wrapper the garbage collector would reclaim at once.
      *
      * @return never
      * @throws UnsupportedOperationException always
@@ -164,7 +173,10 @@ public final class CaffeineConfigurer<K, V> {
     }
 
     /**
-     * Rejected, as {@link #weakValues()}.
+     * See {@link Caffeine#softValues()}.
+     * <p>
+     * <b>Distributed Caffeine:</b> Rejected: values are held in a wrapper the garbage collector would reclaim under
+     * memory pressure.
      *
      * @return never
      * @throws UnsupportedOperationException always
@@ -176,8 +188,10 @@ public final class CaffeineConfigurer<K, V> {
     }
 
     /**
-     * See {@link Caffeine#expireAfterWrite(Duration)}. A duration longer than the store's maximum age is lowered to it,
-     * so no copy outlives the store's bound (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
+     * See {@link Caffeine#expireAfterWrite(Duration)}.
+     * <p>
+     * <b>Distributed Caffeine:</b> A duration longer than the store's maximum age is lowered to it, so no copy outlives
+     * the store's bound (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
      *
      * @param duration the duration
      * @return this configurer
@@ -190,6 +204,9 @@ public final class CaffeineConfigurer<K, V> {
 
     /**
      * See {@link Caffeine#expireAfterWrite(long, TimeUnit)}.
+     * <p>
+     * <b>Distributed Caffeine:</b> A duration longer than the store's maximum age is lowered to it, so no copy outlives
+     * the store's bound (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
      *
      * @param duration the duration
      * @param unit     its unit
@@ -203,6 +220,9 @@ public final class CaffeineConfigurer<K, V> {
 
     /**
      * See {@link Caffeine#expireAfterAccess(Duration)}.
+     * <p>
+     * <b>Distributed Caffeine:</b> Counts the accesses on this instance only. However often it is accessed, a copy
+     * still expires at the store's maximum age (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
      *
      * @param duration the duration
      * @return this configurer
@@ -215,6 +235,9 @@ public final class CaffeineConfigurer<K, V> {
 
     /**
      * See {@link Caffeine#expireAfterAccess(long, TimeUnit)}.
+     * <p>
+     * <b>Distributed Caffeine:</b> Counts the accesses on this instance only. However often it is accessed, a copy
+     * still expires at the store's maximum age (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
      *
      * @param duration the duration
      * @param unit     its unit
@@ -227,8 +250,10 @@ public final class CaffeineConfigurer<K, V> {
     }
 
     /**
-     * See {@link Caffeine#expireAfter(Expiry)}. A duration longer than the store's maximum age is lowered to it, as for
-     * {@link #expireAfterWrite(Duration)}.
+     * See {@link Caffeine#expireAfter(Expiry)}.
+     * <p>
+     * <b>Distributed Caffeine:</b> A duration longer than the store's maximum age is lowered to it, as for {@link
+     * #expireAfterWrite(Duration)}.
      *
      * @param expiry the expiry
      * @return this configurer
@@ -240,10 +265,12 @@ public final class CaffeineConfigurer<K, V> {
     }
 
     /**
-     * See {@link Caffeine#refreshAfterWrite(Duration)}. Requires a loading cache, as in Caffeine. The duration counts
-     * from when this instance got the value; a value read from the store that is already older is refreshed at once.
-     * So a value is refreshed by an age of at most twice the duration. A refresh always calls the loader, and when
-     * several instances refresh a key at once, the first result written wins.
+     * See {@link Caffeine#refreshAfterWrite(Duration)}.
+     * <p>
+     * <b>Distributed Caffeine:</b> Requires a loading cache, as in Caffeine. The duration counts from when this
+     * instance got the value; a value read from the store that is already older is refreshed at once. So a value is
+     * refreshed by an age of at most twice the duration. A refresh always calls the loader, and when several instances
+     * refresh a key at once, the first result written wins.
      *
      * @param duration the duration
      * @return this configurer
@@ -256,6 +283,11 @@ public final class CaffeineConfigurer<K, V> {
 
     /**
      * See {@link Caffeine#refreshAfterWrite(long, TimeUnit)}.
+     * <p>
+     * <b>Distributed Caffeine:</b> Requires a loading cache, as in Caffeine. The duration counts from when this
+     * instance got the value; a value read from the store that is already older is refreshed at once. So a value is
+     * refreshed by an age of at most twice the duration. A refresh always calls the loader, and when several instances
+     * refresh a key at once, the first result written wins.
      *
      * @param duration the duration
      * @param unit     its unit
@@ -268,8 +300,10 @@ public final class CaffeineConfigurer<K, V> {
     }
 
     /**
-     * See {@link Caffeine#ticker(Ticker)}. Drives this instance's expiry and refresh only; ages in the store follow the
-     * store's clock.
+     * See {@link Caffeine#ticker(Ticker)}.
+     * <p>
+     * <b>Distributed Caffeine:</b> Drives this instance's expiry and refresh only; ages in the store follow the store's
+     * clock.
      *
      * @param ticker the ticker
      * @return this configurer
@@ -281,6 +315,10 @@ public final class CaffeineConfigurer<K, V> {
 
     /**
      * See {@link Caffeine#evictionListener(RemovalListener)}.
+     * <p>
+     * <b>Distributed Caffeine:</b> Notified for the copies this instance evicts or expires, also at the store's maximum
+     * age, which applies even without an expiry configured. A change made elsewhere is reported to the removal listener
+     * only.
      *
      * @param evictionListener the listener
      * @return this configurer
@@ -291,8 +329,10 @@ public final class CaffeineConfigurer<K, V> {
     }
 
     /**
-     * See {@link Caffeine#removalListener(RemovalListener)}. Also notified when a change elsewhere removes or replaces
-     * an entry this instance holds; not for the entries {@code close()} drops.
+     * See {@link Caffeine#removalListener(RemovalListener)}.
+     * <p>
+     * <b>Distributed Caffeine:</b> Also notified when a change elsewhere removes or replaces an entry this instance
+     * holds; not for the entries {@code close()} drops.
      *
      * @param removalListener the listener
      * @return this configurer
@@ -303,7 +343,9 @@ public final class CaffeineConfigurer<K, V> {
     }
 
     /**
-     * See {@link Caffeine#recordStats()}. Also records the distributed stats ({@code distributedPolicy().stats()}).
+     * See {@link Caffeine#recordStats()}.
+     * <p>
+     * <b>Distributed Caffeine:</b> Also records the distributed stats ({@code distributedPolicy().stats()}).
      *
      * @return this configurer
      */
@@ -314,8 +356,9 @@ public final class CaffeineConfigurer<K, V> {
     }
 
     /**
-     * See {@link Caffeine#recordStats(Supplier)}. Also records the distributed stats
-     * ({@code distributedPolicy().stats()}).
+     * See {@link Caffeine#recordStats(Supplier)}.
+     * <p>
+     * <b>Distributed Caffeine:</b> Also records the distributed stats ({@code distributedPolicy().stats()}).
      *
      * @param statsCounterSupplier the supplier of the stats counter
      * @return this configurer

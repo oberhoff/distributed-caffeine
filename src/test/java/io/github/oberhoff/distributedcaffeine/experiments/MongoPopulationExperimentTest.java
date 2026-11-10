@@ -158,7 +158,8 @@ class MongoPopulationExperimentTest {
         long queriesBefore = queries(writerClient);
         for (int seq = 0; seq < total; seq++) {
             started[seq] = System.nanoTime();
-            rows.updateOne(eq("_id", "hot"), new Document("$set", new Document("seq", seq).append("value", seq + VALUE)),
+            rows.updateOne(eq("_id", "hot"),
+                    new Document("$set", new Document("seq", seq).append("value", seq + VALUE)),
                     new UpdateOptions().upsert(true));
             acknowledged[seq] = System.nanoTime();
         }

@@ -27,8 +27,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * The core's versions, a hybrid logical clock: every version proposed is larger than every one proposed or seen
- * before, positive, near the time; {@link InternalVersion#UNCONFIRMED} below all of them, {@link InternalVersion#ANYTHING}
- * above.
+ * before, positive, near the time; {@link InternalVersion#UNCONFIRMED} below all of them, {@link
+ * InternalVersion#ANYTHING} above.
  *
  * @author Andreas Oberhoff
  */

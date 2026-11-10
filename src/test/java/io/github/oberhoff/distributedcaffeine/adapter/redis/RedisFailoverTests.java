@@ -240,7 +240,7 @@ abstract class RedisFailoverTests {
         // confirmed by the primary, never replicated
         byte[] lostValue = "lost".getBytes(StandardCharsets.UTF_8);
         Write unreplicated = Write.value(KEY, lostValue, lostValue, 1);
-        long lost = store.write(List.of(unreplicated), "unreplicated", UNREPLICATED).version(unreplicated);
+        store.write(List.of(unreplicated), "unreplicated", UNREPLICATED);
         converges(writer, "lost");
         converges(holder, "lost");
         String before = topology.describe(row);
@@ -253,9 +253,12 @@ abstract class RedisFailoverTests {
             throw new AssertionError(e.getMessage() + "; before the failover: " + before + "after: "
                     + topology.describe(row), e);
         }
+        // taken by both caches, whatever its version: where the new primary's clock stands where the old one's stood (a
+        // virtual machine resumed, found 2026-11-10) it is the lost write's very version
         byte[] bytes = "later".getBytes(StandardCharsets.UTF_8);
-        Write later = Write.value(KEY, bytes, bytes, 1);
-        assertThat(store.write(List.of(later)).version(later)).as("above the lost write's version").isGreaterThan(lost);
+        store.write(List.of(Write.value(KEY, bytes, bytes, 1)));
+        converges(writer, "later");
+        converges(holder, "later");
     }
 
     // the clock that matters is the store's: a new primary whose clock is behind the old one's issues versions below

@@ -46,6 +46,11 @@ operation timeout for the cache's own operations, so caches sharing a client may
 retries a write within it while the primary changes. A timeout set on the client itself (the connection string option
 `timeoutMS`) applies instead. The driver's wait for a pooled connection is covered by the timeout as well.
 
+The timeout does not bound sending: Java sockets have no write timeout, so with the driver's default transport a write
+too large for the socket's buffer, such as a large `putAll`, sent to a primary that vanished without closing the
+connection (a crashed host, a cut network), waits until the operating system gives up (about 15 minutes on Linux,
+`net.ipv4.tcp_retries2`) and fails only then ([JAVA-1269](https://jira.mongodb.org/browse/JAVA-1269)).
+
 ## Failovers
 
 While the primary changes, writes are retried by the driver until the operation timeout runs out, so a timeout above the

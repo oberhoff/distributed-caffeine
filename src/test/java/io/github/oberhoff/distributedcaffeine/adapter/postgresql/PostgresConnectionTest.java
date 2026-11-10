@@ -57,9 +57,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * The PostgreSQL adapter's connections when something is wrong with them: a listening session that goes silent or
- * stops in the middle of a notification (found by the core's heartbeat, and re-established when the core resumes it), a listener that cannot receive what is written
- * (another database), a data source that cannot be written through (a standby), and the listening session several
- * caches share. Poolers: {@link PostgresPoolerTest}.
+ * stops in the middle of a notification (found by the core's heartbeat, and re-established when the core resumes it), a
+ * listener that cannot receive what is written (another database), a data source that cannot be written through (a
+ * standby), and the listening session several caches share. Poolers: {@link PostgresPoolerTest}.
  *
  * @author Andreas Oberhoff
  */

@@ -255,7 +255,8 @@ final class RedissonSession implements RedisSession {
             streams.forEachRemaining(other -> others.put(other.getKey(), id(other.getValue())));
             RFuture<Map<String, Map<StreamMessageId, Map<String, String>>>> future = client
                     .<String, String>getStream(first.getKey(), StringCodec.INSTANCE)
-                    .readAsync(StreamMultiReadArgs.greaterThan(id(first.getValue()), others).timeout(block).count(count));
+                    .readAsync(StreamMultiReadArgs.greaterThan(id(first.getValue()), others).timeout(block)
+                            .count(count));
             synchronized (this) {
                 if (closed) {
                     future.cancel(false);
@@ -288,7 +289,8 @@ final class RedissonSession implements RedisSession {
         private static StreamMessageId id(String id) {
             int dash = id.indexOf('-');
             return dash < 0 ? new StreamMessageId(Long.parseLong(id))
-                    : new StreamMessageId(Long.parseLong(id.substring(0, dash)), Long.parseLong(id.substring(dash + 1)));
+                    : new StreamMessageId(Long.parseLong(id.substring(0, dash)),
+                            Long.parseLong(id.substring(dash + 1)));
         }
 
         @Override

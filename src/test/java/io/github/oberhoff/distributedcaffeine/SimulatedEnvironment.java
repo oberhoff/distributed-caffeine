@@ -28,12 +28,12 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * A simulated environment of the core (VISION.md, "Deterministic simulation", B): its time moves only when a test
- * advances it, or when the core sleeps (a back-off, a pause: the clock moves on by the sleep, and what fell due meanwhile
- * runs at the next advance, not on the sleeping thread, which may be inside an operation, where a delivery could not
- * run with real threads); scheduled tasks run in the order they are due, on the thread that advances the time; randomness comes from
- * the seed, the wall clock from a fixed date. With the cache's executor direct ({@code Runnable::run}), what a task
- * starts (a poll, a heartbeat, maintenance, a resume) runs on that thread too, so one test thread drives virtual
- * minutes in milliseconds.
+ * advances it, or when the core sleeps (a back-off, a pause: the clock moves on by the sleep, and what fell due
+ * meanwhile runs at the next advance, not on the sleeping thread, which may be inside an operation, where a delivery
+ * could not run with real threads); scheduled tasks run in the order they are due, on the thread that advances the
+ * time; randomness comes from the seed, the wall clock from a fixed date. With the cache's executor direct ({@code
+ * Runnable::run}), what a task starts (a poll, a heartbeat, maintenance, a resume) runs on that thread too, so one test
+ * thread drives virtual minutes in milliseconds.
  *
  * @author Andreas Oberhoff
  */

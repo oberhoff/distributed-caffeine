@@ -46,7 +46,8 @@ final class InternalHasher<K> {
 
     // one reusable stream per thread, reset before each use: hashing allocates nothing
     @SuppressWarnings("java:S5164")
-    private static final ThreadLocal<HashStream128> STREAM = ThreadLocal.withInitial(() -> Hashing.xxh3_128().hashStream());
+    private static final ThreadLocal<HashStream128> STREAM =
+            ThreadLocal.withInitial(() -> Hashing.xxh3_128().hashStream());
 
     private final @Nullable HashProvider<K> hashProvider;
 

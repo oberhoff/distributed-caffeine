@@ -35,6 +35,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.function.Executable;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -124,6 +125,21 @@ abstract class MongoFailoverTest {
         }
     }
 
+    // hands the primary back after the checks even when they fail; a hand back failing then doesn't hide their failure
+    private void checkThenHandBack(Executable checks) throws Throwable {
+        try {
+            checks.execute();
+        } catch (Throwable e) {
+            try {
+                replicaSet.handBack();
+            } catch (AssertionError handBack) {
+                e.addSuppressed(handBack);
+            }
+            throw e;
+        }
+        replicaSet.handBack();
+    }
+
     // failovers and restarts
 
     @Test
@@ -171,7 +187,7 @@ abstract class MongoFailoverTest {
     // fail it, with its outcome unknown; either way every key ends with its old or its new value in the store, and no
     // cache holds anything else than the store
     @Test
-    void a_batch_the_primary_dies_under_leaves_every_key_old_or_new_and_both_caches_consistent() throws Exception {
+    void a_batch_the_primary_dies_under_leaves_every_key_old_or_new_and_both_caches_consistent() throws Throwable {
         MongoClient client = client(Duration.ofSeconds(30));
         DistributedCache<String, String> writer = cache(client, 100_000, LONG);
         DistributedCache<String, String> holder = cache(client, 100_000, LONG);
@@ -194,43 +210,49 @@ abstract class MongoFailoverTest {
         });
         pause(100);
         assertThat(batch).as("the batch still under way when the primary dies").isNotDone();
-        Throwable failure;
         try {
             replicaSet.killPreferred();
-            failure = batch.get(2, TimeUnit.MINUTES);
             replicaSet.awaitFailover();
         } finally {
+            // restarted before the batch is awaited: a write the driver is still sending to the killed member fails
+            // only once that connection is reset, which the restarted member does (Java sockets have no write timeout,
+            // see the README, Timeouts)
             replicaSet.start(0);
-            replicaSet.handBack();
         }
-
-        if (failure != null) {
-            assertThat(failure).as("failing as the store failed, the outcome unknown").isInstanceOfSatisfying(
-                    StoreException.class, e -> assertThat(e.isOutcomeUnknown()).isTrue());
-        }
-        boolean allNew = failure == null;
-        assertThat(awaitUpTo(() -> {
-            for (String key : held) {
-                StoredValue<String> stored;
-                try {
-                    stored = writer.distributedPolicy().getFromStore(key);
-                } catch (StoreException e) {
-                    return false;
-                }
-                String value = stored == null ? null : stored.value();
-                if (!(allNew ? List.of("new") : List.of("old", "new")).contains(value)) {
-                    return false;
-                }
-                for (DistributedCache<String, String> cache : List.of(writer, holder)) {
-                    String copy = cache.policy().getIfPresentQuietly(key);
-                    if (copy != null && !copy.equals(value)) {
+        // checked before the primary is handed back: under load the restarted member may take long to catch up with
+        // the batch, and a slow hand back must not hide what the checks find
+        checkThenHandBack(() -> {
+            Throwable failure = batch.get(2, TimeUnit.MINUTES);
+            if (failure != null) {
+                assertThat(failure).as("failing as the store failed, the outcome unknown").isInstanceOfSatisfying(
+                        StoreException.class, e -> assertThat(e.isOutcomeUnknown()).isTrue());
+            }
+            boolean allNew = failure == null;
+            assertThat(awaitUpTo(() -> {
+                for (String key : held) {
+                    StoredValue<String> stored;
+                    try {
+                        stored = writer.distributedPolicy().getFromStore(key);
+                    } catch (StoreException e) {
                         return false;
                     }
+                    String value = stored == null ? null : stored.value();
+                    if (!(allNew ? List.of("new") : List.of("old", "new")).contains(value)) {
+                        return false;
+                    }
+                    for (DistributedCache<String, String> cache : List.of(writer, holder)) {
+                        String copy = cache.policy().getIfPresentQuietly(key);
+                        if (copy != null && !copy.equals(value)) {
+                            return false;
+                        }
+                    }
                 }
-            }
-            return true;
-        }, CONVERGENCE, Duration.ofMillis(500))).as("every key old or new in the store, both caches agreeing with it"
-                + (allNew ? ", the batch applied in full" : ", the batch failed: " + failure)).isTrue();
+                return true;
+            }, CONVERGENCE, Duration.ofMillis(500)))
+                    .as("every key old or new in the store, both caches agreeing with it"
+                            + (allNew ? ", the batch applied in full" : ", the batch failed: " + failure))
+                    .isTrue();
+        });
     }
 
     @Test

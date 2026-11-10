@@ -43,6 +43,7 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -58,6 +59,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -134,10 +136,15 @@ public class InternalPropertyTest {
     // older than its grace (4 s here), so that no poll misses a write and no load's write on "missing" applies over a
     // newer row pruned meanwhile
     private boolean pruning;
-    // the deterministic mode (VISION.md, "Deterministic simulation"): one thread, simulated time, choices from the seed;
-    // null in the threaded mode
+    // the deterministic mode (VISION.md, "Deterministic simulation"): one thread, simulated time, choices from the
+    // seed; null in the threaded mode
     private @Nullable SimulatedEnvironment simulation;
     private Random choices = new Random(0);
+    // the deterministic mode's clock faults: per instance, how far its wall clock is off the store's, in milliseconds
+    // (drawn from the seed); the store's clock is the simulated one. Within a minute either way the instances'
+    // proposals carry the versions; beyond it the store bounds them (the lead, InternalVersion#WARN_AHEAD_MILLIS)
+    private static final long[] SKEWS = {0, -20, 20, -2_000, 2_000, -90_000, 90_000};
+    private final Map<String, Long> skews = new ConcurrentHashMap<>();
 
     private void trace(String event) {
         SimulatedEnvironment simulated = simulation;
@@ -239,6 +246,13 @@ public class InternalPropertyTest {
         SimulatedEnvironment simulated = new SimulatedEnvironment(seed);
         simulation = simulated;
         choices = new Random(seed);
+        // a random of its own, so that the other choices of a seed stay as they were
+        Random skew = new Random(~seed);
+        for (String label : List.of("plain", "populated", "async")) {
+            long millis = SKEWS[skew.nextInt(SKEWS.length)];
+            skews.put(label, millis);
+            trace("CLOCK " + label + " off by " + millis + " ms");
+        }
         return run(seed, new InMemoryBackend(seed, profile, simulated), PHASES);
     }
 
@@ -267,7 +281,8 @@ public class InternalPropertyTest {
             DistributedLoadingCache<String, String> plain = builder(backend, "plain")
                     .withCaffeine(caffeine -> caffeine.maximumSize(simulation == null ? 4 : KEYS * 2))
                     .build(new BulkSourceLoader());
-            DistributedLoadingCache<String, String> populated = builder(backend, "populated").withDistributionMode(DistributionMode.UPDATE)
+            DistributedLoadingCache<String, String> populated = builder(backend, "populated")
+                    .withDistributionMode(DistributionMode.UPDATE)
                     .withNegativeCaching(Duration.ofMinutes(1))
                     .build(new SourceLoader());
             DistributedAsyncLoadingCache<String, String> async = builder(backend, "async")
@@ -328,7 +343,8 @@ public class InternalPropertyTest {
         SimulatedEnvironment simulated = simulation;
         if (simulated != null) {
             // everything on the simulation: the core's executor and Caffeine's direct, Caffeine's clock the simulated
-            builder.withEnvironment(simulated).withStore(store -> store.withExecutor(Runnable::run))
+            builder.withEnvironment(new SkewedEnvironment(simulated, skews.getOrDefault(label, 0L)))
+                    .withStore(store -> store.withExecutor(Runnable::run))
                     .withCaffeine(caffeine -> caffeine.executor(Runnable::run).ticker(simulated::nanoTime));
         }
         return builder
@@ -463,10 +479,11 @@ public class InternalPropertyTest {
         }
     }
 
-    // one phase on one thread: each instance's writer and loader take a step at a time, in an order drawn from the seed,
-    // the simulated time moving a little between steps (deliveries, polls, maintenance, resumes run there), and the
-    // fault at a step drawn too
-    private void runPhase(Random random, PropertyBackend backend, List<DistributedLoadingCache<String, String>> instances,
+    // one phase on one thread: each instance's writer and loader take a step at a time, in an order drawn from the
+    // seed, the simulated time moving a little between steps (deliveries, polls, maintenance, resumes run there), and
+    // the fault at a step drawn too
+    private void runPhase(Random random, PropertyBackend backend,
+                          List<DistributedLoadingCache<String, String>> instances,
                           DistributedAsyncLoadingCache<String, String> async, SimulatedEnvironment simulated) {
         List<Runnable> steps = new ArrayList<>();
         List<Integer> remaining = new ArrayList<>();
@@ -494,6 +511,9 @@ public class InternalPropertyTest {
             // a gap lost nothing, and a gap not revalidating went unnoticed)
             if (step == faultAt) {
                 backend.fault(fault, this::trace);
+                if (backend instanceof InMemoryBackend inMemory && fault.nextDouble() < 0.3) {
+                    reuseVersion(inMemory, fault);
+                }
             }
             simulated.advance(Duration.ofMillis(order.nextInt(5)));
         }
@@ -502,7 +522,8 @@ public class InternalPropertyTest {
     // on simulated time: the time moved until everything is delivered and processed, three checks in a row. Steps of
     // 100 ms: a resume after an interruption backs off for simulated seconds, which steps of 10 ms checked a hundred
     // times each (found: half the runs on a feed took two seconds instead of a fifth)
-    private static void awaitQuiescence(PropertyBackend backend, List<DistributedLoadingCache<String, String>> instances,
+    private static void awaitQuiescence(PropertyBackend backend,
+                                        List<DistributedLoadingCache<String, String>> instances,
                                         SimulatedEnvironment simulated) {
         int quiet = 0;
         for (int step = 0; quiet < 3; step++) {
@@ -518,7 +539,8 @@ public class InternalPropertyTest {
     }
 
     // the store has delivered everything, every instance has processed it, and every subscription is up again
-    private static void awaitQuiescence(PropertyBackend backend, List<DistributedLoadingCache<String, String>> instances) {
+    private static void awaitQuiescence(PropertyBackend backend,
+                                        List<DistributedLoadingCache<String, String>> instances) {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         int quiet = 0;
         while (quiet < 3) {
@@ -565,7 +587,8 @@ public class InternalPropertyTest {
                 boolean prunedButHeld = pruning && inStore == null && answer != null && (answer.equals(inSource)
                         || beforeInvalidateAll.getOrDefault(k, Set.of()).contains(answer));
                 if (!Objects.equals(answer, inStore) && !prunedButHeld) {
-                    InternalCore<String, String> core = ((InternalDistributedLoadingCache<String, String>) instances.get(instance)).core;
+                    InternalCore<String, String> core =
+                            ((InternalDistributedLoadingCache<String, String>) instances.get(instance)).core;
                     violations.add("convergence: instance " + instance + " answers " + answer + " for " + k
                             + ", the store holds " + inStore + " (held: " + core.l1().asMap().get(core.wrap(k))
                             + ", absence remembered: " + core.remembersAbsence(k) + ")");
@@ -581,6 +604,56 @@ public class InternalPropertyTest {
             fail("seed " + seed + ", phase " + phase + ":\n  " + String.join("\n  ", violations)
                     + "\nhistory of " + key + ":\n  "
                     + String.join("\n  ", history.subList(Math.max(0, history.size() - 60), history.size())));
+        }
+    }
+
+    // a write lost in a failover and a later one at its very version (a store assigning versions onto a clock that
+    // stands, found 2026-11-10), as one fault: the row gets another value at the version it has, which the source holds
+    // and was confirmed, while an instance may still hold the earlier value at that version. Only on a feed of the
+    // store's own, which reports the failover's gap; a store polled has versions proposed by the instances (see
+    // InternalPathParityTest#holdOldLostToNewAtItsVersion)
+    private void reuseVersion(InMemoryBackend backend, Random random) {
+        if (backend.database.profile().changes() != StoreProfile.Changes.FEED) {
+            return;
+        }
+        int key = random.nextInt(KEYS);
+        String k = key(key);
+        String token = token(key);
+        if (backend.database.reuseVersion(new InternalHasher<String>(null).wrap(k).hash(),
+                token.getBytes(StandardCharsets.UTF_8))) {
+            trace("FAULT version of " + k + " reused for " + token);
+            setSource(k, token);
+            confirmed.put(k, token);
+        }
+    }
+
+    // an instance's environment with its wall clock off the simulated one: versions are proposed from it, while the
+    // store stamps and assigns by its own clock
+    private record SkewedEnvironment(SimulatedEnvironment simulated, long skewMillis) implements InternalEnvironment {
+
+        @Override
+        public long nanoTime() {
+            return simulated.nanoTime();
+        }
+
+        @Override
+        public long currentTimeMillis() {
+            return simulated.currentTimeMillis() + skewMillis;
+        }
+
+        @Override
+        public void sleep(Duration duration) throws InterruptedException {
+            simulated.sleep(duration);
+        }
+
+        @Override
+        public ScheduledFuture<?> schedule(Runnable task, Duration delay) {
+            return simulated.schedule(task, delay);
+        }
+
+        @Override
+        public long random(long bound) {
+            return simulated.random(bound);
         }
     }
 
@@ -697,7 +770,8 @@ public class InternalPropertyTest {
     // in its unit), and the faults the profile allows that the oracles hold under: the clock stepping back within its
     // allowance, other writes landing between the rows of a read, batches applied in part. The events that lose what
     // the oracles ask for, a failover, an eviction or a message lost silently, are tested on their own
-    // (InternalStoreProfileTest)
+    // (InternalStoreProfileTest); what a failover onto a clock that stands leaves, a version with another value, is in
+    // the deterministic mode's faults (reuseVersion), as are instance clocks off the store's (SKEWS)
     // polling: stores without a change feed, which the core polls (VISION.md, "The polling feed"); idle once every
     // store began two scans after the last heal, the second one after everything written before it
     private static final class InMemoryBackend implements PropertyBackend {
@@ -720,11 +794,11 @@ public class InternalPropertyTest {
             this.simulation = null;
         }
 
-        // on the simulation, under the given profile: the store's clock and its deliveries; polled where the profile has
-        // no feed. The clock follows the simulated time in microseconds
-        // and moves at least a microsecond per reading, as a real one moves between two writes: the simulated time
-        // stands still within a step, and writes stamped equal to an invalidateAll's control row would be hidden by
-        // it (found: most seeds failed so, a confirmed write hidden)
+        // on the simulation, under the given profile: the store's clock and its deliveries; polled where the profile
+        // has no feed. The clock follows the simulated time in microseconds and moves at least a microsecond per
+        // reading, as a real one moves between two writes: the simulated time stands still within a step, and writes
+        // stamped equal to an invalidateAll's control row would be hidden by it (found: most seeds failed so, a
+        // confirmed write hidden)
         InMemoryBackend(long seed, StoreProfile profile, SimulatedEnvironment simulation) {
             java.util.concurrent.atomic.AtomicLong last = new java.util.concurrent.atomic.AtomicLong();
             this.database = new InMemoryDatabase(() -> last.updateAndGet(previous -> Math.max(previous + 1,
@@ -881,7 +955,8 @@ public class InternalPropertyTest {
                 List<String> parts = new ArrayList<>();
                 map.forEach((hash, value) -> parts.add(keysByHash.getOrDefault(String.valueOf(hash), "?") + "="
                         + (value instanceof Row row ? row.state() + "@" + row.version()
-                        + (row.value() == null ? "" : ":" + new String(row.value(), java.nio.charset.StandardCharsets.UTF_8))
+                        + (row.value() == null ? ""
+                                : ":" + new String(row.value(), java.nio.charset.StandardCharsets.UTF_8))
                         : String.valueOf(value))));
                 return parts.toString();
             }
@@ -919,7 +994,8 @@ public class InternalPropertyTest {
                 @Override
                 public void onChanges(List<Change> messages) {
                     for (Change message : messages) {
-                        trace(label + " RECEIVED " + message.kind() + " " + (Store.CONTROL_HASH.equals(message.hash()) ? "ALL "
+                        trace(label + " RECEIVED " + message.kind() + " "
+                                + (Store.CONTROL_HASH.equals(message.hash()) ? "ALL "
                                 : keysByHash.getOrDefault(message.hash(), "?") + " ") + "@" + message.version());
                     }
                     listener.onChanges(messages);

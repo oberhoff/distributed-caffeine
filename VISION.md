@@ -1203,7 +1203,7 @@ both report `DEGRADED`, and the reason goes into the log (a state per reason wou
 
 |                | `SYNCHRONIZED`     | `DEGRADED`, store down                                   | `DEGRADED`, subscription down        | `CLOSED` |
 |----------------|--------------------|----------------------------------------------------------|--------------------------------------|----------|
-| L1 hits        | served (confirmed) | served unconfirmed                                       | each access checks the version first | throws   |
+| L1 hits        | served (confirmed) | served unconfirmed                                       | each access checks its copy first    | throws   |
 | Misses         | L1 → L2 → loader   | loader only, held in L1, not written to L2               | L2 → loader                          | throws   |
 | Writes         | normal             | refused (`invalidate` drops the local copy, then throws); an atomic method writing nothing answers from a held copy | normal                               | throws   |
 | Back to normal | –                  | guard closes, reconnect, revalidation                    | reconnect, revalidation              | –        |
@@ -1216,9 +1216,9 @@ both report `DEGRADED`, and the reason goes into the log (a state per reason wou
   value awaiting its check still tries the store on every access: the guard refuses at once or lets it through as
   its probe, so the first access after the store is back checks it (found by a PostgreSQL failover that loses a
   confirmed write: otherwise the cache served the lost value until the next maintenance run).
-- **Only the subscription down, the store answering:** every access checks the held version against the store
-  (version only, no value transferred), because a copy confirmed now can go stale the next moment while no message
-  can arrive. Writes work normally; the store announces them to the others.
+- **Only the subscription down, the store answering:** every access checks the held copy against the store (its
+  version and value, see below), because a copy confirmed now can go stale the next moment while no message can
+  arrive. Writes work normally; the store announces them to the others.
 - **`CLOSED`:** after `close()` every cache operation throws, except `getSynchronizationState()`, so health checks
   can query a closed cache without catching exceptions.
 
@@ -1227,10 +1227,12 @@ both report `DEGRADED`, and the reason goes into the log (a state per reason wou
 - Each instance has an epoch counter; every `InternalValue` records the epoch at which it was last confirmed. A held
   value is trusted only if its epoch is current and the subscription is up.
 - On a gap the counter is incremented, which makes everything held unconfirmed without touching an entry.
-- An unconfirmed value is checked when read: the store returns hash and version only, under the maximum-age filter.
-  Same version → kept and confirmed, no value transferred; different, too old or missing → a miss (L2, then the
-  loader, as usual).
-- A background pass checks all held keys in batches (versions only, e.g. 1,000 per query, rate-limited so it does
+- An unconfirmed value is checked when read: the store returns the row, under the maximum-age filter. Same version
+  and the same value (compared serialized, as the store holds it) → kept and confirmed; different, too old or missing
+  → a miss (L2, then the loader, as usual). The version alone does not tell: after a failover that lost a write, a
+  store assigning versions can give a later write the lost one's version (found 2026-11-10, see dimension 4 of the
+  in-memory store profiles).
+- A background pass checks all held keys in batches (rows, e.g. 1,000 per query, rate-limited so it does
   not load a store that has just recovered) and drops what does not match, so `asMap()`, iteration and
   `estimatedSize()` are clean again soon, not only once each key has been read. It covers what never goes through a
   read: views and iteration, sizes, quiet reads (`getIfPresentQuietly`, L1 only), the user's removal listener, and
@@ -1238,15 +1240,16 @@ both report `DEGRADED`, and the reason goes into the log (a state per reason wou
   path. Kept after reviewing it as possible over-engineering: without it, views would either show possibly outdated
   entries after a gap until read (a deviation visible only in rare, hard-to-understand moments) or hide unconfirmed
   entries (and look almost empty right after a gap); its cost arises only after gaps and reuses the read path's
-  batched version reads.
+  batched reads.
 - **Order:** subscribe again first, then check. Every change after the check arrives as a message and is handled by
   the version comparison; checking first could miss a change in between.
 - After a crash that lost acknowledged writes, the lost versions held by peers no longer match the store and are
   dropped.
 - A MongoDB resume within the token's reach is no gap, so the epoch stays; while the cursor is down, the per-access
   check applies anyway, since messages are delayed.
-- Costs: one `int` per `InternalValue`; a version read on the first access per key after a gap, and on every access
-  while the subscription is down; one query per 1,000 held keys per gap for the background pass.
+- Costs: one `int` per `InternalValue`; a row read (its value transferred) on the first access per key after a gap,
+  and on every access while the subscription is down; one query per 1,000 held keys per gap for the background
+  pass.
 
 **Store guard, as today (measured and tested):** opens after 3 consecutive failures; while open, store calls are
 refused at once; after 1 s the next call is the probe; a successful call, or the maintenance worker's success,
@@ -1428,13 +1431,13 @@ decide, write conditionally on the version read; on a conflict read again and de
 | `asMap().put(k, v)`, `asMap().remove(k)`                  | none                            | written / tombstone conditionally on the version read, so the returned previous value is exact across instances; `put` always writes, also an equal value, so the row's age renews; `remove` always writes a tombstone, also where there is no value (conditionally on the tombstone's version, or on no row existing), because like Caffeine's `remove` it must defeat a load in flight: without it, a record deleted at the source and removed from the cache while a load was in flight was cached again from the load's older source read (found by the property test). `invalidateIfUnchanged` therefore matches a row of any state by its version, or `MISSING` |
 
 A remapping that returns the current value instance unchanged writes nothing; if that decision was made on a held
-value, its version is first checked against the store (`readVersions`), and on a mismatch the decision is made again
-on the store's row. Without that check a decision that writes nothing never meets the conflict that corrects an
-outdated held value, so `replace(k, old, new)` answered `false` and `putIfAbsent` returned a value invalidated
+value, it is first checked against the store (a read: the same version and value), and on a mismatch the decision is
+made again on the store's row. Without that check a decision that writes nothing never meets the conflict that corrects
+an outdated held value, so `replace(k, old, new)` answered `false` and `putIfAbsent` returned a value invalidated
 elsewhere while the messages were on their way (found by an intermittent test failure). The cost is that of a read and a
-conditional write, the same as reading the previous value and writing unconditionally; a trusted held value saves
-the read. Built: deciding on an outdated held value (its message not yet arrived) made a non-atomic `put` return
-the outdated previous value, which the conditional write corrects through its conflict.
+conditional write, the same as reading the previous value and writing unconditionally; a trusted held value saves the
+read. Built: deciding on an outdated held value (its message not yet arrived) made a non-atomic `put` return the
+outdated previous value, which the conditional write corrects through its conflict.
 
 **Unconditional writes,** as decided: `put`, `putAll`, `asMap().putAll`, `invalidate`, `invalidateAll(keys)`, and
 `clear()` as a global `invalidateAll()`.
@@ -2446,7 +2449,7 @@ Sketch, to be settled against the thin SPI ("Target design: a thin SPI, versions
 - **Trimming by age:** `XADD … MINID ~ <now − retention>`, the retention of tombstones; an instance falling further
   behind sees a gap. Not `MAXLEN`, which a write burst would turn into gaps under load.
 - **Failover:** nothing beyond detecting the gap. A write lost by the failover leaves instances holding its version;
-  the revalidation after the gap keeps a held value only at exactly the store's version
+  the revalidation after the gap keeps a held value only at exactly the store's version and value
   (`InternalCore#confirmOrDrop`), so they drop it, as on MongoDB and PostgreSQL. `WAIT` is not in the first version.
   To check in the failover tests: a write after the failover never gets the version of a lost one (a new primary's
   clock behind the old one's).
@@ -4238,7 +4241,7 @@ risk they carry for the core:
    the run before): a clock in milliseconds stamps a load written in the same millisecond as the control row equal
    to it, which hides it alike; not a hostile case, then. **Fixed 2026-10-29** (`distrustWithinAllowance`): one allowance after an instance
    applied an `invalidateAll` (its own, or announced), its epoch moves once more, so that whatever it installed
-   meanwhile is untrusted and checked on its next read (one version read; a hidden row dropped). An operation that
+   meanwhile is untrusted and checked on its next read (one row read; a hidden row dropped). An operation that
    begins later commits more than the allowance after the control row, since the instance applied it no earlier
    than it was written; one that began before installs under the older epoch anyway. A store without allowance (a
    monotonic clock) needs nothing. Tested deterministically (a clock standing still, a put on another instance right
@@ -4272,7 +4275,25 @@ risk they carry for the core:
    back to older ones, rows written in it gone) and every subscription is told about a gap. What the core must do:
    revalidate after the gap and drop what the store no longer holds, also a value at a version the store no longer
    has (equality, not order, decides a revalidation). Tests: a put acknowledged and then lost, held on two
-   instances; a write after the failover at a version below the lost one (the clocks are ahead of the store now).
+   instances; a write after the failover at a version below the lost one (the clocks are ahead of the store now); a
+   write after the failover at the lost one's very version (found 2026-11-10 on Valkey, a test's virtual machine
+   resumed: a store assigning versions, onto a clock no further than the old primary's, gives a later write of an
+   instance that never saw the lost version that version again), which a holder of the lost value took for its own
+   until the value aged out, and a decision to write nothing made on it (`replace` answering `false`) was confirmed
+   by the later write's version. So a revalidation, and the read confirming such a decision, compare the value too,
+   serialized as the store holds it, not the version alone: exact, at the cost of reading values instead of versions
+   when copies are checked (after a gap, while delivery is interrupted). Tests: two in `InternalStoreProfileTest`, and
+   the situation in `InternalPathParityTest` (fault `reuseVersion`) through every read path and every atomic decision
+   writing nothing, on the profiles with a feed of their own: comparing versions only, 111 of 125 cases failed. In
+   the deterministic property test's faults too (a version reused for another value, and instance clocks off the
+   store's by up to 90 s): comparing versions only, 399 of 600 runs failed. And a model of the version protocol whose
+   every reachable state is searched (`InternalVersionModelTest`: two instances, a store with a replica, writes,
+   reads, messages, clocks, a failover, a restart, versions assigned as on Redis or proposed as on the conditional
+   stores): comparing versions only, a four-step counterexample (a write, a failover losing it and its message, a
+   write by the other instance at its version, a decision on the stale copy); comparing versions and values, none in
+   about a million states per way of assigning versions. A
+   rule that made assigned versions unique by the proposing instance's node was tried and dropped: it left one case in
+   1024, and versions decide what a reader sees only where they are exact.
 5. **Version-conditioned write on a purged row** (`tombstoneOnPurgedRow`: true or false). Values: true (`mongodb`,
    the bulk write's upsert, step 5), false (the others). The contract allows both; today the in-memory store only
    produces the second, so the first is tested only on MongoDB's containers. Tests: the contract tests (they accept
@@ -4292,12 +4313,12 @@ risk they carry for the core:
    read the version (one `readVersions` per such message, which also arrive for reordered echoes of its own writes);
    or a store with its own floor (a sequence, the server's time beyond the skew); or accepting it for evicting stores,
    as documented. **Fixed with the first:** a message below the held version (`apply`) is no longer
-   only ignored; the key is checked against the store in one version read per delivered batch (`check`, as after a
-   gap): the same version is kept and confirmed, any other dropped, and a store that does not answer leaves the value
-   held. It covers a lower tombstone or expiry after an eviction too. Tested deterministically (a write straight to
-   the store below the held version after an eviction; the holder kept `v1` for good without it) and by the
-   eviction test without its pause. Cost: such messages also come as late echoes of an instance's own quick
-   successive writes to one key, each then one version read; to be measured with the contention benchmark.
+   only ignored; the key is checked against the store in one read per delivered batch (`check`, as after a gap): the
+   same version and value are kept and confirmed, anything else dropped, and a store that does not answer leaves the
+   value held. It covers a lower tombstone or expiry after an eviction too. Tested deterministically (a write straight
+   to the store below the held version after an eviction; the holder kept `v1` for good without it) and by the eviction
+   test without its pause. Cost: such messages also come as late echoes of an instance's own quick successive writes to
+   one key, each then one read; to be measured with the contention benchmark.
 7. **Feed losing messages silently** (`feed`: per key in commit order, or silently lossy). The losses of real feeds
    are reported (a gap, an interruption: `gap()`, `interruptSubscriptions()` exist); a feed losing messages without
    telling (Redis pub/sub across a disconnect it did not notice) is the hostile case. A fault
@@ -5018,8 +5039,8 @@ None of them order versions inside L1. They protect a load by a reservation, and
    epoch), or **a second reservation of the same key**.
 4. **An operation installs only if its reservation is unpoisoned, under the registry's lock.** Otherwise it installs
    nothing, and the next read goes to the store.
-5. **A gap moves the epoch on, as today.** Revalidation compares the store's version with the held one, for equality
-   again.
+5. **A gap moves the epoch on, as today.** Revalidation compares the store's version and value with the held ones,
+   for equality again.
 
 **Why it is safe.**
 
@@ -5075,7 +5096,9 @@ Three more make sense; three others were considered and do not fit.
 **3. Revalidation by version (as HTTP's ETag): staleness bounded without trusting the feed.**
 
 - L1 serves a value. When the value is older than a time T, the next access checks it in the background, with a
-  read of versions only (`VersionsResult` exists). An equal version keeps the value; another one loads again.
+  read of versions only (`VersionsResult` exists). An equal version keeps the value; another one loads again. (After
+  a failover that lost a write, an equal version can hold another value, see dimension 4 of the in-memory store
+  profiles: this would need the value or a fingerprint of it too.)
 - This is Caffeine's `refreshAfterWrite`, but a few bytes instead of a load.
 - Robustness:
   - staleness is bounded by T even after a message lost without notice;
@@ -6075,6 +6098,36 @@ None at the moment. New ones go here as they come up while building.
   for statements). If it is reconsidered, measure it like the removed `PostgresJdbcVersusR2dbcExperimentTest`
   (writes, conditional writes, batched reads, same replica set) and check its dependencies; the SPI stays blocking
   either way.
+- **A deadline of the core's own for blocking store calls** (found 2026-11-09). Java sockets have no write timeout, so
+  a driver writing through a blocking socket (the JDBC drivers, MongoDB's default transport, Jedis) cannot bound
+  sending: a write too large for the socket's buffer, sent to a server that vanished without closing the connection,
+  waits until the operating system gives up (about 15 minutes on Linux, `net.ipv4.tcp_retries2`). Seen in
+  `MongoFailoverTest` (a 20,000-key `putAll` when the primary is killed: the thread stuck in the driver's
+  `SocketStream.write`, the driver checking `timeoutMS` only after a write returns). MongoDB knows it
+  ([JAVA-1269](https://jira.mongodb.org/browse/JAVA-1269), backlog since 2014;
+  [JAVA-4664](https://jira.mongodb.org/browse/JAVA-4664); [JAVA-6302](https://jira.mongodb.org/browse/JAVA-6302)).
+  Consistency holds (no lock held while writing; a late failure has an unknown outcome and drops the keys; a late
+  arrival after a healed network is refused by its version if anything newer was written); what breaks is the
+  bound on the caller's wait, so 0.8.0 documents it (`withOperationTimeout`, each adapter's Timeouts). The fix: run
+  each blocking store call under a deadline (the operation timeout plus a margin) and, past it, fail the caller with
+  an unknown outcome (the guard counts it) and leave the stuck thread to fail on its own, as Hystrix's thread
+  isolation and Resilience4j's `TimeLimiter` do. Costs: a thread hop per store call (measure it, with platform and
+  virtual threads), and a thread and pooled connection held until the operating system gives up. The Netty
+  transports bound sending themselves (Lettuce, Redisson, MongoDB's `TransportSettings.nettyBuilder()`), but are not
+  required of users.
+- **A tie-breaker for equal versions, so that a check transfers no value again** (decided 2026-11-10). A version
+  can repeat with other content after a failover that lost a write (dimension 4 of the in-memory store profiles), so
+  0.8.0 confirms a held copy by its version and its value, compared serialized (`InternalCore#stillStored`): exact,
+  free in normal operation, but a check after a gap or while delivery is interrupted transfers the value where it
+  used to transfer the version only (100,000 held keys of 1 KB: about 100 MB instead of about 3 MB for the background
+  pass after a gap). The two writes sharing a version always come from different instances (an instance proposes
+  above every version it learned, its own writes' included), so anything telling writes apart breaks the tie: a
+  128-bit hash of the serialized value (recomputed from the held copy, no memory per entry), or an ID drawn per
+  instance or the Redis write's request ID (no hashing, but kept per entry and carried by reads and messages). Each
+  needs a field per row and an optional one in `VersionsResult`; likely on Redis / Valkey only, the one store where
+  the case occurs in practice (MongoDB's majority reads and writes rule it out; PostgreSQL's sequence repeats only if
+  its own log record is lost too, unverified). Nothing in the store today breaks the tie (write time, stream counter,
+  `xmin` and request keys are lost or repeat with the write). Measure the transfer after gaps first.
 
 Checked and not adopted: JetCache's per-key refresh tasks (Caffeine refreshes on access), its non-strict
 distributed lock (not a cache concern), result codes instead of the Caffeine API (the store guard covers failures),
@@ -6161,7 +6214,7 @@ in about one run in eight before it was fixed), not a substitute for the targete
 - No global eviction across instances; L2 is the global bound.
 - Writes are refused while the store is down; an unconditional put with an unknown outcome throws.
 - Hashing on every user call: 2–4 times a plain Caffeine hit (30–65 ns), 32 bytes per call.
-- After a gap, a version read per held key (lazily and in a rate-limited background pass).
+- After a gap, a row read per held key, its value transferred (lazily and in a rate-limited background pass).
 - With negative caching, each instance learns its own absences.
 - Dependencies: Fory always (about 2.7 MB plus Janino); for PostgreSQL only pgjdbc (R2DBC with Reactor and Netty,
   about 6.6 MB, gone 2026-10-28).

@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import io.github.oberhoff.distributedcaffeine.serializer.JacksonSerializer;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.Row;
@@ -64,8 +65,6 @@ public class InternalRecoveryTest {
 
     private final CacheBackend backend = backend();
     private final List<AutoCloseable> closeables = new ArrayList<>();
-    private final AtomicInteger reads = new AtomicInteger();
-    private final AtomicInteger versionReads = new AtomicInteger();
     private final AtomicInteger storeCalls = new AtomicInteger();
 
     // the store under test: the in-memory store here, a real database in the subclasses
@@ -91,14 +90,12 @@ public class InternalRecoveryTest {
                 backend.open(settings)) {
             @Override
             public Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
-                reads.incrementAndGet();
                 storeCalls.incrementAndGet();
                 return super.read(hashes, maxAge);
             }
 
             @Override
             public VersionsResult readVersions(Collection<String> hashes, Duration maxAge) {
-                versionReads.incrementAndGet();
                 storeCalls.incrementAndGet();
                 return super.readVersions(hashes, maxAge);
             }
@@ -115,7 +112,8 @@ public class InternalRecoveryTest {
                         .withValueSerializer(StringSerializer.ofString()))
                 .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
                         .withMaximumAge(maximumAge).withMaximumSize(maximumSize)
-                        .withMaintenanceInterval(maintenance));
+                        .withMaintenanceInterval(maintenance))
+                .withCaffeine(CaffeineConfigurer::recordStats);
     }
 
     private DistributedCache<String, String> holder() {
@@ -160,21 +158,63 @@ public class InternalRecoveryTest {
 
     // revalidation after a gap
 
+    // kept by the check against the store (its version and value, InternalCore#stillStored) and trusted again: no
+    // further store call for it
     @Test
-    void after_a_gap_an_unchanged_held_value_is_kept_by_a_version_read_only() {
+    void after_a_gap_an_unchanged_held_value_is_kept_and_trusted_again() {
         backend.requireFeed();
         DistributedCache<String, String> cache = holder();
         cache.put("k", "v");
         backend.induceGap();
-        pause(100);
-        await(() -> versionReads.get() > 0); // the background pass
-        int valueReads = reads.get();
+        await(() -> cache.distributedPolicy().stats().revalidationKeptCount() > 0 && core(cache).isQuiescent());
+        int calls = storeCalls.get();
 
         assertThat(cache.getIfPresent("k")).isEqualTo("v");
         assertThat(cache.getIfPresent("k")).isEqualTo("v");
 
-        assertThat(reads.get()).as("no value was read again").isEqualTo(valueReads);
+        assertThat(storeCalls.get()).as("trusted again, no further check").isEqualTo(calls);
         assertThat(held(cache, "k")).isEqualTo("v");
+    }
+
+    record Item(String name, int count) {
+    }
+
+    // a store holding JSON natively returns it in a form of its own (PostgreSQL's jsonb, MongoDB's documents:
+    // spacing, key order), here a space ahead of every value read besides: the check compares in the serializer's form
+    // too, so that an unchanged copy is kept rather than dropped and loaded again after every gap
+    @Test
+    void after_a_gap_an_unchanged_json_value_the_store_returns_in_another_form_is_kept() {
+        backend.requireFeed();
+        Adapter<String, Item> adapter = settings -> new InternalCoreTest.DelegatingStore(backend.open(settings)) {
+            @Override
+            public Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
+                Map<String, Row> rows = new java.util.LinkedHashMap<>();
+                super.read(hashes, maxAge).forEach((hash, row) -> {
+                    byte[] value = row.value();
+                    rows.put(hash, value == null ? row : new Row(hash, row.key(),
+                            (" " + new String(value, StandardCharsets.UTF_8)).getBytes(StandardCharsets.UTF_8),
+                            row.state(), row.version(), row.age()));
+                });
+                return rows;
+            }
+        };
+        DistributedCache<String, Item> cache = track(DistributedCaffeine.newBuilder(InternalCoreTest.offered(adapter))
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(new JacksonSerializer<>(Item.class, true)))
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAge(LONG).withMaximumSize(1_000).withMaintenanceInterval(LONG))
+                .withCaffeine(CaffeineConfigurer::recordStats)
+                .build());
+        Item first = new Item("an item", 2);
+        Item second = new Item("another item", 3);
+        cache.put("k", first);
+        cache.put("l", second);
+        backend.induceGap();
+
+        await(() -> cache.distributedPolicy().stats().revalidationKeptCount() == 2);
+        assertThat(cache.distributedPolicy().stats().revalidationDroppedCount()).as("not dropped").isZero();
+        assertThat(cache.getIfPresent("k")).isSameAs(first);
+        assertThat(cache.getIfPresent("l")).isSameAs(second);
     }
 
     // the heartbeat: a feed that stops delivering without saying so
@@ -212,6 +252,8 @@ public class InternalRecoveryTest {
             await(() -> cache.distributedPolicy().stats().interruptionCount() == 1);
             assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
             assertThat(cache.getIfPresent("k")).as("checked against the store").isEqualTo("new");
+            // logged on the heartbeat's thread right after the count, so awaited as well
+            await(() -> log.count("The change feed seems silent") >= 1);
             assertThat(log.count("The change feed seems silent")).as("logged once: " + log.text()).isEqualTo(1);
 
             // delivering again: the next beat ends the silence with a gap (after those of the resumes while silent)
@@ -219,7 +261,8 @@ public class InternalRecoveryTest {
             faults.resumeDelivery();
             await(() -> cache.distributedPolicy().stats().gapCount() > gaps);
             await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
-            assertThat(log.text()).as("the gap logged").contains("Changes may have been missed");
+            // logged after the count, as above
+            await(() -> log.text().contains("Changes may have been missed"));
         }
         assertThat(cache.distributedPolicy().stats().interruptionCount()).isEqualTo(1);
         assertThat(cache.distributedPolicy().stats().invalidatedMessageCount()).as("beats are not counted").isZero();
@@ -302,17 +345,18 @@ public class InternalRecoveryTest {
         await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.DEGRADED);
         other.put("k", "new");
 
-        assertThat(cache.getIfPresent("k")).as("checked against the store although no message arrived").isEqualTo("new");
-        int checks = versionReads.get();
+        assertThat(cache.getIfPresent("k")).as("checked against the store although no message arrived")
+                .isEqualTo("new");
+        int checks = storeCalls.get();
         assertThat(cache.getIfPresent("k")).isEqualTo("new");
-        assertThat(versionReads.get()).as("checked on every access").isGreaterThan(checks);
+        assertThat(storeCalls.get()).as("checked on every access").isGreaterThan(checks);
 
         faults.resumeSubscriptions(true);
         await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED
                 && core(cache).isQuiescent());
-        int afterResume = versionReads.get();
+        int afterResume = storeCalls.get();
         assertThat(cache.getIfPresent("k")).isEqualTo("new");
-        assertThat(versionReads.get()).as("trusted again after the gap's check, no further check")
+        assertThat(storeCalls.get()).as("trusted again after the gap's check, no further check")
                 .isEqualTo(afterResume);
     }
 
@@ -363,7 +407,8 @@ public class InternalRecoveryTest {
         // no store confirmed must never equal, or a read or a message would confirm the wrong value
         InMemoryDatabase database = new InMemoryDatabase(StoreProfile.POSTGRESQL);
         Adapter<String, String> adapter = settings -> database.openStore("cache");
-        DistributedLoadingCache<String, String> cache = track(DistributedCaffeine.newBuilder(InternalCoreTest.offered(adapter))
+        DistributedLoadingCache<String, String> cache = track(DistributedCaffeine.newBuilder(
+                        InternalCoreTest.offered(adapter))
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
                 .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
@@ -481,7 +526,8 @@ public class InternalRecoveryTest {
 
     @Test
     void maintenance_expires_values_everywhere() {
-        DistributedCache<String, String> writer = track(counted(Duration.ofMillis(300), 1_000, Duration.ofMillis(100)).build());
+        DistributedCache<String, String> writer =
+                track(counted(Duration.ofMillis(300), 1_000, Duration.ofMillis(100)).build());
         DistributedCache<String, String> holder = other();
         writer.put("k", "v");
         assertThat(holder.getIfPresent("k")).isEqualTo("v");

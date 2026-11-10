@@ -151,7 +151,8 @@ final class InMemoryTable {
         boolean partly = writes.size() > 1 && database.faults.takePartialFailure();
         if (partly && database.profile().batch() == StoreProfile.Batch.ATOMIC) {
             checkUp();
-            throw InMemoryDatabase.injected(new StoreException("injected failure of an atomic batch, not committed", false));
+            throw InMemoryDatabase.injected(
+                    new StoreException("injected failure of an atomic batch, not committed", false));
         }
         int applying = partly ? writes.size() / 2 : writes.size();
         return committing(() -> {
@@ -251,7 +252,8 @@ final class InMemoryTable {
                 .filter(entry -> maintained(entry.getKey()) && entry.getValue().state == State.VALUE
                         && !hidden(entry.getValue()))
                 // oldest first; among equally old ones the higher hash goes first, so the lowest is kept
-                .sorted(Comparator.<Map.Entry<String, StoredRow>>comparingLong(entry -> entry.getValue().writeTimeMicros)
+                .sorted(Comparator.<Map.Entry<String, StoredRow>>comparingLong(
+                                entry -> entry.getValue().writeTimeMicros)
                         .thenComparing(Map.Entry::getKey, Comparator.reverseOrder()))
                 .toList();
         // beyond the rank, but none younger than the minimum age
@@ -284,6 +286,9 @@ final class InMemoryTable {
     // few milliseconds would otherwise take it before the read a test aims it at
     synchronized List<Change> changedWithin(Duration within) {
         checkUp();
+        if (database.faults.pollsFailing) {
+            throw InMemoryDatabase.injected(new StoreException("injected: the polls fail", false));
+        }
         long now = database.nowMicros();
         long micros = within.toNanos() / 1_000;
         List<Change> changes = new ArrayList<>();
@@ -315,6 +320,21 @@ final class InMemoryTable {
 
     synchronized void evict(String hash) {
         remove(hash);
+    }
+
+    // a value row's write lost in a failover and another value written at its very version: every subscription told
+    // about the gap, then the later write announced; nothing where the row is no value (false)
+    synchronized boolean reuseVersion(String hash, byte[] value) {
+        StoredRow lost = rows.get(hash);
+        if (lost == null || lost.state != State.VALUE) {
+            return false;
+        }
+        deliveries.forEach(InMemoryDelivery::gap);
+        store(hash, lost.key, value, State.VALUE, lost.version);
+        List<Change> messages = List.of(new Change(Change.Kind.WRITTEN, hash, lost.version));
+        deliveries.forEach(delivery -> delivery.enqueue(messages));
+        database.committed();
+        return true;
     }
 
     // subscriptions

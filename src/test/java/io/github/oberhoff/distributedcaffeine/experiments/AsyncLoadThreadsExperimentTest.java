@@ -120,8 +120,8 @@ public class AsyncLoadThreadsExperimentTest {
                                     .withKeySerializer(StringSerializer.ofString())
                                     .withValueSerializer(StringSerializer.ofString()))
                             .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(1_000_000));
-                    // a fresh pool per run, like the default (cached daemon threads), whose idle threads from an earlier
-                    // run would otherwise hide new ones from the peak
+                    // a fresh pool per run, like the default (cached daemon threads), whose idle threads from an
+                    // earlier run would otherwise hide new ones from the peak
                     ExecutorService storePool = variant.equals("current+virtual") ? virtualThreads()
                             : Executors.newCachedThreadPool(daemon());
                     pool = storePool;
@@ -138,10 +138,11 @@ public class AsyncLoadThreadsExperimentTest {
                     pool = storePool;
                     Store store = new SlowStore(database.openStore("t"));
                     AsyncLoadingCache<String, String> plain = Caffeine.newBuilder().buildAsync((key, executor) ->
-                            CompletableFuture.supplyAsync(() -> store.read(List.of(key), Duration.ofHours(1)), storePool)
+                            CompletableFuture.supplyAsync(
+                                    () -> store.read(List.of(key), Duration.ofHours(1)), storePool)
                                     .thenCompose(read -> read.containsKey(key)
-                                            ? CompletableFuture.completedFuture(new String(requireNonNull(read.get(key).value()),
-                                                    StandardCharsets.UTF_8))
+                                            ? CompletableFuture.completedFuture(new String(
+                                                    requireNonNull(read.get(key).value()), StandardCharsets.UTF_8))
                                             : sourceLoad(key, executor).thenApplyAsync(value -> {
                                         // any positive version: the store only compares it
                                         store.write(List.of(Write.value(key, key.getBytes(StandardCharsets.UTF_8),

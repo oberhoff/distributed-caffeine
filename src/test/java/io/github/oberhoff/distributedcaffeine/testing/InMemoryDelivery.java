@@ -119,7 +119,8 @@ final class InMemoryDelivery implements ChangeSubscription {
                 continue; // lost silently (InMemoryDatabase#setDropProbability)
             }
             queue.addLast(message);
-            if (database.faults.duplicateProbability > 0 && database.nextDouble() < database.faults.duplicateProbability) {
+            if (database.faults.duplicateProbability > 0
+                    && database.nextDouble() < database.faults.duplicateProbability) {
                 queue.addLast(message);
             }
         }
@@ -167,7 +168,8 @@ final class InMemoryDelivery implements ChangeSubscription {
             return; // an in-memory delivery has no connection to re-establish
         }
         if (resumable == null) {
-            throw InMemoryDatabase.injected(new StoreException("injected: the store is not reachable", null, false, true));
+            throw InMemoryDatabase.injected(
+                    new StoreException("injected: the store is not reachable", null, false, true));
         }
         boolean deliverMissed = resumable;
         interrupted = false;

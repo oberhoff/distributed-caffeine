@@ -84,7 +84,7 @@ final class InternalValue<V> {
     /**
      * Marks the value as confirmed at the given epoch; never moves the epoch backwards.
      *
-     * @param confirmedEpoch the epoch at which the store confirmed the version
+     * @param confirmedEpoch the epoch at which the store confirmed the value
      */
     void confirm(int confirmedEpoch) {
         synchronized (this) {

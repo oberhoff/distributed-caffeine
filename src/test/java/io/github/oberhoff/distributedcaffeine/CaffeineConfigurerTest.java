@@ -69,7 +69,8 @@ class CaffeineConfigurerTest {
         List<String> removed = new CopyOnWriteArrayList<>();
         CaffeineConfigurer<String, String> configurer = new CaffeineConfigurer<String, String>()
                 .executor(Runnable::run)
-                .removalListener((String key, String value, RemovalCause cause) -> removed.add(key + "=" + value + ":" + cause))
+                .removalListener((String key, String value, RemovalCause cause) ->
+                        removed.add(key + "=" + value + ":" + cause))
                 .evictionListener((String key, String value, RemovalCause cause) -> removed.add("evicted " + key));
         Cache<InternalKey<String>, InternalValue<String>> cache = configurer.caffeine(MAXIMUM_AGE).build();
 

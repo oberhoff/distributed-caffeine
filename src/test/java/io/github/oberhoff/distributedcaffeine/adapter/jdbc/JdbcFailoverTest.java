@@ -37,9 +37,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * The JDBC adapters on a MySQL or MariaDB primary (the image of the subclass, {@link JdbcIntegrationTest}) with an
- * asynchronous replica while the primary fails over (VISION.md, "MariaDB and MySQL", step 4): writing rides it out, and a write the
- * failover loses (confirmed by the primary, never replicated) is held by no cache afterwards, although the caches
- * learn of changes by polling only.
+ * asynchronous replica while the primary fails over (VISION.md, "MariaDB and MySQL", step 4): writing rides it out, and
+ * a write the failover loses (confirmed by the primary, never replicated) is held by no cache afterwards, although the
+ * caches learn of changes by polling only.
  *
  * @author Andreas Oberhoff
  */

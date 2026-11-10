@@ -195,7 +195,8 @@ public abstract class AbstractLinearizabilityTest {
     @EnabledIfSystemProperty(named = "modelchecking", matches = "true")
     void model_checking() {
         // more on request, to hunt a rare interleaving (-Dlincheck.iterations=…)
-        new ModelCheckingOptions().iterations(Integer.getInteger("lincheck.iterations", 10)).invocationsPerIteration(500)
+        new ModelCheckingOptions().iterations(Integer.getInteger("lincheck.iterations", 10))
+                .invocationsPerIteration(500)
                 .threads(3).actorsPerThread(3)
                 .sequentialSpecification(model()).check(getClass());
     }

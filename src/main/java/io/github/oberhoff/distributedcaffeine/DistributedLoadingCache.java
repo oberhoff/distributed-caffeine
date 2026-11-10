@@ -18,10 +18,14 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import org.jspecify.annotations.Nullable;
 
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * A Caffeine {@link LoadingCache} whose instances share a store; see {@link DistributedCache}.
+ * A Caffeine {@link LoadingCache} whose instances share a store. Each instance holds its own copies, reads a key from
+ * the store when it holds none, and drops or updates its copies when the key changes elsewhere. Behaves as Caffeine's
+ * cache, except where a method documents otherwise. A call that needs the store and cannot reach it, or a write whose
+ * outcome is unknown, throws the unchecked {@link io.github.oberhoff.distributedcaffeine.spi.StoreException}.
  *
  * @param <K> the key type
  * @param <V> the value type
@@ -32,11 +36,11 @@ public interface DistributedLoadingCache<K, V> extends DistributedCache<K, V>, L
     /**
      * {@inheritDoc}
      * <p>
-     * A loaded value is cached only if the key was neither written nor removed on any instance while it loaded;
-     * otherwise a value written meanwhile is returned instead, and after a removal the key is loaded again. After three
-     * attempts in a row each met by a removal, the last loaded value is returned without being cached, as Caffeine's
-     * asynchronous cache does with a load an invalidation discards
-     * ({@code distributedPolicy().stats().uncachedLoadCount()}).
+     * <b>Distributed Caffeine:</b> A loaded value is cached only if the key was neither written nor removed on any
+     * instance while it loaded; otherwise a value written meanwhile is returned instead, and after a removal the key is
+     * loaded again. After three attempts in a row each met by a removal, the last loaded value is returned without
+     * being cached, as Caffeine's asynchronous cache does with a load an invalidation discards ({@code
+     * distributedPolicy().stats().uncachedLoadCount()}).
      */
     // a loader resolving to null caches nothing.
     // Caffeine documents a null result ("or null if the computed value is null") but cannot express it for a value
@@ -45,8 +49,39 @@ public interface DistributedLoadingCache<K, V> extends DistributedCache<K, V>, L
     @SuppressWarnings({"java:S2638", "NullAway"})
     @Nullable V get(K key);
 
+    /**
+     * {@inheritDoc}
+     * <p>
+     * <b>Distributed Caffeine:</b> The keys this instance holds no usable copy of are read from the store in one batch;
+     * only those missing there are loaded. A loaded value is cached only if no instance wrote or removed its key while
+     * it loaded. If one wrote it, that value is returned instead; if one removed it, the key is loaded again on its
+     * own, up to three times. If a removal meets each of these too, the last loaded value is returned without being
+     * cached ({@code distributedPolicy().stats().uncachedLoadCount()}).
+     */
+    @Override
+    Map<K, V> getAll(Iterable<? extends K> keys);
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * <b>Distributed Caffeine:</b> A refresh always calls the loader, even where the store holds a value. Its result is
+     * written to the store only if no instance wrote or removed the key since this instance got the value it refreshes;
+     * otherwise the future completes with what the store holds now, or with {@code null} if the key was removed. While
+     * the store does not answer, the result is kept locally without being written.
+     */
     // completes with null where the reload resolved to null; see get(K) for the types
     @Override
     @SuppressWarnings({"java:S2638", "NullAway"})
     CompletableFuture<@Nullable V> refresh(K key);
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * <b>Distributed Caffeine:</b> The keys are refreshed one by one. Each refresh calls the loader, even where the
+     * store holds a value. Its result is written to the store only if no instance wrote or removed the key since this
+     * instance got the value it refreshes; otherwise the key gets what the store holds now, or none if it was removed.
+     * While the store does not answer, the results are kept locally without being written.
+     */
+    @Override
+    CompletableFuture<Map<K, V>> refreshAll(Iterable<? extends K> keys);
 }

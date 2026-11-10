@@ -109,7 +109,8 @@ class PostgresStatementExperimentTest {
                     version = greatest(r.version + 1, %s), write_time = now()
                 WHERE r.id = ANY (?)
                 RETURNING r.id, r.version)
-            SELECT w.version, pg_notify('rows', 'INVALIDATED|' || w.id || '|' || w.version) FROM w""".formatted(NOW_MICROS);
+            SELECT w.version, pg_notify('rows', 'INVALIDATED|' || w.id || '|' || w.version)
+            FROM w""".formatted(NOW_MICROS);
 
     private static final String EXPIRE = """
             WITH w AS (
@@ -131,7 +132,8 @@ class PostgresStatementExperimentTest {
             String url = container.getJdbcUrl();
             List<String> results = new ArrayList<>();
             try (Connection writer = DriverManager.getConnection(url, container.getUsername(), container.getPassword());
-                 Connection listener = DriverManager.getConnection(url, container.getUsername(), container.getPassword())) {
+                 Connection listener = DriverManager.getConnection(url, container.getUsername(),
+                         container.getPassword())) {
                 try (Statement statement = writer.createStatement()) {
                     statement.execute(SCHEMA);
                 }
@@ -174,8 +176,8 @@ class PostgresStatementExperimentTest {
                 drain(notifications, 500);
                 int winners = race(url, container, 8, connection -> putIfVersion(connection, expected));
                 List<String> raceNotifications = drain(notifications, 1_000);
-                results.add(check("8 concurrent putIfVersion, same expected version: exactly one wins (" + winners + ")",
-                        winners == 1));
+                results.add(check("8 concurrent putIfVersion, same expected version: exactly one wins ("
+                        + winners + ")", winners == 1));
                 results.add(check("... and exactly one notification (" + raceNotifications.size() + ")",
                         raceNotifications.size() == 1));
                 int creators = race(url, container, 8, PostgresStatementExperimentTest::putIfMissing);
@@ -194,7 +196,8 @@ class PostgresStatementExperimentTest {
                     statement.executeQuery().close();
                 }
                 List<String> tombstones = drain(notifications, 1_000);
-                results.add(check("invalidating 5 rows in one statement: 5 INVALIDATED notifications (" + tombstones.size() + ")",
+                results.add(check("invalidating 5 rows in one statement: 5 INVALIDATED notifications ("
+                        + tombstones.size() + ")",
                         tombstones.size() == 5 && tombstones.stream().allMatch(n -> n.startsWith("INVALIDATED|"))));
 
                 // 5. two concurrent expiries notify each expired row exactly once

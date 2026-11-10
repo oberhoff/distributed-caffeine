@@ -124,8 +124,8 @@ public final class MongoAdapter<K, V> implements Adapter<K, V> {
             this.collectionName = checkedCollectionName(collectionName);
             int namespace = (databaseName + "." + collectionName).getBytes(StandardCharsets.UTF_8).length;
             if (namespace > MAXIMUM_NAMESPACE_BYTES) {
-                throw new IllegalArgumentException("the namespace " + databaseName + "." + collectionName + " is longer "
-                        + "than " + MAXIMUM_NAMESPACE_BYTES + " bytes");
+                throw new IllegalArgumentException("the namespace " + databaseName + "." + collectionName
+                        + " is longer than " + MAXIMUM_NAMESPACE_BYTES + " bytes");
             }
         }
 

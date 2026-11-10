@@ -109,8 +109,8 @@ final class InternalStoreGuard {
             throw e;
         } finally {
             stats.increment(write ? InternalStatsCounter.Counter.STORE_WRITE : InternalStatsCounter.Counter.STORE_READ);
-            stats.add(write ? InternalStatsCounter.Counter.STORE_WRITE_TIME : InternalStatsCounter.Counter.STORE_READ_TIME,
-                    environment.nanoTime() - start);
+            stats.add(write ? InternalStatsCounter.Counter.STORE_WRITE_TIME
+                    : InternalStatsCounter.Counter.STORE_READ_TIME, environment.nanoTime() - start);
         }
         success();
         return result;

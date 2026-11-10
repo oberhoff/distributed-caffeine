@@ -157,8 +157,8 @@ public record StoreProfile(String name, Versioning versioning, Changes changes, 
 
     /**
      * MongoDB: single writes assigned in the core's domain, batches conditional and per document, reads document by
-     * document, a clock in milliseconds; a failover with {@code w:1} can lose writes, and a write of a batch on a purged
-     * row leaves a tombstone.
+     * document, a clock in milliseconds; a failover with {@code w:1} can lose writes, and a write of a batch on a
+     * purged row leaves a tombstone.
      */
     public static final StoreProfile MONGODB = new StoreProfile("mongodb", Versioning.MIXED, Changes.FEED,
             Clock.MILLIS, Duration.ZERO, false, Batch.PER_ROW, true, true, false, false);

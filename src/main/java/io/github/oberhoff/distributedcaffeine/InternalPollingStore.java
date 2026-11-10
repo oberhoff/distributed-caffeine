@@ -259,9 +259,9 @@ final class InternalPollingStore implements Store, ChangeFeed {
         private long polled;
         @GuardedBy("this")
         private boolean lost;
-        // guarded by this: whether a poll failed since the last successful one (a gap to report)
-        @GuardedBy("this")
-        private boolean failed;
+        // whether a poll failed since the last successful one (a gap to report): written under this, read without it,
+        // as every read of the core asks (isFailing), and must not wait for a poll in progress
+        private volatile boolean failed;
         // guarded by this: the changes delivered while a poll can still report them again (within its overlap), by
         // hash: the version and when the poll began. Each change is delivered once: one reported again carries
         // nothing new, and as a message it would drop an operation in flight on its key (which cannot compare
@@ -276,8 +276,9 @@ final class InternalPollingStore implements Store, ChangeFeed {
         }
 
         // whether the latest poll failed: changes may be missed until one succeeds (and reports the gap); the core
-        // shows it as DEGRADED, also on an instance that neither reads nor writes through the store meanwhile
-        synchronized boolean isFailing() {
+        // trusts no copy meanwhile and shows it as DEGRADED, also on an instance that neither reads nor writes through
+        // the store
+        boolean isFailing() {
             return failed;
         }
 

@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.AsyncCacheLoader;
+import io.github.oberhoff.distributedcaffeine.InternalCoreTest.DelegatingStore;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.Row;
@@ -191,7 +192,7 @@ class InternalAsyncTest {
     @Test
     void a_trusted_hit_is_answered_at_once_without_the_store() {
         AtomicInteger reads = new AtomicInteger();
-        DistributedAsyncCache<String, String> cache = track(builder(store -> new InternalCoreTest.DelegatingStore(store) {
+        DistributedAsyncCache<String, String> cache = track(builder(store -> new DelegatingStore(store) {
             @Override
             public Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
                 reads.incrementAndGet();
@@ -259,7 +260,8 @@ class InternalAsyncTest {
         DistributedAsyncCache<String, String> cache = cache();
         IllegalStateException failure = new IllegalStateException("source down");
 
-        CompletableFuture<@Nullable String> future = cache.get("k", (key, executor) -> CompletableFuture.failedFuture(failure));
+        CompletableFuture<@Nullable String> future =
+                cache.get("k", (key, executor) -> CompletableFuture.failedFuture(failure));
 
         assertThatThrownBy(() -> get(future)).isInstanceOf(ExecutionException.class).hasCause(failure);
         await(() -> !cache.synchronous().asMap().keySet().contains("k"));
@@ -401,8 +403,9 @@ class InternalAsyncTest {
         }
 
         await(() -> sources.size() == 20);
-        pause(50);
-        assertThat(storeExecutor.running).as("every load waits for its source without a thread").hasValue(0);
+        // idle once whatever else ran there (the instance's own messages) is done: a pending load holding a thread
+        // would keep it from ever being idle
+        await(() -> storeExecutor.running.get() == 0);
         assertThat(loads).allMatch(load -> !load.isDone());
 
         sources.forEach(source -> source.complete("v"));
@@ -440,8 +443,8 @@ class InternalAsyncTest {
 
         CompletableFuture<Map<String, String>> all = cache.getAll(List.of("a", "b"));
         CompletableFuture<@Nullable String> refreshed = cache.synchronous().refresh("r");
-        pause(100);
-        assertThat(storeExecutor.running).hasValue(0);
+        // as above: idle, although the bulk load and the reload are pending
+        await(() -> storeExecutor.running.get() == 0);
         assertThat(all).isNotDone();
         assertThat(refreshed).isNotDone();
 
@@ -466,7 +469,8 @@ class InternalAsyncTest {
         other.synchronous().invalidate("k");
         first.complete("outdated");
 
-        assertThat(get(load)).as("its write conflicted with the tombstone, the source was asked again").isEqualTo("fresh");
+        assertThat(get(load)).as("its write conflicted with the tombstone, the source was asked again")
+                .isEqualTo("fresh");
         assertThat(stored(cache, "k")).isEqualTo("fresh");
     }
 

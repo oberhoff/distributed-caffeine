@@ -86,7 +86,8 @@ class InternalDistributionModeTest {
         return closeable;
     }
 
-    private DistributedCache<String, String> none(Function<DistributedCaffeine<String, String>, DistributedCaffeine<String, String>> configuration) {
+    private DistributedCache<String, String> none(
+            Function<DistributedCaffeine<String, String>, DistributedCaffeine<String, String>> configuration) {
         return track(configuration.apply(builder().withDistributionMode(DistributionMode.NONE)).build());
     }
 

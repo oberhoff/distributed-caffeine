@@ -78,11 +78,11 @@ final class RedisScripts {
     // ARGV[4] milliseconds, and a request found there is answered from it without writing. A client library sending
     // the script again after a connection reset (Lettuce does, by default, what it sent and had no answer for) would
     // otherwise apply it twice: an advance at two versions, a conditional write refused by its own result. KEYS[5 + i]:
-    // the row of write i. ARGV after ARGV[4], per write, 9 fields: hash, condition (A: advance, M: missing, V: on a version), the expected
-    // version's high and low part, the proposed version's high and low part, T for a tombstone or V for a value, the
-    // key and the value (both empty for a tombstone, which keeps the row's key, or has none where no row existed).
-    // Per write the result is {0} (refused) or {1, high, low} (applied at that version). An advance is never refused:
-    // its version is assigned
+    // the row of write i. ARGV after ARGV[4], per write, 9 fields: hash, condition (A: advance, M: missing, V: on a
+    // version), the expected version's high and low part, the proposed version's high and low part, T for a tombstone
+    // or V for a value, the key and the value (both empty for a tombstone, which keeps the row's key, or has none where
+    // no row existed). Per write the result is {0} (refused) or {1, high, low} (applied at that version). An advance is
+    // never refused: its version is assigned
     static final RedisScript WRITE = RedisScript.of("write", RedisScript.Reply.ARRAY, PRELUDE + """
             local kept = redis.call('GET', KEYS[5])
             if kept then

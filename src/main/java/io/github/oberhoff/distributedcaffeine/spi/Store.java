@@ -94,8 +94,8 @@ public interface Store extends AutoCloseable {
     Map<String, Row> read(Collection<String> hashes, Duration maxAge);
 
     /**
-     * Reads only the versions and ages of value rows younger than the maximum age (revalidation,
-     * {@code containsKey}), also of rows the control row hides (the core decides).
+     * Reads only the versions and ages of value rows younger than the maximum age ({@code containsKey}), also of
+     * rows the control row hides (the core decides).
      *
      * @param hashes the hashes to read
      * @param maxAge the maximum age of a value row
@@ -125,8 +125,8 @@ public interface Store extends AutoCloseable {
      * {@link Change.Kind#WRITTEN} per value written and {@link Change.Kind#INVALIDATED} per tombstone written, at the
      * version it was applied at. A conflict writes nothing and announces nothing, with one allowance: a write on a
      * version that finds no row at all (deleted by maintenance since it was read) may leave a tombstone at the
-     * write's version, and announce it, still reported as a conflict; it reads as missing. MongoDB's bulk write needs it
-     * to report every write's outcome in one round trip (VISION.md, build plan, step 5).
+     * write's version, and announce it, still reported as a conflict; it reads as missing. MongoDB's bulk write needs
+     * it to report every write's outcome in one round trip (VISION.md, build plan, step 5).
      * <p>
      * An advancing write is applied either conditionally, at its own version and only above the stored one (refused
      * otherwise), or by assigning: always, at a version above the stored one that the store chooses and reports in the

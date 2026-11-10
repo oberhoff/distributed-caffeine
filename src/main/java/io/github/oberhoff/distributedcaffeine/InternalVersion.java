@@ -39,8 +39,8 @@ import java.util.function.LongConsumer;
  *     (and proposed again, above), never what a reader sees.</li>
  *     <li>{@link #UNCONFIRMED} is below every version a store issues (0; every version is positive) and equal to none:
  *     a value loaded from the source alone while the store did not answer, which any message or read replaces, and
- *     which no stored version confirms (a store numbering its own versions starts at 1). {@link #ANYTHING} is above every version: what L1 must drop
- *     whatever it holds.</li>
+ *     which no stored version confirms (a store numbering its own versions starts at 1). {@link #ANYTHING} is above
+ *     every version: what L1 must drop whatever it holds.</li>
  * </ul>
  *
  * @author Andreas Oberhoff

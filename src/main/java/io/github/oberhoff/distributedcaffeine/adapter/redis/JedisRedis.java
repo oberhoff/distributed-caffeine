@@ -44,7 +44,8 @@ public final class JedisRedis {
 
     // what the class Javadoc leaves out: each command's socket timeout is set to the cache's operation timeout on the
     // borrowed connection and restored before it goes back; a connection that timed out or broke goes back as broken,
-    // and the pool replaces it.
+    // and the pool replaces it. A command whose connection broke (one the server closed while it sat in the pool, after
+    // a restart or a failover) is sent once more on another.
 
     private static final String CLIENT_REQUIRED = "client cannot be null";
 

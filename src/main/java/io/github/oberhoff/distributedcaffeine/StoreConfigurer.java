@@ -120,9 +120,13 @@ public final class StoreConfigurer {
      * carrying would block callers for good. It bounds every call that reaches the store (a local miss, a write, a load
      * writing its value) and the checks when the cache is built. A read that times out fails. A write that times out
      * has an unknown outcome: {@code put} fails, while the atomic {@code asMap()} methods, loads and refreshes repeat
-     * it and fail only if they cannot recognize their own write. With a JDBC connection pool, set the pool's wait for a connection (such as
-     * HikariCP's {@code connectionTimeout}, 30 seconds by default) no higher, or an exhausted pool keeps callers
-     * waiting longer. Optional: 10 seconds by default.
+     * it and fail only if they cannot recognize their own write. With a JDBC connection pool, set the pool's wait for a
+     * connection (such as HikariCP's {@code connectionTimeout}, 30 seconds by default) no higher, or an exhausted pool
+     * keeps callers waiting longer. One wait it does not bound: a driver writing through a blocking socket (the JDBC
+     * drivers, MongoDB's default transport, Jedis) has no timeout for sending, so a write too large for the socket's
+     * buffer, such as a large {@code putAll}, sent to a server that vanished without closing the connection, waits
+     * until the operating system gives up (about 15 minutes on Linux, {@code net.ipv4.tcp_retries2}). Optional: 10
+     * seconds by default.
      *
      * @param operationTimeout the timeout (positive)
      * @return this configurer

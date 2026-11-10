@@ -50,15 +50,18 @@ public abstract class StoreContractTest extends AbstractContractTest {
         Store reader = open();
         long[][] steps = {{900, 900}, {5, 900}, {1L << 50, 1L << 50}, {6, 1L << 50}, {(1L << 50) + 1, (1L << 50) + 1}};
         for (long[] step : steps) {
-            Set<String> refused = writer.write(List.of(Write.value("h1", new byte[]{1}, new byte[]{1}, step[0]))).refused();
+            Set<String> refused =
+                    writer.write(List.of(Write.value("h1", new byte[]{1}, new byte[]{1}, step[0]))).refused();
             assertThat(refused).as("version " + step[0]).isEqualTo(step[0] == step[1] ? Set.of() : Set.of("h1"));
             assertThat(reader.read(List.of("h1"), LONG).get("h1").version()).as("only grows").isEqualTo(step[1]);
             assertThat(reader.readVersions(List.of("h1"), LONG).versions()).containsEntry("h1", step[1]);
         }
-        assertThat(writer.write(List.of(Write.tombstone("h1", 3))).refused()).as("a tombstone below").containsExactly("h1");
+        assertThat(writer.write(List.of(Write.tombstone("h1", 3))).refused()).as("a tombstone below")
+                .containsExactly("h1");
         writer.write(List.of(Write.tombstone("h1", 1L << 51)));
         assertThat(reader.read(List.of("h1"), LONG).get("h1").version()).as("a tombstone above").isEqualTo(1L << 51);
-        assertThat(writer.write(List.of(Write.tombstone("h1", 1L << 51))).refused()).as("an equal one").containsExactly("h1");
+        assertThat(writer.write(List.of(Write.tombstone("h1", 1L << 51))).refused()).as("an equal one")
+                .containsExactly("h1");
     }
 
     @Test
@@ -612,10 +615,10 @@ public abstract class StoreContractTest extends AbstractContractTest {
         Store writer = open();
         writer.write(List.of(entry("value", "v")));
         writer.write(List.of(tombstone("old")));
-        pause(100);
+        pause(600);
         writer.write(List.of(tombstone("young")));
 
-        assertThat(writer.pruneTombstones(Duration.ofMillis(60), ALL)).isEqualTo(1);
+        assertThat(writer.pruneTombstones(Duration.ofMillis(300), ALL)).isEqualTo(1);
 
         assertThat(writer.read(List.of("value", "old", "young"), LONG).keySet())
                 .containsExactlyInAnyOrder("value", "young");

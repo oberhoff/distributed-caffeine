@@ -87,7 +87,8 @@ abstract class PostgresNotifyQueueTest {
 
     // notifications until PostgreSQL refuses one: the queue is full
     private void fillQueue() throws SQLException {
-        try (Connection connection = database.dataSource.getConnection(); Statement statement = connection.createStatement()) {
+        try (Connection connection = database.dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
             for (int index = 0; index < 10_000; index++) {
                 try {
                     statement.execute("SELECT pg_notify('flood', repeat('x', 7000))");

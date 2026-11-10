@@ -36,6 +36,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -103,7 +104,11 @@ class InternalStoreProfileTest {
     // invalidation not yet applied, read as a stale value)
     @SafeVarargs
     private static void settle(InMemoryDatabase database, DistributedCache<String, String>... caches) {
-        await(() -> database.isIdle() && Stream.of(caches)
+        settle(database, List.of(caches));
+    }
+
+    private static void settle(InMemoryDatabase database, Collection<DistributedCache<String, String>> caches) {
+        await(() -> database.isIdle() && caches.stream()
                 .allMatch(cache -> ((InternalDistributedCache<String, String>) cache).core.isQuiescent()));
     }
 
@@ -285,6 +290,72 @@ class InternalStoreProfileTest {
         writer.put("k", "after");
         await(() -> "after".equals(holder.getIfPresent("k")) || holder.getIfPresent("k") == null);
         assertThat(holder.get("k", ignored -> "loaded")).isEqualTo("after");
+    }
+
+    // the store assigns versions from its clock, which on the new primary may stand where the old one's stood (a clock
+    // behind, a virtual machine resumed, found 2026-11-10 on Valkey): a write by an instance that never saw the lost
+    // write's version then gets that very version. Landing before the holder hears of the gap, it must still replace
+    // the lost value there: after a gap a held value is confirmed by its version and its value, not its version alone
+    @Test
+    void a_later_write_at_the_version_of_a_write_lost_in_a_failover_reaches_every_holder() {
+        LostVersion lost = loseAndReuseVersion();
+        lost.database().resumeDelivery();
+
+        settle(lost.database(), lost.caches().values());
+        Map<String, @Nullable String> held = new LinkedHashMap<>();
+        lost.caches().forEach((name, cache) -> held.put(name, cache.getIfPresent("k")));
+        assertThat(held).as("what each instance holds").allSatisfy((name, value) ->
+                assertThat(value).as(name).isIn("later", null));
+    }
+
+    // the same, decided on the held copy before the gap arrives: a decision to write nothing is confirmed by a read,
+    // which finds the lost write's version again, with the later value
+    @Test
+    void a_decision_on_a_value_lost_in_a_failover_is_not_confirmed_by_a_later_write_at_its_version() {
+        LostVersion lost = loseAndReuseVersion();
+        DistributedCache<String, String> holder = requireNonNull(lost.caches().get("holder"));
+
+        assertThat(holder.asMap().replace("k", "later", "replaced")).as("replaced what the store holds").isTrue();
+        lost.database().resumeDelivery();
+        assertThat(stored(holder, "k")).isEqualTo("replaced");
+    }
+
+    private record LostVersion(InMemoryDatabase database, Map<String, DistributedCache<String, String>> caches) {
+    }
+
+    // a value written, then one lost in a failover while an instance holds it, then a later write by another instance
+    // at the lost one's very version; delivery paused, so that no instance has heard of the gap yet
+    private LostVersion loseAndReuseVersion() {
+        // ahead of the instances' clocks, so that the store's time rather than a proposal decides every version, and
+        // standing still, so that each write is one above the stored version
+        long standing = Instant.now().plus(LONG).toEpochMilli() * 1_000;
+        InMemoryDatabase database = new InMemoryDatabase(() -> standing, 1, StoreProfile.REDIS);
+        DistributedCache<String, String> keeper = cache(database);
+        DistributedCache<String, String> holder = cache(database);
+        InMemoryStore store = database.openFeed("cache");
+        closeables.add(store);
+        keeper.put("k", "kept");
+        settle(database, keeper, holder);
+        pause(200);
+        // the lost and the later write by instances started just before, which have seen no version, so that the
+        // store's time outweighs their proposals (an instance that saw a version proposes above it)
+        DistributedCache<String, String> loser = cache(database);
+        loser.put("k", "lost");
+        assertThat(holder.get("k", ignored -> "loaded")).isEqualTo("lost");
+        long lost = requireNonNull(store.read(List.of(K_HASH), LONG).get(K_HASH)).version();
+
+        database.pauseDelivery();
+        database.failover(Duration.ofMillis(100));
+        DistributedCache<String, String> later = cache(database);
+        later.put("k", "later");
+        assertThat(requireNonNull(store.read(List.of(K_HASH), LONG).get(K_HASH)).version())
+                .as("the later write at the lost one's version").isEqualTo(lost);
+        Map<String, DistributedCache<String, String>> caches = new LinkedHashMap<>();
+        caches.put("keeper", keeper);
+        caches.put("holder", holder);
+        caches.put("loser", loser);
+        caches.put("later", later);
+        return new LostVersion(database, caches);
     }
 
     // dimension 5: a write conditioned on a version of a purged row

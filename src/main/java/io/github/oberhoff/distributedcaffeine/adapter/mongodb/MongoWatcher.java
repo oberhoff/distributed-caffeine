@@ -410,10 +410,12 @@ final class MongoWatcher {
             BsonDocument valueWritten = BsonDocument.parse("{$addFields: {updateDescription: {$cond: {"
                     + "if: {$eq: ['$operationType', 'update']}, else: '$$REMOVE', then: {$mergeObjects: ["
                     + "'$updateDescription', {updatedFields: {$mergeObjects: ['$updateDescription.updatedFields', {"
-                    + VALUE_WRITTEN + ": {$ne: [{$type: '$updateDescription.updatedFields.value'}, 'missing']}}]}}]}}}}}");
+                    + VALUE_WRITTEN + ": {$ne: [{$type: '$updateDescription.updatedFields.value'}, 'missing']}"
+                    + "}]}}]}}}}}");
             List<BsonDocument> stages = List.of(new BsonDocument("$match", match), valueWritten,
                     BsonDocument.parse("{$project: {'fullDocument.value': 0, 'fullDocument.key': 0, "
-                            + "'updateDescription.updatedFields.value': 0, 'updateDescription.updatedFields.key': 0}}"));
+                            + "'updateDescription.updatedFields.value': 0, "
+                            + "'updateDescription.updatedFields.key': 0}}"));
             ChangeStreamIterable<BsonDocument> stream = database.watch(stages, BsonDocument.class)
                     .maxAwaitTime(MAX_AWAIT_MILLIS, TimeUnit.MILLISECONDS);
             if (token != null) {

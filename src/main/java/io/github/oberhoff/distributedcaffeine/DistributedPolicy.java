@@ -37,7 +37,8 @@ public interface DistributedPolicy<K, V> {
 
     /**
      * Reads the key's value from the store, bypassing this instance's copy and without keeping what it reads. Values
-     * older than the store's maximum age are not returned.
+     * older than the store's maximum age are not returned, nor values this instance cannot read (counted as
+     * {@code unreadableRowCount}), which every read treats as missing.
      *
      * @param key the key
      * @return the stored value, or {@code null} if the store holds none

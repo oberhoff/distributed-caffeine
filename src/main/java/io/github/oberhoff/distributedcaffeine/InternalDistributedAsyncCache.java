@@ -73,8 +73,7 @@ class InternalDistributedAsyncCache<K, V> implements DistributedAsyncCache<K, V>
 
     @Override
     public CompletableFuture<Map<K, V>> getAll(Iterable<? extends K> keys,
-                                               Function<? super Set<? extends K>, ? extends Map<? extends K, ? extends V>>
-                                                       mappingFunction) {
+            Function<? super Set<? extends K>, ? extends Map<? extends K, ? extends V>> mappingFunction) {
         requireNonNull(mappingFunction, MAPPING_FUNCTION_CANNOT_BE_NULL);
         return core.getAllAsync(keys, missing -> CompletableFuture.supplyAsync(() -> mappingFunction.apply(missing),
                 executor));
@@ -82,9 +81,8 @@ class InternalDistributedAsyncCache<K, V> implements DistributedAsyncCache<K, V>
 
     @Override
     public CompletableFuture<Map<K, V>> getAll(Iterable<? extends K> keys,
-                                               BiFunction<? super Set<? extends K>, ? super Executor,
-                                                       ? extends CompletableFuture<? extends Map<? extends K, ? extends V>>>
-                                                       mappingFunction) {
+            BiFunction<? super Set<? extends K>, ? super Executor,
+                    ? extends CompletableFuture<? extends Map<? extends K, ? extends V>>> mappingFunction) {
         requireNonNull(mappingFunction, MAPPING_FUNCTION_CANNOT_BE_NULL);
         return core.getAllAsync(keys, missing -> mappingFunction.apply(missing, executor));
     }

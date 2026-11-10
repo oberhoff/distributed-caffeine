@@ -74,7 +74,8 @@ class PostgresChannelPartitioningExperimentTest {
             try (Connection setup = connect(container); Statement statement = setup.createStatement()) {
                 statement.execute(PostgresStatementExperimentTest.SCHEMA);
             }
-            StringBuilder out = new StringBuilder("\n=== channel partitioning, postgres:18, 4 instances, 10,000 keys ===\n")
+            StringBuilder out = new StringBuilder(
+                    "\n=== channel partitioning, postgres:18, 4 instances, 10,000 keys ===\n")
                     .append(String.format("%-10s %10s %10s %12s %12s %16s%n", "channels", "writes/s", "sessions",
                             "arrival p50", "arrival p99", "PG CPU ms/1000w"));
             for (int rate : new int[]{1_500, 3_000, 6_000}) {

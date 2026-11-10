@@ -39,10 +39,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * The MongoDB adapter when the oplog rolls over behind the change stream, for real: on a single-member replica set
- * with an oplog of 1 MB that MongoDB truncates as soon as it can ({@link MongoTopology#SINGLE_NODE_REPLICA_SET_WITH_SMALL_OPLOG};
- * by default a checkpoint every 60 s and 5 minutes of history hold the truncation back), a stream held back from
- * reading, and writes enough to truncate the oplog past its position. The stream cannot resume from there, so it
- * reopens without its token and the caches are told about a gap; what changed meanwhile is found by the revalidation.
+ * with an oplog of 1 MB that MongoDB truncates as soon as it can ({@link
+ * MongoTopology#SINGLE_NODE_REPLICA_SET_WITH_SMALL_OPLOG}; by default a checkpoint every 60 s and 5 minutes of history
+ * hold the truncation back), a stream held back from reading, and writes enough to truncate the oplog past its
+ * position. The stream cannot resume from there, so it reopens without its token and the caches are told about a gap;
+ * what changed meanwhile is found by the revalidation.
  *
  * @author Andreas Oberhoff
  */

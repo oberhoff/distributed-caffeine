@@ -310,7 +310,8 @@ abstract class PostgresAdapterTest {
 
         await(() -> holder.distributedPolicy().stats().gapCount() > gaps
                 && holder.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
-        assertThat(holder.getIfPresent("k")).as("checked after the gap").isEqualTo("written while the session was down");
+        assertThat(holder.getIfPresent("k")).as("checked after the gap")
+                .isEqualTo("written while the session was down");
     }
 
     // schema

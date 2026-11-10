@@ -199,7 +199,8 @@ class MongoCrashExperimentTest {
                 stop.set(true);
                 watcher.join(30_000);
                 return String.format("last acknowledged %d, stored after restart %d (lost acknowledged: %d), "
-                                + "max event before crash %d (events for lost writes: %d), events after restart %d%n  %s",
+                                + "max event before crash %d (events for lost writes: %d), "
+                                + "events after restart %d%n  %s",
                         lastAcknowledged, stored, lastAcknowledged - stored, maxEventBeforeCrash,
                         Math.max(0, maxEventBeforeCrash - stored), eventsAfterRestart.get(), watcherLog.joined());
             }

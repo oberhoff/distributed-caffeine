@@ -78,7 +78,8 @@ class MongoNonHolderExperimentTest {
         try (MongoDBContainer container = new MongoDBContainer("mongo:8").withReplicaSet()) {
             container.start();
             String url = container.getReplicaSetUrl("experiment");
-            StringBuilder out = new StringBuilder("\n=== non-holders, 8 instances, 10,000 keys, 4 writers, 20,000 writes ===\n")
+            StringBuilder out = new StringBuilder(
+                    "\n=== non-holders, 8 instances, 10,000 keys, 4 writers, 20,000 writes ===\n")
                     .append(String.format("%-10s %6s %6s %10s %14s %14s %14s %14s %10s%n", "variant", "value", "held",
                             "writes/s", "CPU ms/inst.", "MB recv/inst.", "held p50 µs", "held p99 µs", "reads/wr"));
             for (int valueSize : new int[]{1_024, 10_240}) {
@@ -202,7 +203,8 @@ class MongoNonHolderExperimentTest {
                         int k = ThreadLocalRandom.current().nextInt(KEYS);
                         started[seq] = System.nanoTime();
                         rows.updateOne(eq("_id", key(k)), new Document("$set",
-                                new Document("seq", seq).append("value", seq + payload)), new UpdateOptions().upsert(true));
+                                new Document("seq", seq).append("value", seq + payload)),
+                                new UpdateOptions().upsert(true));
                     }
                 });
                 writers.add(writer);

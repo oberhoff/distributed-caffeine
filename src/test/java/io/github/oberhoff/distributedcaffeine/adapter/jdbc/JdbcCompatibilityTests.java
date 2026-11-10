@@ -26,7 +26,8 @@ import org.junit.jupiter.api.TestInstance;
 /**
  * The suites where versions differ, on one MariaDB or MySQL image through one driver (the subclass names both): the
  * storage and change scan contracts, the adapters' own tests (schema, refusals, connections, timeouts), the
- * property test, the classification of failures for retries and a restart of the server. The database is started with the class and stopped after its suites.
+ * property test, the classification of failures for retries and a restart of the server. The database is started with
+ * the class and stopped after its suites.
  *
  * @author Andreas Oberhoff
  */

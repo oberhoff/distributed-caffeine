@@ -110,8 +110,10 @@ class InternalSerializerTest {
             }
         });
 
-        assertThatThrownBy(() -> serializer.serialize("x")).isInstanceOf(InternalSerializer.SerializationException.class);
-        assertThatThrownBy(() -> serializer.deserialize(new byte[0])).isInstanceOf(InternalSerializer.SerializationException.class);
+        assertThatThrownBy(() -> serializer.serialize("x"))
+                .isInstanceOf(InternalSerializer.SerializationException.class);
+        assertThatThrownBy(() -> serializer.deserialize(new byte[0]))
+                .isInstanceOf(InternalSerializer.SerializationException.class);
     }
 
     @Test

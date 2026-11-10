@@ -46,9 +46,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * invalidateAll}, then the operation" (the operation as on an absent key). Never a value derived from the state before
  * the {@code invalidateAll}.
  * <p>
- * Since the {@code invalidateAll} by the store's time (2026-10-28) this race is accepted, as Caffeine, memcached, Redis,
- * Hazelcast and FusionCache accept it: the tests closing it are disabled until its repair; those of own values written
- * after an unannounced {@code invalidateAll} still hold.
+ * Since the {@code invalidateAll} by the store's time (2026-10-28) this race is accepted, as Caffeine, memcached,
+ * Redis, Hazelcast and FusionCache accept it: the tests closing it are disabled until its repair; those of own values
+ * written after an unannounced {@code invalidateAll} still hold.
  *
  * @author Andreas Oberhoff
  */
@@ -58,11 +58,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 class InternalInvalidateAllRaceTest {
 
     private static final Duration LONG = Duration.ofHours(1);
-    // the race these tests close is accepted, as the industry accepts it for loads: a load or an update that read before
-    // another instance's invalidateAll and writes after it survives it (VISION.md, "Target design: invalidateAll by the
-    // store's time, hidden on read", the repair tried and reverted 2026-11-05). A log of decisions repairs those that
-    // read exactly, but not those decided on a held value (when it was written against the unheard invalidateAll is
-    // unknown); closing it needs a read per operation or a check of the control row in the store's write
+    // the race these tests close is accepted, as the industry accepts it for loads: a load or an update that read
+    // before another instance's invalidateAll and writes after it survives it (VISION.md, "Target design: invalidateAll
+    // by the store's time, hidden on read", the repair tried and reverted 2026-11-05). A log of decisions repairs those
+    // that read exactly, but not those decided on a held value (when it was written against the unheard invalidateAll
+    // is unknown); closing it needs a read per operation or a check of the control row in the store's write
     private static final String RACE_ACCEPTED = "racing loads and updates are accepted until their repair (VISION.md, "
             + "build plan, Later)";
 

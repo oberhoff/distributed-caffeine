@@ -177,7 +177,8 @@ final class PostgresTestDatabase implements AutoCloseable {
         primary = server(ports.get(0))
                 .withNetworkAliases("primary")
                 // replication connections from the standby, which the image does not allow by default
-                .withCopyToContainer(Transferable.of("echo 'host replication all all trust' >> \"$PGDATA/pg_hba.conf\"\n"),
+                .withCopyToContainer(
+                        Transferable.of("echo 'host replication all all trust' >> \"$PGDATA/pg_hba.conf\"\n"),
                         "/docker-entrypoint-initdb.d/replication.sh")
                 .withCommand(command.toArray(String[]::new))
                 .waitingFor(Wait.forLogMessage("(?s).*database system is ready to accept connections.*", 2));

@@ -179,14 +179,16 @@ abstract class MongoAdapterTest {
     @Test
     void every_format_round_trips_and_values_are_never_read_as_operators() {
         DistributedCache<String, Order> binary = track(DistributedCaffeine.newBuilder(
-                        MongoAdapter.newBuilder(database.client, "adapter", collection + "_binary").<String, Order>build())
+                        MongoAdapter.newBuilder(database.client, "adapter", collection + "_binary")
+                                .<String, Order>build())
                 .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(100)).build());
         binary.put("k", new Order("o1", 3, List.of("a")));
         assertThat(requireNonNull(binary.distributedPolicy().getFromStore("k")).value())
                 .isEqualTo(new Order("o1", 3, List.of("a")));
 
         DistributedCache<String, Order> json = track(DistributedCaffeine.newBuilder(
-                        MongoAdapter.newBuilder(database.client, "adapter", collection + "_json").<String, Order>build())
+                        MongoAdapter.newBuilder(database.client, "adapter", collection + "_json")
+                                .<String, Order>build())
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(new JacksonSerializer<>(Order.class, true)))
                 .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(100)).build());
@@ -606,9 +608,12 @@ abstract class MongoAdapterTest {
             // written after it (or in the same millisecond, which also hides it: at or before)
             store.write(List.of(Write.value(Store.CONTROL_HASH, bytes, bytes, 2)));
 
-            assertThat(store.expire(Duration.ZERO, 3, Integer.MAX_VALUE)).as("neither the hidden one nor the control row").isZero();
-            assertThat(store.pruneToSize(0, Duration.ZERO, Integer.MAX_VALUE)).as("neither counted nor deleted").isZero();
-            assertThat(store.pruneTombstones(LONG, Integer.MAX_VALUE)).as("the hidden one, without a grace period").isOne();
+            assertThat(store.expire(Duration.ZERO, 3, Integer.MAX_VALUE))
+                    .as("neither the hidden one nor the control row").isZero();
+            assertThat(store.pruneToSize(0, Duration.ZERO, Integer.MAX_VALUE)).as("neither counted nor deleted")
+                    .isZero();
+            assertThat(store.pruneTombstones(LONG, Integer.MAX_VALUE)).as("the hidden one, without a grace period")
+                    .isOne();
             assertThat(store.read(List.of("hidden", Store.CONTROL_HASH), LONG)).containsOnlyKeys(Store.CONTROL_HASH);
         }
     }
@@ -655,11 +660,11 @@ abstract class MongoAdapterTest {
         }
 
         var created = database.client.getDatabase("adapter").getCollection(collection);
-        assertThat(requireNonNull(created.find(new Document("_id", MongoLocation.MARKER_ID)).first()).getString("schema"))
-                .isEqualTo(MongoLocation.MARKER);
+        Document marker = requireNonNull(created.find(new Document("_id", MongoLocation.MARKER_ID)).first());
+        assertThat(marker.getString("schema")).isEqualTo(MongoLocation.MARKER);
         assertThat(created.listIndexes().into(new ArrayList<>())).anyMatch(index ->
-                index.get("key", Document.class).equals(new Document("_id.d", 1).append("state", 1).append("writeTime", 1)
-                        .append("_id.h", 1)));
+                index.get("key", Document.class).equals(new Document("_id.d", 1).append("state", 1)
+                        .append("writeTime", 1).append("_id.h", 1)));
         assertThat(created.countDocuments(new Document("_id.c", MongoLocation.START))).as("one per discriminator")
                 .isEqualTo(1);
     }

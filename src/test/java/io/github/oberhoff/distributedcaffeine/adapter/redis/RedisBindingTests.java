@@ -307,6 +307,19 @@ abstract class RedisBindingTests {
         assertThat(eventually(() -> Optional.ofNullable(session.eval(NOTHING, List.of(), List.of())))).isEmpty();
     }
 
+    // a connection closed while it sat idle (a restart, a failover) costs no command: Lettuce and Redisson reconnect
+    // and send it again, the Jedis binding sends it once more on another connection of the pool
+    @Test
+    void a_command_on_a_connection_closed_while_idle_is_sent_on_another() throws Exception {
+        SilencingProxy proxy = proxy();
+        RedisSession session = session(throughProxy(proxy), TIMEOUT);
+        session.eval(NOTHING, List.of(), List.of());
+
+        proxy.retarget(server.host(), server.port());
+
+        assertThat(session.eval(NOTHING, List.of(), List.of())).isNull();
+    }
+
     @Test
     void a_blocking_read_on_a_silent_connection_fails_within_its_block_time_and_the_timeout() throws Exception {
         SilencingProxy proxy = proxy();

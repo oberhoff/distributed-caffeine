@@ -339,7 +339,8 @@ public final class EndToEndBenchmark {
         table.append(contend("1 hot key, 50 % gets / 50 % puts", first, second, fresh(1), 5, false));
         table.append(contend("1 key, compute (increment) only", first, second, fresh(1), 0, true));
         table.append(String.format(Locale.ROOT, "%nwhere the store reads come from, and what messages did (counts in "
-                + "the 5 s, both instances)%n%n| %-40s | %8s | %8s | %10s | %8s | %8s | %11s | %8s | %8s | %8s | %8s |%n",
+                + "the 5 s, both instances)%n%n| %-40s | %8s | %8s | %10s | %8s | %8s | %11s | %8s | %8s | %8s "
+                + "| %8s |%n",
                 "scenario", "puts", "reads", "population", "loads", "refusals", "revalidated", "messages", "ignored",
                 "replaced", "dropped"));
         breakdown.forEach(table::append);

@@ -443,8 +443,8 @@ public final class DistributedCaffeine<K, V> {
         return negativeCachingExpiry;
     }
 
-    // the time, sleeping, scheduling and randomness of the cache (InternalEnvironment): a simulation of the tests', whose
-    // time they move, for the paths that wait for time; not public
+    // the time, sleeping, scheduling and randomness of the cache (InternalEnvironment): a simulation of the tests',
+    // whose time they move, for the paths that wait for time; not public
     DistributedCaffeine<K, V> withEnvironment(InternalEnvironment environment) {
         this.environment = requireNonNull(environment, "environment cannot be null");
         return this;

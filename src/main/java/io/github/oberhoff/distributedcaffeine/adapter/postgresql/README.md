@@ -63,11 +63,16 @@ on the primary there.
 ## Timeouts
 
 The cache's operation timeout (`withOperationTimeout(...)`, 10 seconds by default) becomes the network timeout of each
-connection borrowed for an operation, restored before the connection goes back, so a connection the network silently
-stopped carrying fails the operation in time, and caches sharing a data source may have different timeouts. The wait for
-a pooled connection is the pool's own (such as HikariCP's `connectionTimeout`, 30 seconds by default): set it no higher
-than the operation timeout, or an exhausted pool keeps callers waiting longer. A listening connection that dies silently
-is detected by the cache's heartbeat and replaced.
+connection borrowed for an operation, restored before the connection goes back, so an operation waiting for an answer
+on a connection the network silently stopped carrying fails in time, and caches sharing a data source may have
+different timeouts. The wait for a pooled connection is the pool's own (such as HikariCP's `connectionTimeout`, 30
+seconds by default): set it no higher than the operation timeout, or an exhausted pool keeps callers waiting longer. A
+listening connection that dies silently is detected by the cache's heartbeat and replaced.
+
+The network timeout bounds waiting for an answer, not sending: Java sockets have no write timeout, so a write too large
+for the socket's buffer, such as a large `putAll`, sent to a server that vanished without closing the connection (a
+crashed host, a cut network), waits until the operating system gives up (about 15 minutes on Linux,
+`net.ipv4.tcp_retries2`) and fails only then.
 
 ## Failovers
 

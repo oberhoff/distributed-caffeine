@@ -297,8 +297,8 @@ public final class DistributedStats {
     }
 
     /**
-     * Returns the number of held values whose version was checked against the store, after a gap or while
-     * delivery was interrupted: the kept ones plus the dropped ones.
+     * Returns the number of held values checked against the store, after a gap or while delivery was interrupted:
+     * the kept ones plus the dropped ones.
      *
      * @return the count
      */
@@ -307,7 +307,7 @@ public final class DistributedStats {
     }
 
     /**
-     * Returns of those, the values the store still held in the same version.
+     * Returns of those, the values the store still held, in the same version and with the same content.
      *
      * @return the count
      */
@@ -316,7 +316,7 @@ public final class DistributedStats {
     }
 
     /**
-     * Returns of those, the values dropped because the store held another version or none.
+     * Returns of those, the values dropped because the store held another version, other content or none.
      *
      * @return the count
      */

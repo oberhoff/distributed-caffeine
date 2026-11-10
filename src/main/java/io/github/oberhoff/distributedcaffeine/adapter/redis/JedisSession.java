@@ -50,9 +50,9 @@ import static java.util.Objects.requireNonNull;
  * timeout as the connection's socket timeout (restored before it goes back); a stream reader holds a connection of its
  * own while it reads. Commands are built by Jedis's CommandObjects for the protocol the connection speaks (RESP2 or
  * RESP3), so their replies come back typed alike; a script's reply comes back raw, false (RESP3's for Lua's false) read
- * as nil. Jedis does not send a command again after a reset, so a write is never repeated here. In a cluster, a command
- * goes to the node Jedis takes for the owner of its first key's slot (a script's keys share one); a node answering
- * MOVED or ASK ran nothing, so Jedis's view is refreshed and the command sent once more
+ * as nil. A command whose connection broke is sent once more on another, as Lettuce and Redisson do after a reset. In
+ * a cluster, a command goes to the node Jedis takes for the owner of its first key's slot (a script's keys share
+ * one); a node answering MOVED or ASK ran nothing, so Jedis's view is refreshed and the command sent once more
  *
  * @author Andreas Oberhoff
  */
@@ -191,34 +191,52 @@ final class JedisSession implements RedisSession {
     private static <T extends @Nullable Object> T run(Source source, @Nullable String key, Duration bound,
                                                       String what, Function<CommandObjects, CommandObject<T>> command) {
         try {
-            return runOnce(source, key, bound, what, command);
+            return runBorrowed(source, key, bound, what, command);
         } catch (RedisCommandException e) {
             if (redirected(e)) {
                 source.changed();
-                return runOnce(source, key, bound, what, command);
+                return runBorrowed(source, key, bound, what, command);
             }
             if (e.kind() == Kind.CONNECTION || e.kind() == Kind.TIMEOUT) {
-                // not sent again (it may have run), but the next command goes where the cluster says now
+                // the next command goes where the cluster says now
                 source.changed();
             }
             throw e;
         }
     }
 
-    private static <T extends @Nullable Object> T runOnce(Source source, @Nullable String key, Duration bound,
-                                                          String what,
-                                                          Function<CommandObjects, CommandObject<T>> command) {
-        Lease lease;
+    // sent once more on another connection where the borrowed one broke: a connection the server closed while it sat
+    // in the pool (a restart, a failover) fails its first command, which a pool on Jedis's defaults does not check
+    // before lending it. Lettuce and Redisson send a command again after a reset as well, so every script takes being
+    // sent twice (see RedisScripts#WRITE); a timeout is not sent again, as it may still be running
+    private static <T extends @Nullable Object> T runBorrowed(Source source, @Nullable String key, Duration bound,
+                                                              String what,
+                                                              Function<CommandObjects, CommandObject<T>> command) {
+        Lease lease = borrow(source, key, what);
         try {
-            lease = source.borrow(key);
+            return run(lease.connection(), bound, what, command, true);
+        } catch (RedisCommandException e) {
+            if (e.kind() != Kind.CONNECTION) {
+                throw e;
+            }
+            source.changed();
+        } finally {
+            lease.giveBack();
+        }
+        Lease again = borrow(source, key, what);
+        try {
+            return run(again.connection(), bound, what, command, true);
+        } finally {
+            again.giveBack();
+        }
+    }
+
+    private static Lease borrow(Source source, @Nullable String key, String what) {
+        try {
+            return source.borrow(key);
         } catch (RuntimeException e) {
             // no connection within the pool's own wait, or none could be opened
             throw new RedisCommandException(Kind.CONNECTION, what + " could not connect: " + e.getMessage(), e);
-        }
-        try {
-            return run(lease.connection(), bound, what, command, true);
-        } finally {
-            lease.giveBack();
         }
     }
 

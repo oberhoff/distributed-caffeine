@@ -284,8 +284,8 @@ final class InternalCore<K, V> {
                  @Nullable Loaders<K, V> loaders,
                  DistributionMode distributionMode,
                  @Nullable Duration negativeCachingExpiry, long maximumSize, Duration maintenanceInterval,
-                 Duration pruneGrace, Duration heartbeatInterval, int loadAttempts, InternalStatsCounter stats, Runnable onClose,
-                 InternalEnvironment environment) {
+                 Duration pruneGrace, Duration heartbeatInterval, int loadAttempts, InternalStatsCounter stats,
+                 Runnable onClose, InternalEnvironment environment) {
         this.environment = requireNonNull(environment);
         this.name = requireNonNull(name);
         this.clock = new InternalVersion(environment, this::clockAhead);
@@ -591,12 +591,16 @@ final class InternalCore<K, V> {
         confirmOrDropAll(requested);
         Map<K, V> result = new LinkedHashMap<>();
         List<InternalKey<K>> missing = new ArrayList<>();
+        List<InternalKey<K>> inFlight = new ArrayList<>();
         for (InternalKey<K> internalKey : requested) {
             // as in getIfPresent: a miss is counted once, by the read through the store
             CompletableFuture<InternalValue<V>> held = l1.asMap().containsKey(internalKey)
                     ? l1.getIfPresent(internalKey) : null;
             if (held == null) {
                 missing.add(internalKey);
+            } else if (!held.isDone()) {
+                // as in getIfPresent: a load in flight here, whose value may already be in the store; counted already
+                inFlight.add(internalKey);
             } else {
                 InternalValue<V> value = completedValue(held);
                 if (value != null) {
@@ -604,8 +608,12 @@ final class InternalCore<K, V> {
                 }
             }
         }
-        if (!missing.isEmpty()) {
-            Map<InternalKey<K>, V> found = readThrough(missing);
+        if (!missing.isEmpty() || !inFlight.isEmpty()) {
+            // one read for both; only the keys not held are counted, after it, as readThrough counts them
+            List<InternalKey<K>> toRead = new ArrayList<>(missing);
+            toRead.addAll(inFlight);
+            Map<InternalKey<K>, V> found = readThrough(toRead, false);
+            countLookups(missing);
             Map<K, V> ordered = new LinkedHashMap<>();
             for (InternalKey<K> internalKey : requested) {
                 if (result.containsKey(internalKey.key())) {
@@ -634,11 +642,12 @@ final class InternalCore<K, V> {
         return result;
     }
 
+    // a value this instance cannot read counts as none, as for every read (see deserializeOrNull)
     @Nullable StoredValue<V> getFromStore(K key) {
         InternalKey<K> internalKey = wrap(key);
         Row row = readRows(List.of(internalKey.hash())).get(internalKey.hash());
-        return row == null || row.state() != State.VALUE ? null
-                : new StoredValue<>(valueSerializer.deserialize(requireNonNull(row.value())), shown(row.age()));
+        V value = valueOf(row);
+        return row == null || value == null ? null : new StoredValue<>(value, shown(row.age()));
     }
 
     // an age as the caller sees it: never negative, though a store reports one for a row written after the read's
@@ -654,10 +663,9 @@ final class InternalCore<K, V> {
         Map<K, StoredValue<V>> result = new LinkedHashMap<>();
         for (InternalKey<K> internalKey : requested) {
             Row row = rows.get(internalKey.hash());
-            if (row != null && row.state() == State.VALUE) {
-                result.put(internalKey.key(),
-                        new StoredValue<>(valueSerializer.deserialize(requireNonNull(row.value())),
-                                shown(row.age())));
+            V value = valueOf(row);
+            if (row != null && value != null) {
+                result.put(internalKey.key(), new StoredValue<>(value, shown(row.age())));
             }
         }
         return result;
@@ -719,9 +727,9 @@ final class InternalCore<K, V> {
     }
 
     /**
-     * The user's remapping function of {@code compute}, {@code computeIfPresent} or {@code merge}, counted in Caffeine's
-     * stats as Caffeine counts it: a load, failed if it returns {@code null} or throws. Each run counts (it may run
-     * more than once after a conflict).
+     * The user's remapping function of {@code compute}, {@code computeIfPresent} or {@code merge}, counted in
+     * Caffeine's stats as Caffeine counts it: a load, failed if it returns {@code null} or throws. Each run counts (it
+     * may run more than once after a conflict).
      */
     @SuppressWarnings("java:S1181") // an error is recorded as a failed load too, then rethrown
     <A, B extends @Nullable Object> BiFunction<A, B, @Nullable V> countedAsLoad(
@@ -787,13 +795,14 @@ final class InternalCore<K, V> {
                     if (newValue == current.value() && !alwaysWrite) {
                         return new Update<>(current.value(), newValue);
                     }
-                    throw unanswered;
+                    throw failed(internalKey, newValue, unanswered);
                 }
                 if (current.held() && (newValue == null || (newValue == current.value() && !alwaysWrite))) {
                     // decided on a held value, but not to write one: nothing would check it, so checked by a read.
-                    // The same version confirms the decision (the remapping, counted as a load, does not run again;
-                    // the held instance kept, as Caffeine tells an unchanged value by identity); otherwise decided
-                    // again. While the store does not answer, a decision to write nothing stands unconfirmed
+                    // The same version and content confirm the decision (the remapping, counted as a load, does not
+                    // run again; the held instance kept, as Caffeine tells an unchanged value by identity); otherwise
+                    // decided again. The version alone does not tell (see stillStored). While the store does not
+                    // answer, a decision to write nothing stands unconfirmed
                     Current<V> read;
                     try {
                         read = read(internalKey);
@@ -801,9 +810,11 @@ final class InternalCore<K, V> {
                         if (newValue == current.value() && !alwaysWrite) {
                             return new Update<>(current.value(), newValue);
                         }
-                        throw e;
+                        // the decision left to confirm here is a removal
+                        throw failed(internalKey, null, e);
                     }
-                    if (read.version() != current.version() || read.value() == null) {
+                    if (read.version() != current.version() || read.value() == null
+                            || !sameContent(read.value(), current.value())) {
                         // written elsewhere since, or hidden by an invalidateAll (read at the same version, no value)
                         current = read;
                         continue;
@@ -844,11 +855,7 @@ final class InternalCore<K, V> {
                     // invalidateAll as a tombstone, so the next write is conditioned on it
                     current = read(internalKey);
                 } catch (StoreException e) {
-                    if (e.isOutcomeUnknown()) {
-                        // at no version known: anything held goes, and nothing in flight installs (see invalidate)
-                        dropOlder(internalKey, InternalVersion.ANYTHING);
-                    }
-                    throw e;
+                    throw failed(internalKey, newValue, e);
                 }
             }
         } finally {
@@ -857,9 +864,20 @@ final class InternalCore<K, V> {
         }
     }
 
+    // an update the store did not take: a removal drops the key locally whatever the store answered, as invalidate
+    // does, so that this instance no longer serves what the caller removed; a value written with an unknown outcome
+    // drops it too (at no version known: anything held goes, and nothing in flight installs). A value refused for
+    // sure leaves the copy held, as the store still holds what it shows
+    private StoreException failed(InternalKey<K> internalKey, @Nullable V newValue, StoreException e) {
+        if (newValue == null || e.isOutcomeUnknown()) {
+            dropOlder(internalKey, InternalVersion.ANYTHING);
+        }
+        return e;
+    }
+
     // the hot path: a trusted held value is decided on as it is, and the write, conditional on its version, is one
-    // store operation, refused if a write elsewhere came since. Otherwise from the store. An invalidateAll elsewhere not
-    // heard of yet is not seen by the version (it leaves the row as it is): the decision then counts as before it,
+    // store operation, refused if a write elsewhere came since. Otherwise from the store. An invalidateAll elsewhere
+    // not heard of yet is not seen by the version (it leaves the row as it is): the decision then counts as before it,
     // the race accepted for loads and updates in flight (VISION.md, "Target design: invalidateAll by the store's time")
     // With the maximum age for the store only, always read: most held copies outlive their rows, and a write
     // conditioned on the held version would be refused and decided again, the remapping run twice
@@ -1004,7 +1022,9 @@ final class InternalCore<K, V> {
     /**
      * {@code asMap().containsKey}: L1 if held and trusted; otherwise an existence check in the store (versions only,
      * nothing is held), which also confirms or drops an unconfirmed copy. A store that does not answer counts as a
-     * miss, as for {@code getIfPresent}.
+     * miss, as for {@code getIfPresent}. A value this instance cannot read counts as present here, unlike for
+     * {@code get}: knowing it would mean reading the value, which the existence check avoids (README, "Unreadable
+     * values").
      */
     boolean containsKey(K key) {
         InternalKey<K> internalKey = wrap(key);
@@ -1118,7 +1138,7 @@ final class InternalCore<K, V> {
     // control row, while the instance that wrote or loaded it holds its value, for good (found by the property test on
     // the mongodb profile). The allowance after invalidateAll returns covers only writes after it. So the epoch moves
     // once more, one allowance after this instance applied it: everything installed meanwhile, by an operation that
-    // began before then, is untrusted and checked against the store on its next read (one version read), a hidden row
+    // began before then, is untrusted and checked against the store on its next read (one row read), a hidden row
     // dropped. An operation beginning later commits more than the allowance after the control row (applied here no
     // earlier than it was written) and is stamped after it. A clock without allowance (monotonic) needs none of this
     private void distrustWithinAllowance() {
@@ -1226,7 +1246,8 @@ final class InternalCore<K, V> {
 
     // a future of L1 completes with null where nothing was found (see joinHeld)
     @SuppressWarnings({"unchecked", "java:S2589", "java:S2583"})
-    private @Nullable InternalValue<V> getOrLoad(InternalKey<K> internalKey, @Nullable SingleLoader<K, V> singleLoader) {
+    private @Nullable InternalValue<V> getOrLoad(InternalKey<K> internalKey,
+                                                 @Nullable SingleLoader<K, V> singleLoader) {
         @Nullable CompletableFuture<InternalValue<V>>[] owned = new CompletableFuture[1];
         CompletableFuture<InternalValue<V>> future = l1.get(internalKey, (key, executor) -> {
             CompletableFuture<InternalValue<V>> created = new CompletableFuture<>();
@@ -1372,7 +1393,8 @@ final class InternalCore<K, V> {
                     return unwrap(held);
                 }
                 InternalValue<V> value = held.isCompletedExceptionally() ? null : held.join();
-                if (value != null && (isTrusted(value) || guard.isOpen())) {
+                // checked also while the guard is open, as its probe (see confirmOrDrop)
+                if (value != null && isTrusted(value)) {
                     return unwrap(held);
                 }
                 if (value != null) {
@@ -1409,7 +1431,8 @@ final class InternalCore<K, V> {
             return future;
         }
         InternalValue<V> value = completedValue(future);
-        if (value == null || isTrusted(value) || guard.isOpen()) {
+        // checked also while the guard is open, as its probe (see confirmOrDrop)
+        if (value == null || isTrusted(value)) {
             return future;
         }
         return this.<@Nullable InternalValue<V>>supply(() -> confirmOrDrop(internalKey, future))
@@ -1458,7 +1481,7 @@ final class InternalCore<K, V> {
             List<K> userKeys = requested.stream().map(InternalKey::key).toList();
             return supply(() -> getAllPresent(userKeys));
         }
-        CompletableFuture<@Nullable Void> checked = untrusted && !guard.isOpen()
+        CompletableFuture<@Nullable Void> checked = untrusted
                 ? this.<@Nullable Void>supply(() -> {
                     confirmOrDropAll(requested);
                     return null;
@@ -1873,6 +1896,8 @@ final class InternalCore<K, V> {
                                                                                 AsyncBulkLoader<K, V> bulkLoader,
                                                                                 Executor steps) {
         Set<InternalKey<K>>[] missing = new Set[1];
+        BulkOutcome<K, V> outcome = new BulkOutcome<>(ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(),
+                ConcurrentHashMap.newKeySet());
         @Nullable CompletableFuture<Map<InternalKey<K>, InternalValue<V>>>[] owned = new CompletableFuture[1];
         CompletableFuture<Map<InternalKey<K>, InternalValue<V>>> future = l1.getAll(internalKeys, (keys, executor) -> {
             missing[0] = new LinkedHashSet<>(keys);
@@ -1897,15 +1922,15 @@ final class InternalCore<K, V> {
                     }
                 });
             }
-            Set<InternalKey<K>> absent = ConcurrentHashMap.newKeySet();
-            loadAll(loading, bulkLoader, steps, absent).whenComplete((loaded, failure) -> {
+            loadAll(loading, bulkLoader, steps, outcome).whenComplete((loaded, failure) -> {
                 try {
                     if (failure != null) {
                         created.completeExceptionally(cause(failure));
                     } else {
-                        absent.forEach(internalKey ->
+                        outcome.absent().forEach(internalKey ->
                                 rememberAbsence(internalKey, keyFutures.get(internalKey), loadEpoch));
                         loaded.forEach((internalKey, value) -> value.bind(internalKey));
+                        outcome.uncached().forEach((internalKey, value) -> value.bind(internalKey));
                         created.complete(loaded);
                     }
                 } finally {
@@ -1913,7 +1938,30 @@ final class InternalCore<K, V> {
                 }
             });
         }
-        return future;
+        return future.thenApply(values -> {
+            // refresh rule 2, as for a single load (see completeLoad): once Caffeine holds the values, since a refresh
+            // of a key still in flight would only join its load
+            outcome.stale().forEach(internalKey -> {
+                if (values.containsKey(internalKey)) {
+                    refreshLater(internalKey);
+                }
+            });
+            // a key whose load gave up is answered as a single get answers it, with its value left uncached: added
+            // to a copy, as Caffeine installs every entry of the bulk result in L1
+            if (outcome.uncached().isEmpty()) {
+                return values;
+            }
+            Map<InternalKey<K>, InternalValue<V>> answered = new HashMap<>(values);
+            answered.putAll(outcome.uncached());
+            return answered;
+        });
+    }
+
+    // what a bulk load leaves to its caller besides the values to hold: the keys neither the store nor the source has
+    // a value for, to be remembered (negative caching); the keys whose loads gave up after repeated removals (see
+    // attempt), with the last value loaded; and the keys whose values read from the store are due for a refresh
+    private record BulkOutcome<K, V>(Set<InternalKey<K>> absent, Map<InternalKey<K>, InternalValue<V>> uncached,
+                                     Set<InternalKey<K>> stale) {
     }
 
     // one read for all keys, the source for the rest, one conditional write; keys that conflict start over one by
@@ -1921,12 +1969,12 @@ final class InternalCore<K, V> {
     // tombstone or an expired row means the key was touched meanwhile, so the source value may be outdated), and held
     // by the core itself under the write registry rather than handed to Caffeine, which would insert them without the
     // version rule and unseen by messages announced during the load. Steps as for single keys
-    // absent: filled with the keys neither the store nor the source has a value for, to be remembered (negative
-    // caching). Absences are answered as for single keys (see load): trusted ones at once, others after the store
+    // outcome: filled for the caller (see BulkOutcome). Absences are answered as for single keys (see load): trusted
+    // ones at once, others after the store
     private CompletableFuture<Map<InternalKey<K>, InternalValue<V>>> loadAll(Set<InternalKey<K>> requested,
                                                                            @Nullable AsyncBulkLoader<K, V> bulkLoader,
                                                                            Executor steps,
-                                                                           Set<InternalKey<K>> absent) {
+                                                                           BulkOutcome<K, V> outcome) {
         Set<InternalKey<K>> internalKeys = new LinkedHashSet<>();
         Set<InternalKey<K>> checked = new HashSet<>();
         for (InternalKey<K> internalKey : requested) {
@@ -1942,14 +1990,14 @@ final class InternalCore<K, V> {
         if (internalKeys.isEmpty()) {
             return CompletableFuture.completedFuture(new LinkedHashMap<>());
         }
-        return on(steps, () -> readAll(internalKeys, checked)).thenCompose(read -> {
+        return on(steps, () -> readAll(internalKeys, checked, outcome)).thenCompose(read -> {
             if (read == null) {
                 // served unconfirmed, as held values are while the store does not answer
                 stats.add(Counter.NEGATIVE_HIT, checked.size());
                 Set<InternalKey<K>> unchecked = new LinkedHashSet<>(internalKeys);
                 unchecked.removeAll(checked);
                 return unchecked.isEmpty() ? CompletableFuture.completedFuture(new LinkedHashMap<>())
-                        : sourceOnly(unchecked, bulkLoader, absent);
+                        : sourceOnly(unchecked, bulkLoader, outcome.absent());
             }
             if (read.toLoad().isEmpty() || bulkLoader == null) {
                 return CompletableFuture.completedFuture(read.result());
@@ -1958,10 +2006,11 @@ final class InternalCore<K, V> {
             read.toLoad().keySet().forEach(internalKey -> byKey.put(internalKey.key(), internalKey));
             stats.add(Counter.SOURCE_LOAD, byKey.size());
             return call(() -> bulkLoader.loadAll(byKey.keySet())).thenComposeAsync(loaded -> {
-                Map<? extends @Nullable K, ? extends @Nullable V> found = requireNonNull(loaded, "loadAll returned null");
+                Map<? extends @Nullable K, ? extends @Nullable V> found =
+                        requireNonNull(loaded, "loadAll returned null");
                 read.toLoad().keySet().forEach(internalKey -> {
                     if (found.get(internalKey.key()) == null) {
-                        absent.add(internalKey);
+                        outcome.absent().add(internalKey);
                     }
                 });
                 List<InternalKey<K>> conflicting = writeAll(internalKeys, read, byKey, found);
@@ -1972,13 +2021,22 @@ final class InternalCore<K, V> {
                         .thenApply(values -> values.get(key));
                 List<CompletableFuture<Void>> retries = conflicting.stream().map(internalKey ->
                     load(internalKey, single, null, steps, false).thenAccept(retried -> {
-                        if (retried.cacheable && retried.value != null) {
+                        if (retried.value == null) {
+                            return;
+                        }
+                        if (retried.cacheable) {
                             synchronized (read.result()) {
                                 read.result().put(internalKey, retried.value);
                             }
+                            if (needsRefresh(retried.age)) {
+                                outcome.stale().add(internalKey);
+                            }
+                        } else {
+                            outcome.uncached().put(internalKey, retried.value);
                         }
                     })).toList();
-                return CompletableFuture.allOf(retries.toArray(new CompletableFuture[0])).thenApply(done -> read.result());
+                return CompletableFuture.allOf(retries.toArray(new CompletableFuture[0]))
+                        .thenApply(done -> read.result());
             }, steps);
         });
     }
@@ -1990,8 +2048,10 @@ final class InternalCore<K, V> {
     }
 
     // the store step before the source; null if the store does not answer. checked: keys remembered absent while the
-    // feed is down, loaded by nobody: a value in the store ends the absence, none confirms it
-    private @Nullable BulkRead<K, V> readAll(Set<InternalKey<K>> internalKeys, Set<InternalKey<K>> checked) {
+    // feed is down, loaded by nobody: a value in the store ends the absence, none confirms it. A value found that is
+    // due for a refresh is added to the outcome's stale keys
+    private @Nullable BulkRead<K, V> readAll(Set<InternalKey<K>> internalKeys, Set<InternalKey<K>> checked,
+                                             BulkOutcome<K, V> outcome) {
         int readEpoch = epoch.get();
         Map<String, Row> rows;
         try {
@@ -2009,6 +2069,9 @@ final class InternalCore<K, V> {
                     forgetAbsence(internalKey.hash()); // written elsewhere while no message could tell
                 }
                 result.put(internalKey, new InternalValue<>(value, row.version(), readEpoch));
+                if (needsRefresh(row.age())) {
+                    outcome.stale().add(internalKey);
+                }
             } else if (checked.contains(internalKey)) {
                 stats.increment(Counter.NEGATIVE_HIT);
             } else {
@@ -2057,7 +2120,8 @@ final class InternalCore<K, V> {
         Set<String> conflicts;
         try {
             try {
-                WriteResult outcome = writes.isEmpty() ? WriteResult.allApplied() : guard.write(() -> store.write(writes));
+                WriteResult outcome = writes.isEmpty() ? WriteResult.allApplied()
+                        : guard.write(() -> store.write(writes));
                 conflicts = outcome.refused();
                 // at the versions the store reports
                 writes.forEach(write -> versions.put(write.hash(), outcome.version(write)));
@@ -2372,20 +2436,26 @@ final class InternalCore<K, V> {
         superviseResume();
     }
 
-    // the feed delivers, as far as this instance knows: neither reported interrupted nor silent
+    // the feed delivers, as far as this instance knows: neither reported interrupted nor silent, nor, where it is
+    // polled, its latest poll failed. A failed poll misses nothing yet (the next one covers its window, and a loss is
+    // reported only past the grace period), but changes made meanwhile arrive only once a poll succeeds: until then,
+    // as for a feed interrupted, every read checks its copy (README, "Distribution interrupted"); otherwise copies
+    // stayed trusted until the heartbeat noticed the silence, two intervals later
     private boolean feedUp() {
-        return subscriptionUp && (heartbeat == null || !heartbeat.isSilent());
+        return subscriptionUp && !(subscription instanceof InternalPollingStore.Poller poller && poller.isFailing())
+                && (heartbeat == null || !heartbeat.isSilent());
     }
 
     private boolean isTrusted(InternalValue<V> value) {
         return feedUp() && value.epoch() == epoch.get();
     }
 
-    // revalidation on read: a held value not trusted is checked against the store (its version only); kept and
-    // confirmed if the store holds the same version, dropped otherwise (null: the caller treats it as a miss). While
-    // the store does not answer, it is served unconfirmed
+    // revalidation on read: a held value not trusted is checked against the store; kept and confirmed if the store
+    // still has it (stillStored), dropped otherwise (null: the caller treats it as a miss). While the store does not
+    // answer, it is served unconfirmed
     @SuppressWarnings("java:S2589") // a future of L1 completes with null where nothing was found (see joinHeld)
-    private @Nullable InternalValue<V> confirmOrDrop(InternalKey<K> internalKey, CompletableFuture<InternalValue<V>> held) {
+    private @Nullable InternalValue<V> confirmOrDrop(InternalKey<K> internalKey,
+                                                     CompletableFuture<InternalValue<V>> held) {
         InternalValue<V> value = joinHeld(held);
         if (value == null || isTrusted(value)) {
             return value;
@@ -2394,14 +2464,13 @@ final class InternalCore<K, V> {
         // a read notices the store is back (otherwise only maintenance did, up to its interval later, serving a value
         // the store no longer had meanwhile: found by the failover test that loses a write)
         int current = epoch.get();
-        Map<String, Long> versions;
+        Map<String, Row> rows;
         try {
-            versions = readVisibleVersions(List.of(internalKey.hash()));
+            rows = readRows(List.of(internalKey.hash()));
         } catch (StoreException e) {
             return value;
         }
-        Long stored = versions.get(internalKey.hash());
-        if (stored != null && stored == value.version()) {
+        if (stillStored(rows.get(internalKey.hash()), value)) {
             stats.increment(Counter.REVALIDATION_KEPT);
             value.confirm(current);
             return value;
@@ -2409,6 +2478,40 @@ final class InternalCore<K, V> {
         stats.increment(Counter.REVALIDATION_DROPPED);
         l1.asMap().remove(internalKey, held);
         return null;
+    }
+
+    // whether the store still has the held value: a value row at its version, holding the same bytes. The version alone
+    // does not tell: a failover that lost a write lets a store assigning versions (Redis, MongoDB), onto a clock no
+    // further than the old primary's, give a later write the lost write's very version, which a holder of the lost
+    // value would take for its own (found 2026-11-10, InternalStoreProfileTest). Compared serialized: as the store
+    // holds it, or else as the serializer writes what it reads, since a store holding JSON natively returns it in a
+    // form of its own (PostgreSQL's jsonb, MongoDB's documents: spacing, key order). Never by equals, which an entity
+    // may answer by its id alone; a serializer not stable byte for byte, or a map whose keys the store reordered, only
+    // costs a reload
+    private boolean stillStored(@Nullable Row row, InternalValue<V> held) {
+        if (row == null || row.state() != State.VALUE || row.version() != held.version()) {
+            return false;
+        }
+        byte[] stored = requireNonNull(row.value());
+        try {
+            byte[] serialized = valueSerializer.serialize(held.value());
+            return Arrays.equals(stored, serialized)
+                    || Arrays.equals(valueSerializer.serialize(valueSerializer.deserialize(stored)), serialized);
+        } catch (InternalSerializer.SerializationException e) {
+            return false;
+        }
+    }
+
+    // whether a value read and a value held are the same, serialized as the store holds them (see stillStored)
+    private boolean sameContent(@Nullable V read, @Nullable V held) {
+        if (read == null || held == null) {
+            return false;
+        }
+        try {
+            return Arrays.equals(valueSerializer.serialize(read), valueSerializer.serialize(held));
+        } catch (InternalSerializer.SerializationException e) {
+            return false;
+        }
     }
 
     // the same for several keys, in one query; afterwards the dropped ones are missing from L1
@@ -2421,23 +2524,23 @@ final class InternalCore<K, V> {
                 toCheck.put(internalKey, held);
             }
         }
-        if (toCheck.isEmpty() || guard.isOpen()) {
+        // also while the guard is open, as its probe (see confirmOrDrop)
+        if (toCheck.isEmpty()) {
             return;
         }
         check(toCheck, epoch.get());
     }
 
     private void check(Map<InternalKey<K>, CompletableFuture<InternalValue<V>>> toCheck, int confirmingEpoch) {
-        Map<String, Long> versions;
+        Map<String, Row> rows;
         try {
-            versions = readVisibleVersions(hashes(toCheck.keySet()));
+            rows = readRows(hashes(toCheck.keySet()));
         } catch (StoreException e) {
             return;
         }
         toCheck.forEach((internalKey, held) -> {
-            Long stored = versions.get(internalKey.hash());
             InternalValue<V> value = held.join();
-            if (stored != null && stored == value.version()) {
+            if (stillStored(rows.get(internalKey.hash()), value)) {
                 stats.increment(Counter.REVALIDATION_KEPT);
                 value.confirm(confirmingEpoch);
             } else {
@@ -2487,9 +2590,7 @@ final class InternalCore<K, V> {
         if (closed) {
             return SynchronizationState.CLOSED;
         }
-        boolean pollFailing = subscription instanceof InternalPollingStore.Poller poller && poller.isFailing();
-        return guard.isOpen() || !feedUp() || pollFailing ? SynchronizationState.DEGRADED
-                : SynchronizationState.SYNCHRONIZED;
+        return guard.isOpen() || !feedUp() ? SynchronizationState.DEGRADED : SynchronizationState.SYNCHRONIZED;
     }
 
     // maintenance: expiry (announced), pruning to size and of old tombstones (silent). Calls the store directly, not
@@ -2507,9 +2608,9 @@ final class InternalCore<K, V> {
     }
 
     // one batch of a run's phase (expiry, pruning to size, pruning tombstones), at most the phase's limit
-    // (InternalMaintenance): a batch that reached it is followed by the next after a pause as long as it took, so that a large
-    // backlog is worked off at most half the time and other store work goes in between; a shorter one moves on to
-    // the next phase. A failure ends the run, the next one starts over at its interval
+    // (InternalMaintenance): a batch that reached it is followed by the next after a pause as long as it took, so that
+    // a large backlog is worked off at most half the time and other store work goes in between; a shorter one moves on
+    // to the next phase. A failure ends the run, the next one starts over at its interval
     private void maintain(int phase, long expiredVersion) {
         if (closed) {
             return;
@@ -2618,9 +2719,8 @@ final class InternalCore<K, V> {
         return result.isRefused(beat) ? version : result.version(beat);
     }
 
-    private CompletableFuture<Map<InternalKey<K>, InternalValue<V>>> sourceOnly(Set<InternalKey<K>> internalKeys,
-                                                                              @Nullable AsyncBulkLoader<K, V> bulkLoader,
-                                                                              Set<InternalKey<K>> absent) {
+    private CompletableFuture<Map<InternalKey<K>, InternalValue<V>>> sourceOnly(
+            Set<InternalKey<K>> internalKeys, @Nullable AsyncBulkLoader<K, V> bulkLoader, Set<InternalKey<K>> absent) {
         if (bulkLoader == null) {
             return CompletableFuture.completedFuture(new LinkedHashMap<>());
         }
