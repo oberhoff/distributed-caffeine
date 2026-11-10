@@ -15,19 +15,39 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import com.dynatrace.hash4j.hashing.HashStream128;
+import com.dynatrace.hash4j.hashing.HashValue128;
+import com.dynatrace.hash4j.hashing.Hashing;
 import io.github.oberhoff.distributedcaffeine.hasher.HashProvider;
 import io.github.oberhoff.distributedcaffeine.hasher.Hashable;
 import io.github.oberhoff.distributedcaffeine.hasher.Hasher;
 import org.jspecify.annotations.Nullable;
 
-import java.util.Set;
 import java.util.UUID;
 
-import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
-import static java.util.Objects.nonNull;
-import static java.util.stream.Collectors.toSet;
+import static java.util.Objects.requireNonNull;
 
-class InternalHasher<K> {
+/**
+ * Wraps a user's key into an {@link InternalKey} with its hash, as in the current generation: a configured
+ * {@link HashProvider} first, then a key implementing {@link Hashable}, then the built-in key types {@code String},
+ * {@code Long}, {@code Integer} and {@code UUID}.
+ * <p>
+ * Built-in key types are hashed exactly as {@code new Hasher().putString(key).getHash()} (and so on) would, through
+ * the same hash4j stream calls, but on a stream reused per thread and with the bits read directly, so no string is
+ * created on the hit path.
+ *
+ * @param <K> the key type
+ * @author Andreas Oberhoff
+ */
+final class InternalHasher<K> {
+
+    // the prefix of the library's own rows (the heartbeat's key, the stores' control rows); the built-in hashes are hex
+    static final String RESERVED = "#";
+
+    // one reusable stream per thread, reset before each use: hashing allocates nothing
+    @SuppressWarnings("java:S5164")
+    private static final ThreadLocal<HashStream128> STREAM =
+            ThreadLocal.withInitial(() -> Hashing.xxh3_128().hashStream());
 
     private final @Nullable HashProvider<K> hashProvider;
 
@@ -35,52 +55,42 @@ class InternalHasher<K> {
         this.hashProvider = hashProvider;
     }
 
-    // memorizing variant: reuse the hash cached on the key (or the one propagated from a store entry), otherwise
-    // compute it once and cache it on the key instance for subsequent hashings
-    String getHash(InternalKey<K> key) {
-        String hash = key.getHash();
-        if (nonNull(hash)) {
-            return hash;
+    InternalKey<K> wrap(K key) {
+        requireNonNull(key, "key cannot be null");
+        if (hashProvider != null) {
+            return InternalKey.ofHash(key, requireHash(hashProvider.getHash(key, Hasher::new), key));
         }
-        // caching what was computed rather than reading it back off the key, whose accessor cannot promise a hash
-        String computedHash = getHash(k(key));
-        key.setHash(computedHash);
-        return computedHash;
-    }
-
-    String getHash(K key) {
-        if (nonNull(hashProvider)) {
-            return hashProvider.getHash(key, Hasher::new);
+        if (key instanceof Hashable hashable) {
+            return InternalKey.ofHash(key, requireHash(hashable.getHash(Hasher::new), key));
+        }
+        HashStream128 stream = STREAM.get().reset();
+        if (key instanceof String string) {
+            stream.putString(string);
+        } else if (key instanceof Long longValue) {
+            stream.putLong(longValue);
+        } else if (key instanceof Integer integerValue) {
+            stream.putInt(integerValue);
+        } else if (key instanceof UUID uuid) {
+            stream.putUUID(uuid);
         } else {
-            if (key instanceof Hashable hashable) {
-                return hashable.getHash(Hasher::new);
-            } else if (key instanceof String stringValue) {
-                return new Hasher().putString(stringValue).getHash();
-            } else if (key instanceof Long longValue) {
-                return new Hasher().putLong(longValue).getHash();
-            } else if (key instanceof Integer integerValue) {
-                return new Hasher().putInt(integerValue).getHash();
-            } else if (key instanceof UUID uuidValue) {
-                return new Hasher().putUUID(uuidValue).getHash();
-            } else {
-                throw new IllegalStateException(
-                        "Keys of type %s are not hashable out of the box (only %s, %s, %s and %s are), "
-                                .concat("keys have to implement the %s interface or a %s has to be specified.")
-                                .formatted(
-                                        key.getClass().getSimpleName(),
-                                        String.class.getSimpleName(),
-                                        Long.class.getSimpleName(),
-                                        Integer.class.getSimpleName(),
-                                        UUID.class.getSimpleName(),
-                                        Hashable.class.getSimpleName(),
-                                        HashProvider.class.getSimpleName()));
-            }
+            throw new IllegalStateException(("Keys of type %s cannot be hashed out of the box (only String, Long, "
+                    + "Integer and UUID can): implement Hashable in the key class, or set withHashProvider(...) on the "
+                    + "builder").formatted(key.getClass().getSimpleName()));
         }
+        HashValue128 value = stream.get();
+        // Hasher.getHash() formats toByteArray(), which holds the least significant half first, then the most
+        // significant one, each little-endian; read as two big-endian halves of the hex string, they are reversed
+        return InternalKey.ofBits(key, Long.reverseBytes(value.getLeastSignificantBits()),
+                Long.reverseBytes(value.getMostSignificantBits()));
     }
 
-    Set<String> getHashes(Set<? extends K> keys) {
-        return keys.stream()
-                .map(this::getHash)
-                .collect(toSet());
+    private static String requireHash(@Nullable String hash, Object key) {
+        if (hash == null || hash.isEmpty()) {
+            throw new IllegalStateException("The hash of key " + key + " cannot be null or empty");
+        }
+        if (hash.startsWith(RESERVED)) {
+            throw new IllegalStateException("The hash of key " + key + " is reserved: " + hash);
+        }
+        return hash;
     }
 }

@@ -15,380 +15,480 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.Configurer;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer.LoadingStrategy;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.PersistenceConfigurer;
+import io.github.oberhoff.distributedcaffeine.InternalStatsCounter.Counter;
 import org.jspecify.annotations.Nullable;
 
-import java.util.Objects;
+import java.util.EnumMap;
+import java.util.Map;
 
 /**
- * Statistics about the distribution of this cache instance, complementing
- * {@link com.github.benmanes.caffeine.cache.Cache#stats()}.
+ * A snapshot of one cache instance's store and synchronization activity, from {@code distributedPolicy().stats()};
+ * recorded only if the cache records stats ({@code recordStats()}). Caffeine's own stats keep their meaning: a value
+ * found in the store counts there as a miss and a successful load. A message is a change made by any instance, as the
+ * store announces it.
  * <p>
- * An immutable snapshot of counters that only increase, recorded per cache instance only if
- * {@link com.github.benmanes.caffeine.cache.Caffeine#recordStats()} is enabled (otherwise all are zero).
+ * The counts only grow: the difference of two snapshots ({@link #minus}) is the activity in between, and the sum
+ * ({@link #plus}) combines instances.
  *
  * @author Andreas Oberhoff
  */
 public final class DistributedStats {
 
-    private static final DistributedStats EMPTY = new DistributedStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    private static final DistributedStats EMPTY = new DistributedStats(new EnumMap<>(Counter.class));
 
-    private final long storeHitCount;
-    private final long storeMissCount;
-    private final long storeFailureCount;
-    private final long storeWriteSuccessCount;
-    private final long storeWriteFailureCount;
-    private final long asynchronousStoreWriteFailureCount;
-    private final long synchronousStoreWriteCount;
-    private final long totalSynchronousStoreWriteTime;
-    private final long storeRejectionCount;
-    private final long remoteUpdateCount;
-    private final long remoteRemovalCount;
-    private final long discardedLoadCount;
-    private final long reconciliationCount;
+    // by counter; a counter missing counts zero
+    private final Map<Counter, Long> values;
 
-    @SuppressWarnings("java:S107") // one per counter, and package-private so that the order is never a user's concern
-    DistributedStats(long storeHitCount, long storeMissCount, long storeFailureCount,
-                     long storeWriteSuccessCount, long storeWriteFailureCount, long asynchronousStoreWriteFailureCount,
-                     long synchronousStoreWriteCount, long totalSynchronousStoreWriteTime,
-                     long storeRejectionCount, long remoteUpdateCount, long remoteRemovalCount,
-                     long discardedLoadCount, long reconciliationCount) {
-        this.storeHitCount = requireNonNegative(storeHitCount);
-        this.storeMissCount = requireNonNegative(storeMissCount);
-        this.storeFailureCount = requireNonNegative(storeFailureCount);
-        this.storeWriteSuccessCount = requireNonNegative(storeWriteSuccessCount);
-        this.storeWriteFailureCount = requireNonNegative(storeWriteFailureCount);
-        this.asynchronousStoreWriteFailureCount = requireNonNegative(asynchronousStoreWriteFailureCount);
-        this.synchronousStoreWriteCount = requireNonNegative(synchronousStoreWriteCount);
-        this.totalSynchronousStoreWriteTime = requireNonNegative(totalSynchronousStoreWriteTime);
-        this.storeRejectionCount = requireNonNegative(storeRejectionCount);
-        this.remoteUpdateCount = requireNonNegative(remoteUpdateCount);
-        this.remoteRemovalCount = requireNonNegative(remoteRemovalCount);
-        this.discardedLoadCount = requireNonNegative(discardedLoadCount);
-        this.reconciliationCount = requireNonNegative(reconciliationCount);
+    DistributedStats(Map<Counter, Long> values) {
+        this.values = values.isEmpty() ? new EnumMap<>(Counter.class) : new EnumMap<>(values);
     }
 
     /**
-     * Returns statistics with all counts being zero.
+     * Returns a snapshot with every count zero.
      *
-     * @return statistics with all counts being zero
+     * @return the empty snapshot
      */
     public static DistributedStats empty() {
         return EMPTY;
     }
 
     /**
-     * Returns the number of keys found in the underlying store before loading, so that neither the cache loader nor
-     * the mapping function was called.
-     * <p>
-     * <b>Note:</b> Keys are only looked up in the underlying store before loading if persistence of evicted entries
-     * is configured (see {@link PersistenceConfigurer#withEvictedEntries(Configurer)}) with at least one loading
-     * strategy (see {@link EvictedEntryPersistenceConfigurer#withLoadingStrategies(LoadingStrategy...)}).
+     * Returns the number of read calls that reached the store (values or versions).
      *
-     * @return the number of keys found in the underlying store
+     * @return the count
+     */
+    public long storeReadCount() {
+        return value(Counter.STORE_READ);
+    }
+
+    /**
+     * Returns the time spent in those read calls, in nanoseconds; divide its difference between two snapshots by
+     * the difference of {@link #storeReadCount()} for an average.
+     *
+     * @return the time in nanoseconds
+     */
+    public long totalStoreReadTime() {
+        return value(Counter.STORE_READ_TIME);
+    }
+
+    /**
+     * Returns the number of keys a load found in the store, so that the source was not called.
+     *
+     * @return the count
      */
     public long storeHitCount() {
-        return storeHitCount;
+        return value(Counter.STORE_HIT);
     }
 
     /**
-     * Returns the number of keys not found in the underlying store before loading, so that the cache loader or the
-     * mapping function was called.
-     * <p>
-     * <b>Note:</b> Keys are only looked up in the underlying store before loading if persistence of evicted entries
-     * is configured (see {@link PersistenceConfigurer#withEvictedEntries(Configurer)}) with at least one loading
-     * strategy (see {@link EvictedEntryPersistenceConfigurer#withLoadingStrategies(LoadingStrategy...)}).
+     * Returns the number of keys a load did not find in the store (missing, invalidated, expired, too old or
+     * unreadable).
      *
-     * @return the number of keys not found in the underlying store
+     * @return the count
      */
     public long storeMissCount() {
-        return storeMissCount;
+        return value(Counter.STORE_MISS);
     }
 
     /**
-     * Returns the number of keys whose lookup in the underlying store before loading failed (including refused
-     * lookups, see {@link #storeRejectionCount()}).
-     * <p>
-     * <b>Note:</b> Keys are only looked up in the underlying store before loading if persistence of evicted entries
-     * is configured (see {@link PersistenceConfigurer#withEvictedEntries(Configurer)}) with at least one loading
-     * strategy (see {@link EvictedEntryPersistenceConfigurer#withLoadingStrategies(LoadingStrategy...)}).
+     * Returns the number of keys loaded from the source (the loader or mapping function); unlike Caffeine's load
+     * count, which includes the store hits.
      *
-     * @return the number of keys whose lookup in the underlying store failed
+     * @return the count
      */
-    public long storeFailureCount() {
-        return storeFailureCount;
+    public long sourceLoadCount() {
+        return value(Counter.SOURCE_LOAD);
     }
 
     /**
-     * Returns the number of keys looked up in the underlying store before loading, i.e. hits, misses and failures.
-     * <p>
-     * <b>Note:</b> Keys are only looked up in the underlying store before loading if persistence of evicted entries
-     * is configured (see {@link PersistenceConfigurer#withEvictedEntries(Configurer)}) with at least one loading
-     * strategy (see {@link EvictedEntryPersistenceConfigurer#withLoadingStrategies(LoadingStrategy...)}).
+     * Returns the number of keys reloaded from the source (refresh, refreshAfterWrite).
      *
-     * @return the number of keys looked up in the underlying store
+     * @return the count
      */
-    public long storeRequestCount() {
-        return saturatedAdd(saturatedAdd(storeHitCount, storeMissCount), storeFailureCount);
+    public long sourceReloadCount() {
+        return value(Counter.SOURCE_RELOAD);
     }
 
     /**
-     * Returns the ratio of {@link #storeHitCount()} to {@link #storeRequestCount()}, or {@code 1.0} if there were no
-     * requests (as for Caffeine's hit rate).
-     * <p>
-     * <b>Note:</b> Keys are only looked up in the underlying store before loading if persistence of evicted entries
-     * is configured (see {@link PersistenceConfigurer#withEvictedEntries(Configurer)}) with at least one loading
-     * strategy (see {@link EvictedEntryPersistenceConfigurer#withLoadingStrategies(LoadingStrategy...)}).
+     * Returns the number of write calls that reached the store.
      *
-     * @return the ratio of keys found in the underlying store to keys looked up there
-     */
-    public double storeHitRate() {
-        long requestCount = storeRequestCount();
-        return (requestCount == 0) ? 1.0 : (double) storeHitCount / requestCount;
-    }
-
-    /**
-     * Returns the number of successful writes to the underlying store (synchronous and asynchronous), each of which
-     * may carry the changes of several keys.
-     *
-     * @return the number of successful writes to the underlying store
-     */
-    public long storeWriteSuccessCount() {
-        return storeWriteSuccessCount;
-    }
-
-    /**
-     * Returns the number of failed writes to the underlying store (synchronous and asynchronous, including refused
-     * writes, see {@link #storeRejectionCount()}).
-     *
-     * @return the number of failed writes to the underlying store
-     */
-    public long storeWriteFailureCount() {
-        return storeWriteFailureCount;
-    }
-
-    /**
-     * Returns the number of failed asynchronous writes to the underlying store, which are included in
-     * {@link #storeWriteFailureCount()}. Unlike a failed synchronous write, nobody is told about such a failure (it is
-     * only logged), and the change is lost: other cache instances may go on serving a value this one evicted or
-     * refreshed, until it is written again or expires there.
-     *
-     * @return the number of failed asynchronous writes to the underlying store
-     */
-    public long asynchronousStoreWriteFailureCount() {
-        return asynchronousStoreWriteFailureCount;
-    }
-
-    /**
-     * Returns the number of writes to the underlying store, i.e. successes and failures.
-     *
-     * @return the number of writes to the underlying store
+     * @return the count
      */
     public long storeWriteCount() {
-        return saturatedAdd(storeWriteSuccessCount, storeWriteFailureCount);
+        return value(Counter.STORE_WRITE);
     }
 
     /**
-     * Returns the number of synchronous writes to the underlying store, successful or not, which is what
-     * {@link #totalSynchronousStoreWriteTime()} is divided by.
+     * Returns the time spent in those write calls, in nanoseconds; divide its difference between two snapshots
+     * by the difference of {@link #storeWriteCount()} for an average.
      *
-     * @return the number of synchronous writes to the underlying store
+     * @return the time in nanoseconds
      */
-    public long synchronousStoreWriteCount() {
-        return synchronousStoreWriteCount;
+    public long totalStoreWriteTime() {
+        return value(Counter.STORE_WRITE_TIME);
     }
 
     /**
-     * Returns the total number of nanoseconds spent on synchronous writes to the underlying store, meant to be
-     * compared between two snapshots (see {@link #minus(DistributedStats)}): its difference divided by that of
-     * {@link #synchronousStoreWriteCount()} is the average time a caller waited for a write in between. Where that
-     * average rises while the number of writes per unit of time does not, writes are waiting for the underlying store
-     * rather than being made any faster, which means that the store limits them.
+     * Returns the number of keys written unconditionally ({@code put}, {@code putAll}).
      *
-     * @return the total number of nanoseconds spent on synchronous writes to the underlying store
+     * @return the count
      */
-    public long totalSynchronousStoreWriteTime() {
-        return totalSynchronousStoreWriteTime;
+    public long putCount() {
+        return value(Counter.PUT);
     }
 
     /**
-     * Returns the average number of nanoseconds per synchronous write to the underlying store over the lifetime of
-     * this cache instance, or {@code 0.0} if there were none. For the average over a period of time, see
-     * {@link #totalSynchronousStoreWriteTime()}.
+     * Returns the number of keys written or removed conditionally on the version read (loads, refreshes, the
+     * atomic {@code asMap()} methods).
      *
-     * @return the average number of nanoseconds per synchronous write to the underlying store
+     * @return the count
      */
-    public double averageSynchronousStoreWriteTime() {
-        return (synchronousStoreWriteCount == 0)
-                ? 0.0
-                : (double) totalSynchronousStoreWriteTime / synchronousStoreWriteCount;
+    public long conditionalWriteCount() {
+        return value(Counter.CONDITIONAL_WRITE);
     }
 
     /**
-     * Returns the number of calls to the underlying store refused without contacting it, because the preceding ones
-     * failed, so that the store is left alone for a short time (see
-     * {@link DistributedPolicy.SynchronizationState#DEGRADED}). Refused calls are included in
-     * {@link #storeFailureCount()} (per key) and {@link #storeWriteFailureCount()}.
+     * Returns the number of conditional writes and removals that found another version, so that a newer value
+     * won or the decision was made again.
      *
-     * @return the number of calls to the underlying store refused without contacting it
+     * @return the count
      */
-    public long storeRejectionCount() {
-        return storeRejectionCount;
+    public long conflictCount() {
+        return value(Counter.CONFLICT);
     }
 
     /**
-     * Returns the number of values put into this cache instance because another cache instance changed them.
+     * Returns the number of store calls that failed.
      *
-     * @return the number of values put because another cache instance changed them
+     * @return the count
      */
-    public long remoteUpdateCount() {
-        return remoteUpdateCount;
+    public long storeFailureCount() {
+        return value(Counter.STORE_FAILURE);
     }
 
     /**
-     * Returns the number of values removed from this cache instance because another cache instance invalidated or
-     * evicted them (depending on the {@link DistributionMode}). Only values actually held here are counted, so
-     * invalidating all values counts each value removed.
+     * Returns the number of failed write calls whose outcome is unknown (the keys were dropped locally).
      *
-     * @return the number of values removed because another cache instance invalidated or evicted them
+     * @return the count
      */
-    public long remoteRemovalCount() {
-        return remoteRemovalCount;
+    public long unknownOutcomeCount() {
+        return value(Counter.UNKNOWN_OUTCOME);
     }
 
     /**
-     * Returns the number of loaded or refreshed values discarded, because their key was written while loading (by this
-     * or another cache instance). They are reported to the removal listener as well.
+     * Returns the number of store calls refused at once because the store had failed repeatedly; such calls fail
+     * without waiting until a probe finds the store answering again.
      *
-     * @return the number of loaded or refreshed values discarded
+     * @return the count
      */
-    public long discardedLoadCount() {
-        return discardedLoadCount;
+    public long refusedCount() {
+        return value(Counter.REFUSED);
     }
 
     /**
-     * Returns the number of times this cache instance was reconciled against the underlying store, because receiving
-     * the changes of other cache instances was interrupted (e.g. by a failover). Reconciling drops values the store
-     * does not confirm.
+     * Returns how often repeated failures made this instance stop calling the store for a while.
      *
-     * @return the number of times this cache instance was reconciled against the underlying store
+     * @return the count
      */
-    public long reconciliationCount() {
-        return reconciliationCount;
+    public long guardOpenCount() {
+        return value(Counter.GUARD_OPEN);
     }
 
     /**
-     * Returns the difference of these statistics and the given ones, with each count being at least zero.
+     * Returns the number of messages received for keys written anywhere, this instance included.
      *
-     * @param other the statistics to subtract
-     * @return the difference of these statistics and the given ones
+     * @return the count
      */
-    public DistributedStats minus(DistributedStats other) {
-        return new DistributedStats(
-                Math.max(0, storeHitCount - other.storeHitCount),
-                Math.max(0, storeMissCount - other.storeMissCount),
-                Math.max(0, storeFailureCount - other.storeFailureCount),
-                Math.max(0, storeWriteSuccessCount - other.storeWriteSuccessCount),
-                Math.max(0, storeWriteFailureCount - other.storeWriteFailureCount),
-                Math.max(0, asynchronousStoreWriteFailureCount - other.asynchronousStoreWriteFailureCount),
-                Math.max(0, synchronousStoreWriteCount - other.synchronousStoreWriteCount),
-                Math.max(0, totalSynchronousStoreWriteTime - other.totalSynchronousStoreWriteTime),
-                Math.max(0, storeRejectionCount - other.storeRejectionCount),
-                Math.max(0, remoteUpdateCount - other.remoteUpdateCount),
-                Math.max(0, remoteRemovalCount - other.remoteRemovalCount),
-                Math.max(0, discardedLoadCount - other.discardedLoadCount),
-                Math.max(0, reconciliationCount - other.reconciliationCount));
+    public long writtenMessageCount() {
+        return value(Counter.WRITTEN_MESSAGE);
     }
 
     /**
-     * Returns the sum of these statistics and the given ones, with each count saturating at {@link Long#MAX_VALUE}.
+     * Returns the number of messages received for keys invalidated anywhere.
      *
-     * @param other the statistics to add
-     * @return the sum of these statistics and the given ones
+     * @return the count
+     */
+    public long invalidatedMessageCount() {
+        return value(Counter.INVALIDATED_MESSAGE);
+    }
+
+    /**
+     * Returns the number of messages received for keys that reached the maximum age.
+     *
+     * @return the count
+     */
+    public long expiredMessageCount() {
+        return value(Counter.EXPIRED_MESSAGE);
+    }
+
+    /**
+     * Returns the number of messages received for {@code invalidateAll()} anywhere.
+     *
+     * @return the count
+     */
+    public long invalidatedAllMessageCount() {
+        return value(Counter.INVALIDATED_ALL_MESSAGE);
+    }
+
+    /**
+     * Returns the number of messages for a held key that were not newer than the copy held, such as this instance's own
+     * writes coming back.
+     *
+     * @return the count
+     */
+    public long ignoredMessageCount() {
+        return value(Counter.IGNORED_MESSAGE);
+    }
+
+    /**
+     * Returns the number of copies dropped, or with {@code DistributionMode.UPDATE} replaced, because the key was
+     * written elsewhere.
+     *
+     * @return the count
+     */
+    public long replacedCount() {
+        return value(Counter.REPLACED);
+    }
+
+    /**
+     * Returns the number of held values dropped because the key was invalidated elsewhere.
+     *
+     * @return the count
+     */
+    public long invalidatedCount() {
+        return value(Counter.INVALIDATED);
+    }
+
+    /**
+     * Returns the number of held values dropped because the key reached the maximum age in the store.
+     *
+     * @return the count
+     */
+    public long expiredCount() {
+        return value(Counter.EXPIRED);
+    }
+
+    /**
+     * Returns the number of keys read from the store to replace a copy written elsewhere
+     * ({@code DistributionMode.UPDATE}).
+     *
+     * @return the count
+     */
+    public long populationReadCount() {
+        return value(Counter.POPULATION_READ);
+    }
+
+    /**
+     * Returns how often messages may have been missed, so that the copies held were checked against the store.
+     *
+     * @return the count
+     */
+    public long gapCount() {
+        return value(Counter.GAP);
+    }
+
+    /**
+     * Returns how often the arrival of messages was interrupted.
+     *
+     * @return the count
+     */
+    public long interruptionCount() {
+        return value(Counter.INTERRUPTION);
+    }
+
+    /**
+     * Returns the number of held values checked against the store, after a gap or while delivery was interrupted:
+     * the kept ones plus the dropped ones.
+     *
+     * @return the count
+     */
+    public long revalidatedCount() {
+        return value(Counter.REVALIDATION_KEPT) + value(Counter.REVALIDATION_DROPPED);
+    }
+
+    /**
+     * Returns of those, the values the store still held, in the same version and with the same content.
+     *
+     * @return the count
+     */
+    public long revalidationKeptCount() {
+        return value(Counter.REVALIDATION_KEPT);
+    }
+
+    /**
+     * Returns of those, the values dropped because the store held another version, other content or none.
+     *
+     * @return the count
+     */
+    public long revalidationDroppedCount() {
+        return value(Counter.REVALIDATION_DROPPED);
+    }
+
+    /**
+     * Returns the number of rows whose value could not be deserialized (treated as a miss).
+     *
+     * @return the count
+     */
+    public long unreadableRowCount() {
+        return value(Counter.UNREADABLE_ROW);
+    }
+
+    /**
+     * Returns the number of loads answered by negative caching without the store or the source.
+     *
+     * @return the count
+     */
+    public long negativeHitCount() {
+        return value(Counter.NEGATIVE_HIT);
+    }
+
+    /**
+     * Returns the number of unconditional writes ({@code put}, {@code invalidate}) the store refused because it held a
+     * newer version, written by a racing write or by an instance whose clock runs ahead; each was written again, at one
+     * more round trip. A measure of contention and clock skew.
+     *
+     * @return the count
+     */
+    public long versionRefusalCount() {
+        return value(Counter.VERSION_REFUSAL);
+    }
+
+    /**
+     * Returns the number of loads that returned their value without caching it, because the key was removed elsewhere
+     * during each of three attempts in a row. Rare unless a key is removed about as often as its load takes.
+     *
+     * @return the count
+     */
+    public long uncachedLoadCount() {
+        return value(Counter.UNCACHED_LOAD);
+    }
+
+    /**
+     * Returns the number of versions seen whose time lay more than a minute ahead of this instance's clock, written by
+     * an instance or a store server whose clock runs ahead. Correctness does not depend on it; a steady count shows a
+     * clock to fix.
+     *
+     * @return the count
+     */
+    public long clockAheadCount() {
+        return value(Counter.CLOCK_AHEAD);
+    }
+
+    /**
+     * Returns the number of values this instance's maintenance expired in the store at the maximum age (announced to
+     * every instance, see {@link #expiredMessageCount()}).
+     *
+     * @return the count
+     */
+    public long maintenanceExpiredCount() {
+        return value(Counter.MAINTENANCE_EXPIRED);
+    }
+
+    /**
+     * Returns the number of values this instance's maintenance removed from the store to keep it within its maximum
+     * size, without notifying the instances, which may keep their copies. A steady count means the maximum size is
+     * smaller than the working set, so values are loaded from the source again.
+     *
+     * @return the count
+     */
+    public long maintenancePrunedCount() {
+        return value(Counter.MAINTENANCE_PRUNED);
+    }
+
+    /**
+     * Returns the sum of this snapshot and another, saturating at {@code Long.MAX_VALUE}.
+     *
+     * @param other the other snapshot
+     * @return the sum
      */
     public DistributedStats plus(DistributedStats other) {
-        return new DistributedStats(
-                saturatedAdd(storeHitCount, other.storeHitCount),
-                saturatedAdd(storeMissCount, other.storeMissCount),
-                saturatedAdd(storeFailureCount, other.storeFailureCount),
-                saturatedAdd(storeWriteSuccessCount, other.storeWriteSuccessCount),
-                saturatedAdd(storeWriteFailureCount, other.storeWriteFailureCount),
-                saturatedAdd(asynchronousStoreWriteFailureCount, other.asynchronousStoreWriteFailureCount),
-                saturatedAdd(synchronousStoreWriteCount, other.synchronousStoreWriteCount),
-                saturatedAdd(totalSynchronousStoreWriteTime, other.totalSynchronousStoreWriteTime),
-                saturatedAdd(storeRejectionCount, other.storeRejectionCount),
-                saturatedAdd(remoteUpdateCount, other.remoteUpdateCount),
-                saturatedAdd(remoteRemovalCount, other.remoteRemovalCount),
-                saturatedAdd(discardedLoadCount, other.discardedLoadCount),
-                saturatedAdd(reconciliationCount, other.reconciliationCount));
+        Map<Counter, Long> sum = new EnumMap<>(Counter.class);
+        for (Counter counter : Counter.values()) {
+            long a = value(counter);
+            long b = other.value(counter);
+            long result = a + b;
+            sum.put(counter, ((a ^ result) & (b ^ result)) < 0 ? Long.MAX_VALUE : result);
+        }
+        return new DistributedStats(sum);
     }
 
-    private static long requireNonNegative(long count) {
-        if (count < 0) {
-            throw new IllegalArgumentException("A count cannot be negative");
+    /**
+     * Returns the difference of this snapshot and an earlier one, never below zero.
+     *
+     * @param other the earlier snapshot
+     * @return the difference
+     */
+    public DistributedStats minus(DistributedStats other) {
+        Map<Counter, Long> difference = new EnumMap<>(Counter.class);
+        for (Counter counter : Counter.values()) {
+            difference.put(counter, Math.max(0, value(counter) - other.value(counter)));
         }
-        return count;
+        return new DistributedStats(difference);
     }
 
-    // as in Caffeine's CacheStats: an overflow sticks at the maximum rather than wrapping around into the negative
-    private static long saturatedAdd(long a, long b) {
-        long naiveSum = a + b;
-        if (((a ^ b) < 0) || ((a ^ naiveSum) >= 0)) {
-            return naiveSum;
-        }
-        return Long.MAX_VALUE + ((naiveSum >>> (Long.SIZE - 1)) ^ 1);
+    private long value(Counter counter) {
+        return values.getOrDefault(counter, 0L);
     }
 
     @Override
     public boolean equals(@Nullable Object o) {
-        if (this == o) {
-            return true;
-        }
         if (!(o instanceof DistributedStats other)) {
             return false;
         }
-        return storeHitCount == other.storeHitCount
-                && storeMissCount == other.storeMissCount
-                && storeFailureCount == other.storeFailureCount
-                && storeWriteSuccessCount == other.storeWriteSuccessCount
-                && storeWriteFailureCount == other.storeWriteFailureCount
-                && asynchronousStoreWriteFailureCount == other.asynchronousStoreWriteFailureCount
-                && synchronousStoreWriteCount == other.synchronousStoreWriteCount
-                && totalSynchronousStoreWriteTime == other.totalSynchronousStoreWriteTime
-                && storeRejectionCount == other.storeRejectionCount
-                && remoteUpdateCount == other.remoteUpdateCount
-                && remoteRemovalCount == other.remoteRemovalCount
-                && discardedLoadCount == other.discardedLoadCount
-                && reconciliationCount == other.reconciliationCount;
+        for (Counter counter : Counter.values()) {
+            if (value(counter) != other.value(counter)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(storeHitCount, storeMissCount, storeFailureCount, storeWriteSuccessCount,
-                storeWriteFailureCount, asynchronousStoreWriteFailureCount, synchronousStoreWriteCount,
-                totalSynchronousStoreWriteTime, storeRejectionCount, remoteUpdateCount, remoteRemovalCount,
-                discardedLoadCount, reconciliationCount);
+        int hash = 1;
+        for (Counter counter : Counter.values()) {
+            hash = 31 * hash + Long.hashCode(value(counter));
+        }
+        return hash;
     }
 
     @Override
     public String toString() {
-        return getClass().getSimpleName() + "{"
-                + "storeHitCount=" + storeHitCount
-                + ", storeMissCount=" + storeMissCount
-                + ", storeFailureCount=" + storeFailureCount
-                + ", storeWriteSuccessCount=" + storeWriteSuccessCount
-                + ", storeWriteFailureCount=" + storeWriteFailureCount
-                + ", asynchronousStoreWriteFailureCount=" + asynchronousStoreWriteFailureCount
-                + ", synchronousStoreWriteCount=" + synchronousStoreWriteCount
-                + ", totalSynchronousStoreWriteTime=" + totalSynchronousStoreWriteTime
-                + ", storeRejectionCount=" + storeRejectionCount
-                + ", remoteUpdateCount=" + remoteUpdateCount
-                + ", remoteRemovalCount=" + remoteRemovalCount
-                + ", discardedLoadCount=" + discardedLoadCount
-                + ", reconciliationCount=" + reconciliationCount
-                + "}";
+        return "DistributedStats{" + "storeReadCount=" + value(Counter.STORE_READ) + ", "
+                + "totalStoreReadTime=" + value(Counter.STORE_READ_TIME) + ", "
+                + "storeHitCount=" + value(Counter.STORE_HIT) + ", "
+                + "storeMissCount=" + value(Counter.STORE_MISS) + ", "
+                + "sourceLoadCount=" + value(Counter.SOURCE_LOAD) + ", "
+                + "sourceReloadCount=" + value(Counter.SOURCE_RELOAD) + ", "
+                + "storeWriteCount=" + value(Counter.STORE_WRITE) + ", "
+                + "totalStoreWriteTime=" + value(Counter.STORE_WRITE_TIME) + ", "
+                + "putCount=" + value(Counter.PUT) + ", "
+                + "conditionalWriteCount=" + value(Counter.CONDITIONAL_WRITE) + ", "
+                + "conflictCount=" + value(Counter.CONFLICT) + ", "
+                + "storeFailureCount=" + value(Counter.STORE_FAILURE) + ", "
+                + "unknownOutcomeCount=" + value(Counter.UNKNOWN_OUTCOME) + ", "
+                + "refusedCount=" + value(Counter.REFUSED) + ", "
+                + "guardOpenCount=" + value(Counter.GUARD_OPEN) + ", "
+                + "writtenMessageCount=" + value(Counter.WRITTEN_MESSAGE) + ", "
+                + "invalidatedMessageCount=" + value(Counter.INVALIDATED_MESSAGE) + ", "
+                + "expiredMessageCount=" + value(Counter.EXPIRED_MESSAGE) + ", "
+                + "invalidatedAllMessageCount=" + value(Counter.INVALIDATED_ALL_MESSAGE) + ", "
+                + "ignoredMessageCount=" + value(Counter.IGNORED_MESSAGE) + ", "
+                + "replacedCount=" + value(Counter.REPLACED) + ", "
+                + "invalidatedCount=" + value(Counter.INVALIDATED) + ", "
+                + "expiredCount=" + value(Counter.EXPIRED) + ", "
+                + "populationReadCount=" + value(Counter.POPULATION_READ) + ", "
+                + "gapCount=" + value(Counter.GAP) + ", "
+                + "interruptionCount=" + value(Counter.INTERRUPTION) + ", "
+                + "revalidatedCount=" + revalidatedCount() + ", "
+                + "revalidationKeptCount=" + value(Counter.REVALIDATION_KEPT) + ", "
+                + "revalidationDroppedCount=" + value(Counter.REVALIDATION_DROPPED) + ", "
+                + "unreadableRowCount=" + value(Counter.UNREADABLE_ROW) + ", "
+                + "negativeHitCount=" + value(Counter.NEGATIVE_HIT) + ", "
+                + "versionRefusalCount=" + value(Counter.VERSION_REFUSAL) + ", "
+                + "uncachedLoadCount=" + value(Counter.UNCACHED_LOAD) + ", "
+                + "clockAheadCount=" + value(Counter.CLOCK_AHEAD) + ", "
+                + "maintenanceExpiredCount=" + value(Counter.MAINTENANCE_EXPIRED) + ", "
+                + "maintenancePrunedCount=" + value(Counter.MAINTENANCE_PRUNED) + "}";
     }
 }

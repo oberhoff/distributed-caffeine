@@ -16,15 +16,16 @@
 package io.github.oberhoff.distributedcaffeine.serializer;
 
 /**
- * This is a marker interface only. Serializers must implement one of the following interfaces instead:
+ * Turns keys or values into what the store holds, and back. Implement one of its subinterfaces, which decides how the
+ * store holds the result:
  * <ul>
- *      <li>{@link ByteArraySerializer} for serializing an object to a byte array representation</li>
- *      <li>{@link StringSerializer} for serializing an object to a string representation</li>
- *      <li>{@link JsonSerializer} for serializing an object to a JSON representation (encoded as String or BSON)</li>
+ * <li>{@link ByteArraySerializer}: as bytes</li>
+ * <li>{@link StringSerializer}: as text</li>
+ * <li>{@link JsonSerializer}: as JSON, stored as text or in the store's own JSON type</li>
  * </ul>
  *
  * @param <T> the type of the object to serialize
- * @param <U> the type of the value to deserialize
+ * @param <U> the type of its serialized form
  * @author Andreas Oberhoff
  */
 @SuppressWarnings({"unused", "java:S112"})

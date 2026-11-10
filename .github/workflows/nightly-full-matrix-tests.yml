@@ -1,0 +1,93 @@
+name: Nightly Full Matrix Tests
+
+# every image and topology of every store, one runner per group, so the groups neither wait for nor disturb each
+# other, on JDK 17: the oldest supported, which the release is built for (continuous-delivery.yml). The per-push
+# workflow (continuous-integration.yml) covers JDK 25 with Error Prone and NullAway, on the latest image of each store
+# (-DrunsOnGitHub)
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  group:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # longest first, as at most 20 jobs run at once and the rest wait: model checking first, the in-memory
+          # suites on the other store profiles (the default is jdbc), the shortest, last; the experiments
+          # (-Dexperiments) and the managed Redis services (-Dredis.external) stay manual
+          - name: In-memory, model checking
+            tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
+            flags: -Dmodelchecking=true
+          - name: MongoDB 4-5
+            tests: "MongoIntegrationTest$Mongo_4_*,MongoIntegrationTest$Mongo_5_*"
+          - name: MongoDB 6-7
+            tests: "MongoIntegrationTest$Mongo_6_*,MongoIntegrationTest$Mongo_7_*"
+          - name: MongoDB 8-9
+            tests: "MongoIntegrationTest$Mongo_8_*,MongoIntegrationTest$Mongo_9_*"
+          - name: PostgreSQL 9-13
+            tests: "PostgresIntegrationTest$Postgres_9_*,PostgresIntegrationTest$Postgres_10_*,PostgresIntegrationTest$Postgres_11_*,PostgresIntegrationTest$Postgres_12_*,PostgresIntegrationTest$Postgres_13_*"
+          - name: PostgreSQL 14-18
+            tests: "PostgresIntegrationTest$Postgres_14_*,PostgresIntegrationTest$Postgres_15_*,PostgresIntegrationTest$Postgres_16_*,PostgresIntegrationTest$Postgres_17_*,PostgresIntegrationTest$Postgres_18_*"
+          - name: Redis 6
+            tests: "RedisIntegrationTest$Redis_6_*"
+          - name: Redis 7-8
+            tests: "RedisIntegrationTest$Redis_7_*,RedisIntegrationTest$Redis_8_*"
+          - name: Valkey
+            tests: "RedisIntegrationTest$Valkey_*"
+          - name: Dragonfly
+            tests: "RedisIntegrationTest$Dragonfly_*"
+          - name: Kvrocks
+            tests: "RedisIntegrationTest$Kvrocks_*"
+          - name: MariaDB 10
+            tests: "JdbcIntegrationTest$MariaDB_10_*"
+          - name: MariaDB 11
+            tests: "JdbcIntegrationTest$MariaDB_11_*"
+          - name: MariaDB 12
+            tests: "JdbcIntegrationTest$MariaDB_12_*"
+          - name: MariaDB 13
+            tests: "JdbcIntegrationTest$MariaDB_13_*"
+          - name: MySQL 5
+            tests: "JdbcIntegrationTest$MySQL_5_*"
+          - name: MySQL 8
+            tests: "JdbcIntegrationTest$MySQL_8_*"
+          - name: MySQL 9
+            tests: "JdbcIntegrationTest$MySQL_9_*"
+          - name: MySQL 26
+            tests: "JdbcIntegrationTest$MySQL_26_*"
+          - name: In-memory, postgresql
+            tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
+            flags: -Dinmemory.profile=postgresql
+          - name: In-memory, mongodb
+            tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
+            flags: -Dinmemory.profile=mongodb
+          - name: In-memory, redis
+            tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
+            flags: -Dinmemory.profile=redis
+          - name: In-memory, redis-hostile
+            tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
+            flags: -Dinmemory.profile=redis-hostile
+          - name: In-memory, postgresql-stepping
+            tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
+            flags: -Dinmemory.profile=postgresql-stepping
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v7
+        with:
+          # nightly: develop, as scheduled runs start from the default branch; by hand: the branch chosen
+          ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref }}
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+      - name: Run the group
+        # no failIfNoSpecifiedTests=false: a group whose pattern matches no test (a typo, or a branch without these
+        # tests) fails instead of passing with nothing tested
+        run: mvn -B -DskipErrorProne test "-Dtest=${{ matrix.tests }}" ${{ matrix.flags }}

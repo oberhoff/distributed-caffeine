@@ -15,133 +15,38 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.CachedEntryPersistenceConfigurer;
-import io.github.oberhoff.distributedcaffeine.DistributedCaffeine.EvictedEntryPersistenceConfigurer;
-import io.github.oberhoff.distributedcaffeine.adapter.Adapter;
-import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry;
-import io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status;
-import io.github.oberhoff.distributedcaffeine.adapter.Repository;
 import org.jspecify.annotations.Nullable;
 
-import java.util.HashSet;
-import java.util.Set;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
+import java.util.Map;
 
-import static io.github.oberhoff.distributedcaffeine.InternalUtils.getFailable;
-import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullIterable;
-import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireRepository;
-import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.CACHED_GROUP;
-import static io.github.oberhoff.distributedcaffeine.adapter.CacheEntry.Status.EVICTED_RETAINED_GROUP;
-import static io.github.oberhoff.distributedcaffeine.adapter.Repository.Order.UNORDERED;
-import static java.util.Objects.nonNull;
-import static java.util.Objects.requireNonNull;
+/**
+ * @author Andreas Oberhoff
+ */
+final class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V> {
 
-@SuppressWarnings("java:S1450")
-class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V>, InternalInitializable<K, V> {
+    private final InternalCore<K, V> core;
 
-    @SuppressWarnings("NotNullFieldNotInitialized")
-    private InternalInstanceRegistry<K, V> instanceRegistry;
-    @SuppressWarnings("NotNullFieldNotInitialized")
-    private InternalStoreGuard storeGuard;
-    @SuppressWarnings("NotNullFieldNotInitialized")
-    private Adapter<K, V> adapter;
-    private @Nullable Repository<K, V> repository;
-    @SuppressWarnings("NotNullFieldNotInitialized")
-    private InternalHasher<K> hasher;
-    @SuppressWarnings("NotNullFieldNotInitialized")
-    private CachedEntryPersistenceConfigurer cachedEntryPersistenceConfigurer;
-    @SuppressWarnings("NotNullFieldNotInitialized")
-    private EvictedEntryPersistenceConfigurer evictedEntryPersistenceConfigurer;
-
-    @SuppressWarnings({"java:S2637", "NullAway.Init"})
-    InternalDistributedPolicy() {
-        // see also initialize()
-    }
-
-    @Override
-    public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
-        this.instanceRegistry = instanceRegistry;
-        this.storeGuard = instanceRegistry.getStoreGuard();
-        this.adapter = instanceRegistry.getAdapter();
-        this.repository = instanceRegistry.getAdapter().getRepository().orElse(null);
-        this.hasher = instanceRegistry.getHasher();
-        this.cachedEntryPersistenceConfigurer = instanceRegistry.getCachedEntryPersistenceConfigurer();
-        this.evictedEntryPersistenceConfigurer = instanceRegistry.getEvictedEntryPersistenceConfigurer();
-    }
-
-    @Override
-    public Adapter<K, V> getAdapter() {
-        return adapter;
-    }
-
-    @Override
-    public void startSynchronization() {
-        instanceRegistry.activate();
-    }
-
-    @Override
-    public void stopSynchronization() {
-        instanceRegistry.deactivate();
-    }
-
-    @Override
-    public DistributedStats stats() {
-        return instanceRegistry.getDistributedStatsCounter().snapshot();
+    InternalDistributedPolicy(InternalCore<K, V> core) {
+        this.core = core;
     }
 
     @Override
     public SynchronizationState getSynchronizationState() {
-        // Read in this order on purpose: a cache instance that was stopped is stopped whatever the store is doing,
-        // and the guard goes on holding what it learned while it was running
-        if (!instanceRegistry.isActivated()) {
-            return SynchronizationState.STOPPED;
-        }
-        return storeGuard.isStoreUnreachable()
-                ? SynchronizationState.DEGRADED
-                : SynchronizationState.SYNCHRONIZED;
+        return core.state();
     }
 
     @Override
-    @SuppressWarnings("java:S2638")
-    public @Nullable CacheEntry<K, V> getFromStore(K key, boolean includeEvicted) {
-        requireNonNull(key);
-        return getAllFromStore(Set.of(key), includeEvicted).stream()
-                .filter(cacheEntry -> key.equals(cacheEntry.getKey()))
-                .findFirst()
-                .orElse(null);
+    public @Nullable StoredValue<V> getFromStore(K key) {
+        return core.getFromStore(key);
     }
 
     @Override
-    public Set<CacheEntry<K, V>> getAllFromStore(Iterable<? extends K> keys, boolean includeEvicted) {
-        Set<K> keySet = requireNonNullIterable(keys);
-        // what a persistence tier retains, not what a write leaves behind until it is swept: cached entries
-        // are written for distribution whether or not persistence is configured for them, so without it they would
-        // be visible here for the distribution duration alone and turn up empty afterwards
-        Set<Status> statuses = new HashSet<>();
-        if (cachedEntryPersistenceConfigurer.isConfigured()) {
-            statuses.addAll(CACHED_GROUP);
-        }
-        if (includeEvicted && evictedEntryPersistenceConfigurer.isConfigured()) {
-            statuses.addAll(EVICTED_RETAINED_GROUP);
-        }
-        if (statuses.isEmpty()) {
-            return Set.of();
-        }
-        Repository<K, V> retaining = requireRepository(repository, adapter.getIdentifier());
-        // Observed rather than guarded, because the caller came here for the store itself: getFromStore and
-        // getAllFromStore are the one place the API promises an answer about it, so one is fetched however the
-        // store has been behaving. What is taken from it is the outcome - a failure counts towards leaving the
-        // store alone elsewhere, and an answer ends that straight away, which is better evidence than anything
-        // the cache could gather by spending a write of its own on finding out
-        try (Stream<CacheEntry<K, V>> cacheEntryStream = getFailable(() -> storeGuard.observed(
-                () -> retaining.streamCacheEntries(
-                        hasher.getHashes(keySet),
-                        statuses,
-                        UNORDERED)))) {
-            return cacheEntryStream
-                    .filter(cacheEntry -> nonNull(cacheEntry.getValue()))
-                    .collect(Collectors.toSet());
-        }
+    public Map<K, StoredValue<V>> getAllFromStore(Iterable<? extends K> keys) {
+        return core.getAllFromStore(keys);
+    }
+
+    @Override
+    public DistributedStats stats() {
+        return core.stats();
     }
 }

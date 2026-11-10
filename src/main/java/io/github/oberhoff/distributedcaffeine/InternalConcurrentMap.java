@@ -18,542 +18,349 @@ package io.github.oberhoff.distributedcaffeine;
 import org.jspecify.annotations.Nullable;
 
 import java.util.AbstractCollection;
-import java.util.AbstractMap.SimpleEntry;
+import java.util.AbstractMap;
 import java.util.AbstractSet;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 
-import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
-import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
-import static io.github.oberhoff.distributedcaffeine.InternalUtils.entry;
-import static io.github.oberhoff.distributedcaffeine.InternalUtils.im;
-import static io.github.oberhoff.distributedcaffeine.InternalUtils.m;
-import static io.github.oberhoff.distributedcaffeine.InternalUtils.requireNonNullMap;
-import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
-import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
-import static io.github.oberhoff.distributedcaffeine.InternalValue.vn;
-import static java.lang.Boolean.TRUE;
-import static java.util.Objects.isNull;
-import static java.util.Objects.nonNull;
 import static java.util.Objects.requireNonNull;
-import static java.util.stream.Collectors.joining;
-import static java.util.stream.Collectors.toSet;
 
-class InternalConcurrentMap<K, V> implements ConcurrentMap<K, V>, InternalInitializable<K, V> {
+/**
+ * The {@code asMap()} view of a synchronous cache (see "Reading and writing methods" in VISION.md). Methods about one
+ * key read through L2: {@code get} and {@code getOrDefault} like {@code getIfPresent}, {@code containsKey} as an
+ * existence check, {@code computeIfAbsent} like {@code get(key, function)}, and the conditional methods atomically
+ * across instances (the remapping may run more than once after a conflict). Methods about the whole map (sizes,
+ * iteration, the views, {@code containsValue}) show what this instance holds; removals through the views invalidate
+ * globally, and {@code clear()} is the global {@code invalidateAll()}.
+ *
+ * @param <K> the key type
+ * @param <V> the value type
+ * @author Andreas Oberhoff
+ */
+@SuppressWarnings("java:S2160") // AbstractMap's equals and hashCode compare the entries, as Map requires
+final class InternalConcurrentMap<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V> {
 
-    @SuppressWarnings("NotNullFieldNotInitialized")
-    private ConcurrentMap<InternalKey<K>, InternalValue<V>> concurrentMap;
-    @SuppressWarnings("NotNullFieldNotInitialized")
-    private InternalCacheManager<K, V> cacheManager;
-    @SuppressWarnings("NotNullFieldNotInitialized")
-    private InternalSynchronizationLock synchronizationLock;
+    private static final String VALUE_CANNOT_BE_NULL = "value cannot be null";
+    private static final String REMAPPING_FUNCTION_CANNOT_BE_NULL = "remappingFunction cannot be null";
 
-    @SuppressWarnings({"java:S2637", "NullAway.Init"})
-    InternalConcurrentMap() {
-        // see also initialize()
+    private final InternalCore<K, V> core;
+    private final ConcurrentMap<InternalKey<K>, InternalValue<V>> local;
+    private final Set<K> keySetView = new KeySet();
+    private final Collection<V> valuesView = new Values();
+    private final Set<Map.Entry<K, V>> entrySetView = new EntrySet();
+
+    InternalConcurrentMap(InternalCore<K, V> core) {
+        this.core = core;
+        this.local = core.l1().synchronous().asMap();
     }
 
-    @Override
-    public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
-        this.concurrentMap = instanceRegistry.getCache().asMap();
-        this.cacheManager = instanceRegistry.getCacheManager();
-        this.synchronizationLock = instanceRegistry.getSynchronizationLock();
-    }
+    // one key, through L2
 
     @Override
     @SuppressWarnings("unchecked")
     public @Nullable V get(Object key) {
-        return vn(concurrentMap.get(ik((K) key)));
+        return core.getIfPresent((K) requireNonNull(key), false);
     }
 
     @Override
-    public @Nullable V put(K key, V value) {
-        requireNonNull(key);
-        requireNonNull(value);
-        InternalKey<K> internalKey = ik(key);
-        return synchronizationLock.getLockedOrNull(internalKey, () ->
-                vn(concurrentMap.put(internalKey, cacheManager.putDistributed(internalKey, iv(value)))));
-    }
-
-    @Override
-    public void putAll(Map<? extends K, ? extends V> map) {
-        requireNonNullMap(map);
-        Map<InternalKey<K>, InternalValue<V>> internalMap = im(map);
-        synchronizationLock.runLocked(internalMap.keySet(), () ->
-                concurrentMap.putAll(cacheManager.putAllDistributed(internalMap)));
-    }
-
-    @Override
-    public @Nullable V putIfAbsent(K key, V value) {
-        requireNonNull(key);
-        requireNonNull(value);
-        // atomic check-then-act under the (reentrant) synchronization lock; map values are never null, so a
-        // non-null get() already proves presence (no separate containsKey needed)
-        InternalKey<K> internalKey = ik(key);
-        return synchronizationLock.getLockedOrNull(internalKey, () -> {
-            V oldValue = get(key);
-            return isNull(oldValue)
-                    ? put(key, value) // implicit distribution
-                    : oldValue;
-        });
-    }
-
-    @Override
-    public @Nullable V replace(K key, V value) {
-        requireNonNull(key);
-        requireNonNull(value);
-        InternalKey<K> internalKey = ik(key);
-        return synchronizationLock.getLockedOrNull(internalKey, () ->
-                isNull(get(key))
-                        ? null
-                        : put(key, value)); // implicit distribution
-    }
-
-    @Override
-    public boolean replace(K key, V oldValue, V newValue) {
-        requireNonNull(key);
-        requireNonNull(oldValue);
-        requireNonNull(newValue);
-        // implicit distribution
-        InternalKey<K> internalKey = ik(key);
-        return TRUE.equals(synchronizationLock.getLockedOrNull(internalKey, () -> {
-            if (Objects.equals(get(key), oldValue)) {
-                put(key, newValue); // implicit distribution
-                return true;
-            }
-            return false;
-        }));
-    }
-
-    @Override
-    @SuppressWarnings("unchecked")
-    public @Nullable V remove(Object key) {
-        requireNonNull(key);
-        InternalKey<K> internalKey = ik((K) key);
-        return synchronizationLock.getLockedOrNull(internalKey, () ->
-                vn(concurrentMap.remove(cacheManager.invalidateDistributed(internalKey))));
-    }
-
-    @Override
-    @SuppressWarnings("unchecked")
-    public boolean remove(Object key, Object value) {
-        requireNonNull(key);
-        // atomic check-then-act; a null value never matches (map values are never null), so no exception is thrown
-        // implicit distribution
-        InternalKey<K> internalKey = ik((K) key);
-        return TRUE.equals(synchronizationLock.getLockedOrNull(internalKey, () -> {
-            V oldValue = get(key);
-            if (nonNull(oldValue) && Objects.equals(oldValue, value)) {
-                remove(key); // implicit distribution
-                return true;
-            }
-            return false;
-        }));
-    }
-
-    @Override
-    public @Nullable V computeIfAbsent(K key, Function<? super K, ? extends @Nullable V> mappingFunction) {
-        requireNonNull(key);
-        requireNonNull(mappingFunction);
-        // atomic under the (reentrant) synchronization lock; the mapping function is applied at most once, and the
-        // resulting change is distributed via put() - the inherited default is a non-atomic CAS-retry that may apply
-        // the function multiple times
-        InternalKey<K> internalKey = ik(key);
-        return synchronizationLock.getLockedOrNull(internalKey, () -> {
-            V oldValue = get(key);
-            if (nonNull(oldValue)) {
-                return oldValue;
-            }
-            V newValue = mappingFunction.apply(key);
-            if (nonNull(newValue)) {
-                put(key, newValue); // implicit distribution
-            }
-            return newValue;
-        });
-    }
-
-    @Override
-    public @Nullable V computeIfPresent(K key, BiFunction<? super K, ? super @Nullable V,
-            ? extends @Nullable V> remappingFunction) {
-        requireNonNull(key);
-        requireNonNull(remappingFunction);
-        InternalKey<K> internalKey = ik(key);
-        return synchronizationLock.getLockedOrNull(internalKey, () -> {
-            V oldValue = get(key);
-            if (isNull(oldValue)) {
-                return null;
-            }
-            V newValue = remappingFunction.apply(key, oldValue);
-            if (nonNull(newValue)) {
-                put(key, newValue); // implicit distribution
-                return newValue;
-            }
-            remove(key); // implicit distribution
-            return null;
-        });
-    }
-
-    @Override
-    public @Nullable V compute(K key, BiFunction<? super K, ? super @Nullable V,
-            ? extends @Nullable V> remappingFunction) {
-        requireNonNull(key);
-        requireNonNull(remappingFunction);
-        InternalKey<K> internalKey = ik(key);
-        return synchronizationLock.getLockedOrNull(internalKey, () -> {
-            V oldValue = get(key);
-            V newValue = remappingFunction.apply(key, oldValue);
-            if (nonNull(newValue)) {
-                put(key, newValue); // implicit distribution
-                return newValue;
-            }
-            if (nonNull(oldValue)) {
-                remove(key); // implicit distribution
-            }
-            return null;
-        });
-    }
-
-    @Override
-    public @Nullable V merge(K key, V value, BiFunction<? super @Nullable V, ? super V,
-            ? extends @Nullable V> remappingFunction) {
-        requireNonNull(key);
-        requireNonNull(value);
-        requireNonNull(remappingFunction);
-        InternalKey<K> internalKey = ik(key);
-        return synchronizationLock.getLockedOrNull(internalKey, () -> {
-            V oldValue = get(key);
-            V newValue = isNull(oldValue)
-                    ? value
-                    : remappingFunction.apply(oldValue, value);
-            if (nonNull(newValue)) {
-                put(key, newValue); // implicit distribution
-            } else {
-                // newValue can only be null when the remapping function ran, which implies oldValue was present
-                // (value is non-null), so there is always a mapping to remove here
-                remove(key); // implicit distribution
-            }
-            return newValue;
-        });
-    }
-
-    @Override
-    public void clear() {
-        synchronizationLock.runLocked(() -> {
-            cacheManager.invalidateAllDistributed();
-            concurrentMap.clear();
-        });
+    public @Nullable V getOrDefault(Object key, @Nullable V defaultValue) {
+        V value = get(key);
+        return value != null ? value : defaultValue;
     }
 
     @Override
     @SuppressWarnings("unchecked")
     public boolean containsKey(Object key) {
-        return concurrentMap.containsKey(ik((K) key));
+        return core.containsKey((K) requireNonNull(key));
+    }
+
+    // atomic like the conditional methods, so the previous value is exact across instances
+    @Override
+    public @Nullable V put(K key, V value) {
+        requireNonNull(value, VALUE_CANNOT_BE_NULL);
+        return core.update(key, (k, current) -> value, true).oldValue();
+    }
+
+    @Override
+    public void putAll(Map<? extends K, ? extends V> map) {
+        core.putAll(requireNonNull(map, "map cannot be null"));
     }
 
     @Override
     @SuppressWarnings("unchecked")
-    public boolean containsValue(Object value) {
-        return concurrentMap.containsValue(iv((V) value));
+    public @Nullable V remove(Object key) {
+        // always moves the version, also without a value: a load in flight then conflicts
+        return core.update((K) requireNonNull(key), (k, current) -> null, true).oldValue();
     }
 
     @Override
+    public @Nullable V putIfAbsent(K key, V value) {
+        requireNonNull(value, VALUE_CANNOT_BE_NULL);
+        return core.update(key, (k, current) -> current != null ? current : value).oldValue();
+    }
+
+    @Override
+    public @Nullable V replace(K key, V value) {
+        requireNonNull(value, VALUE_CANNOT_BE_NULL);
+        return core.update(key, (k, current) -> current != null ? value : null).oldValue();
+    }
+
+    @Override
+    public boolean replace(K key, V oldValue, V newValue) {
+        requireNonNull(oldValue, "oldValue cannot be null");
+        requireNonNull(newValue, "newValue cannot be null");
+        V found = core.update(key, (k, current) -> oldValue.equals(current) ? newValue : current).oldValue();
+        return oldValue.equals(found);
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public boolean remove(Object key, @Nullable Object value) {
+        requireNonNull(key);
+        if (value == null) {
+            return false;
+        }
+        V found = core.update((K) key, (k, current) -> value.equals(current) ? null : current).oldValue();
+        return value.equals(found);
+    }
+
+    @Override
+    public @Nullable V computeIfAbsent(K key, Function<? super K, ? extends V> mappingFunction) {
+        requireNonNull(mappingFunction, "mappingFunction cannot be null");
+        return core.get(key, mappingFunction::apply);
+    }
+
+    @Override
+    public @Nullable V computeIfPresent(K key,
+                                        BiFunction<? super K, ? super V, ? extends @Nullable V> remappingFunction) {
+        requireNonNull(remappingFunction, REMAPPING_FUNCTION_CANNOT_BE_NULL);
+        BiFunction<K, V, @Nullable V> counted = core.countedAsLoad(remappingFunction);
+        return core.update(key, (k, current) -> current == null ? null : counted.apply(k, current)).newValue();
+    }
+
+    @Override
+    public @Nullable V compute(K key,
+                               BiFunction<? super K, ? super @Nullable V, ? extends @Nullable V> remappingFunction) {
+        requireNonNull(remappingFunction, REMAPPING_FUNCTION_CANNOT_BE_NULL);
+        return core.update(key, core.<K, @Nullable V>countedAsLoad(remappingFunction)::apply).newValue();
+    }
+
+    @Override
+    public @Nullable V merge(K key, V value,
+                             BiFunction<? super V, ? super V, ? extends @Nullable V> remappingFunction) {
+        requireNonNull(value, VALUE_CANNOT_BE_NULL);
+        requireNonNull(remappingFunction, REMAPPING_FUNCTION_CANNOT_BE_NULL);
+        return core.update(key, (k, current) -> current == null ? value
+                : core.countedAsLoad(remappingFunction).apply(current, value)).newValue();
+    }
+
+    @Override
+    public void clear() {
+        core.invalidateAll();
+    }
+
+    // the whole map, local
+
+    @Override
     public int size() {
-        return concurrentMap.size();
+        core.checkOpen();
+        return local.size();
     }
 
     @Override
     public boolean isEmpty() {
-        return concurrentMap.isEmpty();
+        core.checkOpen();
+        return local.isEmpty();
+    }
+
+    @Override
+    public boolean containsValue(Object value) {
+        requireNonNull(value);
+        core.checkOpen();
+        for (InternalValue<V> held : local.values()) {
+            if (value.equals(held.value())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
     public Set<K> keySet() {
-        return new AbstractSet<>() {
-            @Override
-            public Iterator<K> iterator() {
-                return new Iterator<>() {
-                    private final Iterator<InternalKey<K>> iterator =
-                            concurrentMap.keySet().iterator();
-                    private @Nullable InternalKey<K> next;
-
-                    @Override
-                    public boolean hasNext() {
-                        return iterator.hasNext();
-                    }
-
-                    @Override
-                    public K next() {
-                        next = iterator.next();
-                        return k(next);
-                    }
-
-                    @Override
-                    public void remove() {
-                        // read into a local, so that what is invalidated is what the guard above checked - and
-                        // clear it afterwards, so that a second call fails the guard instead of distributing an
-                        // invalidation for an entry that is already gone and only then letting the delegate throw
-                        InternalKey<K> current = next;
-                        if (isNull(current)) {
-                            throw new IllegalStateException();
-                        }
-                        synchronizationLock.runLocked(current, () -> {
-                            cacheManager.invalidateDistributed(current);
-                            iterator.remove();
-                        });
-                        next = null;
-                    }
-                };
-            }
-
-            // the inherited implementations scan through the iterator above, which is correct but linear, while the
-            // map itself answers both directly
-            @Override
-            public boolean contains(Object key) {
-                return InternalConcurrentMap.this.containsKey(key);
-            }
-
-            @Override
-            @SuppressWarnings("unchecked")
-            public boolean remove(Object key) {
-                // atomic check-then-act under the (reentrant) synchronization lock; map values are never null, so a
-                // non-null result already proves the key was there. Checking first keeps a key that is not there
-                // from being distributed as invalidated, which is what scanning through the iterator did as well
-                InternalKey<K> internalKey = ik((K) key);
-                return TRUE.equals(synchronizationLock.getLockedOrNull(internalKey, () ->
-                        containsKey(key) && nonNull(InternalConcurrentMap.this.remove(key)))); // implicit distribution
-            }
-
-            @Override
-            public boolean removeAll(Collection<?> c) {
-                requireNonNull(c);
-                return TRUE.equals(synchronizationLock.getLockedOrNull(() -> {
-                    Set<InternalKey<K>> keys = concurrentMap.keySet().stream()
-                            .filter(key -> c.contains(k(key)))
-                            .collect(toSet());
-                    cacheManager.invalidateAllDistributed(keys);
-                    return concurrentMap.keySet().removeAll(keys);
-                }));
-            }
-
-            @Override
-            public boolean retainAll(Collection<?> c) {
-                requireNonNull(c);
-                return TRUE.equals(synchronizationLock.getLockedOrNull(() -> {
-                    Set<InternalKey<K>> keys = concurrentMap.keySet().stream()
-                            .filter(key -> !c.contains(k(key)))
-                            .collect(toSet());
-                    cacheManager.invalidateAllDistributed(keys);
-                    return concurrentMap.keySet().removeAll(keys);
-                }));
-            }
-
-            @Override
-            public void clear() {
-                InternalConcurrentMap.this.clear(); // implicit distribution
-            }
-
-            @Override
-            public int size() {
-                return InternalConcurrentMap.this.size();
-            }
-        };
+        return keySetView;
     }
 
     @Override
     public Collection<V> values() {
-        return new AbstractCollection<>() {
-            @Override
-            public Iterator<V> iterator() {
-                return new Iterator<>() {
-                    private final Iterator<Entry<InternalKey<K>, InternalValue<V>>> iterator =
-                            concurrentMap.entrySet().iterator();
-                    private @Nullable Entry<InternalKey<K>, InternalValue<V>> next;
-
-                    @Override
-                    public boolean hasNext() {
-                        return iterator.hasNext();
-                    }
-
-                    @Override
-                    public V next() {
-                        next = iterator.next();
-                        return v(next.getValue());
-                    }
-
-                    @Override
-                    @SuppressWarnings("DuplicatedCode")
-                    public void remove() {
-                        // see the key set iterator above for why this reads into a local and clears afterwards
-                        Entry<InternalKey<K>, InternalValue<V>> current = next;
-                        if (isNull(current)) {
-                            throw new IllegalStateException();
-                        }
-                        synchronizationLock.runLocked(current.getKey(), () -> {
-                            cacheManager.invalidateDistributed(current.getKey());
-                            iterator.remove();
-                        });
-                        next = null;
-                    }
-                };
-            }
-
-            @Override
-            public boolean removeAll(Collection<?> c) {
-                requireNonNull(c);
-                return TRUE.equals(synchronizationLock.getLockedOrNull(() -> {
-                    Set<InternalKey<K>> keys = concurrentMap.entrySet().stream()
-                            .filter(entry -> c.contains(v(entry.getValue())))
-                            .map(Entry::getKey)
-                            .collect(toSet());
-                    cacheManager.invalidateAllDistributed(keys);
-                    return concurrentMap.keySet().removeAll(keys);
-                }));
-            }
-
-            @Override
-            public boolean retainAll(Collection<?> c) {
-                requireNonNull(c);
-                return TRUE.equals(synchronizationLock.getLockedOrNull(() -> {
-                    Set<InternalKey<K>> keys = concurrentMap.entrySet().stream()
-                            .filter(entry -> !c.contains(v(entry.getValue())))
-                            .map(Entry::getKey)
-                            .collect(toSet());
-                    cacheManager.invalidateAllDistributed(keys);
-                    return concurrentMap.keySet().removeAll(keys);
-                }));
-            }
-
-            @Override
-            public void clear() {
-                InternalConcurrentMap.this.clear(); // implicit distribution
-            }
-
-            @Override
-            public int size() {
-                return InternalConcurrentMap.this.size();
-            }
-        };
+        return valuesView;
     }
 
     @Override
-    public Set<Entry<K, V>> entrySet() {
-        return new AbstractSet<>() {
-            @Override
-            public Iterator<Entry<K, V>> iterator() {
-                return new Iterator<>() {
-                    private final Iterator<Entry<InternalKey<K>, InternalValue<V>>> iterator =
-                            concurrentMap.entrySet().iterator();
-                    private @Nullable Entry<InternalKey<K>, InternalValue<V>> next;
-
-                    @Override
-                    public boolean hasNext() {
-                        return iterator.hasNext();
-                    }
-
-                    @Override
-                    public Entry<K, V> next() {
-                        next = iterator.next();
-                        return new WriteThroughEntry<>(entry(k(next.getKey()), v(next.getValue())),
-                                InternalConcurrentMap.this);
-                    }
-
-                    @Override
-                    @SuppressWarnings("DuplicatedCode")
-                    public void remove() {
-                        // see the key set iterator above for why this reads into a local and clears afterwards
-                        Entry<InternalKey<K>, InternalValue<V>> current = next;
-                        if (isNull(current)) {
-                            throw new IllegalStateException();
-                        }
-                        synchronizationLock.runLocked(current.getKey(), () -> {
-                            cacheManager.invalidateDistributed(current.getKey());
-                            iterator.remove();
-                        });
-                        next = null;
-                    }
-                };
-            }
-
-            @Override
-            public boolean removeAll(Collection<?> c) {
-                requireNonNull(c);
-                return TRUE.equals(synchronizationLock.getLockedOrNull(() -> {
-                    Set<InternalKey<K>> keys = concurrentMap.entrySet().stream()
-                            .filter(entry -> c.contains(entry(k(entry.getKey()), v(entry.getValue()))))
-                            .map(Entry::getKey)
-                            .collect(toSet());
-                    cacheManager.invalidateAllDistributed(keys);
-                    return concurrentMap.keySet().removeAll(keys);
-                }));
-            }
-
-            @Override
-            public boolean retainAll(Collection<?> c) {
-                requireNonNull(c);
-                return TRUE.equals(synchronizationLock.getLockedOrNull(() -> {
-                    Set<InternalKey<K>> keys = concurrentMap.entrySet().stream()
-                            .filter(entry -> !c.contains(entry(k(entry.getKey()), v(entry.getValue()))))
-                            .map(Entry::getKey)
-                            .collect(toSet());
-                    cacheManager.invalidateAllDistributed(keys);
-                    return concurrentMap.keySet().removeAll(keys);
-                }));
-            }
-
-            @Override
-            public void clear() {
-                InternalConcurrentMap.this.clear(); // implicit distribution
-            }
-
-            @Override
-            public int size() {
-                return InternalConcurrentMap.this.size();
-            }
-        };
+    public Set<Map.Entry<K, V>> entrySet() {
+        return entrySetView;
     }
 
-    @Override
-    public boolean equals(@Nullable Object object) {
-        return object instanceof Map<?, ?> map && Objects.equals(m(concurrentMap), map);
+    // iterates what this instance holds; remove() invalidates the last key globally
+    private abstract class LocalIterator<T> implements Iterator<T> {
+
+        private final Iterator<Map.Entry<InternalKey<K>, InternalValue<V>>> iterator;
+        private @Nullable K last;
+
+        LocalIterator() {
+            core.checkOpen();
+            this.iterator = local.entrySet().iterator();
+        }
+
+        @Override
+        public boolean hasNext() {
+            return iterator.hasNext();
+        }
+
+        @Override
+        public T next() {
+            Map.Entry<InternalKey<K>, InternalValue<V>> next = iterator.next();
+            last = next.getKey().key();
+            return map(next.getKey().key(), next.getValue().value());
+        }
+
+        abstract T map(K key, V value);
+
+        @Override
+        public void remove() {
+            if (last == null) {
+                throw new IllegalStateException();
+            }
+            core.invalidate(last);
+            last = null;
+        }
     }
 
-    @Override
-    public int hashCode() {
-        // InternalKey/InternalValue delegate hashCode() to the wrapped key/value, so the underlying map already
-        // satisfies the Map.hashCode() contract (sum of key.hashCode() ^ value.hashCode()) without unwrapping
-        return concurrentMap.hashCode();
+    private final class KeySet extends AbstractSet<K> {
+
+        @Override
+        public Iterator<K> iterator() {
+            return new LocalIterator<K>() {
+                @Override
+                K map(K key, V value) {
+                    return key;
+                }
+            };
+        }
+
+        @Override
+        public int size() {
+            return InternalConcurrentMap.this.size();
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public boolean contains(Object key) {
+            return local.containsKey(core.wrap((K) requireNonNull(key)));
+        }
+
+        // true if this instance held the key; invalidated globally either way
+        @Override
+        @SuppressWarnings("unchecked")
+        public boolean remove(Object key) {
+            K k = (K) requireNonNull(key);
+            boolean held = contains(k);
+            core.invalidate(k);
+            return held;
+        }
+
+        @Override
+        public void clear() {
+            InternalConcurrentMap.this.clear();
+        }
     }
 
-    @Override
-    public String toString() {
-        // render directly in the standard '{key=value, ...}' format without materializing an unwrapped copy
-        return concurrentMap.entrySet().stream()
-                .map(entry -> k(entry.getKey()) + "=" + v(entry.getValue()))
-                .collect(joining(", ", "{", "}"));
+    private final class Values extends AbstractCollection<V> {
+
+        @Override
+        public Iterator<V> iterator() {
+            return new LocalIterator<V>() {
+                @Override
+                V map(K key, V value) {
+                    return value;
+                }
+            };
+        }
+
+        @Override
+        public int size() {
+            return InternalConcurrentMap.this.size();
+        }
+
+        @Override
+        public boolean contains(Object value) {
+            return containsValue(value);
+        }
+
+        @Override
+        public void clear() {
+            InternalConcurrentMap.this.clear();
+        }
     }
 
-    @SuppressWarnings("java:S2160")
-    private static final class WriteThroughEntry<K, V> extends SimpleEntry<K, V> {
+    private final class EntrySet extends AbstractSet<Map.Entry<K, V>> {
 
-        private final transient Map<K, V> map;
+        @Override
+        public Iterator<Map.Entry<K, V>> iterator() {
+            return new LocalIterator<Map.Entry<K, V>>() {
+                @Override
+                Map.Entry<K, V> map(K key, V value) {
+                    return new WriteThroughEntry(key, value);
+                }
+            };
+        }
 
-        private WriteThroughEntry(Entry<? extends K, ? extends V> entry, InternalConcurrentMap<K, V> map) {
-            super(entry);
-            this.map = map;
+        @Override
+        public int size() {
+            return InternalConcurrentMap.this.size();
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public boolean contains(Object entry) {
+            if (!(entry instanceof Map.Entry<?, ?> e) || e.getKey() == null || e.getValue() == null) {
+                return false;
+            }
+            InternalValue<V> held = local.get(core.wrap((K) e.getKey()));
+            return held != null && e.getValue().equals(held.value());
+        }
+
+        // conditional on the value, like remove(key, value)
+        @Override
+        public boolean remove(Object entry) {
+            if (!(entry instanceof Map.Entry<?, ?> e) || e.getKey() == null) {
+                return false;
+            }
+            return InternalConcurrentMap.this.remove(e.getKey(), e.getValue());
+        }
+
+        @Override
+        public void clear() {
+            InternalConcurrentMap.this.clear();
+        }
+    }
+
+    // setValue writes, like put
+    private final class WriteThroughEntry extends SimpleEntry<K, V> {
+
+        WriteThroughEntry(K key, V value) {
+            super(key, value);
         }
 
         @Override
         public V setValue(V value) {
-            V oldValue = getValue();
-            map.put(super.getKey(), value); // implicit distribution
-            super.setValue(value);
-            return oldValue;
+            requireNonNull(value, VALUE_CANNOT_BE_NULL);
+            core.put(getKey(), value);
+            return super.setValue(value);
         }
     }
 }

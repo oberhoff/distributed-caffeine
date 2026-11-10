@@ -24,11 +24,12 @@ import java.util.stream.Stream;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Implementation of a serializer with byte array representation based on <i>Apache Fory</i>.
+ * Serializes to bytes with <i>Apache Fory</i>; the default for keys and values, as it handles every type without
+ * configuration.
  * <p>
- * <b>Attention:</b> Class registration is not enforced by default, which means that arbitrary classes can be
- * deserialized. Values should therefore only be deserialized from a trusted data store. If strict enforcement is
- * required, {@link #ForySerializer(ForyBuilder, Class[])} can be used with a Fory builder enforcing this.
+ * <b>Attention:</b> by default, any class can be deserialized, so whoever can write to the store can make every
+ * instance deserialize classes of their choice. If the store's access cannot be trusted, use
+ * {@link #requiringRegistration(Class[])}.
  *
  * @param <T> the type of the object to serialize
  * @author Andreas Oberhoff
@@ -39,18 +40,16 @@ public class ForySerializer<T> implements ByteArraySerializer<T> {
     private final ThreadSafeFory fory;
 
     /**
-     * Constructs a serializer with byte array representation based on <i>Apache Fory</i>.
+     * Constructs a serializer that accepts any class.
      */
     public ForySerializer() {
         this(new Class<?>[0]);
     }
 
     /**
-     * Constructs a serializer with byte array representation based on <i>Apache Fory</i> along with optional
-     * class-based type information.
+     * Constructs a serializer that accepts any class and registers the given ones, which stores them more compactly.
      *
-     * @param registerClasses optional class of the object (with additional classes of nested objects) to serialize
-     *                        (order must be stable)
+     * @param registerClasses the classes to register, in an order that stays the same across instances
      */
     public ForySerializer(Class<?>... registerClasses) {
         this(new ForyBuilder()
@@ -61,12 +60,10 @@ public class ForySerializer<T> implements ByteArraySerializer<T> {
     }
 
     /**
-     * Constructs a serializer with byte array representation based on <i>Apache Fory</i> along with a customizable
-     * Fory builder and optional class-based type information.
+     * Constructs a serializer from a Fory builder of the caller's, registering the given classes.
      *
-     * @param foryBuilder     customizable Fory builder used to construct Fory instance internally
-     * @param registerClasses optional class of the object (with additional classes of nested objects) to serialize
-     *                        (order must be stable)
+     * @param foryBuilder     the Fory builder
+     * @param registerClasses the classes to register, in an order that stays the same across instances
      */
     public ForySerializer(ForyBuilder foryBuilder, Class<?>... registerClasses) {
         requireNonNull(foryBuilder, "foryBuilder cannot be null");
@@ -75,6 +72,20 @@ public class ForySerializer<T> implements ByteArraySerializer<T> {
                 .buildThreadSafeFory();
         Stream.of(registerClasses)
                 .forEach(fory::register);
+    }
+
+    /**
+     * Returns a serializer that deserializes only the given classes, hardened against values written to the store by
+     * someone else. Every class of the serialized objects must be listed.
+     *
+     * @param registerClasses the classes to accept, in an order that stays the same across instances
+     * @param <T>             the type of the object to serialize
+     * @return the serializer
+     */
+    public static <T> ForySerializer<T> requiringRegistration(Class<?>... registerClasses) {
+        return new ForySerializer<>(new ForyBuilder()
+                .withLanguage(Language.JAVA)
+                .requireClassRegistration(true), registerClasses);
     }
 
     @Override

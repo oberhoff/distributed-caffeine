@@ -16,10 +16,11 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.Policy;
-
 import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -30,33 +31,29 @@ import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.stream.Stream;
 
-import static io.github.oberhoff.distributedcaffeine.InternalKey.ik;
-import static io.github.oberhoff.distributedcaffeine.InternalKey.k;
-import static io.github.oberhoff.distributedcaffeine.InternalUtils.m;
-import static io.github.oberhoff.distributedcaffeine.InternalValue.iv;
-import static io.github.oberhoff.distributedcaffeine.InternalValue.ivn;
-import static io.github.oberhoff.distributedcaffeine.InternalValue.v;
-import static io.github.oberhoff.distributedcaffeine.InternalValue.vn;
-import static java.util.Objects.isNull;
 import static java.util.Objects.requireNonNull;
-import static java.util.stream.Collectors.toUnmodifiableMap;
 
-class InternalPolicy<K, V> implements Policy<K, V>, InternalInitializable<K, V> {
+/**
+ * {@code policy()}: L1's Caffeine policy, translated from {@link InternalKey} / {@link InternalValue} to the user's
+ * keys and values (see "Reading and writing methods" in VISION.md). Everything is local to this instance, as in
+ * Caffeine: quiet reads, refreshes in flight, sizes, durations, and the coldest/hottest/oldest/youngest snapshots.
+ * The writes of {@link Policy.VarExpiration} go through the {@code asMap()} methods (through L2); their duration
+ * applies to this instance's copy only.
+ *
+ * @param <K> the key type
+ * @param <V> the value type
+ * @author Andreas Oberhoff
+ */
+final class InternalPolicy<K, V> implements Policy<K, V> {
 
-    @SuppressWarnings("NotNullFieldNotInitialized")
-    private InternalInstanceRegistry<K, V> instanceRegistry;
-    @SuppressWarnings("NotNullFieldNotInitialized")
-    private Policy<InternalKey<K>, InternalValue<V>> policy;
+    private final InternalCore<K, V> core;
+    private final InternalConcurrentMap<K, V> map;
+    private final Policy<InternalKey<K>, InternalValue<V>> policy;
 
-    @SuppressWarnings({"java:S2637", "NullAway.Init"})
-    InternalPolicy() {
-        // see also initialize()
-    }
-
-    @Override
-    public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
-        this.instanceRegistry = instanceRegistry;
-        this.policy = instanceRegistry.getCache().policy();
+    InternalPolicy(InternalCore<K, V> core, InternalConcurrentMap<K, V> map) {
+        this.core = core;
+        this.map = map;
+        this.policy = core.l1().synchronous().policy();
     }
 
     @Override
@@ -66,285 +63,300 @@ class InternalPolicy<K, V> implements Policy<K, V>, InternalInitializable<K, V> 
 
     @Override
     public @Nullable V getIfPresentQuietly(K key) {
-        return vn(policy.getIfPresentQuietly(ik(key)));
+        return InternalValue.valueOrNull(policy.getIfPresentQuietly(core.wrap(key)));
     }
 
     @Override
-    @SuppressWarnings("java:S2638")
     public @Nullable CacheEntry<K, V> getEntryIfPresentQuietly(K key) {
-        CacheEntry<InternalKey<K>, InternalValue<V>> cacheEntry = policy.getEntryIfPresentQuietly(ik(key));
-        return isNull(cacheEntry)
-                ? null
-                : createCacheEntry(cacheEntry);
+        CacheEntry<InternalKey<K>, InternalValue<V>> entry = policy.getEntryIfPresentQuietly(core.wrap(key));
+        return entry == null ? null : new Entry<>(entry);
     }
 
     @Override
     public Map<K, CompletableFuture<V>> refreshes() {
-        return policy.refreshes().entrySet().stream()
-                .collect(toUnmodifiableMap(
-                        entry -> k(entry.getKey()),
-                        entry -> entry.getValue().thenApply(InternalValue::v)));
+        core.checkOpen();
+        Map<K, CompletableFuture<V>> refreshes = new LinkedHashMap<>();
+        policy.refreshes().forEach((internalKey, future) ->
+                refreshes.put(internalKey.key(), InternalValue.valuesOf(future)));
+        return Collections.unmodifiableMap(refreshes);
     }
 
     @Override
     public Optional<Eviction<K, V>> eviction() {
-        //noinspection Convert2Diamond
-        return policy.eviction()
-                .map(eviction -> new Eviction<K, V>() {
-
-                    @Override
-                    public boolean isWeighted() {
-                        return eviction.isWeighted();
-                    }
-
-                    @Override
-                    public OptionalInt weightOf(K key) {
-                        return eviction.weightOf(ik(key));
-                    }
-
-                    @Override
-                    public OptionalLong weightedSize() {
-                        return eviction.weightedSize();
-                    }
-
-                    @Override
-                    public long getMaximum() {
-                        return eviction.getMaximum();
-                    }
-
-                    @Override
-                    public void setMaximum(long maximum) {
-                        eviction.setMaximum(maximum);
-                    }
-
-                    @Override
-                    public Map<K, V> coldest(int limit) {
-                        return m(eviction.coldest(limit));
-                    }
-
-                    @Override
-                    public Map<K, V> hottest(int limit) {
-                        return m(eviction.hottest(limit));
-                    }
-                });
+        return policy.eviction().map(EvictionView::new);
     }
 
     @Override
     public Optional<FixedExpiration<K, V>> expireAfterAccess() {
-        return policy.expireAfterAccess()
-                .map(InternalPolicy::createFixedExpiration);
+        return policy.expireAfterAccess().map(FixedExpirationView::new);
     }
 
     @Override
     public Optional<FixedExpiration<K, V>> expireAfterWrite() {
-        return policy.expireAfterWrite().map(
-                InternalPolicy::createFixedExpiration);
+        return policy.expireAfterWrite().map(FixedExpirationView::new);
     }
 
     @Override
     public Optional<VarExpiration<K, V>> expireVariably() {
-        return policy.expireVariably()
-                .map(varExpiration -> instanceRegistry.initialize(new InternalExpiration<>(varExpiration)));
+        return policy.expireVariably().map(VarExpirationView::new);
     }
 
     @Override
     public Optional<FixedRefresh<K, V>> refreshAfterWrite() {
-        //noinspection Convert2Diamond
-        return policy.refreshAfterWrite()
-                .map(fixedRefresh -> new FixedRefresh<K, V>() {
-                    @Override
-                    public OptionalLong ageOf(K key, TimeUnit unit) {
-                        return fixedRefresh.ageOf(ik(key), unit);
-                    }
-
-                    @Override
-                    public long getRefreshesAfter(TimeUnit unit) {
-                        return fixedRefresh.getRefreshesAfter(unit);
-                    }
-
-                    @Override
-                    public void setRefreshesAfter(long duration, TimeUnit unit) {
-                        fixedRefresh.setRefreshesAfter(duration, unit);
-                    }
-                });
+        return policy.refreshAfterWrite().map(FixedRefreshView::new);
     }
 
-    static class InternalExpiration<K, V> implements VarExpiration<K, V>, InternalInitializable<K, V> {
+    // translation
 
-        private final VarExpiration<InternalKey<K>, InternalValue<V>> varExpiration;
+    private static <K, V> Map<K, V> unwrap(Map<InternalKey<K>, InternalValue<V>> snapshot) {
+        Map<K, V> result = new LinkedHashMap<>();
+        snapshot.forEach((internalKey, value) -> result.put(internalKey.key(), value.value()));
+        return Collections.unmodifiableMap(result);
+    }
 
-        @SuppressWarnings("NotNullFieldNotInitialized")
-        private Policy<InternalKey<K>, InternalValue<V>> policy;
-        @SuppressWarnings("NotNullFieldNotInitialized")
-        private InternalCacheManager<K, V> cacheManager;
-        @SuppressWarnings("NotNullFieldNotInitialized")
-        private InternalSynchronizationLock synchronizationLock;
+    private static <K, V, T extends @Nullable Object> Function<Stream<CacheEntry<InternalKey<K>, InternalValue<V>>>, T>
+            unwrap(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
+        requireNonNull(mappingFunction, "mappingFunction cannot be null");
+        return stream -> mappingFunction.apply(stream.map(Entry::new));
+    }
 
-        @SuppressWarnings({"java:S2637", "NullAway.Init"})
-        InternalExpiration(VarExpiration<InternalKey<K>, InternalValue<V>> varExpiration) {
-            this.varExpiration = varExpiration;
-            // see also initialize()
+    private final class EvictionView implements Eviction<K, V> {
+
+        private final Eviction<InternalKey<K>, InternalValue<V>> eviction;
+
+        EvictionView(Eviction<InternalKey<K>, InternalValue<V>> eviction) {
+            this.eviction = eviction;
         }
 
         @Override
-        public void initialize(InternalInstanceRegistry<K, V> instanceRegistry) {
-            this.policy = instanceRegistry.getCache().policy();
-            this.cacheManager = instanceRegistry.getCacheManager();
-            this.synchronizationLock = instanceRegistry.getSynchronizationLock();
+        public boolean isWeighted() {
+            return eviction.isWeighted();
         }
 
         @Override
-        public @Nullable V put(K key, V value, long duration, TimeUnit unit) {
-            requireNonNull(key);
-            requireNonNull(value);
-            requireNonNull(unit);
-            InternalKey<K> internalKey = ik(key);
-            return synchronizationLock.getLockedOrNull(internalKey, () ->
-                    vn(varExpiration.put(internalKey, cacheManager.putDistributed(internalKey, iv(value)), duration, unit)));
+        public OptionalInt weightOf(K key) {
+            return eviction.weightOf(core.wrap(key));
         }
 
         @Override
-        public @Nullable V putIfAbsent(K key, V value, long duration, TimeUnit unit) {
-            requireNonNull(key);
-            requireNonNull(value);
-            requireNonNull(unit);
-            InternalKey<K> internalKey = ik(key);
-            return synchronizationLock.getLockedOrNull(internalKey, () -> {
-                V oldValue = vn(policy.getIfPresentQuietly(internalKey));
-                return isNull(oldValue)
-                        ? put(key, value, duration, unit) // implicit distribution
-                        : oldValue;
-            });
+        public OptionalLong weightedSize() {
+            return eviction.weightedSize();
         }
 
         @Override
-        public @Nullable V compute(K key, BiFunction<? super K, ? super @Nullable V, ? extends @Nullable V> remappingFunction,
-                                   Duration duration) {
-            requireNonNull(key);
-            requireNonNull(remappingFunction);
-            requireNonNull(duration);
-            BiFunction<InternalKey<K>, @Nullable InternalValue<V>, @Nullable InternalValue<V>> distributedRemapping =
-                    (remappingKey, remappingValue) -> {
-                        InternalValue<V> value = ivn(remappingFunction
-                                .apply(k(remappingKey), vn(remappingValue)));
-                        if (isNull(value)) {
-                            cacheManager.invalidateDistributed(remappingKey);
-                        } else {
-                            cacheManager.putDistributed(remappingKey, value);
-                        }
-                        return value;
-                    };
-            InternalKey<K> internalKey = ik(key);
-            return synchronizationLock.getLockedOrNull(internalKey, () ->
-                    vn(varExpiration.compute(internalKey, distributedRemapping, duration)));
+        public long getMaximum() {
+            return eviction.getMaximum();
         }
 
         @Override
-        public OptionalLong getExpiresAfter(K key, TimeUnit unit) {
-            return varExpiration.getExpiresAfter(ik(key), unit);
+        public void setMaximum(long maximum) {
+            eviction.setMaximum(maximum);
         }
 
         @Override
-        public void setExpiresAfter(K key, long duration, TimeUnit unit) {
-            varExpiration.setExpiresAfter(ik(key), duration, unit);
+        public Map<K, V> coldest(int limit) {
+            return unwrap(eviction.coldest(limit));
+        }
+
+        @Override
+        public Map<K, V> coldestWeighted(long weightLimit) {
+            return unwrap(eviction.coldestWeighted(weightLimit));
+        }
+
+        @Override
+        public <T extends @Nullable Object> T coldest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
+            return eviction.coldest(unwrap(mappingFunction));
+        }
+
+        @Override
+        public Map<K, V> hottest(int limit) {
+            return unwrap(eviction.hottest(limit));
+        }
+
+        @Override
+        public Map<K, V> hottestWeighted(long weightLimit) {
+            return unwrap(eviction.hottestWeighted(weightLimit));
+        }
+
+        @Override
+        public <T extends @Nullable Object> T hottest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
+            return eviction.hottest(unwrap(mappingFunction));
+        }
+    }
+
+    private final class FixedExpirationView implements FixedExpiration<K, V> {
+
+        private final FixedExpiration<InternalKey<K>, InternalValue<V>> expiration;
+
+        FixedExpirationView(FixedExpiration<InternalKey<K>, InternalValue<V>> expiration) {
+            this.expiration = expiration;
+        }
+
+        @Override
+        public OptionalLong ageOf(K key, TimeUnit unit) {
+            return expiration.ageOf(core.wrap(key), unit);
+        }
+
+        @Override
+        public long getExpiresAfter(TimeUnit unit) {
+            return expiration.getExpiresAfter(unit);
+        }
+
+        @Override
+        public void setExpiresAfter(long duration, TimeUnit unit) {
+            expiration.setExpiresAfter(duration, unit);
         }
 
         @Override
         public Map<K, V> oldest(int limit) {
-            return m(varExpiration.oldest(limit));
+            return unwrap(expiration.oldest(limit));
         }
 
         @Override
         public <T extends @Nullable Object> T oldest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
-            Function<Stream<CacheEntry<InternalKey<K>, InternalValue<V>>>, T> internalMappingFunction =
-                    stream -> mappingFunction.apply(stream
-                            .map(InternalPolicy::createCacheEntry));
-            return varExpiration.oldest(internalMappingFunction);
+            return expiration.oldest(unwrap(mappingFunction));
         }
 
         @Override
         public Map<K, V> youngest(int limit) {
-            return m(varExpiration.youngest(limit));
+            return unwrap(expiration.youngest(limit));
         }
 
         @Override
         public <T extends @Nullable Object> T youngest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
-            Function<Stream<CacheEntry<InternalKey<K>, InternalValue<V>>>, T> internalMappingFunction =
-                    stream -> mappingFunction.apply(stream
-                            .map(InternalPolicy::createCacheEntry));
-            return varExpiration.youngest(internalMappingFunction);
+            return expiration.youngest(unwrap(mappingFunction));
         }
     }
 
-    private static <K, V> CacheEntry<K, V> createCacheEntry(CacheEntry<InternalKey<K>, InternalValue<V>> entry) {
-        //noinspection Convert2Diamond
-        return new CacheEntry<K, V>() {
+    private final class VarExpirationView implements VarExpiration<K, V> {
 
-            @Override
-            public K getKey() {
-                return k(entry.getKey());
-            }
+        private final VarExpiration<InternalKey<K>, InternalValue<V>> expiration;
 
-            @Override
-            public V getValue() {
-                return v(entry.getValue());
-            }
+        VarExpirationView(VarExpiration<InternalKey<K>, InternalValue<V>> expiration) {
+            this.expiration = expiration;
+        }
 
-            @Override
-            public V setValue(V value) {
-                throw new UnsupportedOperationException();
-            }
+        @Override
+        public OptionalLong getExpiresAfter(K key, TimeUnit unit) {
+            return expiration.getExpiresAfter(core.wrap(key), unit);
+        }
 
-            @Override
-            public int weight() {
-                return entry.weight();
-            }
+        @Override
+        public void setExpiresAfter(K key, long duration, TimeUnit unit) {
+            expiration.setExpiresAfter(core.wrap(key), duration, unit);
+        }
 
-            @Override
-            public long expiresAt() {
-                return entry.expiresAt();
+        @Override
+        public @Nullable V putIfAbsent(K key, V value, long duration, TimeUnit unit) {
+            V previous = map.putIfAbsent(key, value);
+            if (previous == null) {
+                setExpiresAfter(key, duration, unit);
             }
+            return previous;
+        }
 
-            @Override
-            public long refreshableAt() {
-                return entry.refreshableAt();
-            }
+        @Override
+        public @Nullable V put(K key, V value, long duration, TimeUnit unit) {
+            V previous = map.put(key, value);
+            setExpiresAfter(key, duration, unit);
+            return previous;
+        }
 
-            @Override
-            public long snapshotAt() {
-                return entry.snapshotAt();
+        @Override
+        public @Nullable V compute(K key,
+                                   BiFunction<? super K, ? super @Nullable V, ? extends @Nullable V> remappingFunction,
+                                   Duration duration) {
+            requireNonNull(duration, "duration cannot be null");
+            V value = map.compute(key, remappingFunction);
+            if (value != null) {
+                setExpiresAfter(key, duration);
             }
-        };
+            return value;
+        }
+
+        @Override
+        public Map<K, V> oldest(int limit) {
+            return unwrap(expiration.oldest(limit));
+        }
+
+        @Override
+        public <T extends @Nullable Object> T oldest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
+            return expiration.oldest(unwrap(mappingFunction));
+        }
+
+        @Override
+        public Map<K, V> youngest(int limit) {
+            return unwrap(expiration.youngest(limit));
+        }
+
+        @Override
+        public <T extends @Nullable Object> T youngest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
+            return expiration.youngest(unwrap(mappingFunction));
+        }
     }
 
-    private static <K, V> FixedExpiration<K, V> createFixedExpiration(FixedExpiration<InternalKey<K>, InternalValue<V>> fixedExpiration) {
-        //noinspection Convert2Diamond
-        return new FixedExpiration<K, V>() {
+    private final class FixedRefreshView implements FixedRefresh<K, V> {
 
-            @Override
-            public OptionalLong ageOf(K key, TimeUnit unit) {
-                return fixedExpiration.ageOf(ik(key), unit);
-            }
+        private final FixedRefresh<InternalKey<K>, InternalValue<V>> refresh;
 
-            @Override
-            public long getExpiresAfter(TimeUnit unit) {
-                return fixedExpiration.getExpiresAfter(unit);
-            }
+        FixedRefreshView(FixedRefresh<InternalKey<K>, InternalValue<V>> refresh) {
+            this.refresh = refresh;
+        }
 
-            @Override
-            public void setExpiresAfter(long duration, TimeUnit unit) {
-                fixedExpiration.setExpiresAfter(duration, unit);
-            }
+        @Override
+        public OptionalLong ageOf(K key, TimeUnit unit) {
+            return refresh.ageOf(core.wrap(key), unit);
+        }
 
-            @Override
-            public Map<K, V> oldest(int limit) {
-                return m(fixedExpiration.oldest(limit));
-            }
+        @Override
+        public long getRefreshesAfter(TimeUnit unit) {
+            return refresh.getRefreshesAfter(unit);
+        }
 
-            @Override
-            public Map<K, V> youngest(int limit) {
-                return m(fixedExpiration.youngest(limit));
-            }
-        };
+        @Override
+        public void setRefreshesAfter(long duration, TimeUnit unit) {
+            refresh.setRefreshesAfter(duration, unit);
+            core.refreshAfterWrite(refresh.getRefreshesAfter());
+        }
+    }
+
+    // a snapshot of an L1 entry, unwrapped; immutable like Caffeine's
+    private record Entry<K, V>(K key, V value, int weight, long expiresAt, long refreshableAt, long snapshotAt)
+            implements CacheEntry<K, V> {
+
+        Entry(CacheEntry<InternalKey<K>, InternalValue<V>> entry) {
+            this(entry.getKey().key(), entry.getValue().value(), entry.weight(), entry.expiresAt(),
+                    entry.refreshableAt(), entry.snapshotAt());
+        }
+
+        @Override
+        public K getKey() {
+            return key;
+        }
+
+        @Override
+        public V getValue() {
+            return value;
+        }
+
+        @Override
+        public V setValue(V value) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean equals(@Nullable Object o) {
+            return o instanceof Map.Entry<?, ?> e && key.equals(e.getKey()) && value.equals(e.getValue());
+        }
+
+        @Override
+        public int hashCode() {
+            return key.hashCode() ^ value.hashCode();
+        }
+
+        @Override
+        public String toString() {
+            return key + "=" + value;
+        }
     }
 }

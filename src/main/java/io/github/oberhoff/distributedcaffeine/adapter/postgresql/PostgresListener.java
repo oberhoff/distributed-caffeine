@@ -15,590 +15,662 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter.postgresql;
 
-import dev.failsafe.Failsafe;
-import dev.failsafe.RetryPolicy;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
+import io.github.oberhoff.distributedcaffeine.spi.Change;
+import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
+import io.github.oberhoff.distributedcaffeine.spi.ChangeSubscription;
+import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import org.jspecify.annotations.Nullable;
 import org.postgresql.PGConnection;
 import org.postgresql.PGNotification;
+import org.postgresql.core.BaseConnection;
+import org.postgresql.core.PGStream;
+import org.postgresql.core.QueryExecutorBase;
+import org.postgresql.util.DriverInfo;
 
 import javax.sql.DataSource;
+import java.io.IOException;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Queue;
-import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
-import static java.lang.Math.min;
-import static java.lang.String.format;
-import static java.util.Objects.nonNull;
-
 /**
- * One listening session, shared by the cache instances that subscribe to it.
+ * Listening on PostgreSQL through pgjdbc (VISION.md, "PostgreSQL listening without R2DBC" and "Connection sharing"):
+ * one session per listener data source (by identity), shared by every cache instance using it, each cache on a
+ * channel of its own (table and discriminator), dispatched by channel name. The payload is {@code kind|hash|version}.
  * <p>
- * The session is held by a thread of its own for as long as anybody subscribes, and that thread does nothing but
- * keep the session alive and hand what arrives to the subscribers it is meant for. What a subscriber does with it -
- * reading the records back, applying them to its cache instance - happens on the subscriber's side, so that one
- * cache instance being slow or failing never holds up the others or the session itself.
+ * The session is one connection of the data source whose stream the listener takes over. pgjdbc connects (with
+ * whatever authentication and TLS the data source is configured for) and runs the first {@code LISTEN}s; then the
+ * listener reads pgjdbc's stream itself, on a thread of its own, parsing notifications and skipping every other
+ * message. pgjdbc's own way to them ({@code getNotifications}) hands out only about 750 notifications/s per session;
+ * reading the stream directly is as fast as R2DBC was (measured, VISION.md). Later {@code LISTEN}s and
+ * {@code UNLISTEN}s are sent on the same stream as simple queries, answered through the listener's thread. The stream
+ * is reached through reflection on one protected field, checked at the first subscription.
  * <p>
- * Subscribing and unsubscribing are requests that the listening thread carries out between polls: the driver holds
- * the connection for the whole of a poll, so a statement issued from anywhere else would wait for it anyway.
+ * The session proves it receives notifications on every subscription: a notification sent through the store's data
+ * source must arrive within 5 seconds (which detects a transaction-mode pooler). A lost session is reported as
+ * {@code onLost()} and re-established only when a cache asks ({@code resume()}, VISION.md, "Supervision"): once per
+ * loss, whoever asks first; and also when a cache suspects the session went silent (its heartbeat), which then counts
+ * as a gap for the other caches on it.
+ * <p>
+ * The session's threads only enqueue into the caches' own queues (the core's delivery), so they never call into a
+ * cache's locks.
+ *
+ * @author Andreas Oberhoff
  */
-// The statements here name a channel, and a channel cannot be a parameter of one. What is concatenated into
-// them is derived from the identifier rather than taken from anywhere a caller reaches - a fixed prefix and a
-// digest - so there is nothing in it for a caller to have put there
-@SuppressWarnings({"java:S2077", "SqlNoDataSourceInspection"})
+// the SQL runs against the user's database, unknown to the IDE; what is formatted into it are quoted channel names
+@SuppressWarnings({"SqlNoDataSourceInspection", "java:S2077", "SqlSourceToSinkFlow"})
 final class PostgresListener {
 
-    private static final Logger LOGGER = System.getLogger(PostgresListener.class.getName());
+    private static final Logger LOGGER = System.getLogger(PostgresAdapter.class.getPackageName());
+    // fixed, unlike a cache's operation timeout: no caller waits for the listening session, which is shared by caches
+    // with different timeouts, and its failures are recovered (or noticed by the heartbeat) by the library, so the
+    // bounds follow from its own commands (LISTEN, UNLISTEN, the probe of a notification), not from anyone's latency
+    // budget
+    private static final Duration COMMAND_TIMEOUT = Duration.ofSeconds(10);
+    static final long PROBE_TIMEOUT_SECONDS = 5;
+    private static final int PROBE_ATTEMPTS = 3;
+    private static final IdentityHashMap<DataSource, Session> SESSIONS = new IdentityHashMap<>();
 
-    private static final Duration RETRY_INTERVAL = Duration.ofSeconds(1);
-    // How long a poll waits for something to arrive before looking at the requests and at whether it is still
-    // supposed to be listening. Short, because a cache instance subscribing waits for the poll under way to be
-    // over before its subscription can be carried out - and waiting costs nothing but a timer on a local socket
-    private static final Duration POLL_TIMEOUT = Duration.ofMillis(100);
-    // the statements a session subscribes and unsubscribes with, completed by the channel they concern
-    private static final String LISTEN = "LISTEN ";
-    private static final String UNLISTEN = "UNLISTEN ";
-    private static final String UNLISTEN_ALL = "UNLISTEN *";
+    // the listening sessions open: none once every cache using them is closed (tests check it, a leak would show)
+    static int openSessions() {
+        synchronized (SESSIONS) {
+            return SESSIONS.size();
+        }
+    }
+    // pgjdbc's stream behind a connection: protected, with no getter; null if this pgjdbc does not have it
+    private static final @Nullable Field PG_STREAM = pgStreamField();
 
-    /**
-     * Who a session hands what arrives to.
-     */
-    interface Subscriber {
-
-        String getChannel();
-
-        String getIdentifier();
-
-        // called on the listening thread, so it hands the hashes over rather than acting on them
-        void receiveHashes(Set<String> hashes);
-
-        // called on the listening thread as well: the session was lost and is back, and whatever was announced in
-        // the meantime is gone
-        void receiveRestart();
+    private PostgresListener() {
     }
 
     /**
-     * How the session watches over itself - taken from the cache instance that opens it.
+     * Subscribes a cache instance to its channel: returns once the session listens on it and has proven that
+     * notifications arrive, so every write committed afterwards is delivered (contract point 4).
      */
-    record Settings(Duration heartbeatInterval, Duration heartbeatTimeout, Duration probeTimeout,
-                    Duration watchdogTimeout) {
-    }
-
-    private enum State {
-
-        /**
-         * Listening has not begun yet. A failure in this state is final, and fails everybody waiting to subscribe.
-         */
-        STARTING,
-
-        /**
-         * Listening has begun. Kept while a lost session is being replaced, so that a failure is retried.
-         */
-        STARTED,
-
-        /**
-         * Starting failed. Whoever subscribes is refused, and the registry replaces the listener.
-         */
-        FAILED,
-
-        /**
-         * Nobody subscribes any more, and the session is given up.
-         */
-        CLOSED
-    }
-
-    private record Request(Subscriber subscriber, @Nullable CompletableFuture<@Nullable Void> subscribed) {
-    }
-
-    // the channels that the requests taken into account have left to be listened for, and to be listened for no more
-    private record Changes(List<String> listen, List<String> unlisten) {
-    }
-
-    private final DataSource listenerDataSource;
-    // what writes go through, and so what the probe is sent through - the path whose notifications have to arrive
-    private final DataSource dataSource;
-    private final Settings settings;
-    private final AtomicReference<State> state = new AtomicReference<>(State.STARTING);
-    private final Queue<Request> requests = new ConcurrentLinkedQueue<>();
-    // named in what is logged, which happens outside the listening thread
-    private final Set<String> identifiers = ConcurrentHashMap.newKeySet();
-    // the channel of the session currently listening, through which a subscriber cuts the poll under way short -
-    // only while a session is listening, since otherwise there is no poll to cut short
-    private volatile @Nullable String wakeChannel;
-    // The rest is touched by the listening thread alone - and by whatever completes it once that thread is done
-    private final Map<String, Set<Subscriber>> subscribersByChannel = new HashMap<>();
-    // who has been told that it is subscribed, and so has to be told when the session it relies on was lost
-    private final Set<Subscriber> confirmed = new HashSet<>();
-    private final Map<Subscriber, CompletableFuture<@Nullable Void>> unconfirmed = new ConcurrentHashMap<>();
-    // counted by the registry, under its lock
-    int references;
-
-    PostgresListener(DataSource listenerDataSource, DataSource dataSource, Settings settings) {
-        this.listenerDataSource = listenerDataSource;
-        this.dataSource = dataSource;
-        this.settings = settings;
-    }
-
-    // nothing waits for the session to end, and how it ended is dealt with where it ends rather than by whoever
-    // would otherwise hold on to its future
-    @SuppressWarnings("FutureReturnValueIgnored")
-    void start() {
-        RetryPolicy<Void> retryPolicy = RetryPolicy.<Void>builder()
-                // abort unless listening had already begun: a failure while starting up is final and must fail
-                // fast, whereas a failure after that is treated as transient and retried
-                .abortOn(throwable -> state.get() != State.STARTED)
-                .withMaxAttempts(-1)
-                .withDelay(RETRY_INTERVAL)
-                .withDelayFnOn(context -> RETRY_INTERVAL.multipliedBy(min(context.getAttemptCount(), 10)),
-                        Throwable.class)
-                .onRetryScheduled(event -> Optional.ofNullable(event.getLastException())
-                        .ifPresent(throwable -> LOGGER.log(Level.WARNING,
-                                format("Listening for notifications failed for %s. Retrying...", describe()),
-                                throwable)))
-                .build();
-        ExecutorService executorService = Executors.newSingleThreadExecutor();
-        Failsafe.with(retryPolicy)
-                .with(executorService)
-                .runAsync(this::listen)
-                .whenComplete((result, throwable) -> {
-                    // completed here rather than where the failure happens, so that whoever is told of it finds
-                    // the connection it failed on already returned
-                    if (nonNull(throwable)) {
-                        fail(throwable);
-                    }
-                    executorService.shutdown();
-                });
-    }
-
-    /**
-     * Subscribes, and returns what is completed once the subscriber is listened for on a session that is known to
-     * receive - or completed exceptionally if listening cannot be begun at all.
-     */
-    CompletableFuture<@Nullable Void> subscribe(Subscriber subscriber) {
-        CompletableFuture<@Nullable Void> subscribed = new CompletableFuture<>();
-        synchronized (this) {
-            // checked under the same lock that failing takes, so that a request cannot slip in after failing has
-            // refused everybody waiting and then wait forever itself
-            if (state.get() == State.FAILED || state.get() == State.CLOSED) {
-                subscribed.completeExceptionally(new IllegalStateException("Listening has been given up"));
-                return subscribed;
-            }
-            identifiers.add(subscriber.getIdentifier());
-            requests.add(new Request(subscriber, subscribed));
+    @SuppressWarnings("java:S1181") // whatever fails, the registration is released before it is rethrown
+    static ChangeSubscription subscribe(DataSource listenerDataSource, DataSource dataSource, String channel,
+                                        ChangeListener listener) {
+        if (PG_STREAM == null) {
+            throw new StoreException("Listening on PostgreSQL reads pgjdbc's stream, reached through the field "
+                    + "QueryExecutorBase.pgStream, which pgjdbc " + DriverInfo.DRIVER_VERSION + " does not have or "
+                    + "does not let be reached; use a pgjdbc version this library supports", false);
         }
-        wake();
-        return subscribed;
-    }
-
-    // without waking, because nothing waits for an unsubscription to be carried out
-    void unsubscribe(Subscriber subscriber) {
-        requests.add(new Request(subscriber, null));
-    }
-
-    // Cuts the poll under way short, so that a request is carried out right away rather than once the poll is over:
-    // a cache instance subscribing waits for that, and a poll the driver holds the connection for cannot be
-    // interrupted from here. Announced through the data source writes go through, which is the way the probe has
-    // proven to arrive. A wake that fails costs no more than the rest of the poll, so it is not retried
-    private void wake() {
-        String channel = wakeChannel;
-        if (channel == null) {
-            return;
+        Session session;
+        Registration registration;
+        synchronized (SESSIONS) {
+            session = SESSIONS.computeIfAbsent(listenerDataSource, Session::new);
+            registration = session.register(channel, listener, dataSource);
         }
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement("SELECT pg_notify(?, '')")) {
-            statement.setString(1, channel);
-            statement.execute();
-        } catch (SQLException e) {
-            LOGGER.log(Level.DEBUG, format("Waking the listening session failed for %s", describe()), e);
-        }
-    }
-
-    // by the registry, once nobody subscribes any more
-    void close() {
-        state.compareAndSet(State.STARTING, State.CLOSED);
-        state.compareAndSet(State.STARTED, State.CLOSED);
-    }
-
-    boolean isFailed() {
-        return state.get() == State.FAILED;
-    }
-
-    private boolean isClosed() {
-        return state.get() == State.CLOSED;
-    }
-
-    private synchronized void fail(Throwable throwable) {
-        if (!state.compareAndSet(State.STARTING, State.FAILED)) {
-            return;
-        }
-        Request request;
-        while ((request = requests.poll()) != null) {
-            Optional.ofNullable(request.subscribed()).ifPresent(future -> future.completeExceptionally(throwable));
-        }
-        unconfirmed.values().forEach(future -> future.completeExceptionally(throwable));
-        unconfirmed.clear();
-    }
-
-    private String describe() {
-        return identifiers.stream()
-                .map(identifier -> format("'%s'", identifier))
-                .collect(Collectors.joining(", ", "cache instances at ", ""));
-    }
-
-    private void listen() throws SQLException {
-        // this attempt may have been scheduled before closing, in which case listening must not be (re)started
-        if (isClosed()) {
-            return;
-        }
-        // a connection of its own, held for as long as it listens: a notification reaches the sessions that are
-        // listening when it is issued and nobody else, so this one cannot be borrowed and returned between polls
-        try (Connection connection = listenerDataSource.getConnection()) {
-            Watchdog watchdog = new Watchdog(connection);
-            try {
-                listen(connection, watchdog);
-            } catch (SQLException e) {
-                throw watchdog.explain(e);
-            } finally {
-                watchdog.stop();
-            }
-        }
-    }
-
-    private void listen(Connection connection, Watchdog watchdog) throws SQLException {
-        try (Statement statement = connection.createStatement()) {
-            // Dropping whatever this session was subscribed to before taking it over: a connection comes from a
-            // pool, and a listener that was not given the chance to unsubscribe - one whose thread was interrupted,
-            // or whose connection broke - hands its subscriptions on with it. Inherited, they deliver
-            // notifications of channels nobody here subscribes to
-            statement.execute(UNLISTEN_ALL);
-        }
-        // the requests made while there was no session are taken into account before listening, so that they are
-        // listened for along with everybody else rather than one by one afterwards
-        applyRequests();
-        execute(connection, LISTEN, subscribersByChannel.keySet());
-        // and dropping what it had already been handed: unsubscribing stops what comes next, while whatever reached
-        // this session before it is queued and would be delivered on the first poll regardless
-        drainNotifications(watchdog);
         try {
-            // what arrives while the probe is under way is kept, and handed over once listening has begun
-            String sessionChannel = PostgresChannel.sessionChannel();
-            List<PGNotification> arrivedWhileProbing = probe(connection, sessionChannel, watchdog);
-            if (isClosed()) {
-                return;
+            session.listen(registration);
+            session.requireDelivery(registration);
+        } catch (RuntimeException | Error e) {
+            registration.close();
+            throw e;
+        }
+        return registration;
+    }
+
+    /**
+     * Whether the session of the listener data source has dispatched everything notified before this call (tests): a
+     * notification sent now must arrive through it; notifications arrive in commit order, so everything before it has
+     * arrived too.
+     */
+    static boolean barrier(DataSource listenerDataSource, DataSource dataSource) {
+        Session session;
+        synchronized (SESSIONS) {
+            session = SESSIONS.get(listenerDataSource);
+        }
+        if (session == null) {
+            return true;
+        }
+        synchronized (session) {
+            if (session.held == null) {
+                return false;
             }
-            // Listening having begun once before means this session replaces one that failed, and whatever was
-            // published while nothing was listening is gone: a notification is delivered to the sessions listening
-            // at the time and is not kept for anyone else, so there is nothing to catch up on from here. Reported
-            // to whoever relied on the lost session once listening is live again, so that what arrives while they
-            // recover is delivered rather than missed in turn
-            boolean relistened = state.getAndSet(State.STARTED) == State.STARTED;
-            // from here on, whoever subscribes can wake this session - and only after this point, so that a wake
-            // can never be taken for the probe
-            wakeChannel = sessionChannel;
-            if (relistened) {
-                confirmed.forEach(Subscriber::receiveRestart);
+        }
+        return session.probe(dataSource);
+    }
+
+    // kind|hash|version; anything else (garbage on the channel, a payload of an earlier layout) is ignored
+    static @Nullable Change parse(String payload) {
+        String[] parts = payload.split("\\|", -1);
+        if (parts.length != 3 || parts[1].isEmpty()) {
+            return null;
+        }
+        try {
+            return new Change(Change.Kind.valueOf(parts[0]), parts[1], Long.parseLong(parts[2]));
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    // the message and SQL state of an ErrorResponse's body: fields of a type byte and a string each, ended by a zero
+    // byte (pgjdbc sets client_encoding to UTF8)
+    static String error(byte[] body) {
+        String message = "";
+        String state = "";
+        int at = 0;
+        while (at < body.length && body[at] != 0) {
+            byte field = body[at++];
+            int end = at;
+            while (end < body.length && body[end] != 0) {
+                end++;
             }
-            confirmSubscriptions();
-            dispatch(arrivedWhileProbing);
-            long lastHeartbeat = System.nanoTime();
-            while (!isClosed()) {
-                Changes changes = applyRequests();
-                execute(connection, LISTEN, changes.listen());
-                execute(connection, UNLISTEN, changes.unlisten());
-                confirmSubscriptions();
-                // blocks until something arrives or the timeout is over, without a query of its own, which is what
-                // makes a held connection enough to be woken by
-                PGNotification[] notifications = watchdog.poll((int) POLL_TIMEOUT.toMillis());
-                if (nonNull(notifications) && notifications.length > 0) {
-                    dispatch(List.of(notifications));
-                }
-                // Failing here is what turns a dead connection into the failure it is, so that it is replaced and
-                // what was missed meanwhile is reconciled. A notification arriving while the heartbeat is under
-                // way is kept by the driver and handed over on the next poll, so nothing is lost to it
-                if (System.nanoTime() - lastHeartbeat >= settings.heartbeatInterval().toNanos() && !isClosed()) {
-                    if (!connection.isValid((int) settings.heartbeatTimeout().toSeconds())) {
-                        throw new SQLException(format("Listening connection did not respond within %d seconds",
-                                settings.heartbeatTimeout().toSeconds()), "08006");
-                    }
-                    lastHeartbeat = System.nanoTime();
-                }
+            String value = new String(body, at, end - at, StandardCharsets.UTF_8);
+            if (field == 'M') {
+                message = value;
+            } else if (field == 'C') {
+                state = value;
             }
-        } finally {
-            // a session that is over cannot be woken, and whoever subscribes now is taken into account when the
-            // next one begins
-            wakeChannel = null;
-            // Closing a pooled connection hands it back rather than closing it, and LISTEN is session state that
-            // outlives the hand-back: left subscribed, the connection delivers notifications to whoever borrows it
-            // next, and the server keeps queueing for a session nobody reads. Best effort, because a session that
-            // failed may hold a connection that can no longer carry a statement at all
-            try {
-                // A connection that is already gone took its session with it, and the subscriptions with it - and
-                // the pool discards it rather than handing it on, so there is nothing left to unsubscribe from.
-                // Asked rather than assumed, because a broken one does not report itself as closed
-                if (connection.isValid(1)) {
-                    try (Statement statement = connection.createStatement()) {
-                        statement.execute(UNLISTEN_ALL);
-                    }
-                }
-            } catch (SQLException e) {
-                LOGGER.log(Level.DEBUG, format("Unsubscribing from notifications failed for %s", describe()), e);
+            at = end + 1;
+        }
+        return message + " (SQL state " + state + ")";
+    }
+
+    // InaccessibleObjectException (a module not opening it) and SecurityException are RuntimeExceptions
+    // QueryExecutorBase.pgStream is protected, with no getter: reflection on this one field is what reading pgjdbc's
+    // stream takes. A pgjdbc release could rename or retype it; the first subscription then fails with a clear message
+    @SuppressWarnings("java:S3011")
+    private static @Nullable Field pgStreamField() {
+        try {
+            Field field = QueryExecutorBase.class.getDeclaredField("pgStream");
+            if (field.getType() != PGStream.class) {
+                return null;
+            }
+            field.setAccessible(true);
+            return field;
+        } catch (NoSuchFieldException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    // a cache named by its channel: dc_<schema>.<table>.<discriminator> (shortened with a hash where too long)
+    private static String cacheOf(String channel) {
+        return channel.startsWith("dc_") ? channel.substring(3) : channel;
+    }
+
+    private static String listen(String channel) {
+        return "LISTEN " + PostgresTable.quote(channel);
+    }
+
+    private static final class Registration implements ChangeSubscription {
+
+        private final Session session;
+        private final String channel;
+        private final ChangeListener listener;
+        private final DataSource dataSource;
+        // guarded by the session (not expressible as @GuardedBy): the session's connection it was last delivered on,
+        // and whether it was told that delivery stopped
+        private long generation;
+        private boolean lost;
+        private volatile boolean closed;
+
+        Registration(Session session, String channel, ChangeListener listener, DataSource dataSource) {
+            this.session = session;
+            this.channel = channel;
+            this.listener = listener;
+            this.dataSource = dataSource;
+        }
+
+        @Override
+        public void resume() {
+            if (!closed) {
+                session.resume(this);
+            }
+        }
+
+        @Override
+        public void close() {
+            if (!closed) {
+                closed = true;
+                session.unregister(this);
             }
         }
     }
 
-    // Takes the requests made since the last time into account, and returns which channels are new and which are
-    // left without anybody subscribing. Whatever still arrives on a channel before it is unlistened finds nobody
-    // to be handed to, and is dropped
-    @SuppressWarnings("java:S3776")
-    private Changes applyRequests() {
-        List<String> listen = new ArrayList<>();
-        List<String> unlisten = new ArrayList<>();
-        Request request;
-        while ((request = requests.poll()) != null) {
-            Subscriber subscriber = request.subscriber();
-            String channel = subscriber.getChannel();
-            CompletableFuture<@Nullable Void> subscribed = request.subscribed();
-            if (nonNull(subscribed)) {
-                if (subscribersByChannel.computeIfAbsent(channel, ignored -> new LinkedHashSet<>()).isEmpty()
-                        && !unlisten.remove(channel)) {
-                    listen.add(channel);
-                }
-                subscribersByChannel.get(channel).add(subscriber);
-                unconfirmed.put(subscriber, subscribed);
-            } else {
-                Set<Subscriber> subscribers = subscribersByChannel.get(channel);
-                if (nonNull(subscribers) && subscribers.remove(subscriber) && subscribers.isEmpty()) {
-                    subscribersByChannel.remove(channel);
-                    // a channel subscribed to and left again within the same requests was never listened for
-                    if (!listen.remove(channel)) {
-                        unlisten.add(channel);
-                    }
-                }
-                confirmed.remove(subscriber);
-                Optional.ofNullable(unconfirmed.remove(subscriber)).ifPresent(future -> future.cancel(false));
-                identifiers.remove(subscriber.getIdentifier());
-            }
-        }
-        return new Changes(listen, unlisten);
-    }
-
-    // in one round trip however many channels there are, which is what makes several cache instances starting
-    // together cost the session one statement rather than one each
-    private static void execute(Connection connection, String command, Collection<String> channels)
-            throws SQLException {
-        if (channels.isEmpty()) {
-            return;
-        }
-        try (Statement statement = connection.createStatement()) {
-            for (String channel : channels) {
-                statement.addBatch(command + channel);
-            }
-            statement.executeBatch();
-        }
-    }
-
-    // only on a session that is known to receive, which is what a subscriber waits to be told
-    private void confirmSubscriptions() {
-        if (state.get() != State.STARTED || unconfirmed.isEmpty()) {
-            return;
-        }
-        unconfirmed.forEach((subscriber, subscribed) -> {
-            confirmed.add(subscriber);
-            subscribed.complete(null);
-        });
-        unconfirmed.clear();
-    }
-
-    // What arrives names records rather than carrying them, so it is handed over as hashes, grouped per channel so
-    // that a subscriber gets everything one poll brought for it in one go
-    private void dispatch(List<PGNotification> notifications) {
-        Map<String, Set<String>> hashesByChannel = new LinkedHashMap<>();
-        for (PGNotification notification : notifications) {
-            String payload = notification.getParameter();
-            if (subscribersByChannel.containsKey(notification.getName()) && nonNull(payload) && !payload.isEmpty()) {
-                hashesByChannel.computeIfAbsent(notification.getName(), ignored -> new LinkedHashSet<>())
-                        .addAll(PostgresChannel.hashesOf(payload));
-            }
-        }
-        hashesByChannel.forEach((channel, hashes) -> subscribersByChannel.getOrDefault(channel, Set.of())
-                .forEach(subscriber -> subscriber.receiveHashes(hashes)));
-    }
-
-    // Proves that what writes announce reaches this connection, by announcing something on a channel of its own
-    // through the data source writes go through. A subscription that is accepted is not one that receives: behind a
-    // pooler in transaction mode, LISTEN succeeds on a server session that is handed to somebody else as soon as
-    // the statement is over, and a connection to another server or database listens to a channel nobody writes
-    // to - both without an error, and both leaving a cache instance that never hears of a change. Sent from a
-    // connection other than the listening one, because a session notifying itself is delivered what it sent even
-    // where nothing else would reach it. The channel is the session's own, so no other listener sees it - and it
-    // stays listened to afterwards, as the channel the session is woken through. Once per session rather than per
-    // subscriber, because it is the session that is in question
-    private List<PGNotification> probe(Connection connection, String probeChannel, Watchdog watchdog)
-            throws SQLException {
-        try (Statement statement = connection.createStatement()) {
-            statement.execute(LISTEN + probeChannel);
-        }
-        sendProbe(probeChannel);
-        List<PGNotification> arrived = new ArrayList<>();
-        long deadline = System.nanoTime() + settings.probeTimeout().toNanos();
-        boolean probed = false;
-        long remaining;
-        while (!probed && (remaining = deadline - System.nanoTime()) > 0 && !isClosed()) {
-            PGNotification[] notifications = watchdog.poll(
-                    (int) Math.max(1, TimeUnit.NANOSECONDS.toMillis(remaining)));
-            // the whole batch is looked at even once the probe is in it, because what follows the probe in the
-            // same batch has been taken from the connection and would otherwise be lost
-            for (PGNotification notification : nonNull(notifications) ? notifications : new PGNotification[0]) {
-                if (notification.getName().equals(probeChannel)) {
-                    probed = true;
-                } else {
-                    arrived.add(notification);
-                }
-            }
-        }
-        // the channel stays listened to once probed, because it is what the session is woken through from now on
-        if (!probed && !isClosed()) {
-            throw new SQLException(format("A notification sent through the data source did not reach the "
-                            + "listening connection within %d seconds. Listening needs a session of its own on the server "
-                            + "the data source writes to, which a pooler in transaction mode or a connection to another "
-                            + "server or database does not provide - see PostgresAdapter.Builder#withListenerDataSource "
-                            + "for listening through a direct or session-mode connection",
-                    settings.probeTimeout().toSeconds()), "55000");
-        }
-        return arrived;
-    }
-
-    // Sends the probe in a transaction, as a write sends it: a write commits the record and its notification
-    // together, which a pooler in statement mode refuses - while a notification on its own would pass, and leave
-    // the first write to fail instead
-    // A pooler refusing it closes the connection as well, so what cleaning up fails on is kept along with the
-    // refusal rather than taking its place
-    private void sendProbe(String probeChannel) throws SQLException {
-        try (Connection probing = dataSource.getConnection()) {
-            probing.setAutoCommit(false);
-            try {
-                try (PreparedStatement statement = probing.prepareStatement("SELECT pg_notify(?, '')")) {
-                    statement.setString(1, probeChannel);
-                    statement.execute();
-                }
-                probing.commit();
-            } catch (SQLException e) {
-                SQLException failure = new SQLException("Sending a notification in a transaction through the data "
-                        + "source failed. Writing sends one in the same transaction as the record it announces, which "
-                        + "needs a data source that allows transactions - a pooler in statement mode does not",
-                        e.getSQLState(), e);
-                try {
-                    probing.rollback();
-                    probing.setAutoCommit(true);
-                } catch (SQLException cleanupFailure) {
-                    failure.addSuppressed(cleanupFailure);
-                }
-                throw failure;
-            }
-            probing.setAutoCommit(true);
-        }
-    }
-
-    private static void drainNotifications(Watchdog watchdog) throws SQLException {
-        PGNotification[] stale;
-        do {
-            stale = watchdog.poll(1);
-        } while (nonNull(stale) && stale.length > 0);
-    }
-
-    // Watches the polls of one listening connection from outside the thread that makes them, and aborts the
-    // connection when one of them has been inside the driver for longer than any poll takes. Once the first byte of
-    // a message has arrived, the driver reads the rest without any timeout at all, so a connection that dies in the
-    // middle of a message leaves the listening thread blocked for good - and the heartbeat, which runs on that very
-    // thread, never comes round. Aborting closes the socket without the lock the blocked thread holds, so the
-    // blocked read fails, the session fails with it, and it is replaced and what was missed reconciled - as after
-    // any other failure. Checked on the shared timer behind CompletableFuture.delayedExecutor rather than on a
-    // thread of its own, because a check is one comparison, and so is the abort that a check rarely ends in
-    private final class Watchdog {
-
-        private static final long NOT_POLLING = Long.MIN_VALUE;
+    // a connection whose stream the listener took over: read only by its session's thread, written (LISTEN, UNLISTEN)
+    // only under this object's monitor
+    private static final class Held {
 
         private final Connection connection;
-        private final PGConnection pgConnection;
-        private final AtomicLong pollingSince = new AtomicLong(NOT_POLLING);
-        private final AtomicBoolean fired = new AtomicBoolean(false);
-        private volatile boolean stopped;
+        private final PGStream stream;
+        // the commands sent and not yet answered, in the order sent: each ReadyForQuery answers the oldest
+        private final Queue<CompletableFuture<@Nullable Void>> commands = new ConcurrentLinkedQueue<>();
+        @GuardedBy("this")
+        private boolean ended;
 
-        private Watchdog(Connection connection) throws SQLException {
+        Held(Connection connection, PGStream stream) {
             this.connection = connection;
-            this.pgConnection = connection.unwrap(PGConnection.class);
-            schedule();
+            this.stream = stream;
         }
 
-        private PGNotification @Nullable [] poll(int timeoutMillis) throws SQLException {
-            pollingSince.set(System.nanoTime());
-            try {
-                return pgConnection.getNotifications(timeoutMillis);
-            } finally {
-                pollingSince.set(NOT_POLLING);
-            }
-        }
-
-        private void schedule() {
-            // a few checks per timeout, so that a stuck poll is aborted not much later than it is due
-            long period = Math.max(1, settings.watchdogTimeout().toNanos() / 4);
-            CompletableFuture.delayedExecutor(period, TimeUnit.NANOSECONDS).execute(this::check);
-        }
-
-        private void check() {
-            if (stopped) {
-                return;
-            }
-            long since = pollingSince.get();
-            if (since != NOT_POLLING && System.nanoTime() - since > settings.watchdogTimeout().toNanos()) {
-                fired.set(true);
+        // a simple query ('Q'), waiting for its ReadyForQuery; an error ends the session (see read)
+        void execute(String sql) {
+            CompletableFuture<@Nullable Void> answered = new CompletableFuture<>();
+            synchronized (this) {
+                if (ended) {
+                    throw new StoreException("The PostgreSQL listener's session ended", false);
+                }
+                commands.add(answered);
                 try {
-                    connection.abort(Runnable::run);
-                } catch (SQLException | RuntimeException e) {
-                    LOGGER.log(Level.DEBUG, format("Aborting the listening connection failed for %s", describe()),
-                            e);
+                    byte[] text = stream.getEncoding().encode(sql);
+                    stream.sendChar('Q');
+                    stream.sendInteger4(4 + text.length + 1);
+                    stream.send(text);
+                    stream.sendChar(0);
+                    stream.flush();
+                } catch (IOException e) {
+                    throw new StoreException("Listening on PostgreSQL failed (" + sql + "): " + e.getMessage(), e,
+                            false);
+                }
+            }
+            try {
+                answered.get(COMMAND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            } catch (ExecutionException e) {
+                Throwable cause = e.getCause() != null ? e.getCause() : e;
+                throw new StoreException("Listening on PostgreSQL failed (" + sql + "): " + cause.getMessage(), cause,
+                        false);
+            } catch (TimeoutException e) {
+                throw new StoreException("Listening on PostgreSQL failed (" + sql + "): no answer within "
+                        + COMMAND_TIMEOUT.toSeconds() + " s", e, false);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new StoreException("Listening on PostgreSQL was interrupted (" + sql + ")", e, false);
+            }
+        }
+
+        void answered() {
+            CompletableFuture<@Nullable Void> oldest = commands.poll();
+            if (oldest != null) {
+                oldest.complete(null);
+            }
+        }
+
+        // no command is sent after this; those waiting fail
+        void end(Throwable cause) {
+            synchronized (this) {
+                ended = true;
+            }
+            for (CompletableFuture<@Nullable Void> waiting; (waiting = commands.poll()) != null; ) {
+                waiting.completeExceptionally(cause);
+            }
+        }
+    }
+
+    // one listening session; its state is guarded by the session's monitor, dispatch reads concurrent structures
+    private static final class Session {
+
+        private final DataSource listenerDataSource;
+        private final Map<String, List<Registration>> channels = new ConcurrentHashMap<>();
+        private final Map<String, CompletableFuture<@Nullable Void>> probes = new ConcurrentHashMap<>();
+        private final String probeChannel = "dc_probe_" + UUID.randomUUID().toString().replace("-", "");
+        @GuardedBy("this")
+        private @Nullable Held held;
+        // counts the connections established, so that a loss is re-established once, whoever asks first
+        @GuardedBy("this")
+        private long generation;
+        @GuardedBy("this")
+        private boolean closed;
+
+        Session(DataSource listenerDataSource) {
+            this.listenerDataSource = listenerDataSource;
+        }
+
+        Registration register(String channel, ChangeListener listener, DataSource dataSource) {
+            Registration registration = new Registration(this, channel, listener, dataSource);
+            channels.computeIfAbsent(channel, ignored -> new CopyOnWriteArrayList<>()).add(registration);
+            return registration;
+        }
+
+        // listens on the registration's channel, connecting if there is no connection (re-established for the caches
+        // that lost it, who learn of it when they resume)
+        synchronized void listen(Registration registration) {
+            if (held != null) {
+                try {
+                    held.execute(PostgresListener.listen(registration.channel));
+                } catch (StoreException e) {
+                    // broken before its loss was noticed: connected anew below
+                    discard(held);
+                }
+            }
+            if (held == null) {
+                connect();
+            }
+            registration.generation = generation;
+        }
+
+        // re-establishes the session for a registration (VISION.md, "Supervision"): if another one did since this one
+        // lost it, nothing is left to do; otherwise connected anew, also if the connection seems alive (suspected
+        // silent), which the others delivering on it are told as a gap. Only a registration not told of a loss can
+        // suspect its connection: for one told, a connection there now is a newer one. PostgreSQL keeps no history:
+        // a gap either way
+        void resume(Registration registration) {
+            List<Registration> delivering = new ArrayList<>();
+            synchronized (this) {
+                if (closed) {
+                    return;
+                }
+                if (held == null || (!registration.lost && generation == registration.generation)) {
+                    if (held != null) {
+                        LOGGER.log(Level.WARNING, "The PostgreSQL listener for {0} is suspected silent; reconnecting",
+                                serving());
+                        discard(held);
+                        forEachRegistration(other -> {
+                            if (other != registration && !other.lost) {
+                                delivering.add(other);
+                            }
+                        });
+                    }
+                    connect();
+                    LOGGER.log(Level.INFO, "The PostgreSQL listener for {0} reconnected", serving());
+                    delivering.forEach(other -> other.generation = generation);
+                }
+                registration.generation = generation;
+                registration.lost = false;
+            }
+            for (Registration other : delivering) {
+                notify(other.listener::onGap);
+            }
+        }
+
+        // proves that a notification sent through the registration's data source reaches the session; a probe lost
+        // because the session reconnected meanwhile proves nothing and is repeated
+        void requireDelivery(Registration registration) {
+            for (int attempt = 1; ; attempt++) {
+                long probed;
+                synchronized (this) {
+                    probed = generation;
+                }
+                if (probe(registration.dataSource)) {
+                    return;
+                }
+                boolean reconnected;
+                synchronized (this) {
+                    reconnected = held == null || generation != probed;
+                }
+                if (!reconnected || attempt == PROBE_ATTEMPTS) {
+                    throw new StoreException("The listener connection received no notification within "
+                            + PROBE_TIMEOUT_SECONDS + " s (transaction-mode pooler?); listen through a data source "
+                            + "that reaches the database directly or through a session-mode pooler "
+                            + "(PostgresAdapter.Builder.withListenerDataSource)", false);
+                }
+            }
+        }
+
+        // takes a connection of the data source over and listens on every channel; fails with a StoreException
+        @GuardedBy("this")
+        // the connection is held until the session lets go of it (release); LISTEN one channel at a time, so that a
+        // failure is the channel's own, not a batch's
+        @SuppressWarnings({"java:S2095", "java:S6912"})
+        private void connect() {
+            Connection connection;
+            try {
+                connection = listenerDataSource.getConnection();
+            } catch (SQLException | RuntimeException e) {
+                throw new StoreException("Connecting the PostgreSQL listener failed: " + e.getMessage(), e, false);
+            }
+            try {
+                if (!connection.isWrapperFor(BaseConnection.class)) {
+                    throw new StoreException("The listener's data source must hand out pgjdbc connections "
+                            + "(org.postgresql), not " + connection.getClass().getName(), false);
+                }
+                // LISTEN takes effect at its commit
+                connection.setAutoCommit(true);
+                PostgresStore.bound(connection, COMMAND_TIMEOUT);
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute(PostgresListener.listen(probeChannel));
+                    for (String channel : channels.keySet()) {
+                        statement.execute(PostgresListener.listen(channel));
+                    }
+                }
+                // what pgjdbc received meanwhile, read without waiting; then nothing is left in its hands
+                PGNotification[] early = connection.unwrap(PGConnection.class).getNotifications();
+                // the session idles between notifications: no read timeout (a silent one is the core's heartbeat's
+                // to find)
+                connection.setNetworkTimeout(Runnable::run, 0);
+                PGStream stream = (PGStream) streamField().get(
+                        connection.unwrap(BaseConnection.class).getQueryExecutor());
+                Held taken = new Held(connection, stream);
+                held = taken;
+                generation++;
+                if (early != null) {
+                    for (PGNotification notification : early) {
+                        dispatch(notification.getName(), notification.getParameter());
+                    }
+                }
+                Thread reader = new Thread(() -> read(taken), "distributed-caffeine-postgresql-listener");
+                reader.setDaemon(true);
+                reader.start();
+            } catch (SQLException | ReflectiveOperationException | RuntimeException e) {
+                held = null;
+                release(connection);
+                throw e instanceof StoreException storeException ? storeException
+                        : new StoreException("Listening on PostgreSQL failed: " + e.getMessage(), e, false);
+            }
+        }
+
+        private static Field streamField() {
+            Field field = PG_STREAM;
+            if (field == null) {
+                throw new IllegalStateException("checked when subscribing");
+            }
+            return field;
+        }
+
+        // the session's thread: the backend's messages, by their type byte and length (which counts itself).
+        // NotificationResponse ('A') is dispatched, ReadyForQuery ('Z') answers a command, an ErrorResponse ('E')
+        // ends the session (a LISTEN refused, the backend terminated); everything else is skipped
+        @SuppressWarnings("java:S1181") // whatever ends the session, it is reported as lost
+        private void read(Held taken) {
+            PGStream stream = taken.stream;
+            Throwable failure;
+            try {
+                for (; ; ) {
+                    int type = stream.receiveChar();
+                    int length = stream.receiveInteger4();
+                    if (length < 4) {
+                        throw new IOException("a backend message of type " + type + " with length " + length);
+                    }
+                    switch (type) {
+                        case 'A' -> {
+                            stream.receiveInteger4(); // the notifying backend's process id
+                            String channel = stream.receiveCanonicalString();
+                            dispatch(channel, stream.receiveString());
+                        }
+                        case 'Z' -> {
+                            stream.skip(length - 4);
+                            taken.answered();
+                        }
+                        case 'E' -> throw new StoreException("The PostgreSQL listener's session failed: "
+                                + error(stream.receive(length - 4)), false);
+                        default -> stream.skip(length - 4);
+                    }
+                }
+            } catch (IOException | RuntimeException | Error e) {
+                failure = e;
+            }
+            taken.end(failure);
+            lost(taken, failure);
+        }
+
+        private void dispatch(String channel, @Nullable String payload) {
+            if (probeChannel.equals(channel)) {
+                CompletableFuture<@Nullable Void> probe = payload == null ? null : probes.remove(payload);
+                if (probe != null) {
+                    probe.complete(null);
                 }
                 return;
             }
-            schedule();
-        }
-
-        private void stop() {
-            stopped = true;
-        }
-
-        // what the blocked read fails with once the socket is closed says only that the connection broke, so the
-        // reason it was broken is put in front of it
-        private SQLException explain(SQLException e) {
-            if (!fired.get()) {
-                return e;
+            List<Registration> registrations = channels.get(channel);
+            Change message = payload == null ? null : parse(payload);
+            if (registrations == null || message == null) {
+                return;
             }
-            return new SQLException(format("Listening connection was stuck inside the driver for more than %d "
-                    + "seconds and was aborted", settings.watchdogTimeout().toSeconds()), "08006", e);
+            for (Registration registration : registrations) {
+                try {
+                    registration.listener.onChanges(List.of(message));
+                } catch (RuntimeException e) {
+                    LOGGER.log(Level.WARNING, "A listener for " + cacheOf(registration.channel)
+                            + " failed on a notification", e);
+                }
+            }
+        }
+
+        // a notification sent through JDBC must arrive on this session; false if it does not within the timeout.
+        // A failure to send (the store down) proves nothing about the session and counts as arrived
+        private boolean probe(DataSource dataSource) {
+            String token = UUID.randomUUID().toString();
+            CompletableFuture<@Nullable Void> arrived = new CompletableFuture<>();
+            probes.put(token, arrived);
+            try (Connection jdbc = dataSource.getConnection()) {
+                int previousTimeout = PostgresStore.bound(jdbc, Duration.ofSeconds(PROBE_TIMEOUT_SECONDS));
+                try (PreparedStatement statement = jdbc.prepareStatement("SELECT pg_notify(?, ?)")) {
+                    statement.setString(1, probeChannel);
+                    statement.setString(2, token);
+                    statement.executeQuery().close();
+                } finally {
+                    PostgresStore.unbound(jdbc, previousTimeout);
+                }
+            } catch (SQLException | RuntimeException e) {
+                probes.remove(token);
+                return true;
+            }
+            try {
+                arrived.get(PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                return true;
+            } catch (TimeoutException e) {
+                return false;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return true;
+            } catch (ExecutionException e) {
+                return true;
+            } finally {
+                probes.remove(token);
+            }
+        }
+
+        // the session broke: every cache is told, and resumes it when it can
+        @SuppressWarnings("ReferenceEquality") // only the connection that broke is the current one
+        private void lost(Held broken, Throwable failure) {
+            List<Registration> told = new ArrayList<>();
+            synchronized (this) {
+                if (held != broken || closed) {
+                    return;
+                }
+                discard(broken);
+                forEachRegistration(registration -> {
+                    registration.lost = true;
+                    told.add(registration);
+                });
+            }
+            LOGGER.log(Level.WARNING, "The PostgreSQL listener for {0} lost its connection ({1})", serving(),
+                    failure.getMessage());
+            told.forEach(registration -> notify(() -> registration.listener.onLost(failure)));
+        }
+
+        // lets go of a broken connection; its thread ends, and its loss reported later is ignored
+        @GuardedBy("this")
+        private void discard(Held broken) {
+            held = null;
+            release(broken.connection);
+        }
+
+        // the caches it listens for, for its log messages: a session serves every cache on its data source
+        private String serving() {
+            return channels.keySet().stream().map(PostgresListener::cacheOf).sorted().collect(Collectors.joining(", "));
+        }
+
+        private static void notify(Runnable call) {
+            try {
+                call.run();
+            } catch (RuntimeException e) {
+                LOGGER.log(Level.WARNING, "A listener failed", e);
+            }
+        }
+
+        private void forEachRegistration(java.util.function.Consumer<Registration> action) {
+            for (List<Registration> registrations : channels.values()) {
+                registrations.forEach(action);
+            }
+        }
+
+        void unregister(Registration registration) {
+            synchronized (SESSIONS) {
+                synchronized (this) {
+                    List<Registration> registrations = channels.get(registration.channel);
+                    if (registrations != null) {
+                        registrations.remove(registration);
+                        if (registrations.isEmpty()) {
+                            channels.remove(registration.channel);
+                            if (held != null && !channels.isEmpty()) {
+                                try {
+                                    held.execute("UNLISTEN " + PostgresTable.quote(registration.channel));
+                                } catch (StoreException e) {
+                                    // the session breaks anyway
+                                }
+                            }
+                        }
+                    }
+                    if (channels.isEmpty()) {
+                        close();
+                        SESSIONS.remove(listenerDataSource, this);
+                    }
+                }
+            }
+        }
+
+        @GuardedBy("this")
+        private void close() {
+            closed = true;
+            if (held != null) {
+                release(held.connection);
+                held = null;
+            }
+        }
+
+        // aborted, not closed: the stream was taken over, so the connection must never be used again, and a pool must
+        // not hand it out again. Closed after that, which hands it back to a pool as broken (HikariCP evicts it,
+        // failing to reset its state). On a thread of its own: a broken connection must hold nothing up, and is
+        // released under the session's lock
+        @SuppressWarnings("java:S1166") // a connection being let go of fails as it pleases
+        private static void release(Connection connection) {
+            Thread closer = new Thread(() -> {
+                try {
+                    connection.abort(Runnable::run);
+                } catch (SQLException | RuntimeException ignored) {
+                    // closed already
+                }
+                try {
+                    connection.close();
+                } catch (SQLException | RuntimeException ignored) {
+                    // a pool finding it broken
+                }
+            }, "distributed-caffeine-postgresql-release");
+            closer.setDaemon(true);
+            closer.start();
         }
     }
 }
