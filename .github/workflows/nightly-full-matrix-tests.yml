@@ -11,7 +11,7 @@ on:
 
 jobs:
   changes:
-    name: Changes since the last nightly
+    name: Check for changes since the last nightly
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.head.outputs.sha }}
@@ -56,58 +56,58 @@ jobs:
           # longest first, as at most 20 jobs run at once and the rest wait: model checking first, the in-memory
           # suites on the other store profiles (the default is jdbc), the shortest, last; the experiments
           # (-Dexperiments) and the managed Redis services (-Dredis.external) stay manual
-          - name: In-memory, model checking
+          - name: Test in-memory, model checking
             tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
             flags: -Dmodelchecking=true
-          - name: MongoDB 4-5
+          - name: Test MongoDB 4-5
             tests: "MongoIntegrationTest$Mongo_4_*,MongoIntegrationTest$Mongo_5_*"
-          - name: MongoDB 6-7
+          - name: Test MongoDB 6-7
             tests: "MongoIntegrationTest$Mongo_6_*,MongoIntegrationTest$Mongo_7_*"
-          - name: MongoDB 8-9
+          - name: Test MongoDB 8-9
             tests: "MongoIntegrationTest$Mongo_8_*,MongoIntegrationTest$Mongo_9_*"
-          - name: PostgreSQL 9-13
+          - name: Test PostgreSQL 9-13
             tests: "PostgresIntegrationTest$Postgres_9_*,PostgresIntegrationTest$Postgres_10_*,PostgresIntegrationTest$Postgres_11_*,PostgresIntegrationTest$Postgres_12_*,PostgresIntegrationTest$Postgres_13_*"
-          - name: PostgreSQL 14-18
+          - name: Test PostgreSQL 14-18
             tests: "PostgresIntegrationTest$Postgres_14_*,PostgresIntegrationTest$Postgres_15_*,PostgresIntegrationTest$Postgres_16_*,PostgresIntegrationTest$Postgres_17_*,PostgresIntegrationTest$Postgres_18_*"
-          - name: Redis 6
+          - name: Test Redis 6
             tests: "RedisIntegrationTest$Redis_6_*"
-          - name: Redis 7-8
+          - name: Test Redis 7-8
             tests: "RedisIntegrationTest$Redis_7_*,RedisIntegrationTest$Redis_8_*"
-          - name: Valkey
+          - name: Test Valkey
             tests: "RedisIntegrationTest$Valkey_*"
-          - name: Dragonfly
+          - name: Test Dragonfly
             tests: "RedisIntegrationTest$Dragonfly_*"
-          - name: Kvrocks
+          - name: Test Kvrocks
             tests: "RedisIntegrationTest$Kvrocks_*"
-          - name: MariaDB 10
+          - name: Test MariaDB 10
             tests: "JdbcIntegrationTest$MariaDB_10_*"
-          - name: MariaDB 11
+          - name: Test MariaDB 11
             tests: "JdbcIntegrationTest$MariaDB_11_*"
-          - name: MariaDB 12
+          - name: Test MariaDB 12
             tests: "JdbcIntegrationTest$MariaDB_12_*"
-          - name: MariaDB 13
+          - name: Test MariaDB 13
             tests: "JdbcIntegrationTest$MariaDB_13_*"
-          - name: MySQL 5
+          - name: Test MySQL 5
             tests: "JdbcIntegrationTest$MySQL_5_*"
-          - name: MySQL 8
+          - name: Test MySQL 8
             tests: "JdbcIntegrationTest$MySQL_8_*"
-          - name: MySQL 9
+          - name: Test MySQL 9
             tests: "JdbcIntegrationTest$MySQL_9_*"
-          - name: MySQL 26
+          - name: Test MySQL 26
             tests: "JdbcIntegrationTest$MySQL_26_*"
-          - name: In-memory, postgresql
+          - name: Test in-memory, postgresql
             tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
             flags: -Dinmemory.profile=postgresql
-          - name: In-memory, mongodb
+          - name: Test in-memory, mongodb
             tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
             flags: -Dinmemory.profile=mongodb
-          - name: In-memory, redis
+          - name: Test in-memory, redis
             tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
             flags: -Dinmemory.profile=redis
-          - name: In-memory, redis-hostile
+          - name: Test in-memory, redis-hostile
             tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
             flags: -Dinmemory.profile=redis-hostile
-          - name: In-memory, postgresql-stepping
+          - name: Test in-memory, postgresql-stepping
             tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
             flags: -Dinmemory.profile=postgresql-stepping
     steps:

@@ -11,8 +11,35 @@ on:
 
 jobs:
   continuous-integration:
-    name: Continuous Integration (CI)
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # one runner per group, as in the nightly full matrix (nightly-full-matrix-tests.yml), so the store suites
+          # neither wait for nor disturb each other. Only the first group runs the whole build (Error Prone and
+          # NullAway, javadoc, packaging); the store groups compile without Error Prone and stop after the tests.
+          # Together the groups cover every test of a single run, the integration tests on the latest image of each
+          # store (-DrunsOnGitHub)
+          - name: Test in-memory
+            goal: clean verify
+            tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
+          - name: Test MongoDB
+            goal: -DskipErrorProne test
+            tests: "MongoIntegrationTest$*"
+          - name: Test PostgreSQL
+            goal: -DskipErrorProne test
+            tests: "PostgresIntegrationTest$*"
+          - name: Test Redis, Valkey
+            goal: -DskipErrorProne test
+            tests: "RedisIntegrationTest$Redis_*,RedisIntegrationTest$Valkey_*"
+          - name: Test Dragonfly, Kvrocks
+            goal: -DskipErrorProne test
+            tests: "RedisIntegrationTest$Dragonfly_*,RedisIntegrationTest$Kvrocks_*"
+          - name: Test MariaDB, MySQL
+            goal: -DskipErrorProne test
+            tests: "JdbcIntegrationTest$*"
     steps:
       - name: Checkout branch
         uses: actions/checkout@v7
@@ -27,4 +54,17 @@ jobs:
           distribution: 'temurin'
           cache: maven
       - name: Verify with Maven
-        run: mvn clean verify -DrunsOnGitHub
+        # no failIfNoSpecifiedTests=false: a group whose pattern matches no test fails instead of passing with
+        # nothing tested
+        run: mvn -B ${{ matrix.goal }} -DrunsOnGitHub "-Dtest=${{ matrix.tests }}"
+
+  # one check under the name the single job had, which branch protection can require however the groups change;
+  # always(), as a job skipped after a failed group would count as passed
+  result:
+    name: Continuous Integration (CI)
+    needs: continuous-integration
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every group to pass
+        run: test "${{ needs.continuous-integration.result }}" = success
