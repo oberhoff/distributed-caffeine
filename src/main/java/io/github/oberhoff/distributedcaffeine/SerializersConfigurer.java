@@ -32,7 +32,7 @@ import static java.util.Objects.requireNonNull;
  * <p>
  * <b>Attention:</b> values come from a shared store, so with the default whoever can write to the store can make
  * every instance deserialize arbitrary classes. If the store's access cannot be trusted, use
- * {@link ForySerializer#requiringRegistration(Class[])} or another hardened serializer.
+ * {@link ForySerializer#allowing(Class[])} or another hardened serializer.
  *
  * @param <K> the key type
  * @param <V> the value type

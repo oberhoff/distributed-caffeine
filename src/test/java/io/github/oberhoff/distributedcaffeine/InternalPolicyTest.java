@@ -34,11 +34,13 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * {@code policy()}: L1's policy translated to the user's keys and values, local to the instance; the writes of
@@ -150,6 +152,44 @@ class InternalPolicyTest {
         assertThat(expiration.getExpiresAfter()).isEqualTo(Duration.ofMinutes(1));
         assertThat(cache.policy().expireAfterAccess()).isEmpty();
         assertThat(cache.policy().expireVariably()).isEmpty();
+    }
+
+    @Test
+    void emulated_fixed_expiration_behaves_as_caffeines() {
+        AtomicLong nanos = new AtomicLong();
+        DistributedCache<String, String> cache = track(builder().withCaffeine(caffeine -> caffeine
+                .ticker(nanos::get).expireAfterWrite(Duration.ofMinutes(10))
+                .expireAfterAccess(Duration.ofMinutes(5))).build());
+        cache.put("first", "v");
+        nanos.addAndGet(Duration.ofMinutes(1).toNanos());
+        cache.put("second", "v");
+
+        Policy.FixedExpiration<String, String> writing = cache.policy().expireAfterWrite().orElseThrow();
+        Policy.FixedExpiration<String, String> accessing = cache.policy().expireAfterAccess().orElseThrow();
+        assertThat(writing.ageOf("first")).hasValue(Duration.ofMinutes(1));
+        assertThat(writing.oldest(2).keySet()).containsExactly("first", "second");
+        assertThat(writing.youngest(1)).containsOnlyKeys("second");
+
+        nanos.addAndGet(Duration.ofMinutes(3).toNanos());
+        assertThat(cache.getIfPresent("first")).as("a read moves the access, not the write").isEqualTo("v");
+        assertThat(accessing.ageOf("first")).hasValue(Duration.ZERO);
+        assertThat(writing.ageOf("first")).hasValue(Duration.ofMinutes(4));
+        assertThat(accessing.oldest(1)).containsOnlyKeys("second");
+
+        nanos.addAndGet(Duration.ofSeconds(121).toNanos());
+        assertThat(cache.policy().getIfPresentQuietly("second")).as("not read for five minutes").isNull();
+        assertThat(cache.policy().getIfPresentQuietly("first")).isEqualTo("v");
+
+        // as in Caffeine, a new duration applies to the copies held at once
+        writing.setExpiresAfter(Duration.ofMinutes(6));
+        assertThat(writing.getExpiresAfter()).isEqualTo(Duration.ofMinutes(6));
+        nanos.addAndGet(Duration.ofSeconds(1).toNanos());
+        assertThat(cache.policy().getIfPresentQuietly("first")).isNull();
+
+        writing.setExpiresAfter(LONG.multipliedBy(2));
+        assertThat(writing.getExpiresAfter()).as("lowered to the maximum age, as configured").isEqualTo(LONG);
+        assertThatThrownBy(() -> writing.setExpiresAfter(-1, TimeUnit.SECONDS))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

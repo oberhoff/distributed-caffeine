@@ -40,9 +40,9 @@ public enum DistributionMode {
     UPDATE,
 
     /**
-     * No distribution at all. A copy changed elsewhere stays until it expires or is evicted, at the store's maximum
-     * age at the latest; the next read then takes the value from the store, or else from the loader or mapping
-     * function (if any).
+     * No distribution at all. A copy changed elsewhere stays until it expires or is evicted, at the store's maximum age
+     * after its value's write at the latest; the next read then takes the value from the store, or else from the loader
+     * or mapping function (if any).
      */
     NONE
 }

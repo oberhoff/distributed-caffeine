@@ -204,6 +204,8 @@ final class InternalCore<K, V> {
     // the maximum age for the store only (StoreConfigurer#withMaximumAgeForStoreOnly): a value expires in the store,
     // but its copies stay here
     private final boolean maximumAgeForStoreOnly;
+    // L1's expiry, if it is this library's (CaffeineConfigurer#caffeine): the policy shows its fixed durations
+    private final @Nullable InternalExpiry<K, V> expiry;
     private final Executor storeExecutor;
     private final int loadAttempts;
     private volatile @Nullable Duration refreshAfterWrite;
@@ -278,7 +280,8 @@ final class InternalCore<K, V> {
 
     @SuppressWarnings("java:S2637") // l1 is assigned in the try below, before anything can fail after it
     InternalCore(String name, Store store, Caffeine<InternalKey<K>, InternalValue<V>> caffeine,
-                 InternalHasher<K> hasher, InternalSerializer<K> keySerializer, InternalSerializer<V> valueSerializer,
+                 @Nullable InternalExpiry<K, V> expiry, InternalHasher<K> hasher, InternalSerializer<K> keySerializer,
+                 InternalSerializer<V> valueSerializer,
                  Duration maximumAge,
                  boolean maximumAgeForStoreOnly, Executor storeExecutor, @Nullable Duration refreshAfterWrite,
                  @Nullable Loaders<K, V> loaders,
@@ -298,6 +301,7 @@ final class InternalCore<K, V> {
         this.valueSerializer = requireNonNull(valueSerializer);
         this.maximumAge = requireNonNull(maximumAge);
         this.maximumAgeForStoreOnly = maximumAgeForStoreOnly;
+        this.expiry = expiry;
         this.storeExecutor = requireNonNull(storeExecutor);
         this.loader = loaders == null ? null : loaders.single();
         this.onClose = requireNonNull(onClose);
@@ -388,6 +392,10 @@ final class InternalCore<K, V> {
             l1.synchronous().invalidateAll();
             onClose.run();
         }
+    }
+
+    @Nullable InternalExpiry<K, V> expiry() {
+        return expiry;
     }
 
     AsyncCache<InternalKey<K>, InternalValue<V>> l1() {
@@ -488,7 +496,7 @@ final class InternalCore<K, V> {
                     if (remembered(internalKey.hash())) {
                         forgetAbsence(internalKey.hash()); // written elsewhere while no message could tell
                     }
-                    hold(internalKey, new InternalValue<>(value, row.version(), readEpoch));
+                    hold(internalKey, new InternalValue<>(value, row.version(), readEpoch, row.age()));
                     found.put(internalKey, value);
                     if (needsRefresh(row.age())) {
                         refreshLater(internalKey);
@@ -819,7 +827,7 @@ final class InternalCore<K, V> {
                         current = read;
                         continue;
                     }
-                    current = new Current<>(current.value(), read.version(), read.epoch(), false);
+                    current = new Current<>(current.value(), read.version(), read.epoch(), false, read.age());
                 }
                 if (newValue == current.value() && !alwaysWrite) {
                     // nothing to write, but L1 may be behind what the read found (a write in flight here): brought up
@@ -911,13 +919,13 @@ final class InternalCore<K, V> {
         if (row == null) {
             return new Current<>(null, 0, readEpoch, false);
         }
-        return new Current<>(valueOf(row), row.version(), readEpoch, false);
+        return new Current<>(valueOf(row), row.version(), readEpoch, false, row.age());
     }
 
     private void catchUp(InternalKey<K> internalKey, Current<V> current) {
         V value = current.value();
         if (value != null) {
-            hold(internalKey, new InternalValue<>(value, current.version(), current.epoch()));
+            hold(internalKey, new InternalValue<>(value, current.version(), current.epoch(), current.age()));
         } else if (current.version() > 0) {
             // no value at that version (a hidden row reads as a tombstone at its value's version): held at it is stale
             dropOlder(internalKey, current.version() + 1);
@@ -926,8 +934,13 @@ final class InternalCore<K, V> {
 
     // what an update decides on, held or read from the store (version 0: no row; a version without a value: a
     // tombstone, an expired row or a value too old to count, a row hidden by an invalidateAll, or an unreadable
-    // value), the epoch before it was looked at (the written value's in L1), and whether it is held
-    private record Current<V>(@Nullable V value, long version, int epoch, boolean held) {
+    // value), the epoch before it was looked at (the written value's in L1), whether it is held, and the age of its row
+    // as read (none for a held value, which keeps its own expiry)
+    private record Current<V>(@Nullable V value, long version, int epoch, boolean held, Duration age) {
+
+        Current(@Nullable V value, long version, int epoch, boolean held) {
+            this(value, version, epoch, held, Duration.ZERO);
+        }
     }
 
     // before an operation that will put into L1 reads or writes the store (or, for a load, right after its future
@@ -1635,7 +1648,7 @@ final class InternalCore<K, V> {
                 }
                 stats.increment(Counter.STORE_HIT);
                 return CompletableFuture.completedFuture(
-                        LoadResult.cached(new InternalValue<>(found, row.version(), loadEpoch),
+                        LoadResult.cached(new InternalValue<>(found, row.version(), loadEpoch, row.age()),
                                 row.age()));
             }
             if (checked) {
@@ -1705,7 +1718,7 @@ final class InternalCore<K, V> {
             if (current != null && found != null) {
                 // a newer value landed meanwhile: it wins
                 return CompletableFuture.completedFuture(
-                        LoadResult.cached(new InternalValue<>(found, current.version(), againEpoch),
+                        LoadResult.cached(new InternalValue<>(found, current.version(), againEpoch, current.age()),
                                 current.age()));
             }
             return attempt(internalKey, singleLoader, owned, steps, againEpoch, current, attempt + 1, loaded,
@@ -2068,7 +2081,7 @@ final class InternalCore<K, V> {
                 if (checked.contains(internalKey)) {
                     forgetAbsence(internalKey.hash()); // written elsewhere while no message could tell
                 }
-                result.put(internalKey, new InternalValue<>(value, row.version(), readEpoch));
+                result.put(internalKey, new InternalValue<>(value, row.version(), readEpoch, row.age()));
                 if (needsRefresh(row.age())) {
                     outcome.stale().add(internalKey);
                 }
@@ -2292,7 +2305,7 @@ final class InternalCore<K, V> {
             if (row == null || value == null) {
                 removeIfOlder(lookup, row == null ? InternalVersion.ANYTHING : row.version());
             } else {
-                install(lookup, new InternalValue<>(value, row.version(), readEpoch), false, false);
+                install(lookup, new InternalValue<>(value, row.version(), readEpoch, row.age()), false, false);
             }
         }
     }
@@ -2849,7 +2862,7 @@ final class InternalCore<K, V> {
                         if (found == null) {
                             return null;
                         }
-                        value = new InternalValue<>(found, current.version(), current.epoch());
+                        value = new InternalValue<>(found, current.version(), current.epoch(), current.age());
                     }
                     commit(key, value);
                     CompletableFuture<InternalValue<V>> held = l1.asMap().get(key);

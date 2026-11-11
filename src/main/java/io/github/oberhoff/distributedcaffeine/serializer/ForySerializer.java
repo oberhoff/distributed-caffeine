@@ -29,7 +29,7 @@ import static java.util.Objects.requireNonNull;
  * <p>
  * <b>Attention:</b> by default, any class can be deserialized, so whoever can write to the store can make every
  * instance deserialize classes of their choice. If the store's access cannot be trusted, use
- * {@link #requiringRegistration(Class[])}.
+ * {@link #allowing(Class[])}.
  *
  * @param <T> the type of the object to serialize
  * @author Andreas Oberhoff
@@ -76,16 +76,16 @@ public class ForySerializer<T> implements ByteArraySerializer<T> {
 
     /**
      * Returns a serializer that deserializes only the given classes, hardened against values written to the store by
-     * someone else. Every class of the serialized objects must be listed.
+     * someone else. Every class of the serialized objects must be listed (Fory's class registration).
      *
-     * @param registerClasses the classes to accept, in an order that stays the same across instances
-     * @param <T>             the type of the object to serialize
+     * @param allowedClasses the classes to accept, in an order that stays the same across instances
+     * @param <T>            the type of the object to serialize
      * @return the serializer
      */
-    public static <T> ForySerializer<T> requiringRegistration(Class<?>... registerClasses) {
+    public static <T> ForySerializer<T> allowing(Class<?>... allowedClasses) {
         return new ForySerializer<>(new ForyBuilder()
                 .withLanguage(Language.JAVA)
-                .requireClassRegistration(true), registerClasses);
+                .requireClassRegistration(true), allowedClasses);
     }
 
     @Override

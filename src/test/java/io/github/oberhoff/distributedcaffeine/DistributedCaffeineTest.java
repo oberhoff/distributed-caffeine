@@ -160,7 +160,19 @@ class DistributedCaffeineTest {
         DistributedCaffeine<String, String> fifth = DistributedCaffeine.newBuilder(adapter)
                 .withStore(store -> store.withMaximumAge(Duration.ofSeconds(30)).withMaximumAgeForStoreOnly());
         assertThatThrownBy(fifth::build).isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("heartbeat interval of at most PT6S");
+                .hasMessageContaining("maximum age of at least five heartbeat intervals (PT50S), not PT30S");
+        // a shorter heartbeat allows a shorter age; five default intervals are enough
+        DistributedCaffeine<String, String> shorter = DistributedCaffeine.newBuilder(adapter)
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(StringSerializer.ofString()))
+                .withStore(store -> store.withMaximumAge(Duration.ofSeconds(30)).withMaximumAgeForStoreOnly()
+                        .withHeartbeatInterval(Duration.ofSeconds(6)));
+        shorter.build().close();
+        DistributedCaffeine<String, String> exact = DistributedCaffeine.newBuilder(adapter)
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(StringSerializer.ofString()))
+                .withStore(store -> store.withMaximumAge(Duration.ofSeconds(50)).withMaximumAgeForStoreOnly());
+        exact.build().close();
         DistributedCaffeine<String, String> minute = DistributedCaffeine.newBuilder(adapter)
                 .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumAgeForStoreOnly()
                         .withHeartbeatInterval(Duration.ofMinutes(2)));

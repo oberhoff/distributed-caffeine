@@ -46,7 +46,9 @@ public interface DistributedPolicy<K, V> {
     @Nullable StoredValue<V> getFromStore(K key);
 
     /**
-     * Reads values directly from the store, as {@link #getFromStore(Object)}.
+     * Reads the keys' values from the store, bypassing this instance's copies and without keeping what it reads.
+     * Values older than the store's maximum age are not returned, nor values this instance cannot read (counted as
+     * {@code unreadableRowCount}), which every read treats as missing.
      *
      * @param keys the keys
      * @return the stored values found, by key

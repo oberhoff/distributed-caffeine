@@ -55,10 +55,10 @@ public final class StoreConfigurer {
 
     /**
      * Sets how old a value may get, counted from its write by the store's clock. The store never returns an older
-     * value, and the instances drop their copies of it within about one maintenance interval, however their own expiry
-     * is set (unless {@link #withMaximumAgeForStoreOnly()}). An instance that hears of no change (with
-     * {@link DistributionMode#NONE}, or after a message lost unnoticed) still drops a copy at the maximum age after it
-     * got it, so an outdated copy is served no longer than that.
+     * value, and every instance drops its copy of it at that age, however its own expiry is set and whatever the
+     * distribution mode, also if a change never reaches the instance, so an outdated copy is served no longer than that
+     * (unless {@link #withMaximumAgeForStoreOnly()}). Maintenance removes the value from the store within about one
+     * maintenance interval after.
      * Optional: unbounded by default, as with {@code ChronoUnit.FOREVER.getDuration()}.
      *
      * @param maximumAge the maximum age (positive)
@@ -100,13 +100,12 @@ public final class StoreConfigurer {
      * Applies the maximum age to the store only: a value expires in the store as set, but the local copies expire as
      * their Caffeine expiry says, not bounded by it, and the store's expiry does not drop them. A miss reads the store
      * as before, so a value written or loaded elsewhere within the maximum age is taken from it; later, a miss calls
-     * the source. For a store too small or too expensive for the working set, or local copies kept far longer than
-     * the store should keep values. Nothing bounds how long a copy is served if a change never reaches its instance (a
-     * message lost without a gap noticed); after a gap noticed, copies whose values expired in the store are dropped.
-     * The atomic {@code asMap()} methods stay atomic across instances, at one read more. Requires
-     * {@link #withMaximumAge(Duration)}, distribution (not {@link DistributionMode#NONE}) and a heartbeat interval of
-     * at most a fifth of the maximum age and at most a minute (the default is ten seconds). Values written in the last
-     * three heartbeat intervals are kept beyond the maximum size.
+     * the source. For local copies meant to live longer than the store should keep values. Nothing bounds how long a
+     * copy is served if a change never reaches its instance and the loss goes unnoticed; once a loss is noticed, copies
+     * whose values expired in the store are dropped. The atomic {@code asMap()} methods stay atomic across instances,
+     * at one read more. Requires distribution (not {@link DistributionMode#NONE}) and a maximum age ({@link
+     * #withMaximumAge(Duration)}) of at least five heartbeat intervals: 50 seconds with the default interval, shorter
+     * with a shorter one. Values written in the last three heartbeat intervals are kept beyond the maximum size.
      *
      * @return this configurer
      */
@@ -172,8 +171,8 @@ public final class StoreConfigurer {
     /**
      * Sets how often each instance checks that it still receives the changes made elsewhere, with ±20 % jitter. Changes
      * can stop arriving without any error; such a silence is noticed within about two intervals, and until the changes
-     * arrive again, every read checks its copy against the store. Ignored without distribution. Optional: ten seconds
-     * by default.
+     * arrive again, every read checks its copy against the store. Ignored without distribution. At most a minute with
+     * {@link #withMaximumAgeForStoreOnly()}. Optional: ten seconds by default.
      *
      * @param heartbeatInterval the interval (positive)
      * @return this configurer

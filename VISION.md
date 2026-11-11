@@ -644,7 +644,7 @@ filter; out of the box wins over secure by default, with the threat stated plain
 **Built:** the serializer API carried over unchanged (`Serializer`, `ByteArraySerializer`, `StringSerializer`,
 `JsonSerializer`, `ForySerializer`, `JacksonSerializer`, `JavaObjectSerializer`), plus
 `StringSerializer.ofString()`, `ofLong()`, `ofInteger()`, `ofUUID()` and `ByteArraySerializer.ofByteArray()`,
-`ForySerializer.requiringRegistration(...)`, and `JavaObjectSerializer.allowing(...)` / a constructor taking an `ObjectInputFilter` (the allow list also admits
+`ForySerializer.allowing(...)`, and `JavaObjectSerializer.allowing(...)` / a constructor taking an `ObjectInputFilter` (the allow list also admits
 `java.lang`, `java.util` and `java.time`, which the objects commonly contain; the known gadget chains need classes
 outside the JDK). `withSerializers(serializers -> serializers.withKeySerializer(...).withValueSerializer(...))` in the
 builder; the core's `InternalSerializer` derives the format and moves text as UTF-8.
@@ -4337,9 +4337,16 @@ risk they carry for the core:
      and a user's `Expiry` is capped at what is left of it since the copy was installed (a read never lengthens it
      beyond). With a reliable feed nothing changes but the lag of up to one maintenance interval: maintenance expires
      the row at that age and its message drops the copy anyway; where that message is lost, the local expiry does
-     it. Counted from the install, so a copy of a row already old lives up to twice the maximum age after the write
-     (exact would need the row's age in every held value). `policy().expireAfterWrite()` is now present on every
-     cache. Rejected: a periodic check of the held copies against the store (a version read of everything held, every
+     it. Counted from the install, so a copy of a row already old lived up to twice the maximum age after the write.
+     **Made exact 2026-11-11:** every held value carries its row's age as read (`Row#age`, 0 for a value written
+     here), and the copy goes at the install plus what was left of the maximum age then: the maximum age after the
+     write, late by at most the round trip between the store's read and the install. Caffeine's fixed expiry is one
+     duration for all copies, so with a maximum age L1 always expires variably (`InternalExpiry`), emulating
+     `expireAfterWrite`/`expireAfterAccess`; `InternalPolicy` shows them as Caffeine's fixed policies (durations,
+     ages, order, a new duration applied to the held copies at once) and hides the variable policy unless the user
+     set an `Expiry`, whose `setExpiresAfter` is capped too. Without a bound (none set, or for the store only),
+     Caffeine's own fixed expiry as before. `policy().expireAfterWrite()` is present on every cache without an
+     `Expiry`. Rejected: a periodic check of the held copies against the store (a version read of everything held, every
      round, for nothing with a reliable feed); kept for a later discussion (Later);
    - a bus (once built): every loss is detected, by the sequence each sender numbers its batches with and its
      heartbeats; the epoch moves and what is held is revalidated. Tests: a dropped message noticed within a

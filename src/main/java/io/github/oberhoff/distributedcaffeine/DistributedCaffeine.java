@@ -306,24 +306,34 @@ public final class DistributedCaffeine<K, V> {
             throw new IllegalStateException("refreshAfterWrite requires a loading cache, as in Caffeine");
         }
         if (store().maximumAgeForStoreOnly()) {
-            if (!store().hasMaximumAge()) {
-                throw new IllegalStateException("withMaximumAgeForStoreOnly() requires withMaximumAge(...)");
-            }
-            // without messages every held value counts as trusted, which the atomic methods rely on (InternalCore#read)
-            if (distributionMode() == DistributionMode.NONE) {
-                throw new IllegalStateException("withMaximumAgeForStoreOnly() requires distribution, not "
-                        + "DistributionMode.NONE");
-            }
-            // a trusted holder knows of every write well before the store lets go of its row (InternalCore#read): a
-            // fifth of the maximum age, and at most a minute, three intervals within the tombstones' retention
-            Duration limit = store().maximumAge().dividedBy(5);
-            if (limit.compareTo(InternalMaintenance.STORE_ONLY_HEARTBEAT_LIMIT) > 0) {
-                limit = InternalMaintenance.STORE_ONLY_HEARTBEAT_LIMIT;
-            }
-            if (store().heartbeatInterval().compareTo(limit) > 0) {
-                throw new IllegalStateException("withMaximumAgeForStoreOnly() requires a heartbeat interval of at most "
-                        + limit + ", not " + store().heartbeatInterval());
-            }
+            validateStoreOnly();
+        }
+    }
+
+    // the maximum age for the store only (StoreConfigurer#withMaximumAgeForStoreOnly)
+    private void validateStoreOnly() {
+        if (!store().hasMaximumAge()) {
+            throw new IllegalStateException("withMaximumAgeForStoreOnly() requires withMaximumAge(...)");
+        }
+        // without messages every held value counts as trusted, which the atomic methods rely on (InternalCore#read)
+        if (distributionMode() == DistributionMode.NONE) {
+            throw new IllegalStateException("withMaximumAgeForStoreOnly() requires distribution, not "
+                    + "DistributionMode.NONE");
+        }
+        // a trusted holder knows of every write well before the store lets go of its row (InternalCore#read): a
+        // heartbeat interval of at most a minute, three intervals within the tombstones' retention (only reached
+        // by an interval set that long), and a maximum age of at least five intervals. Told from the maximum age's
+        // side, the setting the user chose: with the default interval, at least 50 seconds
+        Duration heartbeat = store().heartbeatInterval();
+        if (heartbeat.compareTo(InternalMaintenance.STORE_ONLY_HEARTBEAT_LIMIT) > 0) {
+            throw new IllegalStateException("withMaximumAgeForStoreOnly() requires a heartbeat interval of at most "
+                    + InternalMaintenance.STORE_ONLY_HEARTBEAT_LIMIT + ", not " + heartbeat);
+        }
+        Duration minimum = heartbeat.multipliedBy(5);
+        if (store().maximumAge().compareTo(minimum) < 0) {
+            throw new IllegalStateException("withMaximumAgeForStoreOnly() requires a maximum age of at least five "
+                    + "heartbeat intervals (" + minimum + "), not " + store().maximumAge()
+                    + ": set a longer maximum age or a shorter heartbeat interval");
         }
     }
 
@@ -387,7 +397,7 @@ public final class DistributedCaffeine<K, V> {
             boolean forStoreOnly = store().maximumAgeForStoreOnly();
             return new InternalCore<>(name, created,
                     caffeine.caffeine(forStoreOnly ? StoreConfigurer.UNBOUNDED_AGE : store().maximumAge()),
-                    new InternalHasher<>(hashProvider), keySerializer,
+                    caffeine.internalExpiry(), new InternalHasher<>(hashProvider), keySerializer,
                     valueSerializer, store().maximumAge(), forStoreOnly, executor, caffeine.refreshAfterWrite(),
                     loaders, distributionMode(), negativeCachingExpiry, store().maximumSize(),
                     store().maintenanceInterval(), pruneGrace(created instanceof InternalPollingStore),

@@ -17,6 +17,7 @@ package io.github.oberhoff.distributedcaffeine;
 
 import org.jspecify.annotations.Nullable;
 
+import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -45,17 +46,29 @@ final class InternalValue<V> {
     // the user key of the entry holding this value: Caffeine's unbounded cache reports a removal with the key the
     // caller passed, which for a message is a lookup key holding the hash only
     private final AtomicReference<@Nullable Object> key = new AtomicReference<>();
-    // when a user's Expiry must let this copy go at the latest (InternalExpiry): its install plus the store's maximum
+    // how old the store's row was when it was read (Row#age, in nanoseconds, never negative): 0 for a value written
+    // here, so that a copy goes at the store's maximum age after the write, not after its install (InternalExpiry)
+    private final long age;
+    // when this copy must go at the latest (InternalExpiry): its install plus what was left of the store's maximum
     // age, by Caffeine's ticker, so that no read lengthens it beyond
     private volatile long latestExpiry = Long.MAX_VALUE;
+    // when this copy was installed and last read, by Caffeine's ticker: the fixed expiry InternalExpiry emulates
+    private volatile long installedAt;
+    private volatile long accessedAt;
 
     InternalValue(V value, long version, int epoch) {
+        this(value, version, epoch, Duration.ZERO);
+    }
+
+    InternalValue(V value, long version, int epoch, Duration age) {
         this.value = requireNonNull(value, "value cannot be null");
         if (version < 0) {
             throw new IllegalArgumentException("version cannot be negative (0: unconfirmed)");
         }
         this.version = version;
         this.epoch = epoch;
+        // a row written after the read's instant has a negative age (Store#read): as young as can be
+        this.age = age.isNegative() ? 0 : InternalExpiry.nanos(age);
     }
 
     // the user's value of a value that may be absent
@@ -100,6 +113,27 @@ final class InternalValue<V> {
 
     void latestExpiry(long ticks) {
         latestExpiry = ticks;
+    }
+
+    long age() {
+        return age;
+    }
+
+    long installedAt() {
+        return installedAt;
+    }
+
+    long accessedAt() {
+        return accessedAt;
+    }
+
+    void installed(long ticks) {
+        installedAt = ticks;
+        accessedAt = ticks;
+    }
+
+    void accessed(long ticks) {
+        accessedAt = ticks;
     }
 
     // binds the user key of the entry this value is held under; a lookup key binds nothing

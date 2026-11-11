@@ -56,13 +56,18 @@ public final class CaffeineConfigurer<K, V> {
     private boolean recordingStats;
     private @Nullable Executor executor;
     private @Nullable Duration refreshAfterWrite;
-    // the user's expiry of a local copy, applied at build capped at the store's maximum age (see caffeine(Duration)),
+    // the user's expiry of a local copy, applied at build bounded by the store's maximum age (see caffeine(Duration)),
     // and checked at once against a builder of its own, so that a wrong combination fails where it is set, as in
     // Caffeine
     private final Caffeine<Object, Object> checked = Caffeine.newBuilder();
     private @Nullable Duration expireAfterWrite;
+    private @Nullable Duration expireAfterAccess;
     private @Nullable Expiry<? super K, ? super V> expiry;
-    // whether the expiry was applied to the builder (once, so that the builder can build again)
+    // the ticker of the local level, which the emulated fixed expiry reads for the policy (Caffeine's default with an
+    // expiry: the system's)
+    private Ticker ticker = Ticker.systemTicker();
+    // the expiry applied to the builder (once, so that the builder can build again; reset for every build), if any
+    private @Nullable InternalExpiry<K, V> internalExpiry;
     private boolean expiryApplied;
 
     CaffeineConfigurer() {
@@ -191,7 +196,10 @@ public final class CaffeineConfigurer<K, V> {
      * See {@link Caffeine#expireAfterWrite(Duration)}.
      * <p>
      * <b>Distributed Caffeine:</b> A duration longer than the store's maximum age is lowered to it, so no copy outlives
-     * the store's bound (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
+     * the store's bound, and whatever the duration, a copy goes at the maximum age after its value's write in the
+     * store, sooner for a value already old when read (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
+     * With a maximum age, the local level expires each copy by a variable expiry to do so; {@code policy()} still
+     * offers the fixed durations as Caffeine does.
      *
      * @param duration the duration
      * @return this configurer
@@ -206,7 +214,10 @@ public final class CaffeineConfigurer<K, V> {
      * See {@link Caffeine#expireAfterWrite(long, TimeUnit)}.
      * <p>
      * <b>Distributed Caffeine:</b> A duration longer than the store's maximum age is lowered to it, so no copy outlives
-     * the store's bound (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
+     * the store's bound, and whatever the duration, a copy goes at the maximum age after its value's write in the
+     * store, sooner for a value already old when read (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
+     * With a maximum age, the local level expires each copy by a variable expiry to do so; {@code policy()} still
+     * offers the fixed durations as Caffeine does.
      *
      * @param duration the duration
      * @param unit     its unit
@@ -222,14 +233,15 @@ public final class CaffeineConfigurer<K, V> {
      * See {@link Caffeine#expireAfterAccess(Duration)}.
      * <p>
      * <b>Distributed Caffeine:</b> Counts the accesses on this instance only. However often it is accessed, a copy
-     * still expires at the store's maximum age (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
+     * still expires at the store's maximum age after its value's write (not with
+     * {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
      *
      * @param duration the duration
      * @return this configurer
      */
     public CaffeineConfigurer<K, V> expireAfterAccess(Duration duration) {
         checked.expireAfterAccess(duration);
-        caffeine.expireAfterAccess(duration);
+        expireAfterAccess = duration;
         return this;
     }
 
@@ -237,7 +249,8 @@ public final class CaffeineConfigurer<K, V> {
      * See {@link Caffeine#expireAfterAccess(long, TimeUnit)}.
      * <p>
      * <b>Distributed Caffeine:</b> Counts the accesses on this instance only. However often it is accessed, a copy
-     * still expires at the store's maximum age (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
+     * still expires at the store's maximum age after its value's write (not with
+     * {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
      *
      * @param duration the duration
      * @param unit     its unit
@@ -245,15 +258,16 @@ public final class CaffeineConfigurer<K, V> {
      */
     public CaffeineConfigurer<K, V> expireAfterAccess(long duration, TimeUnit unit) {
         checked.expireAfterAccess(duration, unit);
-        caffeine.expireAfterAccess(duration, unit);
+        expireAfterAccess = Duration.ofNanos(unit.toNanos(duration));
         return this;
     }
 
     /**
      * See {@link Caffeine#expireAfter(Expiry)}.
      * <p>
-     * <b>Distributed Caffeine:</b> A duration longer than the store's maximum age is lowered to it, as for {@link
-     * #expireAfterWrite(Duration)}.
+     * <b>Distributed Caffeine:</b> A duration longer than what is left of the store's maximum age since the value's
+     * write is lowered to it, also one set through {@code policy().expireVariably()}, so no copy outlives the store's
+     * bound (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
      *
      * @param expiry the expiry
      * @return this configurer
@@ -310,6 +324,7 @@ public final class CaffeineConfigurer<K, V> {
      */
     public CaffeineConfigurer<K, V> ticker(Ticker ticker) {
         caffeine.ticker(ticker);
+        this.ticker = ticker;
         return this;
     }
 
@@ -391,23 +406,46 @@ public final class CaffeineConfigurer<K, V> {
         return statsCounter != null ? statsCounter : new InternalCaffeineStats(StatsCounter.disabledStatsCounter());
     }
 
-    // the builder of the local level, every copy expiring at the store's maximum age at the latest: the user's
-    // expiry lowered to it, or that age by default. A copy changed or expired in the store is dropped by its message;
-    // where that message is lost without a gap reported (a feed losing messages silently), or there are no messages
-    // (DistributionMode.NONE), this bounds how long it is served (VISION.md, "In-memory store profiles", dimension
-    // 7). Counted from the copy's install, so a copy of a row read when already old lives up to twice the maximum age
-    // after the write. Applied once, so that the builder can build again
+    // the builder of the local level, every copy expiring at the store's maximum age after its row's write at the
+    // latest: the user's expiry lowered to it, or that age by default. A copy changed or expired in the store is
+    // dropped by its message; where that message is lost without a gap reported (a feed losing messages silently), or
+    // there are no messages (DistributionMode.NONE), this bounds how long it is served (VISION.md, "In-memory store
+    // profiles", dimension 7). Counted from the write, not the install, so a copy of a row read when already old does
+    // not live up to twice the maximum age: a variable expiry (InternalExpiry), which Caffeine's fixed expiry cannot
+    // be, as its duration is one for all copies. Without a bound (no maximum age, or one for the store only),
+    // Caffeine's own fixed expiry, as configured. Applied once, so that the builder can build again
     Caffeine<InternalKey<K>, InternalValue<V>> caffeine(Duration maximumAge) {
         if (!expiryApplied) {
-            if (expiry != null) {
-                caffeine.expireAfter(new InternalExpiry<>(expiry, maximumAge));
-            } else {
-                caffeine.expireAfterWrite(expireAfterWrite == null || expireAfterWrite.compareTo(maximumAge) > 0
-                        ? maximumAge : expireAfterWrite);
-            }
+            applyExpiry(maximumAge);
             expiryApplied = true;
+        } else if (internalExpiry != null) {
+            internalExpiry.reset();
         }
         return caffeine;
+    }
+
+    // the user's Expiry, the fixed durations emulated under a maximum age, or else Caffeine's own fixed expiry
+    private void applyExpiry(Duration maximumAge) {
+        if (expiry != null) {
+            internalExpiry = new InternalExpiry<>(expiry, maximumAge, ticker);
+            caffeine.expireAfter(internalExpiry);
+        } else if (!maximumAge.equals(StoreConfigurer.UNBOUNDED_AGE)) {
+            // expireAfterWrite at the maximum age without one set, as the policy shows it (lowered to it otherwise)
+            internalExpiry = new InternalExpiry<>(maximumAge, ticker,
+                    InternalExpiry.nanos(expireAfterWrite == null ? maximumAge : expireAfterWrite),
+                    expireAfterAccess == null ? InternalExpiry.NONE : InternalExpiry.nanos(expireAfterAccess));
+            caffeine.expireAfter(internalExpiry);
+        } else {
+            caffeine.expireAfterWrite(expireAfterWrite == null ? maximumAge : expireAfterWrite);
+            if (expireAfterAccess != null) {
+                caffeine.expireAfterAccess(expireAfterAccess);
+            }
+        }
+    }
+
+    // the expiry of the local level built last, if it is one of this library's (see caffeine(Duration))
+    @Nullable InternalExpiry<K, V> internalExpiry() {
+        return internalExpiry;
     }
 
     // the executor Caffeine runs the user's code on; the asynchronous loaders and mapping functions run there too

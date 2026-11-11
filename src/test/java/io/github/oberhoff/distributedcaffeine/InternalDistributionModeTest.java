@@ -16,6 +16,8 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.Expiry;
+import com.github.benmanes.caffeine.cache.Policy;
+import com.github.benmanes.caffeine.cache.RemovalCause;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeListener;
@@ -29,6 +31,7 @@ import org.junit.jupiter.api.Timeout;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -65,6 +68,10 @@ class InternalDistributionModeTest {
     }
 
     private DistributedCaffeine<String, String> builder() {
+        return builder(database);
+    }
+
+    private DistributedCaffeine<String, String> builder(InMemoryDatabase database) {
         Adapter<String, String> adapter = settings ->
                 // the feed whatever the profile's change source: these tests count its subscriptions
                 new InternalCoreTest.DelegatingStore(database.openFeed("cache")) {
@@ -168,6 +175,66 @@ class InternalDistributionModeTest {
         DistributedCache<String, String> distributed = track(builder().build());
         assertThat(distributed.policy().expireAfterWrite().orElseThrow().getExpiresAfter())
                 .as("with distribution too: a message dropping it may be lost").isEqualTo(MAXIMUM_AGE);
+    }
+
+    @Test
+    void a_copy_expires_at_the_maximum_age_after_its_write_not_after_its_install() {
+        AtomicLong storeMicros = new AtomicLong(TimeUnit.DAYS.toMicros(20_000));
+        InMemoryDatabase aging = new InMemoryDatabase(storeMicros::get, 1);
+        DistributedCache<String, String> writer = track(builder(aging).build());
+        List<String> evicted = new CopyOnWriteArrayList<>();
+        DistributedCache<String, String> holder = track(builder(aging).withDistributionMode(DistributionMode.NONE)
+                .withCaffeine(caffeine -> caffeine.ticker(nanos::get).executor(Runnable::run).evictionListener(
+                        (String key, String value, RemovalCause cause) -> evicted.add(key + " " + cause)))
+                .build());
+        writer.put("old", "v");
+        storeMicros.addAndGet(MAXIMUM_AGE.minusMinutes(1).toNanos() / 1_000);
+        writer.put("young", "v");
+
+        // both read now: "old" written 59 minutes ago, "young" just now
+        assertThat(holder.getIfPresent("old")).isEqualTo("v");
+        assertThat(holder.getIfPresent("young")).isEqualTo("v");
+        assertThat(holder.policy().expireAfterWrite().orElseThrow().getExpiresAfter())
+                .as("the policy still shows Caffeine's fixed expiry").isEqualTo(MAXIMUM_AGE);
+        assertThat(holder.policy().expireVariably()).isEmpty();
+
+        nanos.addAndGet(Duration.ofSeconds(59).toNanos());
+        assertThat(holder.policy().getIfPresentQuietly("old")).isEqualTo("v");
+
+        nanos.addAndGet(Duration.ofSeconds(2).toNanos());
+        assertThat(holder.policy().getIfPresentQuietly("old"))
+                .as("gone at the maximum age after its write, not an hour after its install").isNull();
+        assertThat(holder.policy().getIfPresentQuietly("young")).as("a young row's copy lives on").isEqualTo("v");
+        holder.cleanUp();
+        assertThat(evicted).as("reported as Caffeine reports an expiry").containsExactly("old EXPIRED");
+
+        nanos.addAndGet(MAXIMUM_AGE.minusMinutes(1).toNanos());
+        assertThat(holder.policy().getIfPresentQuietly("young")).isNull();
+    }
+
+    @Test
+    void a_user_expiry_and_its_policy_are_bounded_by_the_age_of_the_row_too() {
+        AtomicLong storeMicros = new AtomicLong(TimeUnit.DAYS.toMicros(20_000));
+        InMemoryDatabase aging = new InMemoryDatabase(storeMicros::get, 1);
+        DistributedCache<String, String> writer = track(builder(aging).build());
+        DistributedCache<String, String> holder = track(builder(aging).withDistributionMode(DistributionMode.NONE)
+                .withCaffeine(caffeine -> caffeine.ticker(nanos::get)
+                        .expireAfter(Expiry.writing((String key, String value) -> MAXIMUM_AGE.multipliedBy(2))))
+                .build());
+        writer.put("old", "v");
+        storeMicros.addAndGet(MAXIMUM_AGE.minusMinutes(1).toNanos() / 1_000);
+
+        assertThat(holder.getIfPresent("old")).isEqualTo("v");
+        Policy.VarExpiration<String, String> expiration = holder.policy().expireVariably().orElseThrow();
+        // what was left of the row's maximum age when read (the store's monotonic clock may add a microsecond)
+        assertThat(expiration.getExpiresAfter("old").orElseThrow())
+                .isBetween(Duration.ofSeconds(59), Duration.ofSeconds(61));
+        expiration.setExpiresAfter("old", MAXIMUM_AGE);
+        assertThat(expiration.getExpiresAfter("old").orElseThrow()).as("not lengthened through the policy either")
+                .isBetween(Duration.ofSeconds(59), Duration.ofSeconds(61));
+
+        nanos.addAndGet(Duration.ofSeconds(61).toNanos());
+        assertThat(holder.policy().getIfPresentQuietly("old")).isNull();
     }
 
     @Test

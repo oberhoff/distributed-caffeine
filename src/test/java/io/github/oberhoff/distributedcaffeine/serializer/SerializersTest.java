@@ -71,12 +71,12 @@ class SerializersTest {
     }
 
     @Test
-    void fory_requiring_registration_accepts_only_registered_classes() {
-        ForySerializer<Object> serializer = ForySerializer.requiringRegistration(Order.class, Other.class);
+    void fory_with_an_allow_list_accepts_only_the_listed_classes() {
+        ForySerializer<Object> serializer = ForySerializer.allowing(Order.class, Other.class);
         Order order = new Order("o3", List.of("a"));
 
         assertThat(serializer.deserialize(serializer.serialize(order))).isEqualTo(order);
-        ForySerializer<Object> strict = ForySerializer.requiringRegistration(Order.class);
+        ForySerializer<Object> strict = ForySerializer.allowing(Order.class);
         assertThatThrownBy(() -> strict.serialize(new Other("y"))).isInstanceOf(Exception.class);
     }
 

@@ -10,8 +10,8 @@
 
     <name>Distributed Caffeine</name>
 
-    <description>Distributed Caffeine adds distribution and a shared second level to Caffeine, through a store
-        the application may already use: MongoDB, PostgreSQL, Redis (also Valkey, Dragonfly, Kvrocks), MariaDB or MySQL.
+    <description>Distributed Caffeine adds distribution and a shared second level to Caffeine, through a store the
+        application may already use: MongoDB, PostgreSQL, Redis (also Valkey, Dragonfly, Kvrocks), MariaDB or MySQL.
     </description>
 
     <properties>
@@ -143,11 +143,9 @@
             <version>${jackson.version}</version>
             <optional>true</optional>
         </dependency>
-        <!-- The PostgreSQL driver's class files reference these annotations, which javac reads when compiling
-             against it, while the driver itself declares them at runtime scope only - so they are absent exactly
-             where they are needed and a warning about it fails the build. Provided, so nothing of it reaches a
-             user of this library, and at any version that still has them, since the driver's class files only name
-             them - so it is kept current like every other dependency rather than at the driver's version. -->
+        <!-- the PostgreSQL driver's class files name these annotations, but the driver declares them at runtime scope
+             only: compiling against it, javac misses them, and its warning fails the build. Provided, so nothing of
+             it reaches a user; kept current rather than at the driver's version, as the class files only name them -->
         <dependency>
             <groupId>org.checkerframework</groupId>
             <artifactId>checker-qual</artifactId>
@@ -184,7 +182,7 @@
             <version>${hikaricp.version}</version>
             <scope>test</scope>
         </dependency>
-        <!-- the plain JDBC adapter's database in the tests: MariaDB in a container -->
+        <!-- the MariaDB and MySQL adapters' tests: each database's driver and container -->
         <dependency>
             <groupId>org.mariadb.jdbc</groupId>
             <artifactId>mariadb-java-client</artifactId>
@@ -211,8 +209,8 @@
         </dependency>
         <!-- linearizability of the operations under concurrency: stress runs and model checking. It brings ASM 9.9.1,
              which IDEs flag for known vulnerabilities; keep it: Lincheck 3.7's model checking fails with ASM 9.11.1
-             (Caffeine's classes no longer initialize under its instrumentation, tried 2026-11-08), and ASM is used by
-             the tests only, on the project's own classes, never part of the library -->
+             (Caffeine's classes no longer initialize under its instrumentation, tried 2026-11-08), and ASM runs in the
+             tests only, on the classes under test, never as part of the library -->
         <dependency>
             <groupId>org.jetbrains.lincheck</groupId>
             <artifactId>lincheck</artifactId>
@@ -225,6 +223,7 @@
             <version>${jmh.version}</version>
             <scope>test</scope>
         </dependency>
+        <!-- routes the library's System.Logger to SLF4J in the tests -->
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-jdk-platform-logging</artifactId>
@@ -270,9 +269,10 @@
                 <configuration>
                     <!-- a plain class path, so that forked JMH benchmark JVMs find the test classes -->
                     <useManifestOnlyJar>false</useManifestOnlyJar>
-                    <!-- JaCoCo's agent (@{argLine}); Lincheck attaches its agent at run time: within the JVM, quietly
-                         (JEP 451) -->
-                    <argLine>@{argLine} -XX:MaxRAMPercentage=50 -Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading</argLine>
+                    <!-- JaCoCo's agent (@{argLine}), and what Lincheck needs to attach its agent at run time without
+                         a warning (JEP 451) -->
+                    <argLine>@{argLine} -XX:MaxRAMPercentage=50 -Djdk.attach.allowAttachSelf=true
+                        -XX:+EnableDynamicAgentLoading</argLine>
                     <!-- a JVM per test class: Lincheck's instrumentation has crashed the JVM (Temurin 25.0.1, SIGBUS
                          in RedefineClasses), and in a shared fork every class after it went unrun -->
                     <reuseForks>false</reuseForks>
@@ -339,7 +339,7 @@
                 <configuration>
                     <!-- Caffeine's sources are read for {@inheritDoc}, not documented; its own Javadoc is linked -->
                     <sourcepath>${project.build.sourceDirectory}${path.separator}${caffeine.sources}</sourcepath>
-                    <excludePackageNames>com.github.benmanes.caffeine:com.github.benmanes.caffeine.*</excludePackageNames>
+                    <excludePackageNames>com.github.benmanes.caffeine*</excludePackageNames>
                     <links>
                         <link>https://javadoc.io/doc/com.github.ben-manes.caffeine/caffeine/${caffeine.version}/</link>
                     </links>
@@ -469,7 +469,8 @@
             </activation>
             <properties>
                 <errorprone.args>${nullaway.args} ${errorprone.checks}</errorprone.args>
-                <errorprone.testargs>${nullaway.testargs} ${errorprone.checks} ${errorprone.generated}</errorprone.testargs>
+                <errorprone.testargs>${nullaway.testargs} ${errorprone.testchecks}</errorprone.testargs>
+                <errorprone.testchecks>${errorprone.checks} ${errorprone.generated}</errorprone.testchecks>
                 <!-- JMH's generated benchmark classes are not ours to fix -->
                 <errorprone.generated>-XepExcludedPaths:.*/generated-test-sources/.*</errorprone.generated>
                 <errorprone.checks>${errorprone.nullness} ${errorprone.hygiene}</errorprone.checks>
@@ -504,6 +505,9 @@
                 <j.comp>-J--add-opens=jdk.compiler/com.sun.tools.javac.comp=ALL-UNNAMED</j.comp>
             </properties>
             <dependencies>
+                <!-- Fory, the MongoDB driver, Reactor (through Lettuce) and others name JSR-305 annotations in their
+                     class files; Error Prone reads them, and the missing class is a warning that -Werror turns into a
+                     failure. Provided, so nothing of it reaches a user -->
                 <dependency>
                     <groupId>com.google.code.findbugs</groupId>
                     <artifactId>jsr305</artifactId>
@@ -527,9 +531,8 @@
                                     <rules>
                                         <requireJavaVersion>
                                             <version>[21,)</version>
-                                            <message>Error Prone (and therefore NullAway) requires JDK 21 or newer to
-                                                run, either build with such a JDK or skip this profile using
-                                                -DskipErrorProne
+                                            <message>Error Prone (and with it NullAway) needs JDK 21 or newer: build
+                                                with such a JDK, or skip this profile with -DskipErrorProne
                                             </message>
                                         </requireJavaVersion>
                                     </rules>

@@ -20,7 +20,9 @@ import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -86,19 +88,35 @@ final class InternalPolicy<K, V> implements Policy<K, V> {
         return policy.eviction().map(EvictionView::new);
     }
 
+    // with a maximum age, L1 expires variably even where the user set fixed durations (InternalExpiry): those are
+    // shown as Caffeine shows them, emulated, and the variable expiry only where the user set one
+
     @Override
     public Optional<FixedExpiration<K, V>> expireAfterAccess() {
-        return policy.expireAfterAccess().map(FixedExpirationView::new);
+        InternalExpiry<K, V> emulated = emulated();
+        if (emulated == null) {
+            return policy.expireAfterAccess().map(FixedExpirationView::new);
+        }
+        return emulated.afterAccess() == InternalExpiry.NONE ? Optional.empty()
+                : Optional.of(new EmulatedExpirationView(emulated, true));
     }
 
     @Override
     public Optional<FixedExpiration<K, V>> expireAfterWrite() {
-        return policy.expireAfterWrite().map(FixedExpirationView::new);
+        InternalExpiry<K, V> emulated = emulated();
+        return emulated == null ? policy.expireAfterWrite().map(FixedExpirationView::new)
+                : Optional.of(new EmulatedExpirationView(emulated, false));
     }
 
     @Override
     public Optional<VarExpiration<K, V>> expireVariably() {
-        return policy.expireVariably().map(VarExpirationView::new);
+        return emulated() != null ? Optional.empty() : policy.expireVariably().map(VarExpirationView::new);
+    }
+
+    // the expiry emulating fixed durations, if L1 has one
+    private @Nullable InternalExpiry<K, V> emulated() {
+        InternalExpiry<K, V> expiry = core.expiry();
+        return expiry == null || expiry.isVariable() ? null : expiry;
     }
 
     @Override
@@ -241,9 +259,18 @@ final class InternalPolicy<K, V> implements Policy<K, V> {
             return expiration.getExpiresAfter(core.wrap(key), unit);
         }
 
+        // at most until the copy must go, as the store's maximum age bounds every duration of the user's Expiry
         @Override
         public void setExpiresAfter(K key, long duration, TimeUnit unit) {
-            expiration.setExpiresAfter(core.wrap(key), duration, unit);
+            InternalKey<K> internalKey = core.wrap(key);
+            InternalExpiry<K, V> expiry = core.expiry();
+            InternalValue<V> held = expiry == null ? null : policy.getIfPresentQuietly(internalKey);
+            if (expiry == null || held == null || duration < 0) {
+                expiration.setExpiresAfter(internalKey, duration, unit); // Caffeine rejects a negative one
+                return;
+            }
+            expiration.setExpiresAfter(internalKey,
+                    expiry.capped(held, expiry.now(), saturatedNanos(duration, unit)), TimeUnit.NANOSECONDS);
         }
 
         @Override
@@ -293,6 +320,110 @@ final class InternalPolicy<K, V> implements Policy<K, V> {
         public <T extends @Nullable Object> T youngest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
             return expiration.youngest(unwrap(mappingFunction));
         }
+    }
+
+    // Caffeine's fixed policy of expireAfterWrite (or of expireAfterAccess), emulated over L1's variable expiry: its
+    // duration as set, the ages since the install (or the last read), and the order by them. Setting the duration
+    // applies it to the held copies at once, as Caffeine's fixed policy does, each still bounded by the store's maximum
+    // age (InternalExpiry#left)
+    private final class EmulatedExpirationView implements FixedExpiration<K, V> {
+
+        private final InternalExpiry<K, V> expiry;
+        private final boolean access;
+
+        EmulatedExpirationView(InternalExpiry<K, V> expiry, boolean access) {
+            this.expiry = expiry;
+            this.access = access;
+        }
+
+        @Override
+        public OptionalLong ageOf(K key, TimeUnit unit) {
+            requireNonNull(unit, "unit cannot be null");
+            InternalValue<V> held = policy.getIfPresentQuietly(core.wrap(key));
+            return held == null ? OptionalLong.empty()
+                    : OptionalLong.of(unit.convert(expiry.now() - since(held), TimeUnit.NANOSECONDS));
+        }
+
+        @Override
+        public long getExpiresAfter(TimeUnit unit) {
+            return unit.convert(access ? expiry.afterAccess() : expiry.afterWrite(), TimeUnit.NANOSECONDS);
+        }
+
+        @Override
+        public void setExpiresAfter(long duration, TimeUnit unit) {
+            if (duration < 0) {
+                throw new IllegalArgumentException("duration cannot be negative: " + duration + " " + unit);
+            }
+            long nanos = saturatedNanos(duration, unit);
+            if (access) {
+                expiry.afterAccess(nanos);
+            } else {
+                expiry.afterWrite(nanos);
+            }
+            // the copies held: each one's expiry recomputed. A copy replaced meanwhile computed its own with the new
+            // duration already, but this may have overwritten it with its predecessor's: done again for the new one
+            VarExpiration<InternalKey<K>, InternalValue<V>> variable = policy.expireVariably().orElseThrow();
+            for (InternalKey<K> internalKey : variable.oldest(stream -> stream.map(CacheEntry::getKey).toList())) {
+                InternalValue<V> held = policy.getIfPresentQuietly(internalKey);
+                while (held != null) {
+                    variable.setExpiresAfter(internalKey, expiry.left(held, expiry.now()), TimeUnit.NANOSECONDS);
+                    InternalValue<V> now = policy.getIfPresentQuietly(internalKey);
+                    held = now == held ? null : now;
+                }
+            }
+        }
+
+        @Override
+        public Map<K, V> oldest(int limit) {
+            return oldest(stream -> unwrapped(stream.limit(limit)));
+        }
+
+        @Override
+        public <T extends @Nullable Object> T oldest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
+            return mapped(Comparator.naturalOrder(), mappingFunction);
+        }
+
+        @Override
+        public Map<K, V> youngest(int limit) {
+            return youngest(stream -> unwrapped(stream.limit(limit)));
+        }
+
+        @Override
+        public <T extends @Nullable Object> T youngest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
+            return mapped(Comparator.reverseOrder(), mappingFunction);
+        }
+
+        private <T extends @Nullable Object> T mapped(Comparator<Long> order,
+                                                      Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
+            requireNonNull(mappingFunction, "mappingFunction cannot be null");
+            return mappingFunction.apply(ordered(order));
+        }
+
+        private long since(InternalValue<V> value) {
+            return access ? value.accessedAt() : value.installedAt();
+        }
+
+        // the held copies by install (or last read): the times taken first, as a read may move them while sorting
+        private Stream<CacheEntry<K, V>> ordered(Comparator<Long> order) {
+            List<Timed<K, V>> timed = policy.expireVariably().orElseThrow().oldest(stream -> stream
+                    .map(entry -> new Timed<>(entry, since(entry.getValue()))).toList());
+            return timed.stream().sorted(Comparator.comparing(Timed::time, order))
+                    .map(entry -> new Entry<>(entry.entry()));
+        }
+    }
+
+    private record Timed<K, V>(CacheEntry<InternalKey<K>, InternalValue<V>> entry, long time) {
+    }
+
+    private static <K, V> Map<K, V> unwrapped(Stream<CacheEntry<K, V>> entries) {
+        Map<K, V> result = new LinkedHashMap<>();
+        entries.forEach(entry -> result.put(entry.getKey(), entry.getValue()));
+        return Collections.unmodifiableMap(result);
+    }
+
+    // as Caffeine converts a duration with its unit, saturated
+    private static long saturatedNanos(long duration, TimeUnit unit) {
+        return requireNonNull(unit, "unit cannot be null").toNanos(duration);
     }
 
     private final class FixedRefreshView implements FixedRefresh<K, V> {

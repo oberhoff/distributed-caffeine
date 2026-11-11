@@ -52,9 +52,17 @@ import static java.util.Objects.requireNonNull;
  *     <li><b>Atomic per row:</b> a conditional write or delete decides and writes in one step: of concurrent ones on
  *     one version, one wins; of concurrent inserts of one id, one wins. A write that is not applied changes
  *     nothing.</li>
- *     <li><b>Visibility and durability:</b> as {@link Store} point 3.</li>
+ *     <li><b>Visibility and durability:</b> a read, on any instance of the cache, reflects every write that was
+ *     confirmed (returned to its writer) before the read began: its version, or a later one. A confirmed write is not
+ *     lost later, unless in an event (a crash, a failover) that every subscription of the change feed sees as a loss
+ *     or a gap.</li>
  *     <li><b>Bytes:</b> keys and values come back byte for byte.</li>
- *     <li><b>Failures and settings:</b> as {@link Store} points 8 and 9.</li>
+ *     <li><b>Failures:</b> a store reports a failure only as {@link StoreException}, classified (applied or not,
+ *     retryable or not); a write applied in part reports its outcome unknown
+ *     ({@link StoreException#afterPartlyApplied()}); a store does not retry, the core decides. Anything else it
+ *     throws counts as a failure that is not retryable, with the outcome of a write unknown.</li>
+ *     <li><b>Settings:</b> a store applies the {@link StoreSettings} it was created with: no operation waits longer
+ *     than the timeout for the store.</li>
  * </ol>
  *
  * @author Andreas Oberhoff
