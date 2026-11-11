@@ -25,12 +25,9 @@ jobs:
           - name: Test in-memory
             goal: clean verify
             tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
-          - name: Test MongoDB
+          - name: Test MongoDB, PostgreSQL
             goal: -DskipErrorProne test
-            tests: "MongoIntegrationTest$*"
-          - name: Test PostgreSQL
-            goal: -DskipErrorProne test
-            tests: "PostgresIntegrationTest$*"
+            tests: "MongoIntegrationTest$*,PostgresIntegrationTest$*"
           - name: Test Redis, Valkey
             goal: -DskipErrorProne test
             tests: "RedisIntegrationTest$Redis_*,RedisIntegrationTest$Valkey_*"
@@ -55,8 +52,9 @@ jobs:
           cache: maven
       - name: Verify with Maven
         # no failIfNoSpecifiedTests=false: a group whose pattern matches no test fails instead of passing with
-        # nothing tested
-        run: mvn -B ${{ matrix.goal }} -DrunsOnGitHub "-Dtest=${{ matrix.tests }}"
+        # nothing tested. Single quotes: in double quotes bash expands the nested class names ($Redis_*) as variables
+        # and every group runs the whole test class
+        run: mvn -B ${{ matrix.goal }} -DrunsOnGitHub '-Dtest=${{ matrix.tests }}'
 
   # one check under the name the single job had, which branch protection can require however the groups change;
   # always(), as a job skipped after a failed group would count as passed

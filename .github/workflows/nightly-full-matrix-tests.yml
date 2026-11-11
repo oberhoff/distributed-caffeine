@@ -125,5 +125,6 @@ jobs:
           cache: maven
       - name: Run the group
         # no failIfNoSpecifiedTests=false: a group whose pattern matches no test (a typo, or a branch without these
-        # tests) fails instead of passing with nothing tested
-        run: mvn -B -DskipErrorProne test "-Dtest=${{ matrix.tests }}" ${{ matrix.flags }}
+        # tests) fails instead of passing with nothing tested. Single quotes: in double quotes bash expands the nested
+        # class names ($Mongo_4_*) as variables and every group runs the whole test class
+        run: mvn -B -DskipErrorProne test '-Dtest=${{ matrix.tests }}' ${{ matrix.flags }}
