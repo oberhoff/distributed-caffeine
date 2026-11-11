@@ -10,8 +10,43 @@ on:
   workflow_dispatch:
 
 jobs:
+  changes:
+    name: Changes since the last nightly
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.head.outputs.sha }}
+      changed: ${{ github.event_name != 'schedule' || steps.marker.outputs.cache-hit != 'true' }}
+    steps:
+      - name: Resolve develop
+        id: head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "sha=$(gh api repos/${{ github.repository }}/commits/develop --jq .sha)" >> "$GITHUB_OUTPUT"
+      # a cache entry per tested commit marks it as done: a nightly without new commits on develop finds the marker
+      # and skips every group; marked when the run starts, so a failed commit is not retested each night either.
+      # Each nightly lookup keeps the entry from expiring (7 days unused)
+      - name: Look up the marker
+        id: marker
+        if: github.event_name == 'schedule'
+        uses: actions/cache/restore@v6
+        with:
+          path: nightly-marker
+          key: nightly-tested-${{ steps.head.outputs.sha }}
+          lookup-only: true
+      - name: Create the marker
+        if: github.event_name == 'schedule' && steps.marker.outputs.cache-hit != 'true'
+        run: echo "${{ steps.head.outputs.sha }}" > nightly-marker
+      - name: Save the marker
+        if: github.event_name == 'schedule' && steps.marker.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: nightly-marker
+          key: nightly-tested-${{ steps.head.outputs.sha }}
+
   group:
     name: ${{ matrix.name }}
+    needs: changes
+    if: needs.changes.outputs.changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -79,8 +114,9 @@ jobs:
       - name: Checkout branch
         uses: actions/checkout@v7
         with:
-          # nightly: develop, as scheduled runs start from the default branch; by hand: the branch chosen
-          ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref }}
+          # nightly: the develop commit resolved above, as scheduled runs start from the default branch, so every
+          # group tests the marked commit even if develop moves meanwhile; by hand: the branch chosen
+          ref: ${{ github.event_name == 'schedule' && needs.changes.outputs.sha || github.ref }}
       - name: Set up JDK 17
         uses: actions/setup-java@v6
         with:
