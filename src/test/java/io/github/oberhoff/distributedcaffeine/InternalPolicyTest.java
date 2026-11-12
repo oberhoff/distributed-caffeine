@@ -327,17 +327,52 @@ class InternalPolicyTest {
     }
 
     @Test
-    void a_longer_maximum_age_lifts_expireAfterWrite_up_to_what_was_set() {
+    void a_shorter_maximum_age_lowers_expireAfterWrite_and_a_longer_one_lifts_it_up_to_what_was_set() {
         DistributedCache<String, String> cache = track(builder().withCaffeine(caffeine -> caffeine
-                .expireAfterWrite(Duration.ofMinutes(90))).build());
+                .expireAfterWrite(Duration.ofMinutes(50))).build());
         Policy.FixedExpiration<String, String> writing = cache.policy().expireAfterWrite().orElseThrow();
         DistributedPolicy.StoreMaximumAge age = cache.distributedPolicy().storeMaximumAge().orElseThrow();
-        assertThat(writing.getExpiresAfter()).as("lowered to the maximum age").isEqualTo(LONG);
+        assertThat(writing.getExpiresAfter()).isEqualTo(Duration.ofMinutes(50));
 
-        age.setMaximumAge(LONG.multipliedBy(2));
-        assertThat(writing.getExpiresAfter()).isEqualTo(Duration.ofMinutes(90));
         age.setMaximumAge(Duration.ofMinutes(30));
-        assertThat(writing.getExpiresAfter()).isEqualTo(Duration.ofMinutes(30));
+        assertThat(writing.getExpiresAfter()).as("lowered to the maximum age").isEqualTo(Duration.ofMinutes(30));
+        age.setMaximumAge(LONG.multipliedBy(2));
+        assertThat(writing.getExpiresAfter()).isEqualTo(Duration.ofMinutes(50));
+        writing.setExpiresAfter(LONG.multipliedBy(3));
+        assertThat(writing.getExpiresAfter()).as("set at runtime: lowered, not rejected")
+                .isEqualTo(LONG.multipliedBy(2));
+    }
+
+    @Test
+    void a_local_expiry_longer_than_the_maximum_age_fails_the_build_unless_for_the_store_only() {
+        DistributedCaffeine<String, String> writing = builder().withCaffeine(caffeine -> caffeine
+                .expireAfterWrite(LONG.plusNanos(1)));
+        assertThatThrownBy(writing::build).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("expireAfterWrite").hasMessageContaining("withMaximumAgeForStoreOnly()");
+        DistributedCaffeine<String, String> accessing = builder().withCaffeine(caffeine -> caffeine
+                .expireAfterAccess(LONG.plusNanos(1)));
+        assertThatThrownBy(accessing::build).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("expireAfterAccess").hasMessageContaining("withMaximumAgeForStoreOnly()");
+        DistributedCache<String, String> equal = track(builder().withCaffeine(caffeine -> caffeine
+                .expireAfterWrite(LONG).expireAfterAccess(LONG)).build());
+        assertThat(equal.policy().expireAfterAccess().orElseThrow().getExpiresAfter()).isEqualTo(LONG);
+
+        DistributedCache<String, String> storeOnly = track(builder()
+                .withStore(StoreConfigurer::withMaximumAgeForStoreOnly)
+                .withCaffeine(caffeine -> caffeine.expireAfterWrite(LONG.multipliedBy(2))
+                        .expireAfterAccess(LONG.multipliedBy(2))).build());
+        assertThat(storeOnly.policy().expireAfterWrite().orElseThrow().getExpiresAfter())
+                .as("copies meant to outlive the store's values").isEqualTo(LONG.multipliedBy(2));
+        assertThat(storeOnly.policy().expireAfterAccess().orElseThrow().getExpiresAfter())
+                .isEqualTo(LONG.multipliedBy(2));
+
+        Adapter<String, String> adapter = settings -> database.openStore("unbounded");
+        DistributedCache<String, String> unbounded = track(DistributedCaffeine.newBuilder(adapter)
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(StringSerializer.ofString()))
+                .withCaffeine(caffeine -> caffeine.expireAfterWrite(LONG.multipliedBy(2))).build());
+        assertThat(unbounded.policy().expireAfterWrite().orElseThrow().getExpiresAfter())
+                .as("without a maximum age, nothing to outlive").isEqualTo(LONG.multipliedBy(2));
     }
 
     @Test

@@ -36,8 +36,10 @@ import static java.util.Objects.requireNonNull;
 
 /**
  * Caffeine's builder methods for this instance's own copies, one to one, typed with the cache's key and value types.
- * Each keeps its meaning and validation from {@link Caffeine} and applies to this instance only. Except:
- * {@link #weakKeys()}, {@link #weakValues()} and {@link #softValues()} are rejected.
+ * Each keeps its meaning and validation from {@link Caffeine} and applies to this instance only: the expiries and
+ * bounds decide which copies this instance keeps and for how long, while the store's maximum age decides how long a
+ * value is valid ({@link StoreConfigurer#withMaximumAge(Duration)}). A copy that goes sends the instance back to the
+ * store, not to the source. Except: {@link #weakKeys()}, {@link #weakValues()} and {@link #softValues()} are rejected.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
@@ -195,12 +197,16 @@ public final class CaffeineConfigurer<K, V> {
     /**
      * See {@link Caffeine#expireAfterWrite(Duration)}.
      * <p>
-     * <b>Distributed Caffeine:</b> A duration longer than the store's maximum age is lowered to it, so no copy outlives
-     * the store's bound, and whatever the duration, a copy goes at the maximum age after its value's write in the
-     * store, sooner for a value already old when read (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
-     * With a maximum age, the local level expires each copy by a variable expiry to do so; {@code policy()} still
-     * offers the fixed durations as Caffeine does. A duration set through {@code policy().expireAfterWrite()} is
-     * lowered the same way: {@code getExpiresAfter()} returns it lowered, and a longer maximum age set later
+     * <b>Distributed Caffeine:</b> Governs this instance's copies only: an expired copy is read from the store again,
+     * where the value stays valid until the store's maximum age. With distribution, it bounds how long a lost change
+     * can go unnoticed; with {@link DistributionMode#NONE}, how long the other instances' writes stay unseen. A
+     * duration longer than the store's maximum age fails the build, as the copies would outlive their values' validity
+     * (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}). Whatever the duration, a copy goes at the
+     * maximum age after its value's write in the store, sooner for a value already old when read. With a maximum age,
+     * the local level expires each copy by a variable expiry to do so; {@code policy()} still offers the fixed
+     * durations as Caffeine does. At runtime, where instances change one after another, a duration longer than the
+     * maximum age is lowered instead, also one set through {@code policy().expireAfterWrite()}:
+     * {@code getExpiresAfter()} returns it lowered, and a longer maximum age set later
      * ({@link DistributedPolicy#storeMaximumAge()}) lifts it again, up to the duration set.
      *
      * @param duration the duration
@@ -215,12 +221,16 @@ public final class CaffeineConfigurer<K, V> {
     /**
      * See {@link Caffeine#expireAfterWrite(long, TimeUnit)}.
      * <p>
-     * <b>Distributed Caffeine:</b> A duration longer than the store's maximum age is lowered to it, so no copy outlives
-     * the store's bound, and whatever the duration, a copy goes at the maximum age after its value's write in the
-     * store, sooner for a value already old when read (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
-     * With a maximum age, the local level expires each copy by a variable expiry to do so; {@code policy()} still
-     * offers the fixed durations as Caffeine does. A duration set through {@code policy().expireAfterWrite()} is
-     * lowered the same way: {@code getExpiresAfter()} returns it lowered, and a longer maximum age set later
+     * <b>Distributed Caffeine:</b> Governs this instance's copies only: an expired copy is read from the store again,
+     * where the value stays valid until the store's maximum age. With distribution, it bounds how long a lost change
+     * can go unnoticed; with {@link DistributionMode#NONE}, how long the other instances' writes stay unseen. A
+     * duration longer than the store's maximum age fails the build, as the copies would outlive their values' validity
+     * (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}). Whatever the duration, a copy goes at the
+     * maximum age after its value's write in the store, sooner for a value already old when read. With a maximum age,
+     * the local level expires each copy by a variable expiry to do so; {@code policy()} still offers the fixed
+     * durations as Caffeine does. At runtime, where instances change one after another, a duration longer than the
+     * maximum age is lowered instead, also one set through {@code policy().expireAfterWrite()}:
+     * {@code getExpiresAfter()} returns it lowered, and a longer maximum age set later
      * ({@link DistributedPolicy#storeMaximumAge()}) lifts it again, up to the duration set.
      *
      * @param duration the duration
@@ -236,9 +246,10 @@ public final class CaffeineConfigurer<K, V> {
     /**
      * See {@link Caffeine#expireAfterAccess(Duration)}.
      * <p>
-     * <b>Distributed Caffeine:</b> Counts the accesses on this instance only. However often it is accessed, a copy
-     * still expires at the store's maximum age after its value's write (not with
-     * {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
+     * <b>Distributed Caffeine:</b> Governs this instance's copies only, counting the accesses on this instance: an
+     * idle copy is read from the store again. However often it is accessed, a copy still expires at the store's
+     * maximum age after its value's write, so a duration longer than the maximum age, which would never apply, fails
+     * the build (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
      *
      * @param duration the duration
      * @return this configurer
@@ -252,9 +263,10 @@ public final class CaffeineConfigurer<K, V> {
     /**
      * See {@link Caffeine#expireAfterAccess(long, TimeUnit)}.
      * <p>
-     * <b>Distributed Caffeine:</b> Counts the accesses on this instance only. However often it is accessed, a copy
-     * still expires at the store's maximum age after its value's write (not with
-     * {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
+     * <b>Distributed Caffeine:</b> Governs this instance's copies only, counting the accesses on this instance: an
+     * idle copy is read from the store again. However often it is accessed, a copy still expires at the store's
+     * maximum age after its value's write, so a duration longer than the maximum age, which would never apply, fails
+     * the build (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
      *
      * @param duration the duration
      * @param unit     its unit
@@ -269,9 +281,13 @@ public final class CaffeineConfigurer<K, V> {
     /**
      * See {@link Caffeine#expireAfter(Expiry)}.
      * <p>
-     * <b>Distributed Caffeine:</b> A duration longer than what is left of the store's maximum age since the value's
-     * write is lowered to it, also one set through {@code policy().expireVariably()}, so no copy outlives the store's
-     * bound (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
+     * <b>Distributed Caffeine:</b> Governs this instance's copies only, so it decides how long a copy is kept, not how
+     * long its value is valid: an expired copy is read from the store again, where the value stays until the store's
+     * maximum age. For a value with a validity of its own, treat an invalid value read as missing and invalidate it.
+     * The methods are called on each instance's own install, update and read of a copy: {@code expireAfterCreate} also
+     * for a value read from the store, written long before. A duration longer than what is left of the store's maximum
+     * age since the value's write is lowered to it, also one set through {@code policy().expireVariably()}, so no copy
+     * outlives its value's validity (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
      *
      * @param expiry the expiry
      * @return this configurer
@@ -468,6 +484,14 @@ public final class CaffeineConfigurer<K, V> {
 
     @Nullable Duration refreshAfterWrite() {
         return refreshAfterWrite;
+    }
+
+    @Nullable Duration expireAfterWrite() {
+        return expireAfterWrite;
+    }
+
+    @Nullable Duration expireAfterAccess() {
+        return expireAfterAccess;
     }
 
     private static <K, V> RemovalListener<InternalKey<K>, InternalValue<V>> unwrapping(

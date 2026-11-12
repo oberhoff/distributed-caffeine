@@ -613,6 +613,25 @@ maximum age is the actual bound of staleness.
   and that a duration set through the policy is lowered to it. Counting `expireAfterWrite` from the store's write was
   rejected: a row older than it would install already expired unless the reads filtered by it too, which merges it
   into the maximum age and gives up Caffeine's meaning.
+- **The two-level model, and the alternatives rejected (decided 2026-11-12):** the store decides how long a value is
+  valid (its maximum age), each instance which copies it keeps and for how long (Caffeine's settings, never beyond the
+  validity), and a copy that goes sends the instance to the store, not the source. That is a second level's role: it
+  keeps values longer than the first. Stated at the top of the README, in the class Javadoc and in each Caffeine
+  setter, with a goal-first table in the README. Rejected:
+  - Symmetric levels (store-only as the default, the age bounding the store alone): a store age alone would no longer
+    bring a source change to the copies, a TTL would have to be set twice (and changed twice, in order, at runtime),
+    the bound would be their sum, a lost change unbounded, and the trust rule's limits (distribution, at least five
+    heartbeat intervals) would apply to everyone.
+  - Enforcing a store age longer than every local expiry instead of capping: it covers only `expireAfterWrite`;
+    `expireAfterAccess` has no end to compare, an `Expiry` no duration known at build, a copy read late still outlives
+    its row, and a staggered runtime change would throw. Taken from it: `expireAfterWrite` or `expireAfterAccess`
+    longer than the maximum age fails the build (the inverted hierarchy, almost certainly a mistake: such a duration
+    never applies); at runtime it is still lowered.
+  - Deriving the store age from `expireAfterWrite`: shrinks the second level to the first's lifetime.
+  - A distribution-only mode (the store as a bus, Caffeine's semantics unchanged): gives up shared loads, the atomic
+    methods' atomicity across instances and warm starts, and needs rows for the feeds anyway; invalidation buses exist
+    elsewhere. Per-entry validity, the one gap it closes, is a check on read plus `invalidate`; an `Expiry`'s time
+    written into the row is the targeted fix, if ever needed.
 - **Not adjustable:** `withMaximumAgeForStoreOnly()` (a mode: the trust rule of the atomic methods), the heartbeat and
   poll intervals (`pruneGrace` and the five-heartbeat rule are computed from them by the instance that prunes, for every
   instance), the operation timeout (fixed into the drivers when the adapter is built) and the executor; the

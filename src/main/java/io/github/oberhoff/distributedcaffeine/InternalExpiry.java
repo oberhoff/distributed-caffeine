@@ -61,8 +61,8 @@ final class InternalExpiry<K, V> implements Expiry<InternalKey<K>, InternalValue
         this(expiry, maximumAge, ticker, NONE, NONE);
     }
 
-    // the fixed durations (expireAfterAccess NONE: not set), expireAfterWrite lowered to the maximum age (Long.MAX_VALUE:
-    // the maximum age, following it)
+    // the fixed durations (expireAfterAccess NONE: not set), expireAfterWrite lowered to the maximum age
+    // (Long.MAX_VALUE: the maximum age, following it)
     InternalExpiry(Duration maximumAge, Ticker ticker, long afterWrite, long afterAccess) {
         this(null, maximumAge, ticker, afterWrite, afterAccess);
     }

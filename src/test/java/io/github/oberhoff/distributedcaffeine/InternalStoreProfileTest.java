@@ -460,14 +460,16 @@ class InternalStoreProfileTest {
         assertThat(holder.get("k", ignored -> "loaded")).isNotEqualTo("v1");
     }
 
-    // the application's expiry never keeps a copy beyond the store's maximum age: a longer expireAfterWrite is
-    // lowered to it, and an Expiry lengthening a copy on every read stops at it
+    // the application's expiry never keeps a copy beyond the store's maximum age: a longer expireAfterWrite (only
+    // possible by a maximum age lowered at runtime, the build rejects it) is lowered to it, and an Expiry lengthening
+    // a copy on every read stops at it
     @Test
     void no_expiry_of_the_application_keeps_a_copy_beyond_the_maximum_age() {
         InMemoryDatabase database = new InMemoryDatabase(StoreProfile.POSTGRESQL);
         Duration maximumAge = Duration.ofMillis(300);
-        DistributedCache<String, String> longer = cache(database, maximumAge,
+        DistributedCache<String, String> longer = cache(database, LONG,
                 builder -> builder.withCaffeine(caffeine -> caffeine.expireAfterWrite(LONG)));
+        longer.distributedPolicy().storeMaximumAge().orElseThrow().setMaximumAge(maximumAge);
         DistributedCache<String, String> lengthening = cache(database, maximumAge,
                 builder -> builder.withCaffeine(caffeine -> caffeine.expireAfter(new Expiry<>() {
                     @Override

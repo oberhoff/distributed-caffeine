@@ -156,10 +156,10 @@ class InternalDistributionModeTest {
         assertThat(configured.policy().expireAfterWrite().orElseThrow().getExpiresAfter())
                 .as("a shorter one is kept").isEqualTo(Duration.ofMinutes(5));
 
-        DistributedCache<String, String> longer = none(builder -> builder
-                .withCaffeine(caffeine -> caffeine.expireAfterWrite(MAXIMUM_AGE.multipliedBy(2))));
-        assertThat(longer.policy().expireAfterWrite().orElseThrow().getExpiresAfter())
-                .as("a longer one is lowered to it").isEqualTo(MAXIMUM_AGE);
+        DistributedCache<String, String> equal = none(builder -> builder
+                .withCaffeine(caffeine -> caffeine.expireAfterWrite(MAXIMUM_AGE)));
+        assertThat(equal.policy().expireAfterWrite().orElseThrow().getExpiresAfter())
+                .as("one as long is kept").isEqualTo(MAXIMUM_AGE);
 
         DistributedCache<String, String> variable = none(builder -> builder.withCaffeine(caffeine -> caffeine
                 .expireAfter(Expiry.writing((String key, String value) -> Duration.ofMinutes(2)))));

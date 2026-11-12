@@ -26,9 +26,9 @@ public enum DistributionMode {
 
     /**
      * The default: a change elsewhere drops this instance's copy of the key; the next read takes the value from the
-     * store, or else from the loader or mapping function (if any). Costs a listening connection, shared by the caches
-     * on the same client (on MariaDB and MySQL, a poll per interval instead), and a store read only for keys read
-     * again.
+     * store, or else from the source (the loader or mapping function, if any). Costs a listening connection, shared by
+     * the caches on the same client (on MariaDB and MySQL, a poll per interval instead), and a store read only for keys
+     * read again.
      */
     INVALIDATE,
 
@@ -41,8 +41,8 @@ public enum DistributionMode {
 
     /**
      * No distribution at all. A copy changed elsewhere stays until it expires or is evicted, at the store's maximum age
-     * after its value's write at the latest; the next read then takes the value from the store, or else from the loader
-     * or mapping function (if any).
+     * after its value's write at the latest; the next read then takes the value from the store, or else from the
+     * source.
      */
     NONE
 }

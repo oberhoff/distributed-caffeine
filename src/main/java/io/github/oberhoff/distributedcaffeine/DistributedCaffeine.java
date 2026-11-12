@@ -36,8 +36,16 @@ import static java.util.Objects.requireNonNullElseGet;
 
 /**
  * The builder of a distributed cache. Each instance keeps a local Caffeine cache; a miss reads the shared store before
- * the source, and a change reaches the copies of the other instances. Configured with Caffeine's builder methods and
- * the store's settings, built as any of Caffeine's cache variants.
+ * the source (the loader or mapping function, if any), and a change reaches the copies of the other instances.
+ * Configured with Caffeine's builder methods and the store's settings, built as any of Caffeine's cache variants. The
+ * two levels split the work:
+ * <ol>
+ *     <li>The store holds the values: its maximum age decides how long a value is valid, on every instance; its
+ *     maximum size, how many values it keeps.</li>
+ *     <li>Each instance holds copies: Caffeine's settings decide which copies it keeps and for how long, never beyond
+ *     their values' validity.</li>
+ *     <li>When a copy goes, the instance asks the store, and only if the store has no valid value, the source.</li>
+ * </ol>
  * <pre>
  * {@code DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
  *     .withCaffeine(caffeine -> caffeine
@@ -84,9 +92,9 @@ public final class DistributedCaffeine<K, V> {
     }
 
     /**
-     * Configures this instance's local level with Caffeine's builder methods, which keep their meaning (see
-     * {@link CaffeineConfigurer}). May be called more than once; settings accumulate, and a setting made twice is
-     * rejected as in Caffeine.
+     * Configures this instance's local level with Caffeine's builder methods, which keep their meaning for the local
+     * copies (see {@link CaffeineConfigurer}): a copy that goes sends the instance back to the store, not to the
+     * source. May be called more than once; settings accumulate, and a setting made twice is rejected as in Caffeine.
      *
      * @param configurer the configuration
      * @return this builder
@@ -307,6 +315,24 @@ public final class DistributedCaffeine<K, V> {
         }
         if (store().maximumAgeForStoreOnly()) {
             validateStoreOnly();
+        } else {
+            validateLocalExpiry("expireAfterWrite", caffeine.expireAfterWrite());
+            validateLocalExpiry("expireAfterAccess", caffeine.expireAfterAccess());
+        }
+    }
+
+    // a fixed local expiry longer than the store's maximum age would never apply, as every copy goes at the maximum age
+    // first (a copy is read no earlier than installed, and installed no earlier than its value's write): the first
+    // level meant to outlive the second, which decides how long a value is valid, almost certainly a mistake, so
+    // rejected here rather than lowered quietly. At runtime, a maximum age or expiry set so still lowers it
+    // (InternalExpiry): instances change one after another, and a staggered change must not fail. A user's Expiry has
+    // no duration known before it runs; it is lowered per copy
+    private void validateLocalExpiry(String name, @Nullable Duration duration) {
+        Duration maximumAge = store().maximumAge();
+        if (duration != null && duration.compareTo(maximumAge) > 0) {
+            throw new IllegalStateException(name + " (" + duration + ") is longer than the store's maximum age ("
+                    + maximumAge + "), which decides how long a value is valid: shorten it, or use "
+                    + "withMaximumAgeForStoreOnly() for local copies meant to outlive the store's values");
         }
     }
 
