@@ -44,6 +44,12 @@ final class InternalMaintenance {
     private InternalMaintenance() {
     }
 
+    // the shortest maximum age for the store only (DistributedCaffeine#validate, InternalCore#maximumAge): five
+    // heartbeat intervals, so that a trusted holder knows of every write well before the store lets go of its row
+    static Duration storeOnlyMinimumAge(Duration heartbeatInterval) {
+        return heartbeatInterval.multipliedBy(5);
+    }
+
     // once, after the delay and never before it (no jitter), never cancelled
     @SuppressWarnings("FutureReturnValueIgnored") // nothing to cancel or wait for
     static void scheduleOnce(InternalEnvironment environment, Runnable task, Duration delay) {

@@ -156,8 +156,9 @@ of its own, and the two relate as follows:
 
 * **Age:** the store's maximum age overrules a longer local expiry: a copy expires at its local expiry or at the store's
   maximum age after its value's write, whichever comes first (unless `withMaximumAgeForStoreOnly()`). A copy of a value
-  already old when read therefore expires sooner. `policy()` still shows `expireAfterWrite` and `expireAfterAccess` as
-  configured.
+  already old when read therefore expires sooner. `policy()` shows `expireAfterWrite` lowered to the maximum age, also
+  one set through `policy().expireAfterWrite()`, and without any local expiry set (`expireAfterWrite` or
+  `expireAfter`), it shows `expireAfterWrite` at the maximum age, which follows a maximum age changed at runtime.
 * **Size:** the bounds are independent: only the local `maximumSize` or `maximumWeight` bounds the local cache, and the
   store pruning to its maximum size leaves the local copies alone. An atomic `asMap()` method then sees a pruned key as
   absent, as Caffeine does after an eviction, even while a local copy still serves reads.
@@ -191,6 +192,7 @@ The store's settings have defaults that suit most uses:
 * `withMaximumSize(...)`: how many values the store keeps: trimmed each maintenance run to the most recently written
   ones, so it can briefly hold more; not Caffeine's frequency-based eviction (default: unbounded).
 * `withMaintenanceInterval(...)`: how often values beyond the maximum age or size are removed (default: one minute).
+  Lowering the maximum age or size at runtime takes effect in the store from the next run.
 * `withHeartbeatInterval(...)`: how often an instance checks that distribution still works (default: ten seconds). A
   stop is noticed within about two intervals, after which the instance checks its copies against the store until
   distribution works again.
@@ -301,6 +303,25 @@ DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapt
 with `recordStats()`), and `getFromStore(...)` and `getAllFromStore(...)`, which read the store directly, bypassing the
 instance's copies.
 
+`storeMaximumAge()` and `storeMaximumSize()` adjust the store's bounds at runtime, as Caffeine's
+`policy().expireAfterWrite()` and `policy().eviction()` adjust the local ones. Each is present only if the cache was
+built with that bound, and each applies to the instance it is called on, so set it on every instance, for example
+from a configuration service:
+
+```java
+cache.distributedPolicy().storeMaximumAge()
+        .ifPresent(age -> age.setMaximumAge(Duration.ofMinutes(30)));
+```
+
+* **Maximum age:** applies at once to the instance's reads of the store, to its maintenance and to its copies (not
+  with `withMaximumAgeForStoreOnly()`). A longer age lengthens the copies held as far as their local expiry allows,
+  except under `expireAfter(...)`. With `withMaximumAgeForStoreOnly()`, it must stay at least five heartbeat
+  intervals.
+* **Maximum size:** applies from the instance's next maintenance run.
+* **While instances differ,** as while a change reaches them one after another, values stay consistent: the shortest
+  age expires values for every instance, which then load them again, and the store is pruned to the smallest size.
+  The stats show it as expired values (`maintenanceExpiredCount`, `expiredCount`), store misses and loads.
+
 ## Remarks
 
 #### Local and shared
@@ -396,9 +417,10 @@ instance's copies.
 
 #### Deployment
 
-* **Same configuration:** all instances of a cache need the same store bounds, serializers and hashing. After changing
-  the key or value classes, their serializers or the hashing, remove the stored values (`invalidateAll()`) or give the
-  cache a new place; on PostgreSQL, a serializer storing another format always needs a new place.
+* **Same configuration:** all instances of a cache need the same store bounds (changed at runtime on every instance,
+  see [The distributed policy](#the-distributed-policy)), serializers and hashing. After changing the key or value
+  classes, their serializers or the hashing, remove the stored values (`invalidateAll()`) or give the cache a new
+  place; on PostgreSQL, a serializer storing another format always needs a new place.
 * **Unreadable values:** a value an instance cannot read, such as one written with other value classes or
   serializers, counts as a miss: it is loaded again and the loaded value replaces it in the store, so the cache keeps
   working, at the cost of loads (logged, and counted as `unreadableRowCount`). While instances with different

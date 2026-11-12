@@ -579,6 +579,51 @@ the copies is what is new.
 - **Tests:** `InternalCoreTest` (on every store: sharing within the age, copies kept after it, atomic methods on
   expired and on pruned rows) and `DistributedCaffeineTest` (validation, prune grace). Not in the property test.
 
+### Store bounds at runtime (built 2026-11-11)
+
+`distributedPolicy().storeMaximumAge()` and `storeMaximumSize()` (`Optional<StoreMaximumAge>` /
+`Optional<StoreMaximumSize>`, nested in `DistributedPolicy`) get and set the store's bounds while the cache runs, as
+Caffeine's `policy().expireAfterWrite()` and `eviction()` do for its own; empty if the cache was built without the
+bound, so that bounded or not stays a decision of the build (L1 gets its capping expiry only with a maximum age).
+Asked for by a real use: a TTL kept in ZooKeeper and set on every instance at runtime. Caffeine's own
+`setExpiresAfter` alone does not do it: it counts from the install and is lowered to the maximum age, so the store's
+maximum age is the actual bound of staleness.
+
+- **Per instance, not shared:** the setter changes the instance it is called on; the configuration service sets every
+  instance. Storing the bounds in the store (one call for the cluster) would need a control row, change messages and a
+  rule for conflicting local configuration: not built without a need (complexity budget).
+- **Disagreement is safe, it only costs loads.** Every atomic decision is conditioned on the row's version, and a read
+  of a value too old for the reader reports it as `EXPIRED` at that version (`Store#read`), so instances that see the
+  same row as present and absent still decide on one referee: the outcome is that of the age changing between the two
+  operations. Expiry is a conditional state update, so pruners with different ages coexist; the shortest expires
+  values for everyone. With the age for the store only, `InternalCore#read`'s trust rule needs only the reader's own
+  age (or the pruner's) to be at least five heartbeat intervals, which the setter checks against the instance's
+  heartbeat (the same on every instance by the configuration rule). A lasting split (an instance restarted with a
+  static default) churns: values expired by the shortest, reloaded by the others.
+- **The copies held follow:** `InternalExpiry` computes a copy's latest expiry from its install, its row's age and the
+  maximum age *now* (no longer stored per value), and `InternalExpiry#reapply` reschedules every held copy, the loop
+  `setExpiresAfter` already used. `expireAfterWrite` is kept as set and lowered to the age where read, so a longer age
+  lifts it again up to what was set; without one set it follows the age. Under the user's `Expiry`, whose durations
+  cannot be computed again, a copy keeps what is left of it, lowered to its new latest expiry: a longer age lengthens
+  none. With the age for the store only, L1 is not touched.
+- **Stays in `withStore`, for now (decided 2026-11-11):** moving the maximum age to the top-level builder would show
+  its cache-wide scope (it is the cluster's bound of staleness and caps the copies too), but changes the API right
+  after 0.8.0; the compromise accepted is documentation: `withMaximumAge`, `expireAfterWrite` and the README say that
+  without a local expiry the copies expire at the maximum age (`policy().expireAfterWrite()` shows it and follows it),
+  and that a duration set through the policy is lowered to it. Counting `expireAfterWrite` from the store's write was
+  rejected: a row older than it would install already expired unless the reads filtered by it too, which merges it
+  into the maximum age and gives up Caffeine's meaning.
+- **Not adjustable:** `withMaximumAgeForStoreOnly()` (a mode: the trust rule of the atomic methods), the heartbeat and
+  poll intervals (`pruneGrace` and the five-heartbeat rule are computed from them by the instance that prunes, for every
+  instance), the operation timeout (fixed into the drivers when the adapter is built) and the executor; the
+  maintenance interval could be, but nobody tunes it live.
+- **Tested:** unit tests for the policy (local expiry following, lifted, capped; validation) and the core (one
+  instance's shorter age expiring the values for every instance, on every store), and a property-test variant: three
+  times a phase one instance's age is set to 50 ms, 200 ms, 1 s or an hour while the instances work, maintenance every
+  5 ms, all back at an hour before the check; freshness and convergence hold (presence is not asked for: a confirmed
+  write may expire), threaded and deterministic on every store profile (304 runs green), each run asserting that
+  values expired.
+
 ### Refresh
 
 Caffeine's `refreshAfterWrite` stays as configured; the library adds four rules around it.

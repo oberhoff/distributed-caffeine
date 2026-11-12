@@ -329,7 +329,7 @@ public final class DistributedCaffeine<K, V> {
             throw new IllegalStateException("withMaximumAgeForStoreOnly() requires a heartbeat interval of at most "
                     + InternalMaintenance.STORE_ONLY_HEARTBEAT_LIMIT + ", not " + heartbeat);
         }
-        Duration minimum = heartbeat.multipliedBy(5);
+        Duration minimum = InternalMaintenance.storeOnlyMinimumAge(heartbeat);
         if (store().maximumAge().compareTo(minimum) < 0) {
             throw new IllegalStateException("withMaximumAgeForStoreOnly() requires a maximum age of at least five "
                     + "heartbeat intervals (" + minimum + "), not " + store().maximumAge()

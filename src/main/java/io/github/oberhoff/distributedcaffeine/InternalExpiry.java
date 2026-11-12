@@ -16,10 +16,15 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.Expiry;
+import com.github.benmanes.caffeine.cache.Policy;
+import com.github.benmanes.caffeine.cache.Policy.CacheEntry;
+import com.github.benmanes.caffeine.cache.Policy.VarExpiration;
 import com.github.benmanes.caffeine.cache.Ticker;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
+import java.util.OptionalLong;
+import java.util.concurrent.TimeUnit;
 
 /**
  * The expiry of the local level (CaffeineConfigurer#caffeine), on its wrapped keys and values: the user's Expiry, or
@@ -39,12 +44,15 @@ final class InternalExpiry<K, V> implements Expiry<InternalKey<K>, InternalValue
     static final long NONE = -1;
 
     private final @Nullable Expiry<? super K, ? super V> expiry;
-    private final long maximumAge;
+    private final long configuredMaximumAge;
     private final Ticker ticker;
     private final long configuredAfterWrite;
     private final long configuredAfterAccess;
-    // the fixed durations, changed through InternalPolicy (as Caffeine's fixed policies change theirs) and reset for
-    // every cache built (see reset)
+    // the store's maximum age, changed through the distributed policy (InternalCore#maximumAge), and the fixed
+    // durations, changed through InternalPolicy (as Caffeine's fixed policies change theirs); all reset for every cache
+    // built (see reset). expireAfterWrite is kept as set and lowered to the maximum age where it is read, so that a
+    // longer maximum age set later lifts it again, up to what was set
+    private volatile long maximumAge;
     private volatile long afterWrite;
     private volatile long afterAccess;
 
@@ -53,7 +61,8 @@ final class InternalExpiry<K, V> implements Expiry<InternalKey<K>, InternalValue
         this(expiry, maximumAge, ticker, NONE, NONE);
     }
 
-    // the fixed durations (expireAfterAccess NONE: not set), expireAfterWrite lowered to the maximum age
+    // the fixed durations (expireAfterAccess NONE: not set), expireAfterWrite lowered to the maximum age (Long.MAX_VALUE:
+    // the maximum age, following it)
     InternalExpiry(Duration maximumAge, Ticker ticker, long afterWrite, long afterAccess) {
         this(null, maximumAge, ticker, afterWrite, afterAccess);
     }
@@ -61,15 +70,16 @@ final class InternalExpiry<K, V> implements Expiry<InternalKey<K>, InternalValue
     private InternalExpiry(@Nullable Expiry<? super K, ? super V> expiry, Duration maximumAge, Ticker ticker,
                            long afterWrite, long afterAccess) {
         this.expiry = expiry;
-        this.maximumAge = maximumAge.toNanos();
+        this.configuredMaximumAge = maximumAge.toNanos();
         this.ticker = ticker;
-        this.configuredAfterWrite = afterWrite == NONE ? NONE : Math.min(afterWrite, this.maximumAge);
+        this.configuredAfterWrite = afterWrite;
         this.configuredAfterAccess = afterAccess;
         reset();
     }
 
     // a cache built (again) starts with the durations configured, as one Caffeine builds does
     void reset() {
+        maximumAge = configuredMaximumAge;
         afterWrite = configuredAfterWrite;
         afterAccess = configuredAfterAccess;
     }
@@ -79,22 +89,55 @@ final class InternalExpiry<K, V> implements Expiry<InternalKey<K>, InternalValue
         return expiry != null;
     }
 
+    // expireAfterWrite as it applies: lowered to the maximum age
     long afterWrite() {
-        return afterWrite;
+        long write = afterWrite;
+        return write == NONE ? NONE : Math.min(write, maximumAge);
     }
 
     long afterAccess() {
         return afterAccess;
     }
 
-    // as Caffeine's FixedExpiration#setExpiresAfter: the held copies follow it (see InternalPolicy); expireAfterWrite
-    // lowered to the maximum age, as configured
+    // as Caffeine's FixedExpiration#setExpiresAfter: the held copies follow it (reapply)
     void afterWrite(long nanos) {
-        afterWrite = Math.min(nanos, maximumAge);
+        afterWrite = nanos;
     }
 
     void afterAccess(long nanos) {
         afterAccess = nanos;
+    }
+
+    // the store's maximum age set at runtime (InternalCore#maximumAge): the held copies follow it (reapply)
+    void maximumAge(long nanos) {
+        maximumAge = nanos;
+    }
+
+    // every held copy's expiry computed again, after a duration or the maximum age changed, as Caffeine's fixed policy
+    // applies a new duration to the held copies at once. Each computation reads the durations and the age as they are
+    // then, so concurrent changes end with the last one applied. A copy replaced meanwhile computed its own already,
+    // but this may have overwritten it with its predecessor's: done again for the new one. Under the user's Expiry,
+    // whose durations cannot be computed again, a copy keeps what is left of it, lowered to its new latest expiry: a
+    // longer maximum age lengthens no copy held, only those installed after
+    void reapply(Policy<InternalKey<K>, InternalValue<V>> policy) {
+        VarExpiration<InternalKey<K>, InternalValue<V>> variable = policy.expireVariably().orElseThrow();
+        for (InternalKey<K> internalKey : variable.oldest(stream -> stream.map(CacheEntry::getKey).toList())) {
+            InternalValue<V> held = policy.getIfPresentQuietly(internalKey);
+            while (held != null) {
+                long currentTime = now();
+                if (expiry == null) {
+                    variable.setExpiresAfter(internalKey, left(held, currentTime), TimeUnit.NANOSECONDS);
+                } else {
+                    OptionalLong remaining = variable.getExpiresAfter(internalKey, TimeUnit.NANOSECONDS);
+                    if (remaining.isPresent()) {
+                        variable.setExpiresAfter(internalKey, capped(held, currentTime, remaining.getAsLong()),
+                                TimeUnit.NANOSECONDS);
+                    }
+                }
+                InternalValue<V> now = policy.getIfPresentQuietly(internalKey);
+                held = now == held ? null : now;
+            }
+        }
     }
 
     long now() {
@@ -103,14 +146,14 @@ final class InternalExpiry<K, V> implements Expiry<InternalKey<K>, InternalValue
 
     @Override
     public long expireAfterCreate(InternalKey<K> key, InternalValue<V> value, long currentTime) {
-        installed(value, currentTime);
+        value.installed(currentTime);
         return expiry == null ? left(value, currentTime)
                 : capped(value, currentTime, expiry.expireAfterCreate(key.key(), value.value(), currentTime));
     }
 
     @Override
     public long expireAfterUpdate(InternalKey<K> key, InternalValue<V> value, long currentTime, long currentDuration) {
-        installed(value, currentTime);
+        value.installed(currentTime);
         return expiry == null ? left(value, currentTime) : capped(value, currentTime,
                 expiry.expireAfterUpdate(key.key(), value.value(), currentTime, currentDuration));
     }
@@ -129,14 +172,14 @@ final class InternalExpiry<K, V> implements Expiry<InternalKey<K>, InternalValue
 
     // a duration from now, at most until the copy must go
     long capped(InternalValue<V> value, long currentTime, long duration) {
-        return Math.min(duration, from(currentTime, value.latestExpiry()));
+        return Math.min(duration, from(currentTime, latestExpiry(value)));
     }
 
     // what is left of a copy under the fixed durations, from now: Caffeine's expireAfterWrite counts from the install,
     // its expireAfterAccess from the last read or install, and the earlier one applies
     long left(InternalValue<V> value, long currentTime) {
-        long until = value.latestExpiry();
-        long write = afterWrite;
+        long until = latestExpiry(value);
+        long write = afterWrite();
         if (write != NONE) {
             until = Math.min(until, plus(value.installedAt(), write));
         }
@@ -147,10 +190,11 @@ final class InternalExpiry<K, V> implements Expiry<InternalKey<K>, InternalValue
         return from(currentTime, until);
     }
 
-    // a copy installed now: it goes at the store's maximum age after its row's write at the latest
-    private void installed(InternalValue<V> value, long currentTime) {
-        value.installed(currentTime);
-        value.latestExpiry(plus(currentTime, Math.max(0, maximumAge - value.age())));
+    // when a copy must go at the latest: the store's maximum age after its row's write, that is its install plus what
+    // was left of the age then. Computed from the age as it is now, not kept from the install, so that a maximum age
+    // set later applies to the copies held too
+    private long latestExpiry(InternalValue<V> value) {
+        return plus(value.installedAt(), Math.max(0, maximumAge - value.age()));
     }
 
     // the nanoseconds from now until then (none if passed); a saturated time stays unbounded, as Caffeine's ticker may

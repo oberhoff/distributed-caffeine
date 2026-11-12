@@ -58,7 +58,9 @@ public final class StoreConfigurer {
      * value, and every instance drops its copy of it at that age, however its own expiry is set and whatever the
      * distribution mode, also if a change never reaches the instance, so an outdated copy is served no longer than that
      * (unless {@link #withMaximumAgeForStoreOnly()}). Maintenance removes the value from the store within about one
-     * maintenance interval after.
+     * maintenance interval after. Without a local expiry set ({@code expireAfterWrite} or {@code expireAfter}), the
+     * local copies expire at the maximum age, and {@code policy().expireAfterWrite()} shows it. Adjustable at runtime
+     * through {@link DistributedPolicy#storeMaximumAge()}.
      * Optional: unbounded by default, as with {@code ChronoUnit.FOREVER.getDuration()}.
      *
      * @param maximumAge the maximum age (positive)

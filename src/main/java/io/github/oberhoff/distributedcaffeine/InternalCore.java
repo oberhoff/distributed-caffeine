@@ -200,7 +200,10 @@ final class InternalCore<K, V> {
     private final InternalSerializer<V> valueSerializer;
     // the cache's name, for its log messages: where it lives (Adapter#toString)
     private final String name;
-    private final Duration maximumAge;
+    // the store's maximum age and size: as built, or as set since through the distributed policy (maximumAge,
+    // maximumSize), read where used; whether each was bounded when built (only then can it be set)
+    private volatile Duration maximumAge;
+    private final boolean ageBounded;
     // the maximum age for the store only (StoreConfigurer#withMaximumAgeForStoreOnly): a value expires in the store,
     // but its copies stay here
     private final boolean maximumAgeForStoreOnly;
@@ -254,7 +257,8 @@ final class InternalCore<K, V> {
     // Caffeine's stats counter of L1, for what Caffeine counts but the core does not run through it
     private final InternalCaffeineStats caffeineStats;
     private final InternalStoreGuard guard;
-    private final long maximumSize;
+    private volatile long maximumSize;
+    private final boolean sizeBounded;
     private final Duration maintenanceInterval;
     // how long a row is spared from size pruning at least (see DistributedCaffeine#pruneGrace): so that a load's write
     // on "missing" does not apply over a newer row pruned while the load ran (unless the load took longer), and,
@@ -300,6 +304,7 @@ final class InternalCore<K, V> {
         this.keySerializer = requireNonNull(keySerializer);
         this.valueSerializer = requireNonNull(valueSerializer);
         this.maximumAge = requireNonNull(maximumAge);
+        this.ageBounded = !maximumAge.equals(StoreConfigurer.UNBOUNDED_AGE);
         this.maximumAgeForStoreOnly = maximumAgeForStoreOnly;
         this.expiry = expiry;
         this.storeExecutor = requireNonNull(storeExecutor);
@@ -317,6 +322,7 @@ final class InternalCore<K, V> {
         this.asyncBulkLoader = loaders == null ? null : asyncBulkLoader(loaders);
         this.distributionMode = requireNonNull(distributionMode);
         this.maximumSize = maximumSize;
+        this.sizeBounded = maximumSize != StoreConfigurer.UNBOUNDED_SIZE;
         this.maintenanceInterval = requireNonNull(maintenanceInterval);
         this.pruneGrace = requireNonNull(pruneGrace);
         this.heartbeatInterval = requireNonNull(heartbeatInterval);
@@ -2599,6 +2605,62 @@ final class InternalCore<K, V> {
         }
     }
 
+    // whether the cache was built with a maximum age, so that it can be set (DistributedPolicy.StoreMaximumAge)
+    boolean hasMaximumAge() {
+        return ageBounded;
+    }
+
+    Duration maximumAge() {
+        return maximumAge;
+    }
+
+    // the store's maximum age for this instance from now on: its reads (a row at least as old counts as missing), its
+    // maintenance (which expires such rows in the store, announced) and, unless the age is for the store only, the
+    // copies it holds (InternalExpiry#reapply). Instances may disagree while a change reaches them all: every atomic
+    // decision is conditioned on the row's version, which a read of a row too old reports as well (Store#read), and
+    // with the age for the store only, every instance's own age is at least five heartbeat intervals, all that read()
+    // relies on. The shortest age expires the values for every instance, at the cost of loads
+    void maximumAge(Duration maximumAge) {
+        requireNonNull(maximumAge, "maximumAge cannot be null");
+        if (maximumAge.isNegative() || maximumAge.isZero()) {
+            throw new IllegalArgumentException("maximumAge must be positive");
+        }
+        // as StoreConfigurer#withMaximumAge does
+        Duration age = maximumAge.compareTo(StoreConfigurer.UNBOUNDED_AGE) > 0 ? StoreConfigurer.UNBOUNDED_AGE
+                : maximumAge;
+        if (maximumAgeForStoreOnly) {
+            Duration minimum = InternalMaintenance.storeOnlyMinimumAge(heartbeatInterval);
+            if (age.compareTo(minimum) < 0) {
+                throw new IllegalArgumentException("withMaximumAgeForStoreOnly() requires a maximum age of at least "
+                        + "five heartbeat intervals (" + minimum + "), not " + age);
+            }
+        }
+        this.maximumAge = age;
+        // L1's expiry is this library's whenever the copies are bounded by the age (CaffeineConfigurer#caffeine)
+        if (!maximumAgeForStoreOnly && expiry != null) {
+            expiry.maximumAge(InternalExpiry.nanos(age));
+            expiry.reapply(l1.synchronous().policy());
+        }
+    }
+
+    // whether the cache was built with a maximum size, so that it can be set (DistributedPolicy.StoreMaximumSize)
+    boolean hasMaximumSize() {
+        return sizeBounded;
+    }
+
+    long maximumSize() {
+        return maximumSize;
+    }
+
+    // the store's maximum size for this instance's maintenance from now on; instances that disagree prune to the
+    // smallest
+    void maximumSize(long maximumSize) {
+        if (maximumSize <= 0) {
+            throw new IllegalArgumentException("maximumSize must be positive");
+        }
+        this.maximumSize = maximumSize;
+    }
+
     SynchronizationState state() {
         if (closed) {
             return SynchronizationState.CLOSED;
@@ -2635,12 +2697,14 @@ final class InternalCore<K, V> {
                 int current = next;
                 int limit = current == 0 ? InternalMaintenance.EXPIRY_BATCH : InternalMaintenance.PRUNE_BATCH;
                 long start = environment.nanoTime();
-                // a bound not set has nothing to remove
+                // a bound not set has nothing to remove; each batch with the bound as set now
+                Duration age = maximumAge;
+                long size = maximumSize;
                 int changed = guard.retrying(() -> switch (current) {
-                    case 0 -> maximumAge.equals(StoreConfigurer.UNBOUNDED_AGE) ? 0
-                            : store.expire(maximumAge, expiredVersion, limit);
-                    case 1 -> maximumSize == StoreConfigurer.UNBOUNDED_SIZE ? 0
-                            : store.pruneToSize(maximumSize, pruneGrace, limit);
+                    case 0 -> age.equals(StoreConfigurer.UNBOUNDED_AGE) ? 0
+                            : store.expire(age, expiredVersion, limit);
+                    case 1 -> size == StoreConfigurer.UNBOUNDED_SIZE ? 0
+                            : store.pruneToSize(size, pruneGrace, limit);
                     default -> store.pruneTombstones(InternalMaintenance.TOMBSTONE_RETENTION, limit);
                 }, Operation.WRITE);
                 guard.success();

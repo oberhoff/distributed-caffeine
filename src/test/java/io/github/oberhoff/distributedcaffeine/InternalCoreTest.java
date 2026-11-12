@@ -317,6 +317,41 @@ public class InternalCoreTest {
     }
 
     @Test
+    void the_maximum_age_for_the_store_only_can_be_set_to_five_heartbeat_intervals_at_least() {
+        DistributedPolicy.StoreMaximumAge age = storeOnlyCache().distributedPolicy().storeMaximumAge().orElseThrow();
+
+        Duration tooShort = STORE_AGE.minusMillis(1);
+        assertThatThrownBy(() -> age.setMaximumAge(tooShort))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("five heartbeat intervals");
+        assertThat(age.getMaximumAge()).isEqualTo(STORE_AGE);
+        age.setMaximumAge(STORE_AGE.multipliedBy(2));
+        assertThat(age.getMaximumAge()).isEqualTo(STORE_AGE.multipliedBy(2));
+    }
+
+    // the maximum age set on one instance only, as while a change reaches the instances one after another: its reads
+    // and its maintenance follow it at once, and the values its maintenance expires are gone for every instance
+    @Test
+    void a_shorter_maximum_age_set_on_one_instance_expires_the_values_for_every_instance() {
+        AtomicInteger loads = new AtomicInteger();
+        DistributedLoadingCache<String, String> other = loading(key -> "v" + loads.incrementAndGet());
+        DistributedLoadingCache<String, String> shortened = builder(LONG)
+                .withStore(store -> store.withMaintenanceInterval(Duration.ofMillis(50)))
+                .build(key -> "v" + loads.incrementAndGet());
+        closeables.add(shortened);
+        assertThat(other.get("k")).isEqualTo("v1");
+        assertThat(shortened.get("k")).as("from the store").isEqualTo("v1");
+
+        shortened.distributedPolicy().storeMaximumAge().orElseThrow().setMaximumAge(Duration.ofMillis(200));
+
+        await(() -> other.policy().getIfPresentQuietly("k") == null);
+        await(() -> shortened.policy().getIfPresentQuietly("k") == null);
+        assertThat(shortened.distributedPolicy().getFromStore("k")).isNull();
+        assertThat(other.distributedPolicy().getFromStore("k")).as("expired in the store").isNull();
+        assertThat(other.get("k")).isEqualTo("v2");
+        assertThat(loads).hasValue(2);
+    }
+
+    @Test
     void a_load_writes_the_store_and_another_instance_reads_it_instead_of_the_source() {
         AtomicInteger loads = new AtomicInteger();
         DistributedLoadingCache<String, String> first = builder(LONG).withCaffeine(CaffeineConfigurer::recordStats)

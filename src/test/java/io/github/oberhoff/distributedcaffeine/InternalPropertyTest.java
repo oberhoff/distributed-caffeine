@@ -136,6 +136,12 @@ public class InternalPropertyTest {
     // older than its grace (4 s here), so that no poll misses a write and no load's write on "missing" applies over a
     // newer row pruned meanwhile
     private boolean pruning;
+    // the ageing variant: a few times per phase, one instance's maximum age set anew (as a configuration service
+    // changes it on the instances one after another), so that the instances disagree while they work and expiry
+    // removes rows with maintenance every few milliseconds; all at LONG again before the check, the change complete.
+    // An expired confirmed write is gone, so presence cannot be asked for
+    private boolean ageing;
+    private static final Duration[] AGES = {Duration.ofMillis(50), Duration.ofMillis(200), Duration.ofSeconds(1), LONG};
     // the deterministic mode (VISION.md, "Deterministic simulation"): one thread, simulated time, choices from the
     // seed; null in the threaded mode
     private @Nullable SimulatedEnvironment simulation;
@@ -203,6 +209,14 @@ public class InternalPropertyTest {
         assertThat(run(seed, new InMemoryBackend(seed), PHASES)).as("phases checked").isEqualTo(PHASES);
     }
 
+    @ParameterizedTest
+    @ValueSource(longs = {1, 2, 3, 4})
+    void with_the_maximum_age_changing_while_the_instances_work_too(long seed) throws Exception {
+        ageing = true;
+        assertThat(run(seed, new InMemoryBackend(seed), PHASES)).as("phases checked").isEqualTo(PHASES);
+        assertThat(trace).as("values expired while the instances worked").anyMatch(event -> event.contains("EXPIRED"));
+    }
+
     // the deterministic mode: the same operations, faults and oracles on one thread and simulated time, every choice
     // from the seed, so that a failure replays from its seed alone; fast enough for many seeds. What happens within an
     // operation, between its threads, is InternalInterleavingTest's
@@ -221,6 +235,15 @@ public class InternalPropertyTest {
     void deterministically_with_size_pruning_while_the_instances_work_too(String profile, long seed) throws Exception {
         pruning = true;
         assertThat(runDeterministically(seed, StoreProfile.of(profile))).as("phases checked").isEqualTo(PHASES);
+    }
+
+    @ParameterizedTest(name = "{0}, seed {1}")
+    @MethodSource("profilesAndSeeds")
+    void deterministically_with_the_maximum_age_changing_while_the_instances_work_too(String profile, long seed)
+            throws Exception {
+        ageing = true;
+        assertThat(runDeterministically(seed, StoreProfile.of(profile))).as("phases checked").isEqualTo(PHASES);
+        assertThat(trace).as("values expired while the instances worked").anyMatch(event -> event.contains("EXPIRED"));
     }
 
     // a run replayed: the same seed, the same history, event by event (a profile with a feed of its own, its faults
@@ -297,6 +320,7 @@ public class InternalPropertyTest {
                 SimulatedEnvironment simulated = simulation;
                 if (simulated != null) {
                     runPhase(random, backend, instances, async, simulated);
+                    agreeOnAge(instances);
                     backend.heal();
                     awaitQuiescence(backend, instances, simulated);
                     check(seed, phase, instances);
@@ -312,9 +336,14 @@ public class InternalPropertyTest {
                 }
                 long faultSeed = random.nextLong();
                 running.add(threads.submit(() -> backend.fault(new Random(faultSeed), this::trace)));
+                if (ageing) {
+                    long ageSeed = random.nextLong();
+                    running.add(threads.submit(() -> age(instances, new Random(ageSeed))));
+                }
                 for (Future<?> future : running) {
                     future.get(30, TimeUnit.SECONDS);
                 }
+                agreeOnAge(instances);
                 backend.heal();
                 awaitQuiescence(backend, instances);
                 check(seed, phase, instances);
@@ -350,9 +379,35 @@ public class InternalPropertyTest {
         return builder
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> (pruning ? store.withMaximumAge(LONG).withMaximumSize(KEYS / 2)
-                        .withMaintenanceInterval(Duration.ofMillis(5)) : store.withMaximumAge(LONG)
-                        .withMaximumSize(1_000)).withPollInterval(Duration.ofMillis(10)));
+                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(pruning ? KEYS / 2 : 1_000)
+                        .withMaintenanceInterval(pruning || ageing ? Duration.ofMillis(5) : Duration.ofMinutes(1))
+                        .withPollInterval(Duration.ofMillis(10)));
+    }
+
+    // the ageing variant's changes in the threaded mode, between the operations
+    private void age(List<DistributedLoadingCache<String, String>> instances, Random random) {
+        for (int change = 0; change < 3; change++) {
+            ageOnce(instances, random);
+            idle(Duration.ofMillis(random.nextInt(20)));
+        }
+    }
+
+    private void ageOnce(List<DistributedLoadingCache<String, String>> instances, Random random) {
+        int instance = random.nextInt(instances.size());
+        Duration age = AGES[random.nextInt(AGES.length)];
+        trace("AGE instance " + instance + " " + age);
+        instances.get(instance).distributedPolicy().storeMaximumAge().orElseThrow().setMaximumAge(age);
+    }
+
+    // the change reached every instance: the same maximum age everywhere before the check, long enough that nothing
+    // expires while it runs
+    private void agreeOnAge(List<DistributedLoadingCache<String, String>> instances) {
+        if (ageing) {
+            trace("AGE all " + LONG);
+            for (DistributedLoadingCache<String, String> instance : instances) {
+                instance.distributedPolicy().storeMaximumAge().orElseThrow().setMaximumAge(LONG);
+            }
+        }
     }
 
     // writers: the source first, then the cache, under the key's lock; a failed cache call is retried, as an
@@ -495,9 +550,14 @@ public class InternalPropertyTest {
             steps.add(() -> loadOnce(cache, async, loader));
             remaining.add(OPERATIONS);
         }
+        if (ageing) {
+            Random ager = new Random(random.nextLong());
+            steps.add(() -> ageOnce(instances, ager));
+            remaining.add(3);
+        }
         Random fault = new Random(random.nextLong());
         Random order = new Random(random.nextLong());
-        int total = steps.size() * OPERATIONS;
+        int total = remaining.stream().mapToInt(Integer::intValue).sum();
         int faultAt = order.nextInt(total);
         for (int step = 0; step < total; step++) {
             int actor;
@@ -576,7 +636,7 @@ public class InternalPropertyTest {
                 violations.add("freshness: the store holds " + inStore + " for " + k + ", the source " + inSource);
             }
             String written = confirmed.get(k);
-            if (!pruning && written != null && !written.equals(inStore)) {
+            if (!pruning && !ageing && written != null && !written.equals(inStore)) {
                 violations.add("presence: the store holds " + inStore + " for " + k + ", the last confirmed write "
                         + written);
             }
@@ -600,7 +660,7 @@ public class InternalPropertyTest {
             String key = found.find() ? found.group(1) : "";
             List<String> history = trace.stream().filter(event -> event.contains(key + " ")
                     || event.contains(key + "=") || event.contains(key + "#") || event.contains("ALL")
-                    || event.contains("FAULT")).toList();
+                    || event.contains("FAULT") || event.contains("AGE")).toList();
             fail("seed " + seed + ", phase " + phase + ":\n  " + String.join("\n  ", violations)
                     + "\nhistory of " + key + ":\n  "
                     + String.join("\n  ", history.subList(Math.max(0, history.size() - 60), history.size())));

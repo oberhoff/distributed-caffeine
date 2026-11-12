@@ -199,7 +199,9 @@ public final class CaffeineConfigurer<K, V> {
      * the store's bound, and whatever the duration, a copy goes at the maximum age after its value's write in the
      * store, sooner for a value already old when read (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
      * With a maximum age, the local level expires each copy by a variable expiry to do so; {@code policy()} still
-     * offers the fixed durations as Caffeine does.
+     * offers the fixed durations as Caffeine does. A duration set through {@code policy().expireAfterWrite()} is
+     * lowered the same way: {@code getExpiresAfter()} returns it lowered, and a longer maximum age set later
+     * ({@link DistributedPolicy#storeMaximumAge()}) lifts it again, up to the duration set.
      *
      * @param duration the duration
      * @return this configurer
@@ -217,7 +219,9 @@ public final class CaffeineConfigurer<K, V> {
      * the store's bound, and whatever the duration, a copy goes at the maximum age after its value's write in the
      * store, sooner for a value already old when read (not with {@link StoreConfigurer#withMaximumAgeForStoreOnly()}).
      * With a maximum age, the local level expires each copy by a variable expiry to do so; {@code policy()} still
-     * offers the fixed durations as Caffeine does.
+     * offers the fixed durations as Caffeine does. A duration set through {@code policy().expireAfterWrite()} is
+     * lowered the same way: {@code getExpiresAfter()} returns it lowered, and a longer maximum age set later
+     * ({@link DistributedPolicy#storeMaximumAge()}) lifts it again, up to the duration set.
      *
      * @param duration the duration
      * @param unit     its unit
@@ -430,9 +434,10 @@ public final class CaffeineConfigurer<K, V> {
             internalExpiry = new InternalExpiry<>(expiry, maximumAge, ticker);
             caffeine.expireAfter(internalExpiry);
         } else if (!maximumAge.equals(StoreConfigurer.UNBOUNDED_AGE)) {
-            // expireAfterWrite at the maximum age without one set, as the policy shows it (lowered to it otherwise)
+            // expireAfterWrite at the maximum age without one set, as the policy shows it, also after the maximum age
+            // changed (lowered to it otherwise)
             internalExpiry = new InternalExpiry<>(maximumAge, ticker,
-                    InternalExpiry.nanos(expireAfterWrite == null ? maximumAge : expireAfterWrite),
+                    expireAfterWrite == null ? Long.MAX_VALUE : InternalExpiry.nanos(expireAfterWrite),
                     expireAfterAccess == null ? InternalExpiry.NONE : InternalExpiry.nanos(expireAfterAccess));
             caffeine.expireAfter(internalExpiry);
         } else {

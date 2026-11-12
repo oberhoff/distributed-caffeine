@@ -27,6 +27,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.time.Duration;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -256,5 +257,105 @@ class InternalPolicyTest {
         } finally {
             release.countDown();
         }
+    }
+
+    // the store's bounds through the distributed policy, as Caffeine's policy offers its own: only if built with them
+
+    @Test
+    void the_store_bounds_are_offered_only_if_the_cache_was_built_with_them() {
+        DistributedCache<String, String> bounded = track(builder().build());
+        Adapter<String, String> adapter = settings -> database.openStore("unbounded");
+        DistributedCache<String, String> unbounded = track(DistributedCaffeine.newBuilder(adapter)
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(StringSerializer.ofString()))
+                .build());
+
+        assertThat(bounded.distributedPolicy().storeMaximumAge().orElseThrow().getMaximumAge()).isEqualTo(LONG);
+        assertThat(bounded.distributedPolicy().storeMaximumSize().orElseThrow().getMaximumSize()).isEqualTo(1_000);
+        assertThat(unbounded.distributedPolicy().storeMaximumAge()).isEmpty();
+        assertThat(unbounded.distributedPolicy().storeMaximumSize()).isEmpty();
+    }
+
+    @Test
+    void the_store_bounds_are_set_and_checked_as_the_builder_does() {
+        DistributedCache<String, String> cache = track(builder().build());
+        DistributedPolicy.StoreMaximumAge age = cache.distributedPolicy().storeMaximumAge().orElseThrow();
+        DistributedPolicy.StoreMaximumSize size = cache.distributedPolicy().storeMaximumSize().orElseThrow();
+
+        age.setMaximumAge(Duration.ofMinutes(10));
+        size.setMaximumSize(5);
+        assertThat(age.getMaximumAge()).isEqualTo(Duration.ofMinutes(10));
+        assertThat(size.getMaximumSize()).isEqualTo(5);
+        Duration negative = Duration.ofSeconds(-1);
+        assertThatThrownBy(() -> age.setMaximumAge(Duration.ZERO)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> age.setMaximumAge(negative)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> size.setMaximumSize(0)).isInstanceOf(IllegalArgumentException.class);
+        assertThat(age.getMaximumAge()).isEqualTo(Duration.ofMinutes(10));
+        assertThat(size.getMaximumSize()).isEqualTo(5);
+
+        age.setMaximumAge(ChronoUnit.FOREVER.getDuration());
+        assertThat(age.getMaximumAge()).as("capped, as by the builder").isEqualTo(Duration.ofNanos(Long.MAX_VALUE));
+    }
+
+    @Test
+    void a_maximum_age_set_applies_to_the_copies_held_and_expireAfterWrite_follows_it_without_one_set() {
+        AtomicLong nanos = new AtomicLong();
+        DistributedCache<String, String> cache = track(builder().withCaffeine(caffeine -> caffeine.ticker(nanos::get))
+                .build());
+        Policy.FixedExpiration<String, String> writing = cache.policy().expireAfterWrite().orElseThrow();
+        DistributedPolicy.StoreMaximumAge age = cache.distributedPolicy().storeMaximumAge().orElseThrow();
+        cache.put("k", "v");
+        assertThat(writing.getExpiresAfter()).as("the maximum age without one set").isEqualTo(LONG);
+
+        nanos.addAndGet(Duration.ofMinutes(5).toNanos());
+        age.setMaximumAge(Duration.ofMinutes(10));
+        assertThat(writing.getExpiresAfter()).isEqualTo(Duration.ofMinutes(10));
+        nanos.addAndGet(Duration.ofMinutes(4).toNanos());
+        assertThat(cache.policy().getIfPresentQuietly("k")).isEqualTo("v");
+        cache.put("longer", "v");
+
+        age.setMaximumAge(LONG.multipliedBy(2));
+        assertThat(writing.getExpiresAfter()).as("following the maximum age").isEqualTo(LONG.multipliedBy(2));
+        nanos.addAndGet(Duration.ofMinutes(2).toNanos());
+        assertThat(cache.policy().getIfPresentQuietly("k")).as("lengthened again").isEqualTo("v");
+
+        age.setMaximumAge(Duration.ofMinutes(10));
+        assertThat(cache.policy().getIfPresentQuietly("k")).as("ten minutes after its write").isNull();
+        assertThat(cache.policy().getIfPresentQuietly("longer")).isEqualTo("v");
+        nanos.addAndGet(Duration.ofMinutes(8).plusSeconds(1).toNanos());
+        assertThat(cache.policy().getIfPresentQuietly("longer")).isNull();
+    }
+
+    @Test
+    void a_longer_maximum_age_lifts_expireAfterWrite_up_to_what_was_set() {
+        DistributedCache<String, String> cache = track(builder().withCaffeine(caffeine -> caffeine
+                .expireAfterWrite(Duration.ofMinutes(90))).build());
+        Policy.FixedExpiration<String, String> writing = cache.policy().expireAfterWrite().orElseThrow();
+        DistributedPolicy.StoreMaximumAge age = cache.distributedPolicy().storeMaximumAge().orElseThrow();
+        assertThat(writing.getExpiresAfter()).as("lowered to the maximum age").isEqualTo(LONG);
+
+        age.setMaximumAge(LONG.multipliedBy(2));
+        assertThat(writing.getExpiresAfter()).isEqualTo(Duration.ofMinutes(90));
+        age.setMaximumAge(Duration.ofMinutes(30));
+        assertThat(writing.getExpiresAfter()).isEqualTo(Duration.ofMinutes(30));
+    }
+
+    @Test
+    void under_an_expiry_a_shorter_maximum_age_bounds_the_copies_held_and_a_longer_one_lengthens_none() {
+        AtomicLong nanos = new AtomicLong();
+        DistributedCache<String, String> cache = track(builder().withCaffeine(caffeine -> caffeine.ticker(nanos::get)
+                .expireAfter(Expiry.writing((String key, String value) -> Duration.ofMinutes(50)))).build());
+        DistributedPolicy.StoreMaximumAge age = cache.distributedPolicy().storeMaximumAge().orElseThrow();
+        cache.put("k", "v");
+
+        age.setMaximumAge(Duration.ofMinutes(10));
+        cache.put("capped", "v");
+        age.setMaximumAge(LONG);
+        nanos.addAndGet(Duration.ofMinutes(10).plusSeconds(1).toNanos());
+        assertThat(cache.policy().getIfPresentQuietly("k")).isNull();
+        assertThat(cache.policy().getIfPresentQuietly("capped")).as("keeps what was left of it").isNull();
+        cache.put("after", "v");
+        nanos.addAndGet(Duration.ofMinutes(49).toNanos());
+        assertThat(cache.policy().getIfPresentQuietly("after")).as("the expiry's own duration").isEqualTo("v");
     }
 }

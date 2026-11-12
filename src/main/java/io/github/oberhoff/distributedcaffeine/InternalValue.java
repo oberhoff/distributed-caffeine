@@ -49,9 +49,6 @@ final class InternalValue<V> {
     // how old the store's row was when it was read (Row#age, in nanoseconds, never negative): 0 for a value written
     // here, so that a copy goes at the store's maximum age after the write, not after its install (InternalExpiry)
     private final long age;
-    // when this copy must go at the latest (InternalExpiry): its install plus what was left of the store's maximum
-    // age, by Caffeine's ticker, so that no read lengthens it beyond
-    private volatile long latestExpiry = Long.MAX_VALUE;
     // when this copy was installed and last read, by Caffeine's ticker: the fixed expiry InternalExpiry emulates
     private volatile long installedAt;
     private volatile long accessedAt;
@@ -105,14 +102,6 @@ final class InternalValue<V> {
                 epoch = confirmedEpoch;
             }
         }
-    }
-
-    long latestExpiry() {
-        return latestExpiry;
-    }
-
-    void latestExpiry(long ticks) {
-        latestExpiry = ticks;
     }
 
     long age() {

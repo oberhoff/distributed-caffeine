@@ -360,17 +360,7 @@ final class InternalPolicy<K, V> implements Policy<K, V> {
             } else {
                 expiry.afterWrite(nanos);
             }
-            // the copies held: each one's expiry recomputed. A copy replaced meanwhile computed its own with the new
-            // duration already, but this may have overwritten it with its predecessor's: done again for the new one
-            VarExpiration<InternalKey<K>, InternalValue<V>> variable = policy.expireVariably().orElseThrow();
-            for (InternalKey<K> internalKey : variable.oldest(stream -> stream.map(CacheEntry::getKey).toList())) {
-                InternalValue<V> held = policy.getIfPresentQuietly(internalKey);
-                while (held != null) {
-                    variable.setExpiresAfter(internalKey, expiry.left(held, expiry.now()), TimeUnit.NANOSECONDS);
-                    InternalValue<V> now = policy.getIfPresentQuietly(internalKey);
-                    held = now == held ? null : now;
-                }
-            }
+            expiry.reapply(policy);
         }
 
         @Override

@@ -17,7 +17,9 @@ package io.github.oberhoff.distributedcaffeine;
 
 import org.jspecify.annotations.Nullable;
 
+import java.time.Duration;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * @author Andreas Oberhoff
@@ -25,9 +27,14 @@ import java.util.Map;
 final class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V> {
 
     private final InternalCore<K, V> core;
+    // present if the cache was built with the bound
+    private final @Nullable StoreMaximumAge maximumAge;
+    private final @Nullable StoreMaximumSize maximumSize;
 
     InternalDistributedPolicy(InternalCore<K, V> core) {
         this.core = core;
+        this.maximumAge = core.hasMaximumAge() ? new MaximumAgeView() : null;
+        this.maximumSize = core.hasMaximumSize() ? new MaximumSizeView() : null;
     }
 
     @Override
@@ -48,5 +55,41 @@ final class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V> {
     @Override
     public DistributedStats stats() {
         return core.stats();
+    }
+
+    @Override
+    public Optional<StoreMaximumAge> storeMaximumAge() {
+        return Optional.ofNullable(maximumAge);
+    }
+
+    @Override
+    public Optional<StoreMaximumSize> storeMaximumSize() {
+        return Optional.ofNullable(maximumSize);
+    }
+
+    private final class MaximumAgeView implements StoreMaximumAge {
+
+        @Override
+        public Duration getMaximumAge() {
+            return core.maximumAge();
+        }
+
+        @Override
+        public void setMaximumAge(Duration maximumAge) {
+            core.maximumAge(maximumAge);
+        }
+    }
+
+    private final class MaximumSizeView implements StoreMaximumSize {
+
+        @Override
+        public long getMaximumSize() {
+            return core.maximumSize();
+        }
+
+        @Override
+        public void setMaximumSize(long maximumSize) {
+            core.maximumSize(maximumSize);
+        }
     }
 }
