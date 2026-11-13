@@ -38,7 +38,7 @@ import static java.util.Objects.requireNonNull;
 final class MongoLocation {
 
     static final String MARKER_ID = "distributed-caffeine";
-    // the layout of this generation; a later layout change gets a new number, refused by this one and the other way
+    // the layout since 0.8; a later layout change gets a new number, refused by this one and the other way
     static final String MARKER = "distributed-caffeine schema 1";
     static final String START = "started";
     private static final JsonWriterSettings JSON = JsonWriterSettings.builder().outputMode(JsonMode.RELAXED).build();
@@ -85,6 +85,15 @@ final class MongoLocation {
                 yield json.substring(json.indexOf(':') + 1, json.length() - 1).trim().getBytes(StandardCharsets.UTF_8);
             }
         };
+    }
+
+    // the cache's name, as its log messages begin with it (the adapter's toString)
+    static String name(String databaseName, String collectionName, String discriminator) {
+        return "MongoDB " + databaseName + "." + collectionName + "/" + discriminator;
+    }
+
+    String name() {
+        return name(databaseName, collectionName, discriminator);
     }
 
     @Override

@@ -28,7 +28,7 @@ import java.util.UUID;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Wraps a user's key into an {@link InternalKey} with its hash, as in the current generation: a configured
+ * Wraps a user's key into an {@link InternalKey} with its hash, as in 0.7.x: a configured
  * {@link HashProvider} first, then a key implementing {@link Hashable}, then the built-in key types {@code String},
  * {@code Long}, {@code Integer} and {@code UUID}.
  * <p>

@@ -538,7 +538,7 @@ final class MongoStore implements Store, ChangeFeed {
         }
     }
 
-    private static boolean isTransient(MongoException e) {
+    static boolean isTransient(MongoException e) {
         return e instanceof MongoSocketException
                 || e instanceof MongoNotPrimaryException || e instanceof MongoNodeIsRecoveringException
                 || e instanceof MongoWriteConcernException || e instanceof MongoExecutionTimeoutException

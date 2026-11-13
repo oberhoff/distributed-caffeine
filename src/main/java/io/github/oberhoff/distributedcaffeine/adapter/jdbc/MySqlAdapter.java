@@ -35,7 +35,7 @@ import static java.util.Objects.requireNonNull;
  *     .build();
  * }</pre>
  * Changes made elsewhere arrive by polling, within about the poll interval ({@code StoreConfigurer.withPollInterval},
- * one second by default).
+ * 1 second by default).
  * <p>
  * Requires MySQL 5.7 or later, or a build of it such as Percona Server. A MariaDB server is refused (use
  * {@link MariaDbAdapter}), as is a Galera cluster node (Percona XtraDB Cluster). A failover to an asynchronous
@@ -56,9 +56,8 @@ public final class MySqlAdapter<K, V> implements Adapter<K, V> {
     // answers (its server_id); on a change, as on any failed poll, the cache checks what it holds against the store.
     // Tested with utf8mb4 and through both drivers on each major's first release and its latest: 5.7.29, 5.7.44,
     // 8.0.19, 8.4.13, 9.0.0, 9.7.4, 26.7.0, 26.10.0, the cache suites on the latest of each; failovers of a primary
-    // with an asynchronous replica on 5.7.29 and the latest of each. 5.7.29 and 8.0.19 stand for 5.7.9 and 8.0.11,
-    // whose images do not start emulated on ARM; on x86 the suites run 5.7.13 (the first 5.7 image Docker still pulls)
-    // and 8.0.11.
+    // with an asynchronous replica on 5.7.29 and the latest of each. 5.7.29 stands for 5.7.9, whose image Docker no
+    // longer pulls; 8.0.19 for 8.0.11 on ARM, where its image does not start emulated (on x86 the suites run 8.0.11).
 
     /**
      * The discriminator of a cache that names none.
@@ -88,14 +87,21 @@ public final class MySqlAdapter<K, V> implements Adapter<K, V> {
 
     @Override
     public Store createStore(StoreSettings settings) {
-        String server = JdbcStore.ensure(dataSource, Dialect.MYSQL, tableName, settings.operationTimeout());
+        String server = JdbcStore.ensure(dataSource, Dialect.MYSQL, tableName, discriminator,
+                settings.operationTimeout());
         return new JdbcStore(dataSource, Dialect.MYSQL, server, tableName, discriminator,
                 settings.operationTimeout());
     }
 
+    // caches on the same client wait once for a store that does not answer (Adapter#client)
+    @Override
+    public Object client() {
+        return dataSource;
+    }
+
     @Override
     public String toString() {
-        return "MySQL " + tableName + "/" + discriminator;
+        return JdbcStore.name(Dialect.MYSQL, tableName, discriminator);
     }
 
     /**

@@ -52,14 +52,14 @@ import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * A rolling update from the current generation's release (0.7.0, as published) to this one on the same MongoDB
+ * A rolling update from 0.7.0 (the release, as published) to this version on the same MongoDB
  * collection with {@code withSchemaReset()}: the first new instance drops the old collection while old instances
  * still run. Checks what the code of both says should happen: the old instances keep working among themselves, the
- * generations do not see each other's documents, an old instance cannot start once the new generation is there
+ * versions do not see each other's documents, an old instance cannot start once the new version is there
  * (its unique index on fields new documents lack fails), and every start of a new instance removes the old documents
  * written since the drop.
  * <p>
- * The release runs in a class loader of its own (both generations share packages), driven by reflection. Its
+ * The release runs in a class loader of its own (both versions share packages), driven by reflection. Its
  * classpath is resolved first:
  * {@code mvn -f src/test/resources/migration/pom.xml dependency:build-classpath
  * -Dmdep.outputFile=$PWD/target/migration-0.7.0.classpath}. Not run by default, only with {@code -Dexperiments=true}:
@@ -69,13 +69,14 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 @NullMarked
 @EnabledIfSystemProperty(named = "experiments", matches = "true")
-@SuppressWarnings("resource") // every cache and client a test opens is closed after it (@AfterEach)
+// every cache and client a test opens is closed after it (@AfterEach); it prints what it finds
+@SuppressWarnings({"resource", "JavaPrintToLogpoint"})
 class MigrationExperimentTest {
 
     private static final Path CLASSPATH = Path.of("target", "migration-0.7.0.classpath");
     private static final String DATABASE = "app";
     private static final String COLLECTION = "cache";
-    // the documents of the old generation: a top-level discriminator, which the new one's never have
+    // the documents of 0.7.0: a top-level discriminator, which the new one's never have
     private static final Document OLD_DOCUMENTS = new Document("discriminator", new Document("$exists", true));
 
     private final List<AutoCloseable> closeables = new ArrayList<>();
@@ -90,7 +91,7 @@ class MigrationExperimentTest {
         for (String jar : Files.readString(CLASSPATH).trim().split(Pattern.quote(File.pathSeparator), -1)) {
             urls.add(Path.of(jar).toUri().toURL());
         }
-        // the platform loader as parent: nothing of this generation or its dependencies leaks into the old one
+        // the platform loader as parent: nothing of this version or its dependencies leaks into the old one
         oldGeneration = new URLClassLoader(urls.toArray(URL[]::new), ClassLoader.getPlatformClassLoader());
         container = new MongoDBContainer("mongo:8").withReplicaSet();
         container.start();
@@ -134,7 +135,7 @@ class MigrationExperimentTest {
         await(() -> "old-2".equals(oldB.getIfPresent("k2")));
         assertThat(collection().countDocuments(OLD_DOCUMENTS)).as("written into the new collection").isEqualTo(1);
 
-        // the new generation works, a second instance finding the marker, dropping nothing and removing the old
+        // the new version works, a second instance finding the marker, dropping nothing and removing the old
         // documents written since the drop
         newA.put("k3", "new-3");
         DistributedCache<String, String> newB = newCache();
@@ -144,15 +145,15 @@ class MigrationExperimentTest {
             newA.put("n" + i, "new");
         }
 
-        // neither generation sees the other's writes (a 0.7.0 cache without persistence keeps only synchronization
+        // neither version sees the other's writes (a 0.7.0 cache without persistence keeps only synchronization
         // records in the collection, so what an old instance sees is what it holds)
-        assertThat(storedValue(newA, "k2")).as("an old document, invisible to the new generation").isNull();
+        assertThat(storedValue(newA, "k2")).as("an old document, invisible to the new version").isNull();
         newA.put("k2", "new-2");
         oldA.put("k3", "old-3");
         await(() -> "old-3".equals(oldB.getIfPresent("k3")));
-        assertThat(oldB.getIfPresent("k2")).as("not reached by the new generation's write").isEqualTo("old-2");
+        assertThat(oldB.getIfPresent("k2")).as("not reached by the new version's write").isEqualTo("old-2");
         assertThat(storedValue(newB, "k2")).isEqualTo("new-2");
-        assertThat(storedValue(newB, "k3")).as("not reached by the old generation's write").isEqualTo("new-3");
+        assertThat(storedValue(newB, "k3")).as("not reached by the old version's write").isEqualTo("new-3");
         assertThat(newB.getIfPresent("k3")).isEqualTo("new-3");
 
         // after the rollout: the old documents left behind, removed by the next start of a new instance, the new ones
@@ -174,7 +175,7 @@ class MigrationExperimentTest {
         OldCache oldA = oldCache();
         oldA.put("k1", "old");
         DistributedCache<String, String> newA = newCache();
-        System.out.println("documents of the new generation right after its first instance: "
+        System.out.println("documents of the new version right after its first instance: "
                 + collection().countDocuments(Filters.not(Filters.exists("discriminator"))));
 
         Throwable failure = catchThrowable(this::oldCache);

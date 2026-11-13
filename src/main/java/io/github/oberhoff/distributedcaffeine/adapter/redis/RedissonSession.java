@@ -80,6 +80,18 @@ final class RedissonSession implements RedisSession {
 
     @Override
     public @Nullable Object eval(RedisScript script, List<String> keys, List<byte[]> arguments) {
+        try {
+            return evalSubmitted(script, keys, arguments);
+        } catch (RedisException e) {
+            throw classified(script.toString(), e);
+        }
+    }
+
+    // A failure Redisson throws while it submits a command rather than through the command's future, classified as
+    // the future's: with lazy initialization (Config#setLazyInitialization) the first command connects the client, and
+    // a server not reached or refusing the credentials fails it so. Without that, a refused login escaped the adapter
+    // as Redisson's own exception, and a store not reached at the build was not taken for one
+    private @Nullable Object evalSubmitted(RedisScript script, List<String> keys, List<byte[]> arguments) {
         List<Object> keyObjects = new ArrayList<>(keys);
         Object[] values = arguments.toArray();
         RScript.ReturnType type = switch (script.reply()) {
@@ -115,6 +127,15 @@ final class RedissonSession implements RedisSession {
 
     @Override
     public RedisServer server() {
+        try {
+            return serverSubmitted();
+        } catch (RedisException e) {
+            // thrown while submitting, as by eval
+            throw classified("INFO server", e);
+        }
+    }
+
+    private RedisServer serverSubmitted() {
         RedisNodeAsync node = primary();
         Map<String, String> server = requireNonNull(await(node.infoAsync(RedisNode.InfoSection.SERVER), timeout,
                 "INFO server"), "INFO server answered nil");

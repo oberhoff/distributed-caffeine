@@ -65,7 +65,7 @@ abstract class PostgresPropertyTest {
         // the listening session, through a proxy that can slow every round trip down; named as the shared one, so
         // that terminating listeners reaches it
         private final SilencingProxy proxy = proxy(database);
-        private final DataSource listener = database.direct("127.0.0.1", proxy.port(), database.databaseName(),
+        private final DataSource listener = database.direct("127.0.0.1", proxy.port(), PostgresTestDatabase.DATABASE,
                 PostgresTestDatabase.LISTENER_APPLICATION);
 
         private static SilencingProxy proxy(PostgresTestDatabase database) {

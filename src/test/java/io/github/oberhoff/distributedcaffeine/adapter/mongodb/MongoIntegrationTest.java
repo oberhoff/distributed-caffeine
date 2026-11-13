@@ -36,6 +36,7 @@ import static io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoTopolo
 import static io.github.oberhoff.distributedcaffeine.adapter.mongodb.MongoTopology.THREE_NODE_REPLICA_SET_WITH_ARBITER;
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.await;
 import static io.github.oberhoff.distributedcaffeine.testing.Topology.Tests.RUNS_ON_GITHUB;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
@@ -103,10 +104,39 @@ class MongoIntegrationTest {
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
     class Mongo_9_latest__Restricted_User_Refused {
 
-        // a replica set with authentication needs a key file, written before the image's own entrypoint starts it
         @Test
         void a_user_without_the_role_the_cache_needs_is_told_which_one() throws Exception {
-            try (GenericContainer<?> server = new GenericContainer<>("mongo:9")) {
+            try (GenericContainer<?> server = authenticated()) {
+                try (MongoClient client = MongoClients.create("mongodb://reader:reader@" + server.getHost() + ":"
+                        + server.getMappedPort(27017) + "/app?authSource=app&directConnection=true")) {
+                    DistributedCaffeine<String, String> builder = DistributedCaffeine.newBuilder(
+                            MongoAdapter.newBuilder(client, "app", "cache").build());
+                    assertThatThrownBy(builder::build).isInstanceOf(StoreException.class)
+                            .hasMessageContaining("readWrite on database app");
+                }
+            }
+        }
+
+        // credentials the server refuses: a configuration error, never a start without the store (VISION.md,
+        // "Starting without the store"), as on the other adapters (AdapterConformanceTest)
+        @Test
+        void wrong_credentials_fail_the_build_for_good() throws Exception {
+            try (GenericContainer<?> server = authenticated()) {
+                try (MongoClient client = MongoClients.create("mongodb://reader:wrong@" + server.getHost() + ":"
+                        + server.getMappedPort(27017) + "/app?authSource=app&directConnection=true")) {
+                    DistributedCaffeine<String, String> builder = DistributedCaffeine.newBuilder(
+                            MongoAdapter.newBuilder(client, "app", "cache").build());
+                    assertThatThrownBy(builder::build).isInstanceOfSatisfying(StoreException.class,
+                            e -> assertThat(e.isRetryable()).as("retryable: " + e.getMessage()).isFalse());
+                }
+            }
+        }
+
+        // a single-node replica set with authentication, a root user and a user "reader" (password "reader") with
+        // only read on database app; it needs a key file, written before the image's own entrypoint starts it
+        private GenericContainer<?> authenticated() throws Exception {
+            GenericContainer<?> server = new GenericContainer<>("mongo:9");
+            try {
                 server.withExposedPorts(27017)
                         .withEnv("MONGO_INITDB_ROOT_USERNAME", "root").withEnv("MONGO_INITDB_ROOT_PASSWORD", "secret")
                         .withCreateContainerCmdModifier(cmd -> cmd.withEntrypoint("bash"))
@@ -119,13 +149,10 @@ class MongoIntegrationTest {
                 initiate(server, "mongosh", root);
                 run(server, "mongosh " + root + " --quiet --eval 'db.getSiblingDB(\"app\").createUser("
                         + "{user: \"reader\", pwd: \"reader\", roles: [{role: \"read\", db: \"app\"}]})'");
-                try (MongoClient client = MongoClients.create("mongodb://reader:reader@" + server.getHost() + ":"
-                        + server.getMappedPort(27017) + "/app?authSource=app&directConnection=true")) {
-                    DistributedCaffeine<String, String> builder = DistributedCaffeine.newBuilder(
-                            MongoAdapter.newBuilder(client, "app", "cache").build());
-                    assertThatThrownBy(builder::build).isInstanceOf(StoreException.class)
-                            .hasMessageContaining("readWrite on database app");
-                }
+                return server;
+            } catch (Exception | AssertionError e) {
+                server.stop();
+                throw e;
             }
         }
     }
@@ -452,24 +479,27 @@ class MongoIntegrationTest {
     }
 
     @Nested
-    @DisplayName("MongoDB 9.0.2 (Single-Node Replica Set)")
-    @Setup(image = "mongo:9.0.2", topology = SINGLE_NODE_REPLICA_SET) // mongo:9.0.0 is not available
+    @DisplayName("MongoDB 9.0.4 (Single-Node Replica Set)")
+    // mongo:9.0.0 is not available; 9.0.2 refuses to start on Linux 6.19 and newer (SERVER-121912)
+    @Setup(image = "mongo:9.0.4", topology = SINGLE_NODE_REPLICA_SET)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    class Mongo_9_0_2__Single_Node_Replica_Set extends MongoTopologyTests {
+    class Mongo_9_0_4__Single_Node_Replica_Set extends MongoTopologyTests {
     }
 
     @Nested
-    @DisplayName("MongoDB 9.0.2 (Three-Node Replica Set)")
-    @Setup(image = "mongo:9.0.2", topology = THREE_NODE_REPLICA_SET) // mongo:9.0.0 is not available
+    @DisplayName("MongoDB 9.0.4 (Three-Node Replica Set)")
+    // mongo:9.0.0 is not available; 9.0.2 refuses to start on Linux 6.19 and newer (SERVER-121912)
+    @Setup(image = "mongo:9.0.4", topology = THREE_NODE_REPLICA_SET)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    class Mongo_9_0_2__Three_Node_Replica_Set extends MongoTopologyTests {
+    class Mongo_9_0_4__Three_Node_Replica_Set extends MongoTopologyTests {
     }
 
     @Nested
-    @DisplayName("MongoDB 9.0.2 (Three-Node Replica Set with Arbiter)")
-    @Setup(image = "mongo:9.0.2", topology = THREE_NODE_REPLICA_SET_WITH_ARBITER) // mongo:9.0.0 is not available
+    @DisplayName("MongoDB 9.0.4 (Three-Node Replica Set with Arbiter)")
+    // mongo:9.0.0 is not available; 9.0.2 refuses to start on Linux 6.19 and newer (SERVER-121912)
+    @Setup(image = "mongo:9.0.4", topology = THREE_NODE_REPLICA_SET_WITH_ARBITER)
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    class Mongo_9_0_2__Three_Node_Replica_Set_with_Arbiter extends MongoTopologyTests {
+    class Mongo_9_0_4__Three_Node_Replica_Set_with_Arbiter extends MongoTopologyTests {
     }
 
     @Nested

@@ -58,8 +58,9 @@ public interface DistributedPolicy<K, V> {
     Map<K, StoredValue<V>> getAllFromStore(Iterable<? extends K> keys);
 
     /**
-     * Returns a snapshot of this instance's store and synchronization activity. Empty unless the cache records stats
-     * ({@code recordStats()}), as Caffeine's {@code stats()}; also after {@code close()}.
+     * Returns a snapshot of this instance's store and synchronization activity, unlike the cache's own {@code stats()},
+     * which counts the local level only. Empty unless the cache records stats ({@code recordStats()}), as Caffeine's
+     * {@code stats()}; also after {@code close()}.
      *
      * @return the snapshot
      */

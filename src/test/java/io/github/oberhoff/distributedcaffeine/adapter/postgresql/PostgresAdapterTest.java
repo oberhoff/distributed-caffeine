@@ -205,8 +205,8 @@ abstract class PostgresAdapterTest {
         String application = "dc-adapter-" + table;
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl(database.jdbcUrl());
-        config.setUsername(database.username());
-        config.setPassword(database.password());
+        config.setUsername(PostgresTestDatabase.USER);
+        config.setPassword(PostgresTestDatabase.PASSWORD);
         config.addDataSourceProperty("ApplicationName", application);
         // one connection for listening, one for everything else: a connection taken over and not given back, or
         // given back and handed out again, would leave nothing to reconnect with
@@ -321,7 +321,9 @@ abstract class PostgresAdapterTest {
         try (LogCapture log = new LogCapture()) {
             cache(Function.identity()).put("k", "v");
             cache(Function.identity());
-            assertThat(log.count("Created table")).as("once, by the first: " + log.text()).isEqualTo(1);
+            assertThat(log.count("Created the table")).as("once, by the first: " + log.text()).isEqualTo(1);
+            assertThat(log.text()).as("named as the cache")
+                    .containsPattern("PostgreSQL \\S+/\\S+: Created the table");
         }
 
         assertThat(query("SELECT obj_description(to_regclass('adapter.\"" + table + "\"')::oid, 'pg_class')"))

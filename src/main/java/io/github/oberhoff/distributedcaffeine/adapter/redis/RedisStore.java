@@ -85,9 +85,10 @@ final class RedisStore implements Store, ChangeFeed {
         this.product = product;
     }
 
-    // the server's product (Redis, Valkey, Dragonfly, Kvrocks), for log messages
-    String product() {
-        return product;
+    // the cache's name, as its log messages begin with it (the adapter's toString): the server's product (Redis,
+    // Valkey, Dragonfly, Kvrocks) and the keyspace with the discriminator
+    String name() {
+        return product + " " + keys.name();
     }
 
     // reads

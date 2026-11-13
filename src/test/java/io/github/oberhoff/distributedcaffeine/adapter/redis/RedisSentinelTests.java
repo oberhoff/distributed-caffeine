@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter.redis;
 
+import io.github.oberhoff.distributedcaffeine.AdapterOutageTest;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
@@ -80,6 +81,36 @@ abstract class RedisSentinelTests {
             redisson.shutdown();
             jedis.close();
             lettuce.shutdown();
+        }
+    }
+
+    @Nested
+    class LettuceOutages extends AdapterOutageTest {
+
+        @Override
+        protected Outage outage() {
+            return new RedisOutage(() -> sentinel.ownClient(RedisOutage.Library.LETTUCE), sentinel::containers,
+                    key -> sentinel.withoutPrimary(), false);
+        }
+    }
+
+    @Nested
+    class JedisOutages extends AdapterOutageTest {
+
+        @Override
+        protected Outage outage() {
+            return new RedisOutage(() -> sentinel.ownClient(RedisOutage.Library.JEDIS), sentinel::containers,
+                    key -> sentinel.withoutPrimary(), true);
+        }
+    }
+
+    @Nested
+    class RedissonOutages extends AdapterOutageTest {
+
+        @Override
+        protected Outage outage() {
+            return new RedisOutage(() -> sentinel.ownClient(RedisOutage.Library.REDISSON), sentinel::containers,
+                    key -> sentinel.withoutPrimary(), false);
         }
     }
 

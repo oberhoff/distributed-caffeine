@@ -49,6 +49,7 @@ public final class StoreConfigurer {
     private Duration maintenanceInterval = DEFAULT_MAINTENANCE_INTERVAL;
     private Duration heartbeatInterval = DEFAULT_HEARTBEAT_INTERVAL;
     private Duration pollInterval = DEFAULT_POLL_INTERVAL;
+    private boolean failFast;
 
     StoreConfigurer() {
     }
@@ -128,8 +129,8 @@ public final class StoreConfigurer {
      * keeps callers waiting longer. One wait it does not bound: a driver writing through a blocking socket (the JDBC
      * drivers, MongoDB's default transport, Jedis) has no timeout for sending, so a write too large for the socket's
      * buffer, such as a large {@code putAll}, sent to a server that vanished without closing the connection, waits
-     * until the operating system gives up (about 15 minutes on Linux, {@code net.ipv4.tcp_retries2}). Optional: 10
-     * seconds by default.
+     * until the operating system gives up (about 15 minutes on Linux, {@code net.ipv4.tcp_retries2}).
+     * Optional: 10 seconds by default.
      *
      * @param operationTimeout the timeout (positive)
      * @return this configurer
@@ -140,6 +141,23 @@ public final class StoreConfigurer {
             throw new IllegalArgumentException("operationTimeout must be positive");
         }
         this.operationTimeout = operationTimeout;
+        return this;
+    }
+
+    /**
+     * Makes building fail when the store cannot be reached, instead of starting without it. By default, a cache whose
+     * store does not answer when it is built (the connection refused, the host unknown, no answer within the operation
+     * timeout) starts as during an outage and connects in the background: misses load from the source, writes fail,
+     * and {@link DistributedPolicy#getSynchronizationState()} is {@code DEGRADED} until the store is reached; values
+     * loaded meanwhile are checked against the store then. So an application restarted while its store is down still
+     * starts. With this setting the build throws instead, as does every build for a store that answers but cannot be
+     * used (a schema that does not match, missing rights): for applications that should not start while their store is
+     * out of reach, rather than run {@code DEGRADED} until it is reached. Optional: off by default.
+     *
+     * @return this configurer
+     */
+    public StoreConfigurer withFailFast() {
+        failFast = true;
         return this;
     }
 
@@ -157,8 +175,8 @@ public final class StoreConfigurer {
     }
 
     /**
-     * Sets how often values beyond the maximum age or size are removed from the store, with ±20 % jitter. Optional: one
-     * minute by default.
+     * Sets how often values beyond the maximum age or size are removed from the store, with ±20 % jitter.
+     * Optional: 1 minute by default.
      *
      * @param maintenanceInterval the interval (positive)
      * @return this configurer
@@ -176,7 +194,7 @@ public final class StoreConfigurer {
      * Sets how often each instance checks that it still receives the changes made elsewhere, with ±20 % jitter. Changes
      * can stop arriving without any error; such a silence is noticed within about two intervals, and until the changes
      * arrive again, every read checks its copy against the store. Ignored without distribution. At most a minute with
-     * {@link #withMaximumAgeForStoreOnly()}. Optional: ten seconds by default.
+     * {@link #withMaximumAgeForStoreOnly()}. Optional: 10 seconds by default.
      *
      * @param heartbeatInterval the interval (positive)
      * @return this configurer
@@ -193,7 +211,7 @@ public final class StoreConfigurer {
     /**
      * Sets how often each instance asks the store for changes, for stores that cannot announce them (MariaDB, MySQL):
      * changes made elsewhere arrive within about an interval, at one query per interval and instance. Ignored by the
-     * other adapters and without distribution. At most half the heartbeat interval. Optional: one second by default.
+     * other adapters and without distribution. At most half the heartbeat interval. Optional: 1 second by default.
      *
      * @param pollInterval the interval (positive)
      * @return this configurer
@@ -215,9 +233,9 @@ public final class StoreConfigurer {
         return maximumAgeForStoreOnly;
     }
 
-    // whether a maximum age was set (maximumAge() returns the unbounded one otherwise)
-    boolean hasMaximumAge() {
-        return maximumAge != null;
+    // whether no maximum age was set (maximumAge() then returns the unbounded one)
+    boolean unboundedAge() {
+        return maximumAge == null;
     }
 
     long maximumSize() {
@@ -242,5 +260,9 @@ public final class StoreConfigurer {
 
     Duration pollInterval() {
         return pollInterval;
+    }
+
+    boolean failFast() {
+        return failFast;
     }
 }

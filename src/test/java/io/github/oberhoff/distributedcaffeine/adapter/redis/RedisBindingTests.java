@@ -16,7 +16,10 @@
 package io.github.oberhoff.distributedcaffeine.adapter.redis;
 
 import io.github.oberhoff.distributedcaffeine.adapter.redis.RedisCommandException.Kind;
+import io.github.oberhoff.distributedcaffeine.spi.StoreException;
+import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.testing.SilencingProxy;
+import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
 import org.jspecify.annotations.NullMarked;
@@ -52,6 +55,10 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 @SuppressWarnings("resource") // every session, reader, client and proxy a test opens is closed after it (@AfterEach)
 abstract class RedisBindingTests {
 
+    // a user the server does not know (ACLs since Redis 6)
+    protected static final String UNKNOWN_USER = "nobody";
+    protected static final String WRONG_PASSWORD = "wrong";
+
     private static final AtomicInteger KEYS = new AtomicInteger();
     private static final Duration TIMEOUT = Duration.ofSeconds(5);
 
@@ -70,8 +77,29 @@ abstract class RedisBindingTests {
     // a driver of a client of its own reaching the given port (a proxy's), which the closeable closes
     protected abstract Proxied driverThrough(int port);
 
+    // a driver of a client of its own on the server, logging in as UNKNOWN_USER with WRONG_PASSWORD
+    protected abstract Proxied driverOfUnknownUser();
+
     // a driver and what closes its client
     record Proxied(RedisDriver driver, AutoCloseable client) {
+    }
+
+    // credentials the server refuses (WRONGPASS), which every library reports as a failure to connect: a configuration
+    // error for good, so a cache never starts without its store over it (VISION.md, "Starting without the store")
+    @Test
+    void wrong_credentials_fail_the_store_creation_for_good() throws Exception {
+        assumeTrue(!image.contains("kvrocks"), "Kvrocks has no users, and the test server no password");
+        Proxied wrong = driverOfUnknownUser();
+        try {
+            RedisAdapter<String, String> adapter = RedisAdapter.newBuilder(wrong.driver(), RedisTestServer.freshName())
+                    .build();
+            assertThatThrownBy(() -> adapter.createStore(TestStoreSettings.of(Format.TEXT, Format.TEXT)).close())
+                    .isInstanceOfSatisfying(StoreException.class,
+                            e -> assertThat(e.isRetryable()).as("retryable: " + e.getMessage()).isFalse())
+                    .hasMessageContaining("refused the credentials");
+        } finally {
+            wrong.client().close();
+        }
     }
 
     // how a command fails on a server that cannot be reached: a connection failure, unless the client library goes on

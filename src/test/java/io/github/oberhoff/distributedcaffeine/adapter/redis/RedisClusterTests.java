@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter.redis;
 
+import io.github.oberhoff.distributedcaffeine.AdapterOutageTest;
 import io.github.oberhoff.distributedcaffeine.CacheBackend;
 import io.github.oberhoff.distributedcaffeine.InternalCoreTest;
 import io.github.oberhoff.distributedcaffeine.InternalDistributionTest;
@@ -50,6 +51,36 @@ abstract class RedisClusterTests {
     @AfterAll
     void stopCluster() {
         cluster.close();
+    }
+
+    @Nested
+    class LettuceOutages extends AdapterOutageTest {
+
+        @Override
+        protected Outage outage() {
+            return new RedisOutage(() -> cluster.ownClient(RedisOutage.Library.LETTUCE), cluster::containers,
+                    cluster.losesPrimary() ? cluster::withoutPrimary : null, false);
+        }
+    }
+
+    @Nested
+    class JedisOutages extends AdapterOutageTest {
+
+        @Override
+        protected Outage outage() {
+            return new RedisOutage(() -> cluster.ownClient(RedisOutage.Library.JEDIS), cluster::containers,
+                    cluster.losesPrimary() ? cluster::withoutPrimary : null, true);
+        }
+    }
+
+    @Nested
+    class RedissonOutages extends AdapterOutageTest {
+
+        @Override
+        protected Outage outage() {
+            return new RedisOutage(() -> cluster.ownClient(RedisOutage.Library.REDISSON), cluster::containers,
+                    cluster.losesPrimary() ? cluster::withoutPrimary : null, false);
+        }
     }
 
     @Nested

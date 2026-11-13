@@ -158,6 +158,13 @@
             <version>${junit.version}</version>
             <scope>test</scope>
         </dependency>
+        <!-- for the listener recording failed tests per test JVM (testing.FailureLog), which the workflows report -->
+        <dependency>
+            <groupId>org.junit.platform</groupId>
+            <artifactId>junit-platform-launcher</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.assertj</groupId>
             <artifactId>assertj-core</artifactId>

@@ -45,6 +45,7 @@ final class InternalExpiry<K, V> implements Expiry<InternalKey<K>, InternalValue
 
     private final @Nullable Expiry<? super K, ? super V> expiry;
     private final long configuredMaximumAge;
+    private final long configuredUnconfirmedMaximumAge;
     private final Ticker ticker;
     private final long configuredAfterWrite;
     private final long configuredAfterAccess;
@@ -53,24 +54,33 @@ final class InternalExpiry<K, V> implements Expiry<InternalKey<K>, InternalValue
     // built (see reset). expireAfterWrite is kept as set and lowered to the maximum age where it is read, so that a
     // longer maximum age set later lifts it again, up to what was set
     private volatile long maximumAge;
+    // the store's maximum age for copies no store confirmed (InternalVersion.UNCONFIRMED: loaded from the source while
+    // the store did not answer): the same as maximumAge, except with the maximum age for the store only, which leaves
+    // the other copies unbounded by it. Their staleness is bounded by messages, which a copy no store confirmed was
+    // never checked against; a cache that does not reach its store, started without it, would hold them for good
+    // otherwise (VISION.md, "Starting without the store", design step 5)
+    private volatile long unconfirmedMaximumAge;
     private volatile long afterWrite;
     private volatile long afterAccess;
 
     // the user's Expiry
-    InternalExpiry(Expiry<? super K, ? super V> expiry, Duration maximumAge, Ticker ticker) {
-        this(expiry, maximumAge, ticker, NONE, NONE);
+    InternalExpiry(Expiry<? super K, ? super V> expiry, Duration maximumAge, Duration unconfirmedMaximumAge,
+                   Ticker ticker) {
+        this(expiry, maximumAge, unconfirmedMaximumAge, ticker, NONE, NONE);
     }
 
     // the fixed durations (expireAfterAccess NONE: not set), expireAfterWrite lowered to the maximum age
     // (Long.MAX_VALUE: the maximum age, following it)
-    InternalExpiry(Duration maximumAge, Ticker ticker, long afterWrite, long afterAccess) {
-        this(null, maximumAge, ticker, afterWrite, afterAccess);
+    InternalExpiry(Duration maximumAge, Duration unconfirmedMaximumAge, Ticker ticker, long afterWrite,
+                   long afterAccess) {
+        this(null, maximumAge, unconfirmedMaximumAge, ticker, afterWrite, afterAccess);
     }
 
-    private InternalExpiry(@Nullable Expiry<? super K, ? super V> expiry, Duration maximumAge, Ticker ticker,
-                           long afterWrite, long afterAccess) {
+    private InternalExpiry(@Nullable Expiry<? super K, ? super V> expiry, Duration maximumAge,
+                           Duration unconfirmedMaximumAge, Ticker ticker, long afterWrite, long afterAccess) {
         this.expiry = expiry;
         this.configuredMaximumAge = maximumAge.toNanos();
+        this.configuredUnconfirmedMaximumAge = unconfirmedMaximumAge.toNanos();
         this.ticker = ticker;
         this.configuredAfterWrite = afterWrite;
         this.configuredAfterAccess = afterAccess;
@@ -80,6 +90,7 @@ final class InternalExpiry<K, V> implements Expiry<InternalKey<K>, InternalValue
     // a cache built (again) starts with the durations configured, as one Caffeine builds does
     void reset() {
         maximumAge = configuredMaximumAge;
+        unconfirmedMaximumAge = configuredUnconfirmedMaximumAge;
         afterWrite = configuredAfterWrite;
         afterAccess = configuredAfterAccess;
     }
@@ -111,6 +122,12 @@ final class InternalExpiry<K, V> implements Expiry<InternalKey<K>, InternalValue
     // the store's maximum age set at runtime (InternalCore#maximumAge): the held copies follow it (reapply)
     void maximumAge(long nanos) {
         maximumAge = nanos;
+        unconfirmedMaximumAge = nanos;
+    }
+
+    // the same with the maximum age for the store only: only the copies no store confirmed follow it
+    void unconfirmedMaximumAge(long nanos) {
+        unconfirmedMaximumAge = nanos;
     }
 
     // every held copy's expiry computed again, after a duration or the maximum age changed, as Caffeine's fixed policy
@@ -194,7 +211,9 @@ final class InternalExpiry<K, V> implements Expiry<InternalKey<K>, InternalValue
     // was left of the age then. Computed from the age as it is now, not kept from the install, so that a maximum age
     // set later applies to the copies held too
     private long latestExpiry(InternalValue<V> value) {
-        return plus(value.installedAt(), Math.max(0, maximumAge - value.age()));
+        long age = value.version() == InternalVersion.UNCONFIRMED ? Math.min(maximumAge, unconfirmedMaximumAge)
+                : maximumAge;
+        return plus(value.installedAt(), Math.max(0, age - value.age()));
     }
 
     // the nanoseconds from now until then (none if passed); a saturated time stays unbounded, as Caffeine's ticker may

@@ -48,7 +48,7 @@ import java.util.concurrent.Future;
 @EnabledIfSystemProperty(named = "experiments", matches = "true")
 // a measurement: it prints what it measures rather than asserting it
 // the SQL runs against a test container, unknown to the IDE
-@SuppressWarnings({"SqlNoDataSourceInspection", "java:S2699"})
+@SuppressWarnings({"SqlNoDataSourceInspection", "java:S2699", "JavaPrintToLogpoint"})
 class PostgresLogicalInvalidateAllExperimentTest {
 
     private static final String NOW_MICROS = "(extract(epoch from clock_timestamp()) * 1000000)::bigint";

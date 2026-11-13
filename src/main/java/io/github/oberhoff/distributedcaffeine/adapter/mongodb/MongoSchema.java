@@ -17,7 +17,6 @@ package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
 
 import com.mongodb.MongoCommandException;
 import com.mongodb.MongoException;
-import com.mongodb.MongoSocketException;
 import com.mongodb.MongoTimeoutException;
 import com.mongodb.ReadConcern;
 import com.mongodb.ReadPreference;
@@ -53,7 +52,8 @@ import java.util.function.UnaryOperator;
  */
 final class MongoSchema {
 
-    private static final Logger LOGGER = System.getLogger(MongoAdapter.class.getPackageName());
+    // the library's one logger, as the core's: the message names the adapter (README, "Deployment")
+    private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine");
     private static final int COMMAND_NOT_FOUND = 59;
     private static final int UNAUTHORIZED = 13;
     // the field of the marker document naming the schema
@@ -82,7 +82,12 @@ final class MongoSchema {
 
     // the database for a store's own operations: bounded by the timeout unless the client sets one of its own
     static MongoDatabase database(MongoClient client, MongoLocation location, Duration timeout) {
-        MongoDatabase database = database(client, location);
+        return bounded(database(client, location), timeout);
+    }
+
+    // a database bounded by the timeout unless the client sets one of its own: without one, a server that accepts the
+    // connection and then answers nothing (paused, or behind a network dropping every packet) blocks forever
+    private static MongoDatabase bounded(MongoDatabase database, Duration timeout) {
         return database.getTimeout(TimeUnit.MILLISECONDS) != null ? database
                 : database.withTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS);
     }
@@ -90,15 +95,15 @@ final class MongoSchema {
     static void ensure(MongoClient client, MongoLocation location, boolean schemaReset, Duration timeout) {
         try {
             MongoDatabase database = database(client, location, timeout);
-            checkDeployment(client, database, location);
+            checkDeployment(client, database, location, timeout);
             MongoCollection<BsonDocument> collection = database.getCollection(location.collectionName,
                     BsonDocument.class);
             boolean exists = database.listCollectionNames().into(new java.util.ArrayList<>())
                     .contains(location.collectionName);
-            if (exists && !hasMarker(collection)) {
+            if (exists && !hasMarker(collection) && !markerArrives(collection)) {
                 requireResettable(collection, location, schemaReset);
-                LOGGER.log(Level.WARNING, "Dropping collection {0} of distributed-caffeine 0.x, or empty "
-                        + "(withSchemaReset)", location);
+                LOGGER.log(Level.WARNING, "{0}: Dropping the collection of distributed-caffeine 0.x, or empty "
+                        + "(withSchemaReset)", location.name());
                 collection.drop();
                 exists = false;
             }
@@ -106,7 +111,7 @@ final class MongoSchema {
                 collection.updateOne(Filters.eq("_id", MongoLocation.MARKER_ID),
                         Updates.setOnInsert(MARKER_FIELD, MongoLocation.MARKER), new UpdateOptions().upsert(true));
                 collection.createIndex(INDEX, new IndexOptions().name("distributed-caffeine"));
-                LOGGER.log(Level.INFO, "Created collection {0} with its schema marker and index", location);
+                LOGGER.log(Level.INFO, "{0}: Created the collection with its schema marker and index", location.name());
             }
             checkIndex(collection, location);
             removeOldGeneration(collection, location);
@@ -118,31 +123,39 @@ final class MongoSchema {
                         + e.getMessage() + "); grant it the role readWrite on database " + location.databaseName
                         + " (through mongos also read on the config database)", e, false);
             }
-            // a store not reached is worth another try, as in every operation; anything else is the setup's
+            // a store not reached is worth another try, as in every operation, and so is one changing its primary;
+            // anything else is the setup's. The check writes only the marker (an upsert), so repeating it is safe
             throw new StoreException("Checking collection " + location + " failed: " + e.getMessage(), e, false,
-                    e instanceof MongoSocketException || e instanceof MongoTimeoutException);
+                    e instanceof MongoTimeoutException || MongoStore.isTransient(e) || interruptedByStepDown(e));
         }
     }
 
+    // killed by the primary stepping down (InterruptedDueToReplStateChange, PrimarySteppedDown), which the driver
+    // reports for a write as a plain write error: MongoDB 4 and 5 step down a primary that lost its majority and kill
+    // the operations running on it
+    private static boolean interruptedByStepDown(MongoException e) {
+        return e.getCode() == 11602 || e.getCode() == 189;
+    }
+
     // The documents of distributed-caffeine 0.7.x that a rolling update with withSchemaReset() leaves behind: written
-    // by old instances still running after the first new one dropped their collection, and ignored by this generation
+    // by old instances still running after the first new one dropped their collection, and ignored from 0.8 on
     // forever. Only theirs have an ObjectId as _id (the server assigns it to their upserts; ours are the marker's
     // string and {d, h} documents), so the built-in _id index finds them without a scan (explain on MongoDB 4.4 and 9:
     // only their keys examined, none once they are gone). Run on every start, as a start after the rollout removes
     // what the last old instances wrote: running old instances lose their store copies, as with the drop. Best
     // effort: a failure (a timeout after a long rollout) only warns, deleteMany keeps what it removed, the next start
-    // goes on. Deletes are outside the change stream's filter, so no cache of this generation hears of them.
+    // goes on. Deletes are outside the change stream's filter, so no cache of 0.8 or later hears of them.
     // To be removed in a later release, once no rollout from 0.7.x is expected (VISION.md, "Migration").
     private static void removeOldGeneration(MongoCollection<BsonDocument> collection, MongoLocation location) {
         try {
             long removed = collection.deleteMany(Filters.type("_id", BsonType.OBJECT_ID)).getDeletedCount();
             if (removed > 0) {
-                LOGGER.log(Level.INFO, "Removed {0} documents of distributed-caffeine 0.7.x from collection {1}",
-                        removed, location);
+                LOGGER.log(Level.INFO, "{0}: Removed {1} documents of distributed-caffeine 0.7.x from the collection",
+                        location.name(), removed);
             }
         } catch (MongoException e) {
-            LOGGER.log(Level.WARNING, "Removing documents of distributed-caffeine 0.7.x from collection {0} failed; "
-                    + "the next start goes on: {1}", location, e.getMessage());
+            LOGGER.log(Level.WARNING, "{0}: Removing documents of distributed-caffeine 0.7.x from the collection "
+                    + "failed; the next start goes on: {1}", location.name(), e.getMessage());
         }
     }
 
@@ -161,8 +174,9 @@ final class MongoSchema {
 
     // change streams need a replica set (or mongos), the reads need majority read concern, and a sharded collection
     // could not keep the per-key order of its events
-    private static void checkDeployment(MongoClient client, MongoDatabase database, MongoLocation location) {
-        Document hello = hello(client.getDatabase("admin")::runCommand);
+    private static void checkDeployment(MongoClient client, MongoDatabase database, MongoLocation location,
+            Duration timeout) {
+        Document hello = hello(bounded(client.getDatabase("admin"), timeout)::runCommand);
         // checked first, so that an old server is told so rather than failing a later check or operation unclearly;
         // hello reports the highest wire version the server speaks (through mongos, the router's)
         int wireVersion = hello.getInteger("maxWireVersion", 0);
@@ -185,7 +199,7 @@ final class MongoSchema {
                     false);
         }
         if (mongos) {
-            Document sharded = client.getDatabase("config").getCollection("collections")
+            Document sharded = bounded(client.getDatabase("config"), timeout).getCollection("collections")
                     .find(Filters.and(Filters.eq("_id", location.databaseName + "." + location.collectionName),
                             Filters.ne("dropped", true))).first();
             if (sharded != null) {
@@ -225,6 +239,25 @@ final class MongoSchema {
         }
     }
 
+    // A start creating the collection at the same time: the marker's upsert creates the collection first and inserts
+    // the marker after it, so another start may find the collection empty and without its marker for a moment, and
+    // would refuse it (found: caches built together on a new collection). An empty one is given a second for the
+    // marker; one holding documents is not being created
+    private static boolean markerArrives(MongoCollection<BsonDocument> collection) {
+        for (int attempt = 0; attempt < 10; attempt++) {
+            if (collection.find().limit(1).first() != null) {
+                return hasMarker(collection);
+            }
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return hasMarker(collection);
+    }
+
     private static boolean hasMarker(MongoCollection<BsonDocument> collection) {
         BsonDocument marker = collection.find(Filters.eq("_id", MongoLocation.MARKER_ID)).first();
         return marker != null && new BsonString(MongoLocation.MARKER).equals(marker.get(MARKER_FIELD));
@@ -236,8 +269,8 @@ final class MongoSchema {
                 return;
             }
         }
-        LOGGER.log(Level.WARNING, "Collection {0} has no index on (_id.d, state, writeTime, _id.h); expiry and pruning "
-                + "will be slow. Create it with: db.{1}.createIndex('{'\"_id.d\": 1, state: 1, writeTime: 1, "
-                + "\"_id.h\": 1'}')", location, location.collectionName);
+        LOGGER.log(Level.WARNING, "{0}: Collection {1} has no index on (_id.d, state, writeTime, _id.h); expiry and "
+                + "pruning will be slow. Create it with: db.{2}.createIndex('{'\"_id.d\": 1, state: 1, writeTime: 1, "
+                + "\"_id.h\": 1'}')", location.name(), location, location.collectionName);
     }
 }

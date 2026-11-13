@@ -126,7 +126,8 @@ final class PostgresStore implements Store, ChangeFeed {
     // data source (shared with every other cache listening through it)
     @Override
     public ChangeSubscription subscribe(ChangeListener listener) {
-        return PostgresListener.subscribe(listenerDataSource, dataSource, table.channel, listener);
+        return PostgresListener.subscribe(listenerDataSource, dataSource, table.channel, table.name(),
+                listener);
     }
 
     // reads
@@ -545,6 +546,25 @@ final class PostgresStore implements Store, ChangeFeed {
         return state != null && state.startsWith("08");
     }
 
+    // the server refused the user or the database: SQLState class 28 (invalid authorization) or 3D (no such
+    // database), also behind a pool's timeout carrying it as a cause (HikariCP's "Connection is not available"); or a
+    // pooler in statement mode refused the schema's transaction, closing the connection (PgBouncer, protocol_violation
+    // 08P01, like a connection lost): a configuration error for good, not a store out of reach (VISION.md, "Starting
+    // without the store")
+    static boolean refused(SQLException e) {
+        for (Throwable cause = e; cause != null; cause = cause.getCause()) {
+            String state = cause instanceof SQLException sql ? sql.getSQLState() : null;
+            if (state != null && (state.startsWith("28") || state.startsWith("3D"))) {
+                return true;
+            }
+            if ("08P01".equals(state) && cause.getMessage() != null
+                    && cause.getMessage().contains("statement pooling mode")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
 
     private static void rollbackQuietly(Connection connection) {
         try {
@@ -555,7 +575,11 @@ final class PostgresStore implements Store, ChangeFeed {
     }
 
     // a standby lags behind, so its reads would contradict the version rules (and writes and LISTEN fail there):
-    // refused, checked once per physical connection
+    // refused, checked once per physical connection. Retryable, as MariaDB's and MySQL's read-only server and Redis's
+    // replica are: during a failover the address may reach the old primary, now a standby, or the standby not yet
+    // promoted, so a cache built then starts without its store and connects once a primary answers there (VISION.md,
+    // "Starting without the store"); a data source that reaches a standby for good shows as a cache that stays
+    // DEGRADED, warning every 5 minutes
     static void requirePrimary(Connection connection) throws SQLException {
         Object physical = connection.isWrapperFor(PGConnection.class) ? connection.unwrap(PGConnection.class)
                 : connection;
@@ -567,7 +591,8 @@ final class PostgresStore implements Store, ChangeFeed {
             resultSet.next();
             if (resultSet.getBoolean(1)) {
                 throw new StoreException("The data source reaches a standby; distributed-caffeine needs the primary "
-                        + "(with several hosts in the URL, set targetServerType=primary)", false);
+                        + "(with several hosts in the URL, set targetServerType=primary; during a failover, try "
+                        + "again)", null, false, true);
             }
         }
         PRIMARIES.put(physical, Boolean.TRUE);

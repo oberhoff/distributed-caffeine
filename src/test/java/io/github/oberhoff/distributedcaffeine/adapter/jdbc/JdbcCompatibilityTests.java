@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.adapter.jdbc;
 
 import io.github.oberhoff.distributedcaffeine.AdapterConformanceTest;
+import io.github.oberhoff.distributedcaffeine.AdapterOutageTest;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterAll;
@@ -76,6 +77,15 @@ abstract class JdbcCompatibilityTests {
 
     @Nested
     class Adapter extends JdbcAdapterTest {
+    }
+
+    @Nested
+    class Outages extends AdapterOutageTest {
+
+        @Override
+        protected Outage outage() {
+            return new JdbcOutage();
+        }
     }
 
     @Nested

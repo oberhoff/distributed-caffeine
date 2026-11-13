@@ -47,7 +47,7 @@ public final class LettuceRedis {
      */
     public static RedisDriver of(RedisClient client) {
         requireNonNull(client, "client cannot be null");
-        return new Driver(() -> client.connect(ByteArrayCodec.INSTANCE), false);
+        return new Driver(client, () -> client.connect(ByteArrayCodec.INSTANCE), false);
     }
 
     /**
@@ -59,7 +59,7 @@ public final class LettuceRedis {
      */
     public static RedisDriver of(RedisClusterClient client) {
         requireNonNull(client, "client cannot be null");
-        return new Driver(() -> client.connect(ByteArrayCodec.INSTANCE), true);
+        return new Driver(client, () -> client.connect(ByteArrayCodec.INSTANCE), true);
     }
 
     private static final class Driver extends RedisDriver {
@@ -67,7 +67,8 @@ public final class LettuceRedis {
         private final Supplier<StatefulConnection<byte[], byte[]>> opener;
         private final boolean clustered;
 
-        Driver(Supplier<StatefulConnection<byte[], byte[]>> opener, boolean clustered) {
+        Driver(Object client, Supplier<StatefulConnection<byte[], byte[]>> opener, boolean clustered) {
+            super(client);
             this.opener = opener;
             this.clustered = clustered;
         }

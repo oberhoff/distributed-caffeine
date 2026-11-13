@@ -90,7 +90,8 @@ public final class RedisAdapter<K, V> implements Adapter<K, V> {
     // a takeover, Lettuce's cluster client could not refresh its view for over a minute. Not tested: Kvrocks's
     // controller, replication without Sentinel, TLS, managed services, other servers speaking the protocol.
 
-    private static final Logger LOGGER = System.getLogger(RedisAdapter.class.getPackageName());
+    // the library's one logger, as the core's: the message names the adapter (README, "Deployment")
+    private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine");
     // the layout of this version (RedisKeys, RedisScripts); a cache written by another one is refused
     private static final String MARKER = "1";
 
@@ -148,9 +149,9 @@ public final class RedisAdapter<K, V> implements Adapter<K, V> {
                         null, false, true);
             }
             if (evicts(server)) {
-                LOGGER.log(Logger.Level.WARNING, "{0} evicts keys under memory pressure (maxmemory-policy {1}): rows "
-                        + "of {2} may vanish silently; noeviction or a volatile-* policy keeps them", server,
-                        server.evictionPolicy(), keys.name());
+                LOGGER.log(Logger.Level.WARNING, "{0}: {1} evicts keys under memory pressure (maxmemory-policy {2}): "
+                        + "the cache''s rows may vanish silently; noeviction or a volatile-* policy keeps them", this,
+                        server, server.evictionPolicy());
             }
             probe(session, server);
             Object marker = session.eval(RedisScripts.MARKER, List.of(keys.schema()),
@@ -164,7 +165,19 @@ public final class RedisAdapter<K, V> implements Adapter<K, V> {
             return new RedisStore(driver, session, keys, server.product());
         } catch (RedisCommandException e) {
             session.close();
-            throw RedisStore.failure(e, false, keys.name(), product);
+            if (RedisCommandException.credentialsRefused(e)) {
+                throw new StoreException(product + " refused the credentials for " + keys.name() + ": "
+                        + e.getMessage(), e, false);
+            }
+            StoreException failure = RedisStore.failure(e, false, keys.name(), product);
+            // not answered in time at creation is not reached, worth another attempt, as for MongoDB (an operation of
+            // a running cache is not repeated after waiting its whole time): a paused server, or Sentinel's servers
+            // all paused, accept connections and answer nothing. The marker script writes no cache's data and may be
+            // repeated
+            if (e.kind() == RedisCommandException.Kind.TIMEOUT) {
+                throw new StoreException(String.valueOf(failure.getMessage()), e, false, true);
+            }
+            throw failure;
         } catch (RuntimeException e) {
             session.close();
             throw e;
@@ -193,6 +206,12 @@ public final class RedisAdapter<K, V> implements Adapter<K, V> {
     static boolean evicts(RedisServer server) {
         String policy = server.evictionPolicy();
         return policy != null && (policy.startsWith("allkeys-") || policy.equals("eviction"));
+    }
+
+    // caches on the same client wait once for a store that does not answer (Adapter#client)
+    @Override
+    public Object client() {
+        return driver.client();
     }
 
     @Override

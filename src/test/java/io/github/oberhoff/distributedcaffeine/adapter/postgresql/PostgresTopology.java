@@ -41,11 +41,11 @@ enum PostgresTopology implements Topology {
     public Set<Kind> suites() {
         return switch (this) {
             case SINGLE_SERVER -> EnumSet.of(Kind.STORE_CONTRACT, Kind.CHANGE_FEED_CONTRACT,
-                    Kind.CORE, Kind.PROPERTY, Kind.ADAPTER);
+                    Kind.CORE, Kind.PROPERTY, Kind.ADAPTER, Kind.OUTAGE);
             case PRIMARY_WITH_ASYNCHRONOUS_STANDBY, PRIMARY_WITH_SYNCHRONOUS_STANDBY -> EnumSet.of(Kind.STORE_CONTRACT,
-                    Kind.CHANGE_FEED_CONTRACT, Kind.FAILOVER);
+                    Kind.CHANGE_FEED_CONTRACT, Kind.FAILOVER, Kind.OUTAGE);
             case SINGLE_SERVER_BEHIND_TRANSACTION_POOLER -> EnumSet.of(Kind.STORE_CONTRACT, Kind.CHANGE_FEED_CONTRACT,
-                    Kind.POOLER);
+                    Kind.POOLER, Kind.OUTAGE);
             case SINGLE_SERVER_WITH_SMALL_NOTIFY_QUEUE -> EnumSet.of(Kind.NOTIFY_QUEUE);
         };
     }

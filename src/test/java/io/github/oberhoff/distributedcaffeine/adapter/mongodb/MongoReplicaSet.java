@@ -122,6 +122,11 @@ final class MongoReplicaSet implements AutoCloseable {
         return ports.get(0);
     }
 
+    // the members' containers, for pausing them all (PausedContainers)
+    List<GenericContainer<?>> members() {
+        return members.stream().filter(GenericContainer::isRunning).toList();
+    }
+
     /**
      * Returns client settings for the whole replica set, resolving the members' names.
      *

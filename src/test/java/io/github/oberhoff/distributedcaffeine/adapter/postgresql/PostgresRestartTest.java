@@ -74,8 +74,8 @@ abstract class PostgresRestartTest {
     private HikariDataSource pool() {
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl(database.jdbcUrl());
-        config.setUsername(database.username());
-        config.setPassword(database.password());
+        config.setUsername(PostgresTestDatabase.USER);
+        config.setPassword(PostgresTestDatabase.PASSWORD);
         config.setMaximumPoolSize(4);
         config.setConnectionTimeout(2_000);
         config.setInitializationFailTimeout(-1);

@@ -55,6 +55,32 @@ jobs:
         # nothing tested. Single quotes: in double quotes bash expands the nested class names ($Redis_*) as variables
         # and every group runs the whole test class
         run: mvn -B ${{ matrix.goal }} -DrunsOnGitHub '-Dtest=${{ matrix.tests }}'
+      # the failures each test JVM recorded (testing.FailureLog), as Surefire's reports keep only the last topology
+      # of a class: an annotation each, readable through the API (a job's check run), the whole list in the job
+      # summary (GitHub shows at most 10 error annotations per step), and the files as an artifact
+      - name: Report failed tests
+        if: failure()
+        run: |
+          shopt -s nullglob
+          files=(target/test-failures/*.txt)
+          [ ${#files[@]} -gt 0 ] || exit 0
+          {
+            echo "### Failed tests"
+            echo
+            sort -u "${files[@]}" | while IFS=$'\t' read -r test message; do echo "- **${test}**: ${message}"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+          sort -u "${files[@]}" | while IFS=$'\t' read -r test message; do
+            title=${test//%/%25}; title=${title//,/%2C}; title=${title//:/%3A}
+            echo "::error title=${title}::${message//%/%25}"
+          done
+      - name: Keep the failed tests
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: failed-tests-${{ strategy.job-index }}
+          path: target/test-failures/
+          if-no-files-found: ignore
+          retention-days: 14
 
   # one check under the name the single job had, which branch protection can require however the groups change;
   # always(), as a job skipped after a failed group would count as passed

@@ -90,7 +90,9 @@ abstract class JdbcAdapterTest {
         try (LogCapture log = new LogCapture()) {
             cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR);
             cache("another");
-            assertThat(log.count("Created table")).as("once, by the first: " + log.text()).isEqualTo(1);
+            assertThat(log.count("Created the table")).as("once, by the first: " + log.text()).isEqualTo(1);
+            assertThat(log.text()).as("named as the cache")
+                    .containsPattern("(MariaDB|MySQL) \\S+/\\S+: Created the table");
         }
 
         // whatever case the database keeps names in (MySQL on Linux: as created, case-sensitive)
@@ -196,15 +198,24 @@ abstract class JdbcAdapterTest {
     // other one refused, naming the right one
     @Test
     void a_read_only_server_is_refused_as_retryable_naming_the_primary() throws SQLException {
+        Adapter<String, String> adapter = JdbcTestDatabase.adapter(JdbcTestDatabase.dataSource(), table,
+                JdbcTestDatabase.DEFAULT_DISCRIMINATOR);
+        StoreSettings settings = TestStoreSettings.of(Format.TEXT, Format.TEXT);
+        DistributedCache<String, String> cache;
         JdbcTestDatabase.asRoot("SET GLOBAL read_only = ON");
         try {
-            assertThatThrownBy(() -> cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR))
+            assertThatThrownBy(() -> adapter.createStore(settings))
                     .isInstanceOfSatisfying(StoreException.class, e -> assertThat(e.isRetryable()).isTrue())
                     .hasMessageContaining("read-only").hasMessageContaining("needs the primary");
+            // retryable, as a failover in progress: the cache starts without its store (VISION.md, "Starting without
+            // the store") and connects once the server takes writes
+            cache = cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR);
+            assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
         } finally {
             JdbcTestDatabase.asRoot("SET GLOBAL read_only = OFF");
         }
-        cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR).put("k", "v");
+        await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
+        cache.put("k", "v");
     }
 
     @Test

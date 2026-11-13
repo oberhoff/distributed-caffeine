@@ -584,7 +584,7 @@ public class InternalCoreTest {
     @Test
     void loads_waiting_for_each_other_across_threads_finish_instead_of_hanging() throws Exception {
         // each load asks for the other key once both loads are under way: whichever waits second would close the
-        // cycle, so it loads the other key by itself instead of waiting (as the current generation does)
+        // cycle, so it loads the other key by itself instead of waiting (as 0.7.x does)
         CountDownLatch bothLoading = new CountDownLatch(2);
         AtomicReference<@Nullable DistributedCache<String, String>> self = new AtomicReference<>();
         Function<String, String> askingForTheOther = key -> {

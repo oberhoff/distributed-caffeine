@@ -45,7 +45,7 @@ import java.util.function.ToIntBiFunction;
  */
 @NullMarked
 // a measurement: it prints what it measures rather than asserting it, and paces itself with pauses
-@SuppressWarnings({"java:S2925", "java:S106"})
+@SuppressWarnings({"java:S2925", "java:S106", "JavaPrintToLogpoint"})
 public final class MaintenanceExperiment {
 
     private static final Duration LONG = Duration.ofHours(1);

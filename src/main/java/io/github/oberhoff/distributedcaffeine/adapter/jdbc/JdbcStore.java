@@ -68,7 +68,8 @@ import static java.util.Objects.requireNonNull;
 @SuppressWarnings({"SqlNoDataSourceInspection", "java:S2077"})
 final class JdbcStore extends PrimitiveStore {
 
-    private static final System.Logger LOGGER = System.getLogger(JdbcStore.class.getPackageName());
+    // the library's one logger, as the core's: the message names the adapter (README, "Deployment")
+    private static final System.Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine");
     // the schema marker, the table's comment: the version of the table's layout this version writes
     // every version's marker begins so, telling a table of another version from one created by hand
     static final String MARKER_PREFIX = "distributed-caffeine schema ";
@@ -204,23 +205,28 @@ final class JdbcStore extends PrimitiveStore {
     // may be lost by a failover too, which the first scan would not notice if it learnt the identity itself (found:
     // caches whose first poll came after the failover held the lost key). Bounded by the timeout like every
     // operation: the metadata calls by the network timeout only, they are no statements
-    static String ensure(DataSource dataSource, Dialect dialect, String table, Duration timeout) {
+    // the cache's name, as its log messages begin with it (the adapter's toString)
+    static String name(Dialect dialect, String table, String discriminator) {
+        return dialect.product + " " + table + "/" + discriminator;
+    }
+
+    static String ensure(DataSource dataSource, Dialect dialect, String table, String discriminator, Duration timeout) {
         try (Connection connection = dataSource.getConnection()) {
             int previousTimeout = bound(connection, timeout);
             try (Statement statement = connection.createStatement()) {
                 statement.setQueryTimeout(seconds(timeout));
-                return ensure(connection, statement, dialect, table);
+                return ensure(connection, statement, dialect, table, name(dialect, table, discriminator));
             } finally {
                 unbound(connection, previousTimeout);
             }
         } catch (SQLException e) {
             // a store not reached is worth another try, as in every operation; anything else is the setup's
             throw new StoreException("Creating the table " + table + " failed: " + e.getMessage(), e, false,
-                    connectionLost(e));
+                    connectionLost(e) && !refused(e));
         }
     }
 
-    private static String ensure(Connection connection, Statement statement, Dialect dialect, String table)
+    private static String ensure(Connection connection, Statement statement, Dialect dialect, String table, String name)
             throws SQLException {
         String version;
         String server;
@@ -269,12 +275,12 @@ final class JdbcStore extends PrimitiveStore {
         }
         if (exists(connection, table)) {
             requireMarker(connection, dialect, table);
-            checkIndex(connection, table);
+            checkIndex(connection, table, name);
             return server;
         }
         try {
             statement.execute(ddl(dialect, table));
-            LOGGER.log(System.Logger.Level.INFO, "Created table {0} with its index and schema marker", table);
+            LOGGER.log(System.Logger.Level.INFO, "{0}: Created the table with its index and schema marker", name);
         } catch (SQLException e) {
             if (!exists(connection, table)) { // not just another instance creating it at the same time
                 // most often a user without the right to create tables (as for PostgreSQL, the DDL to run instead)
@@ -330,7 +336,7 @@ final class JdbcStore extends PrimitiveStore {
 
     // a table created by hand, or whose index was dropped: maintenance and every poll then scan the whole table, slower
     // as the cache grows, so warned of (as by the other adapters); the index needs to start with these two columns
-    private static void checkIndex(Connection connection, String table) throws SQLException {
+    private static void checkIndex(Connection connection, String table, String name) throws SQLException {
         Map<String, Map<Integer, String>> indexes = new LinkedHashMap<>();
         try (ResultSet columns = connection.getMetaData().getIndexInfo(connection.getCatalog(), null, table, false,
                 true)) {
@@ -346,9 +352,9 @@ final class JdbcStore extends PrimitiveStore {
         boolean found = indexes.values().stream().anyMatch(columns -> "discriminator".equalsIgnoreCase(columns.get(1))
                 && "write_time".equalsIgnoreCase(columns.get(2)));
         if (!found) {
-            LOGGER.log(System.Logger.Level.WARNING, "Table {0} has no index on (discriminator, write_time); expiry, "
-                    + "pruning and polling will be slow. Create it with: CREATE INDEX {0}_written ON {0} "
-                    + "(discriminator, write_time)", table);
+            LOGGER.log(System.Logger.Level.WARNING, "{0}: Table {1} has no index on (discriminator, write_time); "
+                    + "expiry, pruning and polling will be slow. Create it with: CREATE INDEX {1}_written ON {1} "
+                    + "(discriminator, write_time)", name, table);
         }
     }
 
@@ -786,6 +792,20 @@ final class JdbcStore extends PrimitiveStore {
     static boolean connectionLost(SQLException e) {
         return e instanceof SQLTransientConnectionException || e instanceof SQLNonTransientConnectionException
                 || e instanceof SQLRecoverableException || sqlStateClass(e, "08");
+    }
+
+    // the server refused the user or the database: SQLState class 28 (invalid authorization) or 3D (no such
+    // database), or MariaDB's and MySQL's codes for them (1044, 1045, 1049), also behind a pool's timeout carrying it
+    // as a cause (HikariCP's "Connection is not available", an SQLTransientConnectionException): a configuration
+    // error for good, not a store out of reach (VISION.md, "Starting without the store")
+    static boolean refused(SQLException e) {
+        for (Throwable cause = e; cause != null; cause = cause.getCause()) {
+            if (cause instanceof SQLException sql && (sqlStateClass(sql, "28") || sqlStateClass(sql, "3D")
+                    || sql.getErrorCode() == 1044 || sql.getErrorCode() == 1045 || sql.getErrorCode() == 1049)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean sqlStateClass(SQLException e, String sqlStateClass) {

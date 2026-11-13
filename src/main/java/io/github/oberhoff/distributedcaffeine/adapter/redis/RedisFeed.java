@@ -75,7 +75,8 @@ import static java.util.Objects.requireNonNull;
  */
 final class RedisFeed {
 
-    private static final Logger LOGGER = System.getLogger(RedisAdapter.class.getPackageName());
+    // the library's one logger, as the core's: the message names the adapter (README, "Deployment")
+    private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine");
     // every command of the reader answers within this, beyond its block time. Fixed, unlike a cache's operation
     // timeout: no caller waits for the reader, which is shared by caches with different timeouts, and its failures are
     // recovered (or noticed by the heartbeat) by the library, so the bound follows from its own waits (as MongoWatcher)
@@ -468,8 +469,8 @@ final class RedisFeed {
                         registration.deliver(of);
                     } catch (RuntimeException e) {
                         // an entry this reader cannot parse, or a listener failing: the others go on
-                        LOGGER.log(Logger.Level.WARNING, "Delivering the changes of " + registration.stream
-                                + " failed; the cache checks what it holds against the store", e);
+                        LOGGER.log(Logger.Level.WARNING, registration.store.name() + ": Delivering the changes failed; "
+                                + "the cache checks what it holds against the store", e);
                         registration.listener.onGap();
                     }
                 }
@@ -504,13 +505,19 @@ final class RedisFeed {
                     targets.add(target);
                 }
             }
-            LOGGER.log(Logger.Level.INFO, "The server refused reading the changes of several keyspaces at once ("
-                    + cause.getMessage() + "); reading them by keyspace from now on");
+            LOGGER.log(Logger.Level.INFO, names(moving) + ": The server refused reading the changes of several "
+                    + "keyspaces at once (" + cause.getMessage() + "); reading them by keyspace from now on");
             if (closing != null) {
                 closing.close();
             }
             session.close();
             targets.forEach(Reader::read);
+        }
+
+        // the caches a reader serves, as its log messages begin with them: one reader serves every cache of its route
+        private static String names(List<Registration> served) {
+            return served.isEmpty() ? "Redis" : served.stream().map(registration -> registration.store.name())
+                    .distinct().sorted().collect(Collectors.joining(", "));
         }
 
         // a read failed: a loss for every subscription delivering, unless the connection was replaced in the meantime
@@ -526,11 +533,8 @@ final class RedisFeed {
                 lost.forEach(registration -> registration.lost = true);
             }
             used.close();
-            String server = lost.isEmpty() ? "the server" : lost.get(0).store.product();
-            String keyspaces = lost.stream().map(registration -> registration.keyspace).distinct().sorted()
-                    .collect(Collectors.joining(", "));
-            LOGGER.log(Logger.Level.WARNING, "Reading the changes on " + server + " failed (keyspaces " + keyspaces
-                    + "); delivery lost until resumed: " + cause.getMessage());
+            LOGGER.log(Logger.Level.WARNING, names(lost) + ": Reading the changes failed; delivery lost until "
+                    + "resumed: " + cause.getMessage());
             lost.forEach(registration -> registration.listener.onLost(cause));
         }
 

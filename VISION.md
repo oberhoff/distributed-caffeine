@@ -1,13 +1,13 @@
-# Distributed Caffeine — next generation
+# Distributed Caffeine — vision
 
-Status: design settled (2026-10-21), measured by the experiments in `src/test/java/.../experiments`; built
-(2026-10-22): the core with all four cache variants, the PostgreSQL and MongoDB adapters, the property and parity
-tests. Moved to the repository root on 2026-11-04 (the switch, see "Coordinates, packaging and version"), on the
-`next` branch; not released yet.
+Status: design settled (2026-10-21), measured by the experiments in `src/test/java/.../experiments`; built from
+2026-10-22 as a rewrite of 0.7.x, moved to the repository root on 2026-11-04 (see "Coordinates, packaging and
+version"), and released as 0.8.0. This document keeps the design, the decisions behind it and the build plan of what
+follows.
 
-## Why a new generation
+## Why the rewrite
 
-The current library keeps the *contents* of all cache instances in step: population pushes every value to every
+The library up to 0.7.x kept the *contents* of all cache instances in step: population pushes every value to every
 instance, eviction is distributed so the key sets do not drift apart, and the store keeps a cached and an evicted
 tier whose statuses depend on the distribution mode. Most of the hard defects of the last year came from exactly
 that contents synchronization (eviction echoes, the restore-mark race, the load-bearing own-echo re-add, silent
@@ -19,7 +19,7 @@ tiers, loading strategies). Two structural problems cannot be fixed inside that 
 - A value reloaded from the store gets a fresh lifetime, because the store does not carry its age, so an entry can
   circulate between the instance and the store forever.
 
-This generation is written from scratch rather than ported, so the assumptions of the old model do not come along.
+0.8 was written from scratch rather than ported, so the assumptions of the old model do not come along.
 The lessons do come along, as tests and as the checklist below.
 
 ## Model
@@ -120,7 +120,7 @@ No validation between Caffeine's expiry and the maximum age is needed: the maxim
 
 ### Key identity: hashes
 
-A row is identified by a hash of its key, as in the current generation. Java's `hashCode()` is not stable across
+A row is identified by a hash of its key, as in 0.7.x. Java's `hashCode()` is not stable across
 JVMs, and keys are not required to be readable by the store, so the identity must be computed deterministically on
 every instance:
 
@@ -209,7 +209,7 @@ clear L1 and increment the revalidation epoch (see "States and recovery"); a loa
 completes with an older epoch, so it counts as unconfirmed, is checked against the store on its next read and finds
 the tombstone. One counter serves revalidation and `invalidateAll`; global ordering is needed only locally.
 
-This replaces, from the current generation: operation ids, activation ids, the ordering remembered by the
+This replaces, from 0.7.x: operation ids, activation ids, the ordering remembered by the
 publishing instance, echo handling, and refresh/load tokens.
 
 ### Distribution: messages carry no values
@@ -525,7 +525,7 @@ the three `invalidateAll` tests); the property test's freshness oracle covers th
 
 - **One setting, three levels:** population is built on invalidation (same subscription, same messages; only a
   write is applied differently), so "population without invalidation" would distribute writes but not removals.
-  An enum makes that combination unrepresentable, maps the current generation's modes almost one to one, and leaves
+  An enum makes that combination unrepresentable, maps 0.7.x's modes almost one to one, and leaves
   room for a level.
 - **Names (renamed 2026-10-22, were `INVALIDATION` and `POPULATION_AND_INVALIDATION`):** each value says what a
   holder does on a change elsewhere, and a write is a change too. That is how comparable libraries name it: Redisson's
@@ -678,7 +678,7 @@ every read past R called the source again.
 The serializer describes the user's types, not the store, so it is configured per cache (one for keys, one for
 values), not on the adapter. Caches sharing a table or collection each bring their own.
 
-All serializers of the current generation are shipped: `ForySerializer`, `JavaObjectSerializer`,
+All serializers of 0.7.x are shipped: `ForySerializer`, `JavaObjectSerializer`,
 `JacksonSerializer`, and the interfaces `ByteArraySerializer`, `StringSerializer`, `JsonSerializer` for custom
 ones.
 
@@ -906,14 +906,14 @@ Splitting the tests found one violation: MongoDB announced a tombstone or expire
 was read as a value). The change stream now flags, before projecting the value out, whether an update wrote a
 value; one that did not is `INVALIDATED`.
 
-Gone compared with the current generation: Publisher and Repository as separate roles, `CacheEntry` with its
+Gone compared with 0.7.x: Publisher and Repository as separate roles, `CacheEntry` with its
 statuses, `PartialCacheEntry` and projections, operation and activation ids in the SPI, read-back and handover
 protocols, status queries by group, eviction publishing and the async publish drain.
 
 ### Java baseline: 17
 
-Java 17, as in the current generation. None of the dependencies (Caffeine, Jackson 3, the MongoDB and PostgreSQL
-drivers, Fory, hash4j) require more, and everyone on the current generation can move to this one
+Java 17, as in 0.7.x. None of the dependencies (Caffeine, Jackson 3, the MongoDB and PostgreSQL
+drivers, Fory, hash4j) require more, and everyone on 0.7.x can move to 0.8
 without upgrading Java.
 
 - **What 17 already has:** records, sealed interfaces, `switch` expressions, `instanceof` patterns, and exhaustive
@@ -925,7 +925,7 @@ without upgrading Java.
   does not depend on them.
 - **Re-check before the release:** raise the baseline only if a dependency or a needed feature requires it.
 
-### Migration from the current generation
+### Migration from 0.7.x
 
 **Data: no conversion, start fresh.** The store is a cache, not the system of record, so discarding its rows costs one
 load from the source per key. A conversion would also be imprecise: today's timestamp is the publish or eviction time,
@@ -940,7 +940,7 @@ the old table, written with write time = now) only if someone needs it.
   the switch. The same name works too, through the schema marker below.
 - Its tables carry a **schema marker**: a table comment on PostgreSQL (`COMMENT ON TABLE ... 'distributed-caffeine
   schema 1'`), a metadata document on MongoDB (a string `_id`, which never equals the `{d, h}` subdocuments of rows,
-  filtered out of reads and change streams). The marker also serves later layout changes within this generation.
+  filtered out of reads and change streams). The marker also serves later layout changes from 0.8 on.
 - On start: nothing there → create table and marker; matching marker → use it; table present without a matching
   marker → **refuse to start** with a clear error (e.g. "Table `X` has the layout of distributed-caffeine 0.x. Stop
   all old instances, then drop it or configure another name, or enable `withSchemaReset()`.").
@@ -975,17 +975,17 @@ layout is checked by its columns).
 **A rolling update with `withSchemaReset()` on the same MongoDB collection (tested 2026-11-05,
 `MigrationExperimentTest`, the published 0.7.0 in a class loader of its own against MongoDB 8):** the first new
 instance drops the old collection; the running old instances resume their change streams and go on among themselves
-(their documents filter on a top-level `discriminator`, which new ones lack); the new generation ignores old documents
-(an ObjectId `_id`, no `{d, h}`); neither sees the other's writes. An old instance starting after the reset fails: the
-new generation has two documents at once (marker and start document), so the old unique index on `(discriminator,
-hash)` finds two `null` pairs and its build fails (E11000), creating nothing; the new generation is unaffected. So a
+(their documents filter on a top-level `discriminator`, which new ones lack); 0.8 ignores old documents
+(an ObjectId `_id`, no `{d, h}`); neither sees the other's writes. An old instance starting after the reset fails: 0.8
+has two documents at once (marker and start document), so the old unique index on `(discriminator,
+hash)` finds two `null` pairs and its build fails (E11000), creating nothing; 0.8 is unaffected. So a
 rollback to 0.7.x needs the collection dropped first. Old documents written during the rollout would stay behind,
 ignored for good: `db.<collection>.deleteMany({discriminator: {$exists: true}})` removes them once the last old
 instance is gone.
 
 **The leftovers removed on every start (built 2026-11-07, temporary):** each `build()` of a MongoDB cache, with or
 without `withSchemaReset()`, deletes the documents with an ObjectId `_id` after the marker check (`MongoSchema
-#removeOldGeneration`). Only 0.7.x documents have one (the server assigns it to their upserts; this generation's are the
+#removeOldGeneration`). Only 0.7.x documents have one (the server assigns it to their upserts; 0.8's are the
 marker's string and `{d, h}` documents). The built-in `_id` index bounds `$type: "objectId"` to the ObjectId range:
 `explain` on MongoDB 4.4 and 9 with 100,000 new and 1,000 old documents examined the 1,000 old ones only, and no key
 once they were gone, so a start after the rollout costs one index probe. Considered first: the cleanup in the
@@ -999,7 +999,7 @@ build plan).
 
 **Configuration: a migration guide.**
 
-| Current generation                                                        | Next generation                                                                      |
+| 0.7.x                                                                     | 0.8                                                                                  |
 |---------------------------------------------------------------------------|--------------------------------------------------------------------------------------|
 | `POPULATION_AND_INVALIDATION_AND_EVICTION`, `POPULATION_AND_INVALIDATION` | `DistributionMode.UPDATE`                                                            |
 | `INVALIDATION`, `INVALIDATION_AND_EVICTION`                               | `DistributionMode.INVALIDATE` (default)                                              |
@@ -1139,7 +1139,7 @@ debugging, for batch jobs that should not pollute L1, and to see how old a value
 
 ### Wrappers in L1: `InternalKey` and `InternalValue` stay
 
-L1 is a Caffeine `AsyncCache` of `InternalKey<K>` to `InternalValue<V>` (wrappers as in the current generation), so
+L1 is a Caffeine `AsyncCache` of `InternalKey<K>` to `InternalValue<V>` (wrappers as in 0.7.x), so
 metadata travels with keys and values without changing Caffeine's types.
 
 - **`InternalKey<K>` caches the key's hash**, computed at most once per wrapper or taken over from a row. The hash
@@ -1155,7 +1155,7 @@ key: a message builds a lookup key from the hash alone and finds the held entry 
 registry of minimum versions for loads in flight is keyed the same way. Whatever Caffeine holds is exactly what
 messages find, including during evictions, expirations and loads in flight.
 
-- **Identity is conceptually the hash string, as in the current generation; `InternalKey` holds it compactly**
+- **Identity is conceptually the hash string, as in 0.7.x; `InternalKey` holds it compactly**
   (decided after the benchmark below):
   - A hash of 32 hex characters (built-in key types, and custom ones using the `Hasher`) is held as 128 bits (two
     `long`s). Built-in key types (`String`, `Long`, `Integer`, `UUID`) go through the same `Hasher` path but read the
@@ -1213,8 +1213,9 @@ Rejected alternatives:
   subscription, and returns a cache in `SYNCHRONIZED` state only when all of it is in place.
 - Configuration errors always throw: a missing driver, wrong credentials, a schema that does not match, no DDL
   rights without an existing table.
-- An unreachable store throws too. An application that must start without its store retries `build()` itself;
-  an option to start `DEGRADED` and connect in the background was dropped as not worth a second start path.
+- An unreachable store throws too (until "Starting without the store" is built, decided 2026-11-12: then an
+  unreachable store returns a cache in `DEGRADED` that connects in the background, unless `withFailFast()`). An
+  option to start `DEGRADED` had been dropped before as not worth a second start path.
 - A failed `build()` leaves nothing behind (sessions and threads released), so a retry starts clean.
 
 **End: the distributed caches implement `AutoCloseable`.**
@@ -1241,6 +1242,358 @@ clearly, and it removes a state (`STOPPED`) and the class of errors behind the p
 **Ownership:** the user owns what they pass in (`MongoClient`, `DataSource`, executor)
 and closes it; the library owns only what it opens (listening sessions, cursors, threads) and closes it with the
 last cache using it.
+
+### Starting without the store (decided 2026-11-12, to build; the default, `withFailFast()` opts out)
+
+**The case, seen in practice:** the store goes down; the running instances turn `DEGRADED` and serve through the
+loader, as designed. But a health check that includes the store (or the cache's state) marks the pod unhealthy,
+Kubernetes restarts it, and the new pod cannot `build()` and loops in `CrashLoopBackOff`. Pod by pod the application
+goes down completely, although its loader's source is fine: the instances that would have ridden out the outage are
+the ones killed. Restarts happen during an outage for other reasons too (an OOM kill, a node drained, a deploy, the
+autoscaler). Retrying `build()` is no answer for users: the application holds the cache from its start (a bean, a
+field), so it would need a wrapper switching from a fallback to the real cache.
+
+**Two parts:**
+
+1. **Documentation:** liveness must never depend on the store or on the cache's state; a store outage is what
+   `DEGRADED` is for. Readiness may reflect the source the application needs. This prevents the restarts that the
+   cache's own health causes, not the others.
+2. **Starting without the store becomes the default; `withFailFast()` opts out** (decided 2026-11-12). The cascade
+   hits exactly the users who do not know of an option, and starting lazily and healing on their own is what the
+   database clients do (Spring's convention). `withFailFast()` keeps today's behaviour, for users who want a
+   misconfiguration to stop the rollout.
+
+**Scope: every adapter** (MongoDB, PostgreSQL, Redis, MariaDB, MySQL). Polled adapters need nothing more in the
+core than fed ones: `InternalPollingStore` only delegates to the store and its `ChangeScan` (`changedWithin`), and it
+already copes with failing polls (`Poller#isFailing`: degraded meanwhile; failed past the grace period, a loss and
+then a gap). What the polled adapters add is tests.
+
+**Behaviour:**
+
+- `build()` throws whatever is told without the store or by a store that answered (configuration, a missing driver,
+  credentials, a schema that does not match, missing rights). Only "the store was not reached" returns a cache in
+  `DEGRADED`, the guard open from the start, and connects in the background.
+- Until connected the cache behaves as in any outage ("States and recovery", `DEGRADED`, store down): misses go to
+  the loader only and are held unconfirmed (`InternalCore.UNCONFIRMED`, single and bulk through `sourceOnly`),
+  nothing is written to L2, writes are refused.
+- Once connected, the checks of `Adapter#createStore` have run, the feed is subscribed (or polled), the guard
+  closes, and the connect counts as a gap: the epoch moves on and the background pass checks what is held.
+- A check that fails once the store answers (another layout, missing rights, a MongoDB standalone, a Redis cluster
+  reached by a plain client) leaves the cache `DEGRADED` for good: logged at `ERROR` on every attempt, retried every
+  5 minutes (rights can be granted while it runs). **The reason is not exposed** (decided 2026-11-12): no API
+  beyond `DEGRADED`. Nothing automatic can act on it (a restart grants no rights and fixes no layout), so it is for
+  humans, who read the log; a state per reason was rejected in "States and recovery" for the lack of such a use.
+  Added later if a health indicator shows a real need; API taken away is harder.
+
+**Design:**
+
+1. **A switching stand-in store** (core-internal), used only when `build()` does not reach the store; a store that
+   answers at `build()` is wired as today. The stand-in is always a `Store` and a `ChangeFeed`: the core sees only
+   feeds anyway, since `InternalPollingStore` turns a scan into one. Until connected, every operation fails at once,
+   retryable and with nothing sent (so never an unknown outcome), and its subscription reports a loss at once, so
+   the existing resume supervision takes over (`superviseResume`, 250 ms doubling to 30 s). The order holds as
+   today: `attemptResume` resumes first and announces the gap after, so the background pass reads after the
+   subscription.
+2. **The kind of change source is decided at connect, by the created store, as `DistributedCaffeine#core` decides
+   today:** a `ChangeFeed` is delegated to directly; a `ChangeScan` without a feed is wrapped in
+   `InternalPollingStore` first (its name, executor and environment as in `core`), then delegated to; a store
+   implementing both gets its feed. Neither is a late configuration error (`DEGRADED` for good, `ERROR`). No SPI
+   change: a declaration on `Adapter` (considered first) is not needed, and could not express a kind that depends on
+   the server, which only connecting tells: a MongoDB standalone without change streams, or a PostgreSQL behind a
+   pooler that cannot hold a `LISTEN` session, could be polled rather than refused, should a store ever choose by
+   what it reached. The kind is decided once per cache, as today: `createStore` runs once, reconnects happen inside
+   the store, and a server losing its feed later fails as any feed does (interruption, resume, `DEGRADED`).
+   **One decision, in one place:** the rule moves out of `DistributedCaffeine#core` into an internal function taking
+   the created store and the builder's settings and returning what the core subscribes to (the store's feed, or its
+   scan wrapped in `InternalPollingStore`). The normal `build()` and the stand-in at connect both call it, so they
+   cannot drift apart. A future choice of the user plugs in there: a flag forcing polling (`withPolling()`, say)
+   would wrap a store's scan even where it has a feed, and refuse a store without a scan (thrown from `build()` with
+   the store up, a late configuration error when started without it). An explicit flag rather than "a poll interval
+   is set": the interval has a default and tunes the scan adapters, so setting it in a shared configuration must not
+   switch a feed store to polling. Not built until a use case comes (no store is both feed and scan today). A
+   message bus, once built ("What follows: pluggable message buses"), plugs in there too: a bus configured, else the
+   store's feed, else its scan polled. The stand-in stays the store's alone; a bus not reached at start is a
+   subscription lost, resumed by the existing supervision.
+   What the stand-in covers for it:
+   - **the prune grace**, final in the core today and depending on polling (`DistributedCaffeine#pruneGrace`),
+     becomes adjustable and is set at connect; nothing is pruned before, as maintenance fails until then;
+   - **the poller's status**: `InternalCore#feedUp` asks `subscription instanceof InternalPollingStore.Poller`
+     whether the latest poll failed, so the stand-in's subscription passes that status through from the poller it
+     wraps;
+   - **the polled checks at connect**: the poll interval at most half the heartbeat interval, checked at `build()`
+     today once the store is known to be polled.
+3. **A connector of its own** in the background (on the store executor, timed by the `InternalEnvironment`, so the
+   simulation reaches it): calls `Adapter#createStore` with backoff (250 ms doubling to 30 s, with jitter), installs
+   the real store in the stand-in, closes the guard. Not the guard's probe: `createStore` waits up to the operation
+   timeout per check and may run DDL, which must never block a user's read; the guard's probe is refused at once by
+   the stand-in until then.
+4. **"Not reached" defined for `createStore`:** a retryable `StoreException` from it means the store was not
+   reached (refused, unknown host, timeout); anything else throws from `build()`. Adapters align on it, as the build
+   checks are idempotent and a timeout is as good as a refusal there: Redis marks `TIMEOUT` not retryable today
+   (`RedisStore#failure`), so a Redis behind a partition dropping packets would throw; the JDBC adapters classify by
+   SQL state `08` plus elapsed time and `Connection#isValid`, to be checked for creation. A Redis replica (a failover
+   in progress behind Sentinel) is retryable and so starts degraded, which is right.
+5. **A bound on copies loaded without the store** (decided 2026-11-12). A pod that never connects sees no writes of
+   other instances, so only the lifetime of its copies bounds their staleness. That lifetime: Caffeine's expiry if
+   set, else the maximum age, also under `withMaximumAgeForStoreOnly()`. The maximum age is a local bound per se;
+   the store-only mode relaxes it because messages keep the copies current, which does not hold for a copy no store
+   confirmed. So copies at version `UNCONFIRMED` expire at the maximum age at the latest, in any outage, not only
+   after a start without the store. With the store-only mode, L1 is built with Caffeine's fixed expiry today
+   (`CaffeineConfigurer#applyExpiry`): it then needs `InternalExpiry` to cap only unconfirmed copies (to check).
+   `withSchemaReset()` stays allowed (refusing it was planned first, but the core cannot see an adapter's setting,
+   and need not): the reset acts only on a table or collection without the current marker (one of 0.x, or empty and
+   unmarked, `PostgresSchema#requireResettable`, `MongoSchema#requireResettable`), so a deferred reset never meets
+   one that current instances have used since; on one of 0.x it does what it would have done at `build()`. **A cache bounded neither way** (no maximum age, no
+   Caffeine expiry: the builder's default) starts without the store like any other (decided 2026-11-12): its copies
+   then live until the store is reached. Refusing it (proposed first) would make two defaults, the builder's own
+   configuration landing on the exception, and would guard only the start: the risk, copies missing writes of
+   other instances, needs a partial partition (in a full outage nobody writes), and a running instance cut off by
+   one is in exactly that state today ("States and recovery", accepted until recovery). A start adds only a new way
+   into it, a misconfiguration at deploy; no bound is the user's choice of copies that live for good. The repeated
+   warning says so (step 6).
+6. **Logs:** one `WARNING` at the start ("started without the store"), repeated every 5 minutes while not connected,
+   so a misconfiguration does not hide; for a cache bounded neither way it says that copies live until the store
+   is reached. Maintenance, heartbeat and resume do not each warn before the first connect;
+   `INFO` once connected. The name in messages: the adapter's `toString()` is taken after `createStore` today
+   because Redis names the product (Valkey, Kvrocks) only after asking the server, so a name without the product
+   until connected.
+7. **`withFailFast()` lives under `withStore(...)`** (decided 2026-11-12): `withStore(store -> store.withFailFast())`,
+   next to `withOperationTimeout`, which bounds the first connect too. It is about how the cache treats its store at
+   `build()`; on the builder itself it would sit among Caffeine's settings and read as one of them.
+8. **The first attempt stays in `build()`, bounded by the operation timeout** (decided 2026-11-12). A store that
+   answers is wired as today and configuration errors throw from `build()`. A refused connection or a name not
+   resolving (a pod down, a service gone) fails within milliseconds; dropped packets (a partition, a firewall) take
+   up to the operation timeout per check, per cache, one cache after another: five caches during a partition delay
+   the start by 50 s or more, which a Kubernetes startup probe must allow for (documented). Rejected: a shorter
+   timeout for the first attempt (another constant, and a slow but healthy store would start degraded), and no
+   attempt in `build()` (configuration errors would no longer throw even with the store up, and the normal path
+   would change). **Built 2026-11-13 (uncommitted), at the user's request:** caches sharing a client reuse the first
+   one's "not reached" instead of each waiting. An adapter names the client it shares (`Adapter#client()`, a default
+   method returning `null`: an addition to the SPI, the user's choice over a public helper each adapter would wrap
+   its `createStore` in), and the core applies the rule around every creation, at `build()` and at a connect
+   (`InternalReachability`, on the `InternalEnvironment`'s clock): a creation that failed retryable after waiting at
+   least a tenth of the operation timeout is remembered per client (a weak map, by the client's equality, identity
+   for every driver's client); for one operation timeout after it, creations through the client fail at once as not
+   reached. A creation that reaches the store, or that the store answers otherwise, forgets it; a fast failure (a
+   refusal, an unknown host) is not remembered. The adapters name `MongoClient`, the `DataSource`, and the Redis
+   library's client, which `RedisDriver#client` now carries, so that caches wrapping one client in drivers of their
+   own are known. While the store is silent, one creation per client and operation timeout asks it; once it answers,
+   the caches connect within about one operation timeout and their backoff. Tested: `InternalReachabilityTest` (on
+   the simulated clock), and in `AdapterConformanceTest` four caches on one client built behind a silenced proxy (the
+   first waits, the others start at once, all connect).
+   That test found a race older than this work, in creating a new table or collection while caches start together
+   (pods of a rollout, say): one read "no marker", then saw the table another had just committed, and refused it for
+   good as a table without the marker. PostgreSQL creates table and marker in one transaction, so `PostgresSchema`
+   reads the marker again once it sees the table. MongoDB's marker upsert creates the collection a step before the
+   marker, so `MongoSchema#markerArrives` gives an empty collection without a marker up to a second for it (one with
+   documents answers at once). MariaDB and MySQL create table, index and marker in one statement and recognised a
+   concurrent creation already.
+9. **`close()` during a connect** closes a store created after it and releases the claim; a failed connect leaves
+   nothing behind, as a failed `build()` does.
+
+**Built 2026-11-12 (build step 2, uncommitted):**
+
+- `DistributedCaffeine#core`: a retryable `StoreException` from `createStore` (and not `withFailFast()`) builds the
+  core on an `InternalPendingStore` with an `InternalCore.Connector`; `#distributing` is the one decision of feed or
+  scan, for `build()` and for `#connect` (which closes a store it cannot use).
+- `InternalPendingStore`: fails every call at once, not retryable (a retry would only wait) and never with an unknown
+  outcome; its subscription subscribes the store's feed (or poller) on the first resume after the connect and passes
+  the poller's status on (`InternalPollingStore.PollStatus`, which `InternalCore#feedUp` asks instead of the
+  `Poller` class).
+- `InternalCore`: the guard open from the start (`InternalStoreGuard#openWithoutStore`), the feed taken for lost
+  by the core itself (the stand-in reporting `onLost` made `InternalDelivery` log a warning with a stack trace at
+  every start); `#attemptConnect` with the resumes' backoff and jitter, `#notReached` warning every 5 minutes,
+  `#failedCheck` at `ERROR` (with a stack trace only for what is neither a `StoreException` nor the core's own
+  `IllegalStateException`) and again after 5 minutes; on success the prune grace set, the guard closed quietly
+  (`InternalStoreGuard#connected`), the feed resumed at once (`#resumeNow`, also from an attempt that failed while the
+  connect happened); resume failures not logged before the connect; the start warning names the unbounded case.
+- `InternalExpiry#unconfirmedMaximumAge`, through `CaffeineConfigurer#caffeine(maximumAge, unconfirmedMaximumAge)`:
+  with the maximum age for the store only, L1 now always runs on the library's expiry, so copies at version
+  `UNCONFIRMED` expire at the maximum age (and follow it when set at runtime).
+- `StoreConfigurer#withFailFast()`; `CaffeineConfigurer#hasExpiry()` for the unbounded case.
+- `InternalStartWithoutStoreTest` (in-memory, feed and polled): the degraded start, the connect taking the store's
+  value and distributing both ways under a partial partition, `withFailFast()`, a non-retryable failure still
+  throwing, an unusable store found at the connect (`ERROR`, closed, `DEGRADED`), `close()` before the connect, the
+  unbounded warning, and the cap on unconfirmed copies.
+
+**Accepted:**
+
+- **Two configuration checks come late when started without the store:** a distribution mode the created store
+  cannot support (neither feed nor scan; none of the shipped adapters), and the poll interval at most half the
+  heartbeat interval. Both depend on the kind of change source, known only at connect; both fail on every start with
+  the store up, so they show in any environment where it is.
+- **A misconfiguration looks like an outage.** A firewall or `NetworkPolicy` blocking the store, or a wrong host
+  name, no longer stops the rollout: the pod runs `DEGRADED`, logged and visible in its state, its copies bounded by
+  L1's lifetime (see design step 5). The price of the default; `withFailFast()` restores the stop.
+- **A change of behaviour on upgrade:** `build()` no longer throws when the store is not reached. An application
+  retrying `build()` itself, or relying on its exception to stop the start, gets a `DEGRADED` cache instead: in the
+  release notes, with `withFailFast()` as the way back. The README's "Building connects to the store and checks it,
+  so a misconfiguration fails at once" changes with it.
+- **The recovery is a deferred cold start.** Every value loaded meanwhile has version `UNCONFIRMED` (0), which
+  `InternalCore#stillStored` never matches, so the background pass drops all of L1 once connected and every key
+  costs an L2 read again (a source load where the store lacks it). Pods restarted during an outage do this together
+  when the store returns; the pass is rate-limited per instance, not across them.
+- **Only caches that load gain:** puts and invalidations are refused until connected, so a cache filled by `put`,
+  or startup code writing to it, gains nothing; and with the loader's source in the store's database, misses fail
+  anyway.
+- **The user's client must be creatable while the store is down.** MongoDB's `MongoClients.create` connects lazily;
+  a `HikariDataSource` built from a `HikariConfig` fails at construction with the default
+  `initializationFailTimeout` (Spring Boot's lazily started one does not); Redisson connects in `Redisson.create`.
+  To verify per driver and document in each adapter's README.
+- **It helps only where the application itself starts without the database.** Spring Boot, for instance, starts
+  without MongoDB (the client connects lazily) and with plain JDBC on HikariCP (its pool starts on the first
+  connection), but not with Flyway or Liquibase (migrations at startup) and usually not with JPA (Hibernate reads
+  JDBC metadata at bootstrap unless the dialect is configured). A cache whose store is the database the application
+  migrates or maps with JPA gains nothing from starting without it; it gains with MongoDB, plain JDBC, or a store
+  separate from the application's main database. The README remark says so. `build()` today behaves like Flyway (a
+  schema check at startup); the new default moves it to the clients' model (start, degrade per operation, heal on
+  its own), Spring's convention.
+
+**Build order:**
+
+1. README: liveness and readiness under a store outage (no code; useful at once). Written 2026-11-12: "Deployment",
+   "Health checks".
+2. **Built 2026-11-12** (see "Built" above). The decision on feed or scan moved into one function, used by
+   `build()` (no change in behaviour, the existing suites green); then the stand-in store (a feed, deciding by that function at connect) and the connector in the
+   core, with the in-memory store (feed, scan-only and storage-only stores); `withFailFast()`, and the cap on
+   unconfirmed copies at the maximum age (design step 5).
+3. Per adapter: "not reached" at creation aligned (Redis `TIMEOUT` first), tests with the server stopped, paused
+   (dropped packets) and its name unresolvable: `build()` returns `DEGRADED` and reaches `SYNCHRONIZED` once the
+   server is back; with wrong credentials it throws. **Built 2026-11-12 (uncommitted):** `AdapterConformanceTest`
+   on every adapter, through `SilencingProxy` (new: `silenceNewConnections` for a paused server, and a client closed
+   at once when the target refuses, as behind a stopped one): paused and stopped, each starting `DEGRADED` and
+   connecting once back; paused, unresolvable and unreachable failing as retryable under `withFailFast()`; wrong
+   credentials thrown for good. Green on MongoDB 9 (single node; three-node sets have no one address, MongoDB's test
+   servers check no credentials), PostgreSQL 18, Redis 8 (Lettuce), MariaDB 13, MySQL 26. Found and fixed:
+   - Redis `TIMEOUT` at creation did not occur (a paused server fails the connect, `CONNECTION`); no change needed.
+   - **Wrong credentials started the cache without its store** on MariaDB/MySQL (HikariCP reports a refused login
+     as its own timeout, an `SQLTransientConnectionException`, the server's answer only in the causes) and on Redis
+     (every client library reports `WRONGPASS` as a failure to connect): `JdbcStore#refused`,
+     `PostgresStore#refused` (SQLState classes 28 and 3D, codes 1044/1045/1049, through the causes) and
+     `RedisCommandException#credentialsRefused` (in `RedisAdapter#createStore`, so for every binding; each library's
+     message tested since, see below).
+   - **A paused PostgreSQL held `build()` for 65 s** with a pool-less `PGSimpleDataSource`: pgjdbc's
+     `connectTimeout` bounds the TCP connect only, the login waits on; documented in the PostgreSQL and JDBC
+     READMEs ("Timeouts"), the test's data source with `loginTimeout`. A pool's `connectionTimeout` bounds it
+     already. A deadline of the core's own ("Options for later") would bound it whatever the data source.
+
+   **Then, on topologies of several addresses (2026-11-12, uncommitted):** `AdapterOutageTest` pauses a whole
+   topology (`PausedContainers`, `docker pause`: connections accepted, nothing answered) while a cache is built: it
+   starts `DEGRADED` and connects once unpaused, and fails as retryable under `withFailFast()`. Hosted by MongoDB's
+   three-node sets (with and without arbiter) and sharded cluster (suite `OUTAGE`), Redis Sentinel and Redis
+   Cluster; green on MongoDB 9 and Redis 8. Wrong credentials per Redis library (`RedisBindingTests`, a client of
+   each logging in as an unknown user): Lettuce, Jedis and Redisson, green on Redis 8.0. Found and fixed:
+   - **A paused MongoDB held `build()` for good, even under `withFailFast()`:** the deployment check asks `hello` on
+     the `admin` database and, through mongos, the `config` database, which carried no timeout (only the cache's own
+     database did), and a socket without a read timeout waits forever. `MongoSchema#bounded` puts both under the
+     operation timeout, as the cache's database.
+   - **Redisson with lazy initialization** (`Config#setLazyInitialization`) connects on the first command and throws
+     a failure to connect while submitting it, not through its future: a refused login escaped the adapter as
+     Redisson's own exception, and a server not reached was not taken for one. `RedissonSession#eval` and `#server`
+     classify such a failure as one the future reports.
+   - In the tests only: the outage clients of Sentinel and the cluster lacked the address mapping of the shared ones
+     (unpaused, they dialled the containers' internal addresses).
+
+   **Then, parity with the outages while running (2026-11-12, uncommitted):** a build during an outage is held to
+   what the restart and failover suites hold a running cache to. `AdapterOutageTest` (suite `OUTAGE`) builds the
+   cache inside the outage, on a client of its own created then, next to an instance built before it: paused briefly
+   and across several of the connect's attempts, stopped and started at its addresses, and without a primary (a
+   replica set without its majority, a Sentinel primary killed with failover held back, a cluster slot's primary
+   killed with the node timeout raised, a PostgreSQL primary stopped behind a multi-host URL, MariaDB and MySQL
+   `read_only`). Hosted by MongoDB's multi-member topologies, Redis Sentinel and Cluster per library, PostgreSQL's
+   single server, both standby topologies and the pooler, MariaDB and MySQL. Every case asks: the build waits a
+   bounded time; the cache starts `DEGRADED`, loads misses from the source at once and refuses writes at once; once
+   the store is back it takes the stored value over the one it loaded, and distributes both ways with the other
+   instance; under `withFailFast()` the build fails as retryable with nothing written. `AdapterConformanceTest` asks
+   the same through its proxy, and `RedisRestartTests` a server stopped during a build, with persistence and
+   without (none of the values loaded meanwhile is kept). Found and fixed:
+   - **MongoDB without its majority failed `build()`:** the schema's reads are answered, the majority write that
+     seeds the cluster time times out, and a timeout is not retried in a running cache. `MongoAdapter#createStore`
+     takes it as not reached, as `MongoSchema` does.
+   - **Redis with every server paused failed `build()`:** `INFO server` got no answer within the operation timeout,
+     classified as for a running cache. `RedisAdapter#createStore` takes a timeout at creation as not reached.
+   - **A PostgreSQL table created by a collided attempt left the cache `DEGRADED` for good:** an attempt that lost
+     its connection went on creating the table at the server, and the next one failed on `relation already exists`,
+     classified as the setup's. `PostgresSchema` takes `duplicate_table`, `duplicate_schema` and a catalog
+     `unique_violation` as retryable; the next attempt finds the table (also two tables created at once in a new
+     schema, which the per-table lock does not serialise).
+   - Found by the full matrix (2026-11-13): **MongoDB 4 and 5 without a majority** step the primary down and kill the
+     schema check's write (`InterruptedDueToReplStateChange`, a plain write error), classified as the setup's;
+     `MongoSchema` now retries what `MongoStore#isTransient` retries, and codes 11602 and 189. **A PostgreSQL server
+     starting up** answers `the database system is starting up` (57P03), classified as the setup's, so a cache
+     built during a restart waited 5 minutes; 57P01 to 57P03 are retryable at creation. **A pooler in statement
+     mode** refuses the schema's transaction with 08P01, which reads as a lost connection and became retryable, so
+     the cache started `DEGRADED` for good; `PostgresStore#refused` names it a configuration error again, failing
+     the build. In the tests only: Kvrocks has no users, so the credential tests skip it. The full matrix then
+     green (MongoDB 4/5 and PostgreSQL 9–18 rerun alone; `contract1_expire_announces_only_the_rows_it_expired` failed
+     once under the load, green alone).
+   - **A PostgreSQL standby is refused as retryable** (the user's decision): during a failover the data source may
+     reach the old primary demoted; the cache starts `DEGRADED` and connects once a primary answers, like MariaDB
+     `read_only` and a Redis replica.
+   - Limits of the libraries, for the client notes (step 5): Jedis cannot create a Sentinel or cluster client while
+     the servers are out (its constructors connect and throw), so an application started during such an outage
+     fails before the cache exists; the tests create Jedis clients before the outage. Redisson with lazy
+     initialization connects inside the first command, synchronously and with its own retries (about 16 s with its
+     defaults), which a build then waits. PgBouncer hands out its server connections broken by a server restart once
+     more: the first statement on each fails with an unknown outcome (correct, the tests' writes retry).
+   - In the tests only, Sentinel's restore after the outage without a primary (`RedisSentinel#withoutPrimary`):
+     `SENTINEL FAILOVER` was dropped. On Redis 8, down-after lowered right after it took the new primary for down and
+     failed back to the old one restarting; on Redis 6.2 it promoted no one within a minute while the dead primary
+     was not yet down in Sentinel's view. Now down-after goes back to a second and Sentinel fails over on its own, as
+     after `kill`. Redis 6.2.0's Sentinel then lists no replica for the old primary (no `+slave` after
+     `+switch-master`) and leaves it a primary for good, so the restore tells it `REPLICAOF` the new primary after
+     15 s, as an operator does. The outage first waits until Sentinel is out of TILT mode (30 s after a pause by the
+     test before; Redis 6.2.0's, just started, re-enters it for over a minute).
+4. The property test (`InMemoryDatabase`, threaded and deterministic): caches started with the store down, loading,
+   then the store back holding other rows and writes of other instances. Every instance must end holding only what
+   the store holds, and a value loaded meanwhile must never be served as confirmed. A simulation test for the
+   connector's backoff and `close()` during a connect. **Built 2026-11-12 (uncommitted):** the restarting variant
+   of `InternalPropertyTest` (threaded on a feed and polled, deterministic on every profile): in about a third of the
+   phases the plain instance is closed and built again while its adapter refuses (retryable), the others writing
+   meanwhile (a partial partition); it reaches the store again within the phase or before the check, which asks the
+   usual oracles of it. Green: threaded (4 seeds on a feed, 2 polled), deterministic on the five profiles with a feed
+   of their own (100 seeds each). `InternalSimulationTest`: an hour without the store takes about 130 attempts and a
+   warning every 5 minutes, then connects within one backoff; a store connected after `close()` is closed. Found on
+   the way: the test's backend kept closed polled stores among those it waits for (fixed), and
+   `-Dproperty.phases` (40 by default) for longer runs. It found a bug of the polling store older than this work, red
+   on the jdbc profile (4 of 100 seeds), fixed (see "Fixed: the polling store's touch re-stamped the control row"
+   below).
+
+   **Fixed: the polling store's touch re-stamped the control row (found and fixed 2026-11-12, uncommitted).** `InternalPollingStore#touch`
+   rewrites the keys of a write that may have come too late for every poll, "as they are now", conditionally on
+   their version: at once for a write slower than the overlap, two operation timeouts later (20 s by default) for one
+   with an unknown outcome. The control row of `invalidateAll` is among them when that write was one. The rewrite gives
+   the row a new write time, and every value row written at or before the control row counts as missing: so the
+   touch hides every value written between the control row's write and the touch, by any instance (confirmed writes
+   lost from the store). Twenty seconds later the row may even be a newer `invalidateAll`'s, which the touch re-stamps
+   all the same. Value rows touched get a new write time too, so they live another maximum age (milder). Only the
+   polled stores (MariaDB, MySQL). The deterministic test at 40 phases lasts about 17 simulated seconds, so the 20 s
+   touch rarely fired within a run; at 120 phases the existing test fails on jdbc in 49 of 50 seeds, every failure a
+   lost confirmed write, the profiles with a feed green. Options were a reserved row announcing a late
+   `invalidateAll` (a new row kind) or re-stamping the rows written since; **the second was built (the user's choice,
+   b):** `InternalPollingStore#touchValues` never rewrites the control row (a value row the control row hides stays
+   hidden); `#touchControl` reads the control row and the rows changed since its write in one read (their ages
+   comparable), rewrites the control row conditionally (refused: a newer `invalidateAll` announces itself, nothing
+   re-stamped), waits the store's clock allowance (as `invalidateAll` does: a clock counting in milliseconds would
+   stamp the next write alike), rewrites the rows that were younger than it, then reads once more for rows committed
+   meanwhile. A row whose commit becomes visible later than the overlap stays hidden (the race accepted, as the
+   scan's overlap is accepted elsewhere). Found on the way: the test's in-memory clock counted milliseconds where the
+   jdbc profile says microseconds, and the harness clock ran ahead of simulated time on reads in the MILLIS profiles
+   (capped within the simulated millisecond). `InternalSimulationTest` covers the late touch (a microsecond clock);
+   the deterministic property test green on every profile at 600 phases over several batches of seeds.
+5. The client notes per driver (above), the costs in "Costs, accepted knowingly", the README (building, health
+   checks pointing to `withFailFast()`, the startup probe allowing for the operation timeout per cache), the release
+   notes on the changed default. **Written 2026-11-13 (uncommitted):** client notes in the Redis README (Jedis's
+   Sentinel and cluster clients not created while out; Redisson created only lazily, then waiting its own retries)
+   and the PostgreSQL README (a statement-mode pooler fails the build; PgBouncer's broken connections after a
+   restart), `loginTimeout` there already; the costs entry; the README's building and health-check notes; release
+   notes drafted for the release page (not kept in the repository).
+
+**Left open:** nothing (2026-11-12).
+
+**For later** (see "Options for later"): installing the row the background pass read instead of dropping a
+mismatched copy; a scan next to a feed for catching up after a gap; a flag forcing polling and the message bus,
+both plugging into the decision of design step 2.
 
 ### Adapter ownership: one adapter per cache
 
@@ -1406,7 +1759,7 @@ it directly (future, then `join()` for the synchronous API) rather than through 
   Recursion across threads (a loader on the executor waiting for the same key) cannot be detected; Caffeine has the
   same limitation and documents it, and so does this library.
 - **Cycles of synchronous loads across threads** (the load of a waits for b, whose load waits for a) are resolved,
-  as the current generation does: the core knows which thread runs each synchronous load and which load each waiting
+  as 0.7.x does: the core knows which thread runs each synchronous load and which load each waiting
   thread waits for, and a thread whose wait would close a cycle asks the source itself instead, without holding or
   writing the answer (the owner's load does both). Without it, every thread of the cycle hung for good.
 - **`getAll`:** L1 hits first; keys already in flight wait for their futures (`AsyncCache.getAll` does that); the
@@ -1595,7 +1948,7 @@ How each method behaves distributed: see "Reading and writing methods".
 
 **Decision:** the library mirrors Caffeine's builder methods one to one in a nested configurer,
 `DistributedCaffeine.newBuilder(adapter).withCaffeine(caffeine -> caffeine.maximumSize(...).expireAfterWrite(...))`
-(the configurer pattern of the current generation, which keeps the top-level builder small and makes migration a
+(the configurer pattern of 0.7.x, which keeps the top-level builder small and makes migration a
 change of the call around unchanged method names), instead of taking the user's Caffeine builder and rewriting its
 private fields by reflection as today. Built: `CaffeineConfigurer` passes every setting at once to a real Caffeine
 builder of `InternalKey` to `InternalValue`, so Caffeine's own validation applies unchanged (a setting made twice,
@@ -1662,7 +2015,7 @@ the value weakly itself, and Caffeine's `COLLECTED` cause would be lost.
   design drops it. With the discriminator in `_id` every event's `documentKey` carries it, and upserts by `_id` are
   atomic, so the duplicate-key retry disappears. Point reads filter on `_id` (always built in the same field order);
   one index `{"_id.d": 1, state: 1, writeTime: 1}` serves expiry, size pruning and tombstone cleanup. The reasons this
-  was rejected in the current generation (memory note `upsert-duplicate-key-retry-cost`) no longer apply: no legacy
+  was rejected in 0.7.x (memory note `upsert-duplicate-key-retry-cost`) no longer apply: no legacy
   `ObjectId` documents (fresh tables), no separator ambiguity (a subdocument, not `"hash@discriminator"`); a slightly
   larger `_id` index remains, accepted.
 - **PostgreSQL:** primary key `(discriminator, id)` and one index `(discriminator, state, write_time)` for the same
@@ -1754,7 +2107,7 @@ silent network otherwise. Nothing that timed out is retried (it waited its whole
 pooled connection, or the answer); a write that timed out has an unknown outcome, because the driver's timeout
 does not tell waiting for a server from waiting for the answer. The README recommends CSOT
 (`timeoutMS`), since without it the driver retries only
-once, and that retry can still land inside a failover (the current generation's lesson). A CSOT timeout may strike
+once, and that retry can still land inside a failover (0.7.x's lesson). A CSOT timeout may strike
 after sending, so it is an unknown outcome. Multi-document updates
 (`invalidateAll`, expiry, pruning) are not retryable writes; the core repeats those, safely, since they are
 conditional. The adapter classifies what the driver labels transient as retryable, a write broken after sending as
@@ -1817,11 +2170,11 @@ component (`...distributedcaffeine.core`, `....mongodb`, `....postgresql`) inste
 - `INFO`: leaving `DEGRADED`; the summary of a revalidation (checked, kept, dropped); a resume after a reconnect.
 - `DEBUG`: the configuration at `build()`.
 - Never per operation; repeated warnings of one kind are rate-limited (e.g. once a minute, with a count). Tests do
-  not count log lines (the current generation's lesson); they check states and stats.
+  not count log lines (0.7.x's lesson); they check states and stats.
 
 **Stats:** `stats()` stays Caffeine's. `distributedPolicy().stats()` returns a `DistributedStats` value (`plus` /
 `minus` as today), gated by `recordStats()`, with counters re-derived for this model; no Micrometer binder (decided
-in the current generation; the value can be polled and exported).
+in 0.7.x; the value can be polled and exported).
 
 | Area               | Counters                                                                               |
 |--------------------|----------------------------------------------------------------------------------------|
@@ -1943,7 +2296,7 @@ store's maximum age.
 - **The boundary is enforced by a test** instead of separate build modules: an architecture test (ArchUnit or a
   plain check over the class files) fails if an adapter package uses anything but the SPI package.
 - **Version: the next minor of the 0.x line** (e.g. 0.8.0), not 1.0. The 0.x line allows breaking changes; the
-  current generation ends with 0.7.x and gets maintenance fixes only.
+  0.7.x line gets maintenance fixes only.
 - **The switch, done 2026-11-04 on the `next` branch:** the module's sources, tests and this file became the
   repository root, its POM merged into the root's (the root's coordinates, metadata and plugins kept: jar manifest,
   sources, Javadoc, enforcer, JaCoCo, license headers, signing, Central publishing). The README and one per adapter (MongoDB,
@@ -2392,8 +2745,8 @@ PostgresAdapter<Key, Value> adapter = PostgresAdapter.newBuilder(dataSource, sch
 - **The core merges consecutive message batches while draining** (up to 1,000 messages, never across a gap or
   interruption marker): PostgreSQL delivers one notification at a time, and population reads stay batched.
 - **A cache fallen too far behind** (more than 100,000 messages pending: its executor busy, its store slow) drops
-  what is pending, keeps the markers in order, and revalidates as after a gap, instead of queueing without bound (the
-  current generation reconciles such an instance the same way).
+  what is pending, keeps the markers in order, and revalidates as after a gap, instead of queueing without bound (0.7.x
+  reconciles such an instance the same way).
 - **Tested:** the contract tests (31 then, 34 now) on PostgreSQL 18 and 13 (a gap induced by terminating the listening backend);
   14 end-to-end tests (every mode and format, discriminators, async, schema creation, refusal, reset, a table for
   other serializers, missing rights, names, a broken session degrading and revalidating); the retry rules with
@@ -2470,7 +2823,7 @@ MongoAdapter<Key, Value> adapter = MongoAdapter.newBuilder(mongoClient, database
   narrowing without the token needed the event-counting tests, and narrowing only after a lag hook held the
   watching thread back, since a thread that is never behind loses nothing even when it reopens fresh). Versions: see "Supported store versions".
 - **Not tested here:** a real rollback or oplog rollover (error 280/286 for real), a real network failure, failover in a
-  3-member replica set (the current generation's test harness has one), injected write failures (no proxy for the
+  3-member replica set (0.7.x's test harness has one), injected write failures (no proxy for the
   client yet), sharded clusters through `mongos`.
 
 ### Redis adapters (decided 2026-10-26, settled and built 2026-11-01)
@@ -2930,7 +3283,7 @@ the complexity budget (a mechanism only for a guarantee or a measured gap), no s
 - **A public adapter per database:** `MariaDbAdapter` and `MySqlAdapter`, each with its documentation (supported
   versions, polling, replication caveats) and its tested matrix, choosing its dialect itself, not by the product name
   behind the user's back; a data source of another product refused at the start, naming the right adapter.
-  `JdbcAdapter` and the untested standard dialect go (next/ is unreleased: no deprecation needed). Another database
+  `JdbcAdapter` and the untested standard dialect go (then unreleased: no deprecation needed). Another database
   (SQL Server, Oracle, H2) gets a dialect and an adapter only on demand, tested.
 - **MySQL's caveats documented:** changes polled (the poll interval, not milliseconds); committed writes lost on a
   failover unless semi-synchronous replication (`AFTER_SYNC`) or Group Replication; Galera's known anomalies stay
@@ -2997,9 +3350,14 @@ the complexity budget (a mechanism only for a guarantee or a measured gap), no s
      10.2.31, MySQL 5.7.29, 8.0.19**; on x86 the true first releases would start. **Both kept (the user, 2026-11-03):**
      each such entry twice, the true first release (10.2.6, 5.7.13 as the first pullable, 8.0.11) with
      `@DisabledOnOs(architectures = "aarch64")`, the stand-in with `@EnabledOnOs(architectures = "aarch64")`
-     (disabled on ARM rather than enabled on x86, which Java names `amd64` or `x86_64`). The x86 entries have not run
-     yet: no x86 runner (a GitHub Actions workflow for `next/` skipped by the user for now; Rosetta in Docker Desktop
-     untried).
+     (disabled on ARM rather than enabled on x86, which Java names `amd64` or `x86_64`). The x86 entries run in the
+     nightly full matrix on GitHub. **Changed 2026-11-13:** MySQL 5.7.13 cannot be pulled on GitHub's Ubuntu 26.04
+     runners (the containerd image store fails to unpack the 2016 image: "failed to extract layer … NotFound"), so
+     5.7.29 runs on every architecture and 5.7.13 is gone; and MongoDB 9.0.2 refuses to start on Linux 6.19 and
+     newer (SERVER-121912, a tcmalloc fix), so 9.0.4 is the first MongoDB 9 tested (locally the arm64 image started).
+     Found by the nightly of 2026-11-12, with the timing failures of the contracts (windows of 60 to 300 ms that a
+     slow runner overruns: every "still younger than" window in the store, feed and scan contracts widened to 1 s
+     after a pause of 1.5 s) and model checking cancelled at the 120-minute limit (now two groups of its own).
    - **MySQL Connector/J on MariaDB 11.0 does not connect** (it asks for `transaction_isolation`, MariaDB's from 11.1):
      the refusal test accepts a failed connection too.
    - **Writing one row per transaction is slow:** 25,000 rows took about 2 minutes alone on MariaDB 13 (a few round
@@ -3192,7 +3550,7 @@ needs, not what PostgreSQL still supports. It needs `jsonb` (9.4), `INSERT ... O
 
 ### Test setup: one store at a time, per image and topology (decided 2026-10-23)
 
-As in the current generation: `MongoIntegrationTest` and `PostgresIntegrationTest` hold one `@Nested` class per image
+As in 0.7.x: `MongoIntegrationTest` and `PostgresIntegrationTest` hold one `@Nested` class per image
 and topology, which starts its store in `@BeforeAll` and stops it in `@AfterAll` (`MongoTopologyTests`,
 `PostgresTopologyTests`); the suites are nested in it and find the running store (`MongoTestDatabase.get()`,
 `PostgresTestDatabase.get()`). No store outlives its class, and no two run at once (the shared per-JVM databases
@@ -4267,7 +4625,7 @@ risk they carry for the core:
      meanwhile, by at most what was written within that age. The core passes `max(4 s, 2 × poll interval + 2 s if
      polled)`: polled, the window in which a poll can still find a write (the poll interval with its jitter and the
      poll's own time, plus the overlap for writes committed after their time); with a feed or without distribution
-     only the floor, for slow loads, since a message carries its version and needs no row (the old generation kept
+     only the floor, for slow loads, since a message carries its version and needs no row (0.7.x kept
      every written record a minute, `DISTRIBUTION_DURATION`, because its notifications named a record that each
      instance then read). That closes the first fully and the second for every load shorter than the grace (a slower
      one stays bounded by the maximum age). Normal operation is unchanged: pruning reaches rows that young only when
@@ -5515,7 +5873,7 @@ at the end.
 
 1. **The PostgreSQL listener without R2DBC.** Built 2026-10-28. Deviation: an optional listener `DataSource`
    (`withListenerDataSource`) stays, for a `DataSource` behind a transaction-mode pooler; by default listening goes
-   through the one `DataSource`. The README items are in the adapter's Javadoc (`next/` has no README yet). See
+   through the one `DataSource`. The README items are in the adapter's Javadoc (there was no README yet). See
    "PostgreSQL listening without R2DBC" and its decision.
    - `PostgresListener` reads pgjdbc's stream: reflection on `QueryExecutorBase.pgStream`, reached through
      `unwrap(BaseConnection.class).getQueryExecutor()`, and checked at startup.
@@ -5848,7 +6206,7 @@ at the end.
      once at build for a product name not tested, without a setting;
    - caches of different serializers in one PostgreSQL table (recorded 2026-10-31, for later): today a table's `key`
      and `value` columns take the type of its first cache's formats (`bytea`, `text`, `jsonb`), and a cache of other
-     formats is refused at start (also in the old generation). One column per format (`key_bytea`, `key_text`,
+     formats is refused at start (also in 0.7.x). One column per format (`key_bytea`, `key_text`,
      `key_jsonb`, the same for `value`), each cache filling the pair of its formats, would allow it and keep `jsonb`
      queryable; it costs six sparse columns and the format in every statement and read. Rejected: everything as
      `bytea` with a format column (`storeAsNativeJson` meaningless on PostgreSQL), everything as `jsonb` (base64 for
@@ -5865,7 +6223,7 @@ at the end.
    - the grace size pruning spares young rows (recorded 2026-10-29, for a later discussion; built as `max(4 s, 2 ×
      poll interval + 2 s if polled)`, see "In-memory store profiles", dimension 0): with a feed or without
      distribution it only protects slow loads, and 4 s leaves a load slower than that, meeting a cache that turns over
-     its whole maximum size meanwhile, stale up to the maximum age. Longer (a minute, as the old generation kept its
+     its whole maximum size meanwhile, stale up to the maximum age. Longer (a minute, as 0.7.x kept its
      records) covers slower loads at the price of the store exceeding its maximum size by that much more while
      thrashing; or tied to something measured (the loads' durations);
    - a periodic check of the local copies against the store, in case an announcement was missed (recorded
@@ -6008,7 +6366,7 @@ at the end.
    - an issue upstream at pgjdbc;
    - **remove the cleanup of 0.7.x documents** on MongoDB (`MongoSchema#removeOldGeneration`, its test in
      `MongoAdapterTest` and the step in `MigrationExperimentTest`, the sentence in the MongoDB README; see "Migration
-     from the current generation", built 2026-11-07 as temporary) in a later release, once no rollout from 0.7.x is
+     from 0.7.x", built 2026-11-07 as temporary) in a later release, once no rollout from 0.7.x is
      expected.
 
 The frame for every step: "Positioning and the complexity budget".
@@ -6200,6 +6558,17 @@ None at the moment. New ones go here as they come up while building.
   its own log record is lost too, unverified). Nothing in the store today breaks the tie (write time, stream counter,
   `xmin` and request keys are lost or repeat with the write). Measure the transfer after gaps first.
 
+- **Installing what the background pass read** (noted 2026-11-12). After a gap the pass reads each held key's row
+  (`InternalCore#stillStored` compares versions and values) and drops a copy that does not match; the next access
+  then reads the same row again. Installing the row read instead would save that second read, after every gap and
+  after a start without the store (where every copy is `UNCONFIRMED` and so mismatches). It installs under the
+  reservations as `readThrough` does. Performance, so after robustness.
+- **A scan next to a feed, for catching up after a gap** (noted 2026-11-12). A store offering both could answer
+  `changedWithin(gap)` after a gap, so only the keys changed meanwhile are dropped, instead of revalidating all held
+  keys. Only within what the store still remembers: a gap longer than the tombstone retention, size pruning (silent)
+  or a failover that lost writes still needs the full revalidation, so an optimisation with a fallback. A new
+  mechanism: only with a measured revalidation cost (as the tie-breaker above). No shipped store is both today.
+
 Checked and not adopted: JetCache's per-key refresh tasks (Caffeine refreshes on access), its non-strict
 distributed lock (not a cache concern), result codes instead of the Caffeine API (the store guard covers failures),
 per-call TTLs in L2 (Caffeine's `Expiry` covers L1), and custom annotations (a thin Spring `CacheManager` adapter
@@ -6208,8 +6577,8 @@ its lock on every L1 hit are weaker than this design.
 
 ## Lessons checklist
 
-Each lesson from the current generation becomes a test, a design rule, or is recorded as not applying. Names refer
-to the working notes of the current generation.
+Each lesson from 0.7.x becomes a test, a design rule, or is recorded as not applying. Names refer
+to the working notes of 0.7.x.
 
 | Lesson                                                                                                                                                                              | Note                                                                                                                                             | Carries over as                                                                                                                                |
 |-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -6284,6 +6653,12 @@ in about one run in eight before it was fixed), not a substitute for the targete
 - Two lifetimes to configure.
 - No global eviction across instances; L2 is the global bound.
 - Writes are refused while the store is down; an unconditional put with an unknown outcome throws.
+- Starting without the store (the default since 2026-11-12): a misconfiguration that looks like an outage (a blocked
+  port, a wrong host name) no longer stops a rollout but runs `DEGRADED`; the recovery is a deferred cold start (every
+  copy loaded meanwhile dropped once connected, an L2 read per key again); two configuration checks come late; a build
+  waits the client's own connect attempts (Redisson with lazy initialization: about 16 s). Caches sharing a client whose
+  store went silent connect up to one operation timeout later than they could (one creation per client asks the store
+  per operation timeout). `withFailFast()` restores the old behaviour.
 - Hashing on every user call: 2–4 times a plain Caffeine hit (30–65 ns), 32 bytes per call.
 - After a gap, a row read per held key, its value transferred (lazily and in a rate-limited background pass).
 - With negative caching, each instance learns its own absences.

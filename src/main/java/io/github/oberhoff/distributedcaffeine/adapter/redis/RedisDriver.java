@@ -26,8 +26,17 @@ import java.time.Duration;
  */
 public abstract class RedisDriver {
 
+    // the application's client, by which caches sharing it are known (Adapter#client)
+    private final Object client;
+
     // only the bindings in this package make drivers: the commands they provide are the library's internals
-    RedisDriver() {
+    RedisDriver(Object client) {
+        this.client = client;
+    }
+
+    // the application's client the driver wraps
+    final Object client() {
+        return client;
     }
 
     /**

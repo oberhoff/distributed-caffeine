@@ -15,14 +15,18 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter.jdbc;
 
+import com.zaxxer.hikari.HikariDataSource;
 import io.github.oberhoff.distributedcaffeine.AdapterConformanceTest.AdapterConformance;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import org.jspecify.annotations.NullMarked;
 import org.mariadb.jdbc.MariaDbDataSource;
 
+import java.net.InetSocketAddress;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * MariaDB's and MySQL's side of the conformance suite, on a fresh table of the running test database.
@@ -33,6 +37,7 @@ import java.sql.Statement;
 final class JdbcConformance implements AdapterConformance {
 
     private final String table = JdbcTestDatabase.freshTable();
+    private final List<HikariDataSource> pools = new ArrayList<>();
 
     @Override
     public Adapter<String, String> adapter(String discriminator) {
@@ -59,6 +64,42 @@ final class JdbcConformance implements AdapterConformance {
         } catch (SQLException e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    @Override
+    public InetSocketAddress server() {
+        return InetSocketAddress.createUnresolved(JdbcTestDatabase.host(), JdbcTestDatabase.port());
+    }
+
+    @Override
+    public Adapter<String, String> through(String host, int port) {
+        return adapterOf(JdbcTestDatabase.pool(host, port, null));
+    }
+
+    @Override
+    public List<Adapter<String, String>> sharingThrough(String host, int port, int count) {
+        HikariDataSource pool = JdbcTestDatabase.pool(host, port, null);
+        pools.add(pool);
+        List<Adapter<String, String>> adapters = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            adapters.add(JdbcTestDatabase.adapter(pool, table, "shared" + i));
+        }
+        return adapters;
+    }
+
+    @Override
+    public Adapter<String, String> wrongCredentials() {
+        return adapterOf(JdbcTestDatabase.pool(JdbcTestDatabase.host(), JdbcTestDatabase.port(), "wrong"));
+    }
+
+    private Adapter<String, String> adapterOf(HikariDataSource pool) {
+        pools.add(pool);
+        return JdbcTestDatabase.adapter(pool, table, JdbcTestDatabase.DEFAULT_DISCRIMINATOR);
+    }
+
+    @Override
+    public void close() {
+        pools.forEach(HikariDataSource::close);
     }
 
     @Override

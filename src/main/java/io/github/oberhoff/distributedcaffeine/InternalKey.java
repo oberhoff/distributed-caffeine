@@ -25,7 +25,7 @@ import static java.util.Objects.requireNonNull;
  * A key in L1, compared by the hash of the user's key rather than by the key itself, so that a message, which carries
  * only the hash, finds the held entry directly.
  * <p>
- * Identity is conceptually the hash string, as in the current generation. A hash of 32 lowercase hex characters (what
+ * Identity is conceptually the hash string, as in 0.7.x. A hash of 32 lowercase hex characters (what
  * {@code Hasher.getHash()} produces) is held compactly as 128 bits; any other string a custom {@code Hashable} or
  * {@code HashProvider} returns is held and compared as the string. Which form a key takes follows from the hash
  * string alone, so every instance decides it the same way, and a 32-hex string never equals any other string, so

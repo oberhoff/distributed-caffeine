@@ -41,10 +41,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * each major. MariaDB through MariaDB Connector/J; MySQL through MySQL Connector/J and MariaDB Connector/J alike,
  * the failover through MySQL Connector/J, and through both on the latest. MySQL publishes arm64 images from 8.0.29
  * only: 5.7 and early 8.0 run emulated on Apple Silicon. With {@code -DrunsOnGitHub=true}, only the latest of each
- * product runs, through its own driver. The first releases of MariaDB 10.2 and MySQL 5.7 and 8.0 have x86 images
- * only, and their entrypoint's helper (gosu, built with an old Go runtime) crashes when emulated: on x86 they run
- * (MySQL 5.7.13 for 5.7.9, as earlier images are published in a manifest format Docker no longer pulls), on ARM
- * (Apple Silicon) the first releases that start emulated stand for them: MariaDB 10.2.31, MySQL 5.7.29 and 8.0.19.
+ * product runs, through its own driver. The first releases of MariaDB 10.2 and MySQL 8.0 have x86 images only, and
+ * their entrypoint's helper (gosu, built with an old Go runtime) crashes when emulated: on x86 they run, on ARM (Apple
+ * Silicon) the first releases that start emulated stand for them: MariaDB 10.2.31 and MySQL 8.0.19. MySQL 5.7 runs
+ * 5.7.29 everywhere: earlier images are published in formats Docker no longer pulls (before 5.7.13), or that the
+ * containerd image store of GitHub's Ubuntu 26.04 runners cannot unpack (5.7.13, found 2026-11-12).
  *
  * @author Andreas Oberhoff
  */
@@ -228,20 +229,8 @@ class JdbcIntegrationTest {
     }
 
     @Nested
-    @DisplayName("MySQL 5.7.13 (MySQL Connector/J)")
+    @DisplayName("MySQL 5.7.29 (MySQL Connector/J)")
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    @DisabledOnOs(architectures = "aarch64")
-    class MySQL_5_7_13 extends JdbcCompatibilityTests {
-
-        MySQL_5_7_13() {
-            super("mysql:5.7.13", MYSQL_CONNECTOR_J);
-        }
-    }
-
-    @Nested
-    @DisplayName("MySQL 5.7.29 (for 5.7.13 on ARM; MySQL Connector/J)")
-    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    @EnabledOnOs(architectures = "aarch64")
     class MySQL_5_7_29 extends JdbcCompatibilityTests {
 
         MySQL_5_7_29() {
@@ -250,20 +239,8 @@ class JdbcIntegrationTest {
     }
 
     @Nested
-    @DisplayName("MySQL 5.7.13 (MariaDB Connector/J)")
+    @DisplayName("MySQL 5.7.29 (MariaDB Connector/J)")
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    @DisabledOnOs(architectures = "aarch64")
-    class MySQL_5_7_13__MariaDB_Connector_J extends JdbcCompatibilityTests {
-
-        MySQL_5_7_13__MariaDB_Connector_J() {
-            super("mysql:5.7.13", MARIADB_CONNECTOR_J);
-        }
-    }
-
-    @Nested
-    @DisplayName("MySQL 5.7.29 (for 5.7.13 on ARM; MariaDB Connector/J)")
-    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    @EnabledOnOs(architectures = "aarch64")
     class MySQL_5_7_29__MariaDB_Connector_J extends JdbcCompatibilityTests {
 
         MySQL_5_7_29__MariaDB_Connector_J() {
@@ -272,20 +249,8 @@ class JdbcIntegrationTest {
     }
 
     @Nested
-    @DisplayName("MySQL 5.7.13 (Primary with Asynchronous Replica)")
+    @DisplayName("MySQL 5.7.29 (Primary with Asynchronous Replica)")
     @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    @DisabledOnOs(architectures = "aarch64")
-    class MySQL_5_7_13__Replication extends JdbcReplicationTests {
-
-        MySQL_5_7_13__Replication() {
-            super("mysql:5.7.13", MYSQL_CONNECTOR_J);
-        }
-    }
-
-    @Nested
-    @DisplayName("MySQL 5.7.29 (for 5.7.13 on ARM; Primary with Asynchronous Replica)")
-    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
-    @EnabledOnOs(architectures = "aarch64")
     class MySQL_5_7_29__Replication extends JdbcReplicationTests {
 
         MySQL_5_7_29__Replication() {

@@ -62,6 +62,14 @@ abstract class RedisCompatibilityTests {
             io.lettuce.core.RedisClient client = io.lettuce.core.RedisClient.create("redis://127.0.0.1:" + port);
             return new Proxied(LettuceRedis.of(client), client::shutdown);
         }
+
+        @Override
+        protected Proxied driverOfUnknownUser() {
+            io.lettuce.core.RedisClient client = io.lettuce.core.RedisClient.create(io.lettuce.core.RedisURI.builder()
+                    .withHost(server.host()).withPort(server.port()).withAuthentication(UNKNOWN_USER, WRONG_PASSWORD)
+                    .build());
+            return new Proxied(LettuceRedis.of(client), client::shutdown);
+        }
     }
 
     @Nested
@@ -80,6 +88,13 @@ abstract class RedisCompatibilityTests {
         @Override
         protected Proxied driverThrough(int port) {
             redis.clients.jedis.RedisClient client = redis.clients.jedis.RedisClient.create("127.0.0.1", port);
+            return new Proxied(JedisRedis.of(client), client);
+        }
+
+        @Override
+        protected Proxied driverOfUnknownUser() {
+            redis.clients.jedis.RedisClient client = redis.clients.jedis.RedisClient.create(server.host(),
+                    server.port(), UNKNOWN_USER, WRONG_PASSWORD);
             return new Proxied(JedisRedis.of(client), client);
         }
     }
@@ -107,6 +122,17 @@ abstract class RedisCompatibilityTests {
             return new Proxied(RedissonRedis.of(client), client::shutdown);
         }
 
+        // connecting on first use: otherwise Redisson.create itself fails on credentials the server refuses, before
+        // the cache sees them
+        @Override
+        protected Proxied driverOfUnknownUser() {
+            org.redisson.config.Config config = new org.redisson.config.Config().setLazyInitialization(true)
+                    .setUsername(UNKNOWN_USER).setPassword(WRONG_PASSWORD);
+            config.useSingleServer().setAddress("redis://" + server.host() + ":" + server.port());
+            org.redisson.api.RedissonClient client = org.redisson.Redisson.create(config);
+            return new Proxied(RedissonRedis.of(client), client::shutdown);
+        }
+
         // Redisson goes on retrying a server it cannot reach past the cache's timeout
         @Override
         protected RedisCommandException.Kind unreachable() {
@@ -115,11 +141,29 @@ abstract class RedisCompatibilityTests {
     }
 
     @Nested
-    class Conformance extends AdapterConformanceTest {
+    class LettuceConformance extends AdapterConformanceTest {
 
         @Override
         protected AdapterConformance conformance() {
-            return new RedisConformance(server);
+            return new RedisConformance(server, RedisOutage.Library.LETTUCE);
+        }
+    }
+
+    @Nested
+    class JedisConformance extends AdapterConformanceTest {
+
+        @Override
+        protected AdapterConformance conformance() {
+            return new RedisConformance(server, RedisOutage.Library.JEDIS);
+        }
+    }
+
+    @Nested
+    class RedissonConformance extends AdapterConformanceTest {
+
+        @Override
+        protected AdapterConformance conformance() {
+            return new RedisConformance(server, RedisOutage.Library.REDISSON);
         }
     }
 

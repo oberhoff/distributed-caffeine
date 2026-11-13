@@ -338,7 +338,7 @@ public final class DistributedCaffeine<K, V> {
 
     // the maximum age for the store only (StoreConfigurer#withMaximumAgeForStoreOnly)
     private void validateStoreOnly() {
-        if (!store().hasMaximumAge()) {
+        if (store().unboundedAge()) {
             throw new IllegalStateException("withMaximumAgeForStoreOnly() requires withMaximumAge(...)");
         }
         // without messages every held value counts as trusted, which the atomic methods rely on (InternalCore#read)
@@ -386,7 +386,9 @@ public final class DistributedCaffeine<K, V> {
     }
 
     // creates the store (each of its operations bounded by the operation timeout) and builds the core; a failure
-    // leaves nothing behind
+    // leaves nothing behind. A store not reached (a retryable failure) starts the cache without it, unless
+    // withFailFast(): a stand-in until the core connects the store in the background (VISION.md, "Starting without the
+    // store"). Then the name lacks what an adapter learns from the server (the product behind a Redis client)
     // whatever fails, what was claimed is released before it is rethrown; created is the adapter's store once
     // assigned, which Sonar does not take as non-null
     @SuppressWarnings({"java:S1181", "java:S4449"})
@@ -397,39 +399,33 @@ public final class DistributedCaffeine<K, V> {
             InternalSerializer<K> keySerializer = serializers.keySerializer();
             InternalSerializer<V> valueSerializer = serializers.valueSerializer();
             Executor executor = requireNonNullElseGet(store().executor(), InternalExecutors::defaultStoreExecutor);
-            created = adapter.createStore(new StoreSettings(keySerializer.format(), valueSerializer.format(),
-                    store().operationTimeout()));
+            StoreSettings settings = new StoreSettings(keySerializer.format(), valueSerializer.format(),
+                    store().operationTimeout());
+            InternalPendingStore.Created attempt = InternalPendingStore.create(adapter, settings, store().failFast(),
+                    environment);
+            created = attempt.store();
             // where the cache lives, as its log messages begin with it; taken once the store exists, as an adapter may
             // name the server's product only after asking it (Valkey or Kvrocks behind a Redis client, say)
             String name = String.valueOf(adapter);
-            if (distributionMode() != DistributionMode.NONE && !(created instanceof ChangeFeed)) {
-                if (!(created instanceof ChangeScan scan)) {
-                    throw new IllegalStateException(adapter + " offers no change feed and no change scan, so it "
-                            + "supports only DistributionMode.NONE, not " + distributionMode());
-                }
-                // polled by the core (VISION.md, "The polling feed")
-                if (store().pollInterval().multipliedBy(2).compareTo(store().heartbeatInterval()) > 0) {
-                    throw new IllegalStateException("The poll interval " + store().pollInterval() + " must be at "
-                            + "most half the heartbeat interval " + store().heartbeatInterval()
-                            + ", or the heartbeat takes the pause between polls for a silent feed");
-                }
-                Duration overlap = InternalPollingStore.POLL_OVERLAP;
-                created = new InternalPollingStore(name, created, scan, store().pollInterval(), overlap,
-                        InternalMaintenance.TOMBSTONE_RETENTION.minus(overlap), store().operationTimeout(), executor,
-                        environment);
+            InternalCore.Connector connector = attempt.connector(() -> connect(settings, name, executor),
+                    store().unboundedAge() && !caffeine.hasExpiry());
+            if (connector == null) {
+                created = distributing(created, name, executor);
             }
             // no copy outlives the store's maximum age, also where no message drops it (none sent, or one lost); with
-            // the maximum age for the store only, the copies expire as Caffeine's expiry says
+            // the maximum age for the store only, the copies expire as Caffeine's expiry says, except those no store
+            // confirmed (InternalExpiry#unconfirmedMaximumAge)
             boolean forStoreOnly = store().maximumAgeForStoreOnly();
             return new InternalCore<>(name, created,
-                    caffeine.caffeine(forStoreOnly ? StoreConfigurer.UNBOUNDED_AGE : store().maximumAge()),
+                    caffeine.caffeine(forStoreOnly ? StoreConfigurer.UNBOUNDED_AGE : store().maximumAge(),
+                            store().maximumAge()),
                     caffeine.internalExpiry(), new InternalHasher<>(hashProvider), keySerializer,
                     valueSerializer, store().maximumAge(), forStoreOnly, executor, caffeine.refreshAfterWrite(),
                     loaders, distributionMode(), negativeCachingExpiry, store().maximumSize(),
                     store().maintenanceInterval(), pruneGrace(created instanceof InternalPollingStore),
                     store().heartbeatInterval(), loadAttempts,
                     InternalStatsCounter.of(caffeine.isRecordingStats()),
-                    () -> InternalClaims.release(adapter), environment);
+                    () -> InternalClaims.release(adapter), connector, environment);
         } catch (RuntimeException | Error e) {
             if (created != null) {
                 created.close();
@@ -437,6 +433,42 @@ public final class DistributedCaffeine<K, V> {
             InternalClaims.release(adapter);
             throw e;
         }
+    }
+
+    // the connect of a cache started without its store, in the background (InternalCore#attemptConnect): the store
+    // created and made ready as build() does; a store created but not usable as configured is closed again
+    private InternalCore.Connected connect(StoreSettings settings, String name, Executor executor) {
+        Store created = InternalReachability.create(adapter, settings, environment);
+        try {
+            Store distributing = distributing(created, name, executor);
+            return new InternalCore.Connected(distributing, pruneGrace(distributing instanceof InternalPollingStore));
+        } catch (RuntimeException e) {
+            created.close();
+            throw e;
+        }
+    }
+
+    // what the core subscribes to, decided by the store created, in one place for build() and for a connect later
+    // (VISION.md, "Starting without the store", design step 2): its own feed if it has one, or else its scan, polled
+    // by the core (VISION.md, "The polling feed"); unchanged without distribution. A future choice of the user (polling
+    // forced, a message bus) plugs in here
+    private Store distributing(Store created, String name, Executor executor) {
+        if (distributionMode() == DistributionMode.NONE || created instanceof ChangeFeed) {
+            return created;
+        }
+        if (!(created instanceof ChangeScan scan)) {
+            throw new IllegalStateException(adapter + " offers no change feed and no change scan, so it supports "
+                    + "only DistributionMode.NONE, not " + distributionMode());
+        }
+        if (store().pollInterval().multipliedBy(2).compareTo(store().heartbeatInterval()) > 0) {
+            throw new IllegalStateException("The poll interval " + store().pollInterval() + " must be at most half "
+                    + "the heartbeat interval " + store().heartbeatInterval()
+                    + ", or the heartbeat takes the pause between polls for a silent feed");
+        }
+        Duration overlap = InternalPollingStore.POLL_OVERLAP;
+        return new InternalPollingStore(name, created, scan, store().pollInterval(), overlap,
+                InternalMaintenance.TOMBSTONE_RETENTION.minus(overlap), store().operationTimeout(), executor,
+                environment);
     }
 
     // as Caffeine decides whether to load in bulk: only if the loader overrides loadAll

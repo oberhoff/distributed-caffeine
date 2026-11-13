@@ -44,9 +44,12 @@ enum MongoTopology implements Topology {
         return switch (this) {
             case SINGLE_NODE_REPLICA_SET -> EnumSet.of(Kind.STORE_CONTRACT, Kind.CHANGE_FEED_CONTRACT,
                     Kind.CORE, Kind.PROPERTY, Kind.ADAPTER);
-            case THREE_NODE_REPLICA_SET -> EnumSet.of(Kind.STORE_CONTRACT, Kind.CHANGE_FEED_CONTRACT, Kind.FAILOVER);
-            case THREE_NODE_REPLICA_SET_WITH_ARBITER -> EnumSet.of(Kind.STORE_CONTRACT, Kind.CHANGE_FEED_CONTRACT);
-            case SHARDED_CLUSTER -> EnumSet.of(Kind.STORE_CONTRACT, Kind.CHANGE_FEED_CONTRACT, Kind.SHARDING);
+            case THREE_NODE_REPLICA_SET -> EnumSet.of(Kind.STORE_CONTRACT, Kind.CHANGE_FEED_CONTRACT, Kind.FAILOVER,
+                    Kind.OUTAGE);
+            case THREE_NODE_REPLICA_SET_WITH_ARBITER -> EnumSet.of(Kind.STORE_CONTRACT, Kind.CHANGE_FEED_CONTRACT,
+                    Kind.OUTAGE);
+            case SHARDED_CLUSTER -> EnumSet.of(Kind.STORE_CONTRACT, Kind.CHANGE_FEED_CONTRACT, Kind.SHARDING,
+                    Kind.OUTAGE);
             case SINGLE_NODE_REPLICA_SET_WITH_SMALL_OPLOG -> EnumSet.of(Kind.OPLOG);
             case STANDALONE_SERVER -> EnumSet.of(Kind.STANDALONE);
         };

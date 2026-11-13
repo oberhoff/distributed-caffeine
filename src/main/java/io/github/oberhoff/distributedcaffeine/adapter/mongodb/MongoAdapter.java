@@ -15,9 +15,11 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
 
+import com.mongodb.MongoTimeoutException;
 import com.mongodb.client.MongoClient;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
+import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 
 import java.nio.charset.StandardCharsets;
@@ -90,13 +92,30 @@ public final class MongoAdapter<K, V> implements Adapter<K, V> {
                 settings.valueFormat());
         MongoSchema.ensure(client, location, schemaReset, settings.operationTimeout());
         MongoStore store = new MongoStore(client, location, settings.operationTimeout());
-        store.seedClusterTime();
+        try {
+            store.seedClusterTime();
+        } catch (StoreException e) {
+            // not answered in time at creation is not reached, worth another attempt, as in MongoSchema#ensure (an
+            // operation of a running cache is not repeated after waiting its whole time): a replica set without its
+            // majority answers the schema's reads, but not this majority write. Its write, of no cache's data, may be
+            // repeated
+            if (e.isRetryable() || !(e.getCause() instanceof MongoTimeoutException)) {
+                throw e;
+            }
+            throw new StoreException(String.valueOf(e.getMessage()), e.getCause(), false, true);
+        }
         return store;
+    }
+
+    // caches on the same client wait once for a store that does not answer (Adapter#client)
+    @Override
+    public Object client() {
+        return client;
     }
 
     @Override
     public String toString() {
-        return "MongoDB " + databaseName + "." + collectionName + "/" + discriminator;
+        return MongoLocation.name(databaseName, collectionName, discriminator);
     }
 
     /**
@@ -147,7 +166,7 @@ public final class MongoAdapter<K, V> implements Adapter<K, V> {
 
         /**
          * Drops and recreates the collection if distributed-caffeine 0.x created it, or if it is empty; one of another
-         * version of this generation, or holding other documents, is never dropped. Meant for the migration from 0.x:
+         * layout version from 0.8 on, or holding other documents, is never dropped. Meant for the migration from 0.x:
          * instances of 0.x still running go on among themselves, apart from the new ones, until they are stopped.
          * Remove it once the migration is done.
          *

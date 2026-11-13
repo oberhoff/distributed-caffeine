@@ -35,7 +35,7 @@ import static java.util.Objects.requireNonNull;
  *     .build();
  * }</pre>
  * Changes made elsewhere arrive by polling, within about the poll interval ({@code StoreConfigurer.withPollInterval},
- * one second by default).
+ * 1 second by default).
  * <p>
  * Requires MariaDB 10.2 or later. A MySQL server is refused (use {@link MySqlAdapter}), as is MySQL Connector/J, which
  * is not supported on MariaDB. A Galera cluster node is refused. A failover to an asynchronous replica, MariaDB's
@@ -89,14 +89,21 @@ public final class MariaDbAdapter<K, V> implements Adapter<K, V> {
 
     @Override
     public Store createStore(StoreSettings settings) {
-        String server = JdbcStore.ensure(dataSource, Dialect.MARIADB, tableName, settings.operationTimeout());
+        String server = JdbcStore.ensure(dataSource, Dialect.MARIADB, tableName, discriminator,
+                settings.operationTimeout());
         return new JdbcStore(dataSource, Dialect.MARIADB, server, tableName, discriminator,
                 settings.operationTimeout());
     }
 
+    // caches on the same client wait once for a store that does not answer (Adapter#client)
+    @Override
+    public Object client() {
+        return dataSource;
+    }
+
     @Override
     public String toString() {
-        return "MariaDB " + tableName + "/" + discriminator;
+        return JdbcStore.name(Dialect.MARIADB, tableName, discriminator);
     }
 
     /**

@@ -74,10 +74,11 @@ public abstract class ChangeScanContractTest extends AbstractContractTest {
         Store writer = open();
         ChangeScan scan = scanning(open());
         writer.write(List.of(entry("before", "v")));
-        pause(300);
+        pause(1_500);
         writer.write(List.of(entry("within", "v")));
 
-        Map<String, Change> changes = byHash(scan.changedWithin(Duration.ofMillis(150)));
+        // wide margins on both sides, so that a slow runner leaves the later row within the window
+        Map<String, Change> changes = byHash(scan.changedWithin(Duration.ofSeconds(1)));
 
         assertThat(changes).containsKey("within").doesNotContainKey("before");
     }

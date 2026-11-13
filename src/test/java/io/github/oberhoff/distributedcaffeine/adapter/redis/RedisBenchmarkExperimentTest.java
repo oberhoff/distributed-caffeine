@@ -33,7 +33,7 @@ import java.util.function.Function;
 @NullMarked
 @EnabledIfSystemProperty(named = "experiments", matches = "true")
 @Timeout(1_800)
-@SuppressWarnings("java:S2699") // an experiment reports what it measures, it asserts nothing
+@SuppressWarnings({"java:S2699", "JavaPrintToLogpoint"}) // an experiment prints what it measures, it asserts nothing
 class RedisBenchmarkExperimentTest {
 
     private static void measure(String image, String label, Function<RedisTestServer, RedisDriver> driver,

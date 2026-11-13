@@ -101,4 +101,19 @@ final class RedisCommandException extends RuntimeException {
     static boolean hasCode(String error, String code) {
         return error.startsWith(code + " ") || error.contains(" -" + code + " ");
     }
+
+    // whether the server refused the credentials on the connect: a wrong user or password (WRONGPASS, or "invalid
+    // password" before Redis 6), none given where one is required (NOAUTH), or one given where none is set. Every
+    // client library reports it as a failure to connect, with the server's answer among the causes; a configuration
+    // error for good, not a server out of reach (VISION.md, "Starting without the store")
+    static boolean credentialsRefused(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            String text = String.valueOf(cause.getMessage());
+            if (text.contains("WRONGPASS") || text.contains("NOAUTH") || text.contains("invalid password")
+                    || text.contains("called without any password configured")) {
+                return true;
+            }
+        }
+        return false;
+    }
 }

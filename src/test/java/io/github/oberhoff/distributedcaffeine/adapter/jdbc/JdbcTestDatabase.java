@@ -119,6 +119,11 @@ final class JdbcTestDatabase implements AutoCloseable {
         return get().mysql;
     }
 
+    // the server's container, for pausing it (PausedContainers)
+    static JdbcDatabaseContainer<?> container() {
+        return get().container;
+    }
+
     // statements needing more than the test user's rights on its database (users, grants); the containers set the
     // root password to the test user's
     static void asRoot(String... statements) throws SQLException {
@@ -176,6 +181,20 @@ final class JdbcTestDatabase implements AutoCloseable {
         config.setMaximumPoolSize(1);
         // connecting on first use, so that a server the driver cannot connect to fails the store's creation, not
         // the pool's
+        config.setInitializationFailTimeout(-1);
+        return new HikariDataSource(config);
+    }
+
+    // a pool of its own through the suites' driver at the given address, as the given user, connecting on first use and
+    // waiting at most a second for a connection; closed by the caller
+    static HikariDataSource pool(String host, int port, @Nullable String password) {
+        JdbcTestDatabase database = get();
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl(url(database.driver, host, port));
+        config.setUsername(database.container.getUsername());
+        config.setPassword(password != null ? password : database.container.getPassword());
+        config.setMaximumPoolSize(2);
+        config.setConnectionTimeout(1_000);
         config.setInitializationFailTimeout(-1);
         return new HikariDataSource(config);
     }

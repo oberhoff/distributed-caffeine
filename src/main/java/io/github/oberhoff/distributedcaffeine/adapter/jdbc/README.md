@@ -29,10 +29,10 @@ can share a table.
 
 ## Polling
 
-Every poll interval (`withPollInterval(...)`, one second by default), each instance reads the changes made since its
+Every poll interval (`withPollInterval(...)`, 1 second by default), each instance reads the changes made since its
 last poll, so changes made elsewhere arrive within about an interval, at one query per interval and instance. A shorter
 interval delivers changes sooner. The interval must be at most half the heartbeat interval
-(`withHeartbeatInterval(...)`, ten seconds by default), which is checked when the cache is built. While polls fail, the
+(`withHeartbeatInterval(...)`, 10 seconds by default), which is checked when the cache is built. While polls fail, the
 instance's state is `DEGRADED`, and after the next successful poll it checks what it holds against the store.
 
 ## Timeouts
@@ -41,7 +41,10 @@ The cache's operation timeout (`withOperationTimeout(...)`, 10 seconds by defaul
 connection borrowed for an operation, restored before the connection goes back, and the query timeout of each statement
 (rounded up to whole seconds), so caches sharing a data source may have different ones. The wait for a pooled connection
 is the pool's own (such as HikariCP's `connectionTimeout`, 30 seconds by default): set it no higher than the operation
-timeout, or an exhausted pool keeps callers waiting longer.
+timeout, or an exhausted pool keeps callers waiting longer. Opening a connection is the pool's or the driver's: a data
+source without a pool needs the driver's own timeouts for connecting and logging in, or a server that accepts
+connections but answers nothing (paused, or behind a network dropping packets) may hold every connect, the build's
+included, beyond the operation timeout.
 
 The network timeout bounds waiting for an answer, not sending: Java sockets have no write timeout, so a write too large
 for the socket's buffer, such as a large `putAll`, sent to a server that vanished without closing the connection (a
@@ -54,6 +57,10 @@ A failover that promotes an asynchronous replica, the default replication of bot
 had confirmed. The instances notice that another server answers (each poll reads the server's `server_id`, which is
 distinct on every server that replicates) and check what they hold against the store, so they drop the lost writes as
 well. MySQL's semi-synchronous replication (`AFTER_SYNC`) loses no confirmed write.
+
+A read-only server (`read_only=ON`, as replicas usually run, and a primary briefly during a failover) is refused as
+retryable: a cache built then starts without its store and connects once the address reaches a writable server (with
+`withFailFast()` the build fails); writes reaching it fail and are retried.
 
 Galera Cluster (MariaDB Galera Cluster, Percona XtraDB Cluster) is refused when a cache is built. Galera can lose
 updates and serve stale reads across nodes even in a healthy cluster, as Jepsen found in 2026 and MariaDB now documents

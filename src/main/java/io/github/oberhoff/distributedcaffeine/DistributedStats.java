@@ -24,8 +24,13 @@ import java.util.Map;
 /**
  * A snapshot of one cache instance's store and synchronization activity, from {@code distributedPolicy().stats()};
  * recorded only if the cache records stats ({@code recordStats()}). Caffeine's own stats keep their meaning: a value
- * found in the store counts there as a miss and a successful load. A message is a change made by any instance, as the
- * store announces it.
+ * found in the store counts there as a miss and a successful load, so their hit rate is the rate of local hits. The
+ * share of requests served without calling the source adds the store hits ({@link #storeHitCount()}):
+ * <pre>{@code
+ * (cache.stats().hitCount() + cache.distributedPolicy().stats().storeHitCount())
+ *         / (double) cache.stats().requestCount()
+ * }</pre>
+ * A message is a change made by any instance, as the store announces it.
  * <p>
  * The counts only grow: the difference of two snapshots ({@link #minus}) is the activity in between, and the sum
  * ({@link #plus}) combines instances.

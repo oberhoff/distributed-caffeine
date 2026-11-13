@@ -54,10 +54,16 @@ jobs:
       matrix:
         include:
           # longest first, as at most 20 jobs run at once and the rest wait: model checking first, the in-memory
-          # suites on the other store profiles (the default is jdbc), the shortest, last; the experiments
-          # (-Dexperiments) and the managed Redis services (-Dredis.external) stay manual
-          - name: Test in-memory, model checking
-            tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
+          # suites on each store profile (the default is jdbc), the shortest, last; the experiments (-Dexperiments)
+          # and the managed Redis services (-Dredis.external) stay manual. Model checking in two groups of its own,
+          # apart from the in-memory suites: on GitHub's runners it takes about 50 min for the interleavings and over
+          # an hour for the linearizability tests (measured 2026-11-12, when one group with the in-memory suites ran
+          # into the timeout)
+          - name: Test model checking, interleavings
+            tests: "InternalInterleavingTest"
+            flags: -Dmodelchecking=true
+          - name: Test model checking, linearizability
+            tests: "InternalLinearizability*Test"
             flags: -Dmodelchecking=true
           - name: Test MongoDB 4-5
             tests: "MongoIntegrationTest$Mongo_4_*,MongoIntegrationTest$Mongo_5_*"
@@ -95,6 +101,8 @@ jobs:
             tests: "JdbcIntegrationTest$MySQL_9_*"
           - name: Test MySQL 26
             tests: "JdbcIntegrationTest$MySQL_26_*"
+          - name: Test in-memory
+            tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
           - name: Test in-memory, postgresql
             tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
             flags: -Dinmemory.profile=postgresql
@@ -128,3 +136,29 @@ jobs:
         # tests) fails instead of passing with nothing tested. Single quotes: in double quotes bash expands the nested
         # class names ($Mongo_4_*) as variables and every group runs the whole test class
         run: mvn -B -DskipErrorProne test '-Dtest=${{ matrix.tests }}' ${{ matrix.flags }}
+      # the failures each test JVM recorded (testing.FailureLog), as Surefire's reports keep only the last topology
+      # of a class: an annotation each, readable through the API (a job's check run), the whole list in the job
+      # summary (GitHub shows at most 10 error annotations per step), and the files as an artifact
+      - name: Report failed tests
+        if: failure()
+        run: |
+          shopt -s nullglob
+          files=(target/test-failures/*.txt)
+          [ ${#files[@]} -gt 0 ] || exit 0
+          {
+            echo "### Failed tests"
+            echo
+            sort -u "${files[@]}" | while IFS=$'\t' read -r test message; do echo "- **${test}**: ${message}"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+          sort -u "${files[@]}" | while IFS=$'\t' read -r test message; do
+            title=${test//%/%25}; title=${title//,/%2C}; title=${title//:/%3A}
+            echo "::error title=${title}::${message//%/%25}"
+          done
+      - name: Keep the failed tests
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: failed-tests-${{ strategy.job-index }}
+          path: target/test-failures/
+          if-no-files-found: ignore
+          retention-days: 14

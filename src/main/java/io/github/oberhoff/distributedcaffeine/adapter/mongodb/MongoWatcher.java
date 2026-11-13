@@ -82,8 +82,9 @@ import java.util.function.Consumer;
  */
 final class MongoWatcher {
 
-    private static final Logger LOGGER = System.getLogger(MongoAdapter.class.getPackageName());
-    private static final String LISTENER_FAILED = "A listener failed";
+    // the library's one logger, as the core's: the message names the adapter (README, "Deployment")
+    private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine");
+    private static final String LISTENER_FAILED = ": A listener failed";
     private static final long MAX_AWAIT_MILLIS = 100;
     // the flag of an update that wrote a value, in its changed fields (a name no document field has)
     private static final String VALUE_WRITTEN = "valueWritten";
@@ -447,7 +448,7 @@ final class MongoWatcher {
                 watch();
             } catch (RuntimeException | Error e) {
                 // never expected: the caches are told that delivery stopped rather than left trusting a dead stream
-                LOGGER.log(Level.ERROR, "The change stream on " + databaseName + " stopped", e);
+                LOGGER.log(Level.ERROR, name() + ": The change stream stopped", e);
                 lose(null, e);
                 throw e;
             }
@@ -514,15 +515,15 @@ final class MongoWatcher {
 
         private void collectionGone(ChangeStreamDocument<BsonDocument> event) {
             String collection = event.getNamespace() == null ? null : event.getNamespace().getCollectionName();
-            LOGGER.log(Level.WARNING, "Collection {0} in {1} was dropped or renamed; the caches check what they hold "
-                    + "against the store", collection, databaseName);
+            LOGGER.log(Level.WARNING, "{0}: Collection {1} was dropped or renamed; the caches check what they hold "
+                    + "against the store", name(), collection);
             for (Map.Entry<String, List<Registration>> scope : scopes.entrySet()) {
                 if (collection == null || scope.getKey().startsWith(collection + "\0")) {
                     for (Registration registration : scope.getValue()) {
                         try {
                             registration.listener.onGap();
                         } catch (RuntimeException e) {
-                            LOGGER.log(Level.WARNING, LISTENER_FAILED, e);
+                            LOGGER.log(Level.WARNING, name() + LISTENER_FAILED, e);
                         }
                     }
                 }
@@ -534,8 +535,8 @@ final class MongoWatcher {
             try {
                 dispatch(event);
             } catch (RuntimeException e) {
-                LOGGER.log(Level.WARNING, "A change event on " + databaseName + " could not be dispatched; the caches "
-                        + "check what they hold against the store", e);
+                LOGGER.log(Level.WARNING, name() + ": A change event could not be dispatched; the caches check what "
+                        + "they hold against the store", e);
                 forEachRegistration(registration -> registration.listener.onGap());
             }
         }
@@ -607,7 +608,7 @@ final class MongoWatcher {
                 try {
                     registration.listener.onChanges(List.of(message));
                 } catch (RuntimeException e) {
-                    LOGGER.log(Level.WARNING, "A listener on " + databaseName + " failed on a change event", e);
+                    LOGGER.log(Level.WARNING, name() + ": A listener failed on a change event", e);
                 }
             }
         }
@@ -649,14 +650,14 @@ final class MongoWatcher {
                     told.add(registration);
                 });
             }
-            LOGGER.log(Level.WARNING, "The change stream on {0} failed ({1})", databaseName, failure.getMessage());
+            LOGGER.log(Level.WARNING, "{0}: The change stream failed ({1})", name(), failure.getMessage());
             told.forEach(registration -> notify(() -> registration.listener.onLost(failure)));
         }
 
         // the history lost: reopened at once without the token, a gap; if that fails, lost (a resume is a gap anyway)
         private void reopenFresh(Exception failure) {
-            LOGGER.log(Level.WARNING, "The change stream on {0} lost its history ({1}); reopening, and the caches "
-                    + "check what they hold against the store", databaseName, failure.getMessage());
+            LOGGER.log(Level.WARNING, "{0}: The change stream lost its history ({1}); reopening, and the caches "
+                    + "check what they hold against the store", name(), failure.getMessage());
             List<Registration> told = new ArrayList<>();
             try {
                 synchronized (this) {
@@ -690,8 +691,7 @@ final class MongoWatcher {
                 }
                 if (cursor == null || (!registration.lost && generation == registration.generation)) {
                     if (cursor != null) {
-                        LOGGER.log(Level.WARNING, "The change stream on {0} is suspected silent; reopening",
-                                databaseName);
+                        LOGGER.log(Level.WARNING, "{0}: The change stream is suspected silent; reopening", name());
                     }
                     reopen();
                 }
@@ -706,7 +706,7 @@ final class MongoWatcher {
             try {
                 openResuming();
                 joined(null);
-                LOGGER.log(Level.INFO, "The change stream on {0} reopened", databaseName);
+                LOGGER.log(Level.INFO, "{0}: The change stream reopened", name());
             } catch (MongoException e) {
                 throw new StoreException("Reopening the change stream on " + databaseName + " failed: "
                         + e.getMessage(), e, false, true);
@@ -727,11 +727,16 @@ final class MongoWatcher {
             }
         }
 
-        private static void notify(Runnable call) {
+        // the database the change stream watches, as its log messages begin with it: it serves every cache there
+        private String name() {
+            return "MongoDB " + databaseName;
+        }
+
+        private void notify(Runnable call) {
             try {
                 call.run();
             } catch (RuntimeException e) {
-                LOGGER.log(Level.WARNING, LISTENER_FAILED, e);
+                LOGGER.log(Level.WARNING, name() + LISTENER_FAILED, e);
             }
         }
 
@@ -767,7 +772,7 @@ final class MongoWatcher {
                     try {
                         action.accept(registration);
                     } catch (RuntimeException e) {
-                        LOGGER.log(Level.WARNING, LISTENER_FAILED, e);
+                        LOGGER.log(Level.WARNING, name() + LISTENER_FAILED, e);
                     }
                 }
             }

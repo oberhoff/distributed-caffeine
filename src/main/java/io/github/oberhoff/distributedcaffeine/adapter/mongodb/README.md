@@ -28,7 +28,7 @@ periodic journal flush and arrive about a hundred times later.
 
 The collection and its index are created when the first cache is built. A collection created by another version of this
 library is refused. `withSchemaReset()` is meant for the migration from 0.x: it drops and recreates a collection of 0.x
-(or an empty one), never one of another version of this generation or one holding other documents. During a rolling
+(or an empty one), never one of another layout version from 0.8 on or one holding other documents. During a rolling
 update, the instances of 0.x still running go on among themselves, apart from the new ones, so their values can be
 outdated until the last of them is stopped. Documents they write after the drop are removed when a cache is built, with
 or without `withSchemaReset()`; this cleanup is temporary and goes away in a later release. Remove `withSchemaReset()`
@@ -58,7 +58,8 @@ duration of an election lets them through. The default of 10 seconds covers a pl
 primary that fails, which the others notice only after `electionTimeoutMillis` (10 seconds by default); 30 seconds lets
 writes ride that out as well. Confirmed writes survive the failover (see [Consistency](#consistency)). On MongoDB 4.4.0,
 a new primary waits for catching up with an unreachable old one indefinitely by default; `catchUpTimeoutMillis` bounds
-that.
+that. A cache built while the replica set has no primary, such as without the majority of its members, starts without
+its store and connects once one is elected (with `withFailFast()` the build fails).
 
 ## Change history
 

@@ -77,9 +77,9 @@ abstract class PostgresFailoverTest {
     private HikariDataSource pool() {
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl("jdbc:postgresql://localhost:" + database.port() + ",localhost:" + database.standbyPort()
-                + "/" + database.databaseName() + "?targetServerType=primary");
-        config.setUsername(database.username());
-        config.setPassword(database.password());
+                + "/" + PostgresTestDatabase.DATABASE + "?targetServerType=primary");
+        config.setUsername(PostgresTestDatabase.USER);
+        config.setPassword(PostgresTestDatabase.PASSWORD);
         config.setMaximumPoolSize(4);
         config.setConnectionTimeout(2_000);
         config.setInitializationFailTimeout(-1);

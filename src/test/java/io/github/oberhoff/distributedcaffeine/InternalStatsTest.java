@@ -478,9 +478,11 @@ class InternalStatsTest {
         await(() -> stats(cache).writtenMessageCount() == 1 && database.isIdle());
         DistributedStats before = stats(cache);
         cache.put("b", "2");
-        // after its own echo has been applied in full (the delivery idle only once the listener returned: every count
-        // of it taken), so that nothing arrives later
-        await(() -> stats(cache).writtenMessageCount() == 2 && database.isIdle());
+        // after its own echo has been applied in full, so that nothing is counted later: the store's delivery idle,
+        // and the core done with what it was handed (found on the redis-hostile profile: an echo counted as ignored
+        // after the snapshot, while the core still applied it)
+        InternalCore<String, String> core = ((InternalDistributedCache<String, String>) cache).core;
+        await(() -> stats(cache).writtenMessageCount() == 2 && database.isIdle() && core.isQuiescent());
         DistributedStats after = stats(cache);
 
         assertThat(after.minus(before).putCount()).isEqualTo(1);

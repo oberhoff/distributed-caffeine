@@ -15,6 +15,8 @@
  */
 package io.github.oberhoff.distributedcaffeine.spi;
 
+import org.jspecify.annotations.Nullable;
+
 /**
  * What a user passes to {@code DistributedCaffeine.newBuilder}, and what provides the store of each cache instance:
  * it describes where one cache lives (client, database, table or collection, discriminator) and is used for one cache
@@ -39,4 +41,22 @@ public interface Adapter<K, V> {
      * @throws StoreException if the store cannot be used
      */
     Store createStore(StoreSettings settings);
+
+    /**
+     * Returns the client this adapter reaches its store through, where caches may share it (a driver's client, a
+     * {@code DataSource}). Caches whose adapters return the same one (by {@code equals}) do not each wait for a store
+     * that does not answer: after a {@link #createStore(StoreSettings) creation} that waited at least a tenth of the
+     * operation timeout and failed as not reached ({@link StoreException#isRetryable() retryable}), as where the
+     * network drops packets, creations through the same client within one operation timeout fail at once, as not
+     * reached, without asking the store. So caches built one after another during such an outage start without their
+     * store within about one operation timeout in all, instead of one each. A creation that reaches the store, or that
+     * the store answers with any other failure, ends it; a creation failing fast (the connection refused, the host
+     * unknown) does not start it.
+     *
+     * @return the client, or {@code null} (the default) where the adapter shares none, and every creation asks the
+     * store
+     */
+    default @Nullable Object client() {
+        return null;
+    }
 }

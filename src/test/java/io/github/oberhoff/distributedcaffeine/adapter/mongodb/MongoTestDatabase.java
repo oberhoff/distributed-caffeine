@@ -27,9 +27,11 @@ import org.testcontainers.containers.Network;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.mongodb.MongoDBContainer;
 
+import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.awaitUpTo;
@@ -66,6 +68,40 @@ final class MongoTestDatabase implements AutoCloseable {
     private final @Nullable MongoReplicaSet replicaSet;
     private final String host;
     private final int port;
+
+    // every running container of the store (its members, a sharded cluster's servers), for pausing them all
+    List<GenericContainer<?>> allContainers() {
+        List<GenericContainer<?>> all = new ArrayList<>(containers.stream().filter(GenericContainer::isRunning)
+                .toList());
+        if (replicaSet != null) {
+            all.addAll(replicaSet.members());
+        }
+        return all;
+    }
+
+    // a client of its own, finding the store's servers within a second; closed by the caller
+    MongoClient newClient() {
+        return switch (topology) {
+            case THREE_NODE_REPLICA_SET, THREE_NODE_REPLICA_SET_WITH_ARBITER -> MongoClients.create(
+                    requireNonNull(replicaSet).settings()
+                            .applyToClusterSettings(cluster -> cluster.serverSelectionTimeout(1, TimeUnit.SECONDS))
+                            .applyToSocketSettings(socket -> socket.connectTimeout(1, TimeUnit.SECONDS)).build());
+            case SHARDED_CLUSTER -> MongoClients.create("mongodb://" + host + ":" + port
+                    + "/?serverSelectionTimeoutMS=1000&connectTimeoutMS=1000");
+            default -> MongoClients.create("mongodb://" + host + ":" + port
+                    + "/?directConnection=true&serverSelectionTimeoutMS=1000&connectTimeoutMS=1000");
+        };
+    }
+
+    // the address that reaches the whole store with a direct connection (a single node, or the router of a sharded
+    // cluster), or null for a replica set of several members, whose client finds them itself
+    @Nullable InetSocketAddress directAddress() {
+        return switch (topology) {
+            case SINGLE_NODE_REPLICA_SET, SINGLE_NODE_REPLICA_SET_WITH_SMALL_OPLOG, SHARDED_CLUSTER ->
+                    InetSocketAddress.createUnresolved(host, port);
+            default -> null;
+        };
+    }
 
     @SuppressWarnings("resource") // the containers are stopped with the store
     private MongoTestDatabase(String image, MongoTopology topology) {

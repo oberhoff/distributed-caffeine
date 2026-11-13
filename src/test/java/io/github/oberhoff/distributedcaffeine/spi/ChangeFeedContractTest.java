@@ -188,12 +188,14 @@ public abstract class ChangeFeedContractTest extends AbstractContractTest {
         // opened before the writes: opening a store takes long enough on some stores to age the young row
         Store watching = open();
         writer.write(List.of(entry("old", "o")));
-        pause(400);
+        pause(1_500);
         writer.write(List.of(entry("young", "y")));
         RecordingListener observer = new RecordingListener();
         subscribe(watching, observer);
 
-        assertThat(writer.expire(Duration.ofMillis(300), nextVersion(), ALL)).isEqualTo(1);
+        // wide margins on both sides, so that a slow runner leaves the young row young (subscribing takes a while;
+        // failed under load with 400 ms and 300 ms)
+        assertThat(writer.expire(Duration.ofSeconds(1), nextVersion(), ALL)).isEqualTo(1);
         // at the version given, or at one of the store's own
         long version = writer.read(List.of("old"), LONG).get("old").version();
 

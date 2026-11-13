@@ -17,8 +17,10 @@ package io.github.oberhoff.distributedcaffeine.adapter.redis;
 
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.PortBinding;
+import io.github.oberhoff.distributedcaffeine.AdapterConformanceTest;
 import io.github.oberhoff.distributedcaffeine.DistributedCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
+import io.github.oberhoff.distributedcaffeine.SynchronizationState;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.testing.Ports;
@@ -39,6 +41,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.function.Supplier;
 
+import static io.github.oberhoff.distributedcaffeine.AdapterConformanceTest.recovers;
+import static io.github.oberhoff.distributedcaffeine.AdapterConformanceTest.startsDegraded;
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.awaitUpTo;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
@@ -106,6 +110,24 @@ abstract class RedisRestartTests {
     private void restart() {
         DockerClientFactory.instance().client().restartContainerCmd(Objects.requireNonNull(container).getContainerId())
                 .exec();
+        awaitAnswering();
+    }
+
+    // stops the server as a restart does, until started again (startAgain)
+    @SuppressWarnings("resource")
+    private void stop() {
+        DockerClientFactory.instance().client().stopContainerCmd(Objects.requireNonNull(container).getContainerId())
+                .exec();
+    }
+
+    @SuppressWarnings("resource")
+    private void startAgain() {
+        DockerClientFactory.instance().client().startContainerCmd(Objects.requireNonNull(container).getContainerId())
+                .exec();
+        awaitAnswering();
+    }
+
+    private void awaitAnswering() {
         try (RedisClient probe = RedisClient.create("redis://127.0.0.1:" + port)) {
             assertThat(awaitUpTo(() -> {
                 try (StatefulRedisConnection<String, String> connection = probe.connect()) {
@@ -189,5 +211,54 @@ abstract class RedisRestartTests {
         converges(writer, null);
         put(writer, "after");
         converges(holder, "after");
+    }
+
+    // a cache built while the server is stopped, as by an application restarting during the server's restart: it
+    // starts without its store and, once the server is back, takes what is stored over what it loaded meanwhile and
+    // distributes both ways (VISION.md, "Starting without the store")
+    @Test
+    void a_cache_built_while_the_server_is_stopped_connects_once_it_is_back() {
+        start(true);
+        DistributedCache<String, String> other = cache();
+        other.put("held", "stored");
+
+        stop();
+        DistributedCache<String, String> started;
+        try {
+            started = cache();
+            startsDegraded(started);
+        } finally {
+            startAgain();
+        }
+
+        recovers(other, started, CONVERGENCE);
+    }
+
+    // the same without persistence: the restart loses every value, so what both caches hold is dropped, the value
+    // the started one loaded meanwhile included (never taken for stored), and they go on
+    @Test
+    void a_cache_built_while_the_server_is_stopped_and_loses_its_values_holds_none_of_them_once_back() {
+        start(false);
+        DistributedCache<String, String> other = cache();
+        other.put("held", "stored");
+
+        stop();
+        DistributedCache<String, String> started;
+        try {
+            started = cache();
+            startsDegraded(started);
+        } finally {
+            startAgain();
+        }
+
+        assertThat(awaitUpTo(() -> started.distributedPolicy().getSynchronizationState()
+                == SynchronizationState.SYNCHRONIZED, CONVERGENCE, Duration.ofMillis(200))).as("connected").isTrue();
+        assertThat(awaitUpTo(() -> eventually(() -> started.getIfPresent("held")) == null, CONVERGENCE,
+                Duration.ofMillis(200))).as("the value loaded meanwhile dropped").isTrue();
+        assertThat(awaitUpTo(() -> eventually(() -> other.getIfPresent("held")) == null, CONVERGENCE,
+                Duration.ofMillis(200))).as("the value lost by the restart dropped").isTrue();
+        AdapterConformanceTest.put(other, "held", "after", CONVERGENCE);
+        assertThat(awaitUpTo(() -> "after".equals(eventually(() -> started.getIfPresent("held"))), CONVERGENCE,
+                Duration.ofMillis(200))).as("distributing again").isTrue();
     }
 }

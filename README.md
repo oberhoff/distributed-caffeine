@@ -142,9 +142,9 @@ DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapt
         .build(key -> loadExpensiveValue(key));
 ```
 
-Note: Building connects to the store and checks it, so a misconfiguration fails at once. A cache is closed with
-`close()`, which releases its connections and threads. That is optional for a cache that lives as long as the
-application, but needed for one discarded earlier.
+Note: Building checks the store, and a store that answers but cannot be used fails it at once; one that cannot be
+reached does not (see [Failures](#failures)). A cache is closed with `close()`, which releases its connections and
+threads. That is optional for a cache that lives as long as the application, but needed for one discarded earlier.
 
 #### Differences from Caffeine
 
@@ -158,7 +158,8 @@ Caffeine's except where it has to reach the store:
 * Writes and removals, `invalidate` and `invalidateAll()` included, go to the store and, with distribution, to every
   instance; only eviction and expiry by the local bounds stay local.
 * With distribution, the removal listener also reports copies dropped or replaced by changes made on other instances.
-* Sizes, iteration and stats cover only the copies of the instance they are called on.
+* Sizes, iteration and stats cover only the copies of the instance they are called on. In Caffeine's stats, a value
+  found in the store counts as a miss and a load (see [Distributed policy](#distributed-policy)).
 * While the store does not answer, reads go on from what is held or, on a miss, from the source; writes and removals
   throw the unchecked `StoreException`.
 * Eviction by weak and soft references is not supported.
@@ -179,7 +180,7 @@ two relate as follows:
   first (unless `withMaximumAgeForStoreOnly()`, see [Store](#store)); a copy of a value already old when read therefore
   expires sooner. `expireAfterWrite` or `expireAfterAccess` longer than the maximum age fails the build: the local
   copies would outlive their values' validity, so it would never apply. A maximum age lowered at runtime (see
-  [The distributed policy](#the-distributed-policy)) below `expireAfterWrite` lowers it instead, as `policy()` shows;
+  [Distributed policy](#distributed-policy)) below `expireAfterWrite` lowers it instead, as `policy()` shows;
   without any local expiry set (`expireAfterWrite` or `expireAfter`), `policy()` shows `expireAfterWrite` at the
   maximum age.
 * **Size:** the bounds are independent: only the local `maximumSize` or `maximumWeight` bounds the local cache, and the
@@ -201,25 +202,29 @@ DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapt
 
 #### Store
 
-The store's settings have defaults that suit most uses:
+Most caches bound the store (unbounded by default):
 
 * `withMaximumAge(...)`: how long a value is valid after its write: the store serves it no longer, and the local copies
   go then too (default: unbounded).
 * `withMaximumSize(...)`: how many values the store keeps: trimmed each maintenance run to the most recently written
-  ones, so it can briefly hold more; not Caffeine's frequency-based eviction (default: unbounded).
+  ones (default: unbounded).
 * `withMaximumAgeForStoreOnly()`: the maximum age bounds the store's values but not the local copies, for which only the
   local expiry counts; a miss after the maximum age calls the source (default: off). For local copies meant to live
-  longer than the store should keep values. Requires distribution (not `NONE`) and a maximum age of at least five
-  heartbeat intervals (see `withHeartbeatInterval(...)` below): 50 seconds with the default interval.
-* `withMaintenanceInterval(...)`: how often values beyond the maximum age or size are removed (default: one minute).
-  Lowering the maximum age or size at runtime takes effect in the store from the next run.
-* `withHeartbeatInterval(...)`: how often an instance checks that distribution still works (default: ten seconds). A
+  longer than the store should keep values. Requires distribution and a maximum age of at least five heartbeat intervals
+  (see `withHeartbeatInterval(...)` below): 50 seconds with the default interval.
+
+Further settings, whose defaults suit most uses:
+
+* `withOperationTimeout(...)`: how long a call waits for the store's answer before it fails (default: 10 seconds).
+* `withFailFast()`: building fails when the store cannot be reached, instead of starting without it and connecting in
+  the background (default: off). For applications that should not start while their store is out of reach, rather than
+  run `DEGRADED` until it is reached (see [Failures](#failures) and the health checks under [Deployment](#deployment)).
+* `withMaintenanceInterval(...)`: how often values beyond the maximum age or size are removed (default: 1 minute).
+* `withPollInterval(...)`: how often an instance polls for changes (default: 1 second). Only for adapters that poll to
+  support distribution (see [Adapters](#adapters)).
+* `withHeartbeatInterval(...)`: how often an instance checks that distribution still works (default: 10 seconds). A
   stop is noticed within about two intervals, after which the instance checks its copies against the store until
   distribution works again.
-* `withPollInterval(...)`: how often an instance polls MariaDB or MySQL for changes (default: one second).
-* `withOperationTimeout(...)`: how long a call waits for the store before it fails (default: 10 seconds). Not bounded
-  on a blocking driver: a large write to a server that vanished without closing the connection (see the adapter's
-  Timeouts).
 * `withExecutor(...)`: where the blocking store calls run, never on the calling thread (default: daemon threads).
 
 #### Distribution mode
@@ -260,6 +265,7 @@ Alternatively, the key class can implement the `Hashable` interface.
 
 ```java
 public class Key implements Hashable {
+    ...
     @Override
     public String getHash(Supplier<Hasher> hasher) {
         return hasher.get()
@@ -316,26 +322,26 @@ DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapt
         .build(key -> loadExpensiveValue(key));
 ```
 
-### The distributed policy
+### Distributed policy
 
-`distributedPolicy()` gives access to the distributed side of a cache instance: its synchronization state, its stats
-of store, synchronization and maintenance activity (only recorded with `recordStats()`), and `getFromStore(...)` and
-`getAllFromStore(...)`, which read the store directly, bypassing the instance's copies. The state is one of:
+`distributedPolicy()` gives access to the distributed side of a cache instance: its synchronization state
+(`getSynchronizationState()`), its stats of store, synchronization and maintenance activity (`stats()`, only recorded
+with `recordStats()`), and `getFromStore(...)` and `getAllFromStore(...)`, which read the store directly, bypassing the
+instance's copies. The state is one of:
 
 * `SYNCHRONIZED`: the store answers and changes made elsewhere arrive.
 * `DEGRADED`: the store does not answer or changes made elsewhere do not arrive (see [Failures](#failures)); the
   instance recovers by itself.
 * `CLOSED`: the cache instance was closed.
 
+Caffeine's stats (`cache.stats()`) count a value found in the store as a miss and a load, so their `hitRate()` is the
+rate of local hits and their load counts and times include the store reads; the distributed stats count these values
+as `storeHitCount`, and the calls to the source alone as `sourceLoadCount`.
+
 `storeMaximumAge()` and `storeMaximumSize()` adjust the store's bounds at runtime, as Caffeine's
 `policy().expireAfterWrite()` and `policy().eviction()` adjust the local ones. Each is present only if the cache was
-built with that bound, and each applies to the instance it is called on, so set it on every instance, for example
-from a configuration service:
-
-```java
-cache.distributedPolicy().storeMaximumAge()
-        .ifPresent(age -> age.setMaximumAge(Duration.ofMinutes(30)));
-```
+built with that bound, and each applies to the instance it is called on, so a change is made on every instance, for
+example from a configuration service.
 
 * **Maximum age:** applies at once to the instance's reads of the store, to its maintenance and to its copies (not
   with `withMaximumAgeForStoreOnly()`). A longer age lengthens the copies held as far as their local expiry allows,
@@ -355,8 +361,10 @@ Which setting serves which goal; the rest can stay at their defaults:
 | Every value loaded from the source again at the latest a given time after its write             | the store's `withMaximumAge(...)`                                               |
 | Read values reloaded in the background, the old value served meanwhile                          | Caffeine's `refreshAfterWrite(...)` (a loading cache)                           |
 | A value with a validity of its own, such as a token's expiry                                    | a check on read and `invalidate(key)` (see below)                               |
+| Other instances' copies dropped on a write, read again on their next access (the default)       | `withDistributionMode(DistributionMode.INVALIDATE)`                             |
 | Other instances' copies replaced on a write, not dropped                                        | `withDistributionMode(DistributionMode.UPDATE)`                                 |
-| Without distribution (`DistributionMode.NONE`): other instances' writes seen after a given time | Caffeine's `expireAfterWrite(...)`                                              |
+| Other instances' copies kept on a write, until they expire or are evicted                       | `withDistributionMode(DistributionMode.NONE)`                                   |
+| Other instances' writes seen after a given time, without distribution (`DistributionMode.NONE`) | Caffeine's `expireAfterWrite(...)`                                              |
 | Missing keys not looked up in the store and the source again and again                          | `withNegativeCaching(...)`                                                      |
 | Less memory per instance                                                                        | Caffeine's `maximumSize(...)`, `maximumWeight(...)` or `expireAfterAccess(...)` |
 | A smaller store                                                                                 | the store's `withMaximumSize(...)`                                              |
@@ -425,6 +433,16 @@ the local copy, and the next read finds the value in the store again. Treat an i
 
 ### Failures
 
+* **Store not reached when building:** the cache starts without it, as during an outage, and connects in the
+  background; `withFailFast()` makes building fail instead.
+  <details><summary>Details</summary>
+
+  Misses load from the source, writes fail, and the state is `DEGRADED` until the store is reached. Values loaded
+  meanwhile are checked against the store then. So an application restarted during an outage still starts, while a
+  misconfiguration (a wrong host, a blocked network) shows as a `DEGRADED` instance rather than a failed rollout,
+  unless `withFailFast()` is set. A store that answers but cannot be used (a schema that does not match, missing
+  rights, wrong credentials) fails the build either way.
+  </details>
 * **Store not answering:** reads keep working, writes fail, and the instances recover automatically once it answers
   again.
   <details><summary>Details</summary>
@@ -463,7 +481,7 @@ the local copy, and the next read finds the value in the store again. Treat an i
 ### Deployment
 
 * **Same configuration:** all instances of a cache need the same store bounds (changed at runtime on every instance,
-  see [The distributed policy](#the-distributed-policy)), serializers and hashing. After changing the key or value
+  see [Distributed policy](#distributed-policy)), serializers and hashing. After changing the key or value
   classes, their serializers or the hashing, remove the stored values (`invalidateAll()`) or give the cache a new
   place; on PostgreSQL, a serializer storing another format always needs a new place.
 * **Unreadable values:** a value an instance cannot read, such as one written with other value classes or
@@ -473,9 +491,25 @@ the local copy, and the next read finds the value in the store again. Treat an i
   whether a value exists, so it answers `true` for an unreadable one.
 * **Clocks:** keep them synchronized (NTP). Correctness does not depend on them, but a clock running ahead costs writes
   one more round trip (`versionRefusalCount`, `clockAheadCount`).
+* **Health checks:** keep the store and the cache's state out of liveness checks. A store outage is what `DEGRADED`
+  is for: running instances ride it out, and instances restarted meanwhile start without the store.
+  <details><summary>Details</summary>
+
+    * A liveness check that fails while the store does not answer (a health indicator of its database included, or
+      `getSynchronizationState()` checked) has the instances restarted one after another during an outage, for
+      nothing. With `withFailFast()` none can be built again until the store answers, and the whole application goes
+      down, although the running instances would have served their copies and loaded misses from the source.
+    * Building waits for the store up to the operation timeout per check when the network drops packets rather than
+      refusing the connection (a partition, a firewall): allow for it in a startup probe. Caches sharing a client
+      wait once: those built within an operation timeout after one that waited start without the store at once.
+    * Readiness may reflect what the application needs to serve requests, such as the loader's source. Leave the store
+      out of it too if `DEGRADED` instances should keep receiving requests.
+  </details>
 * **CPU:** synchronization runs in background threads, so platforms that allocate CPU only while a request is handled
   (common for serverless deployments) need it allocated permanently.
-* **Logging:** through `System.Logger`, under `io.github.oberhoff.distributedcaffeine`.
+* **Logging:** through `System.Logger`, under `io.github.oberhoff.distributedcaffeine`. Each message begins with the
+  cache's name (the store, the place and the discriminator), or for a connection that serves several caches with the
+  names of those caches or the database.
 
 ## Requirements
 

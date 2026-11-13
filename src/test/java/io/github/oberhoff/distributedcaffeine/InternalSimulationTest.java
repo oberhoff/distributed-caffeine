@@ -20,6 +20,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.Change;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import io.github.oberhoff.distributedcaffeine.testing.LogCapture;
 import io.github.oberhoff.distributedcaffeine.testing.ScanOnlyStore;
 import io.github.oberhoff.distributedcaffeine.testing.StoreProfile;
 import org.jspecify.annotations.NullMarked;
@@ -32,6 +33,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -298,5 +300,97 @@ class InternalSimulationTest {
         long version = first.fresh();
         assertThat(second.fresh()).isEqualTo(version);
         assertThat(other.fresh()).as("the node differs with the seed").isNotEqualTo(version);
+    }
+
+    // a cache started without its store for an hour (VISION.md, "Starting without the store"): its connect backs off
+    // to one attempt every 30 s (about 130 in the hour, not thousands), warns every 5 minutes, and connects within
+    // one backoff once the store answers. Real time: an hour
+    @Test
+    void a_cache_started_without_its_store_backs_off_warns_every_few_minutes_and_connects_once_it_answers() {
+        SimulatedEnvironment environment = new SimulatedEnvironment(SEED);
+        InMemoryDatabase database = database(environment, StoreProfile.MONGODB, SEED);
+        AtomicBoolean reachable = new AtomicBoolean();
+        AtomicInteger attempts = new AtomicInteger();
+        Adapter<String, String> adapter = settings -> {
+            attempts.incrementAndGet();
+            if (!reachable.get()) {
+                throw new StoreException("Connection refused", null, false, true);
+            }
+            return database.openStore("cache");
+        };
+        try (LogCapture log = new LogCapture();
+             DistributedCache<String, String> cache = cache(adapter, environment)) {
+            environment.advance(Duration.ofHours(1));
+
+            assertThat(attempts.get()).as("backed off to one attempt every 30 s").isBetween(100, 160);
+            assertThat(log.count("The store has still not been available")).as("every 5 minutes").isBetween(10, 13);
+            assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+
+            reachable.set(true);
+            environment.advance(Duration.ofSeconds(40));
+            assertThat(cache.distributedPolicy().getSynchronizationState()).as("connected within one backoff")
+                    .isEqualTo(SynchronizationState.SYNCHRONIZED);
+            cache.put("k", "v");
+            assertThat(cache.getIfPresent("k")).isEqualTo("v");
+        }
+    }
+
+    // a close while a connect runs (the cache closed by the application as its store came back): the store the
+    // connect created is closed, not left open behind a closed cache
+    @Test
+    void a_store_connected_after_the_cache_was_closed_is_closed_again() {
+        SimulatedEnvironment environment = new SimulatedEnvironment(SEED);
+        InMemoryDatabase database = database(environment, StoreProfile.MONGODB, SEED);
+        AtomicInteger calls = new AtomicInteger();
+        AtomicInteger closed = new AtomicInteger();
+        List<DistributedCache<String, String>> built = new ArrayList<>();
+        Adapter<String, String> adapter = settings -> {
+            if (calls.incrementAndGet() == 1) {
+                throw new StoreException("Connection refused", null, false, true);
+            }
+            built.get(0).close(); // closed while this connect runs
+            return new InternalCoreTest.DelegatingStore(database.openStore("cache")) {
+                @Override
+                public void close() {
+                    closed.incrementAndGet();
+                    super.close();
+                }
+            };
+        };
+        built.add(cache(adapter, environment));
+        environment.advance(Duration.ofSeconds(5));
+
+        assertThat(calls.get()).as("one connect after the build").isEqualTo(2);
+        assertThat(closed.get()).as("the store connected after the close").isEqualTo(1);
+        assertThat(built.get(0).distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.CLOSED);
+    }
+
+    // the polling store touches the keys of a write of unknown outcome again two operation timeouts later (20 s), so
+    // that a poll finds them; for an invalidateAll that rewrite gives the control row a new write time, which hid every
+    // value written since (found 2026-11-12 by the property test in longer runs; VISION.md, "Open: the polling
+    // store's touch re-stamps the control row"): the rows written after it are rewritten after it now
+    @Test
+    @SuppressWarnings("resource") // the caches closed after the test
+    void a_late_touch_of_an_invalidate_all_hides_no_value_written_since() {
+        SimulatedEnvironment environment = new SimulatedEnvironment(SEED);
+        // a clock in microseconds, as the profile says: the rows rewritten after the control row are stamped one
+        // clock allowance (a microsecond) after it, which a clock in whole milliseconds would not show
+        InMemoryDatabase database = new InMemoryDatabase(() -> environment.currentTimeMillis() * 1_000
+                + environment.nanoTime() / 1_000 % 1_000, SEED, StoreProfile.JDBC);
+        database.simulate(environment.forDatabase());
+        DistributedCache<String, String> clearing = cache(database, environment);
+        DistributedCache<String, String> writer = cache(database, environment);
+        database.failNextWrites(1, true); // committed, reported as of unknown outcome
+        assertThatThrownBy(clearing::invalidateAll).isInstanceOfSatisfying(StoreException.class,
+                e -> assertThat(e.isOutcomeUnknown()).isTrue());
+        environment.advance(Duration.ofSeconds(2));
+        writer.put("k", "written after the invalidateAll");
+
+        environment.advance(Duration.ofSeconds(30)); // the touch comes 16 to 24 s after the invalidateAll
+
+        StoredValue<String> stored = writer.distributedPolicy().getFromStore("k");
+        assertThat(stored).as("still in the store").isNotNull();
+        assertThat(requireNonNull(stored).value()).isEqualTo("written after the invalidateAll");
+        assertThat(clearing.getIfPresent("k")).isEqualTo("written after the invalidateAll");
     }
 }

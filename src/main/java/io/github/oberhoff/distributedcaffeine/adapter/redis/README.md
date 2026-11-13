@@ -29,9 +29,16 @@ client.
   another, as Lettuce and Redisson do. Its sockets block and have no write timeout: a write too large for the socket's
   buffer, such as a large `putAll`, sent to a server that vanished without closing the connection, waits until the
   operating system gives up (about 15 minutes on Linux, `net.ipv4.tcp_retries2`). Lettuce and Redisson bound it.
+  A `RedisSentinelClient` or `RedisClusterClient` cannot be created while its servers are out (its constructor
+  connects and throws), so an application starting during such an outage fails before any cache exists; create the
+  client where that failure is retried, or use Lettuce or Redisson, whose clients are created without a server.
 * Redisson: Its own timeouts and retries apply within the cache's operation timeout. Redisson replaces a connection the
   network silently stopped carrying only when its ping fails (`pingConnectionInterval`, 30 seconds by default); until
-  then, commands on it time out. A shorter interval, such as one second, recovers sooner.
+  then, commands on it time out. A shorter interval, such as 1 second, recovers sooner. `Redisson.create(...)`
+  connects to the servers and throws while they are out; with `Config#setLazyInitialization(true)` the client is
+  created without them and connects on its first command, within which it tries again on its own (`retryAttempts`,
+  `retryInterval`), so building a cache while the servers are out waits for those attempts (about 16 seconds by
+  default) before the cache starts without its store.
 
 ## Names
 
@@ -41,9 +48,11 @@ another's). A name outside these is rejected when the adapter is built.
 
 ## Topologies
 
-A single server, a primary behind Sentinel, or a cluster through the library's cluster client. A replica is refused,
-since its writes would fail or vanish, and so is a plain client of one node of a cluster, which would reach only that
-node's slots.
+A single server, a primary behind Sentinel, or a cluster through the library's cluster client. A plain client of one
+node of a cluster is refused, since it would reach only that node's slots. A replica is refused too, since its writes
+would fail or vanish, but as retryable: behind Sentinel it is a failover in progress, so a cache built then starts
+without its store and connects once the primary answers (with `withFailFast()` the build fails). A plain client of a
+replica's address keeps the cache `DEGRADED` (logged every 5 minutes) until its address reaches a primary.
 
 A keyspace is a hash tag (`{dc:<keyspace>}`), so in a cluster all caches of a keyspace live in one slot, on one node,
 and each application instance reads their changes with one connection; caches of different keyspaces spread over the

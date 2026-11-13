@@ -23,7 +23,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 /**
- * The store guard, as in the current generation (measured and tested): it opens after 3 consecutive failures; while
+ * The store guard, as in 0.7.x (measured and tested): it opens after 3 consecutive failures; while
  * open, store calls are refused at once instead of waiting for timeouts; after 1 s the next call goes through as the
  * probe; a successful call, or the maintenance worker's success, closes it. Reads are guarded as well as writes.
  * <p>
@@ -168,6 +168,24 @@ final class InternalStoreGuard {
 
     synchronized boolean isOpen() {
         return open;
+    }
+
+    // a cache started without its store (VISION.md, "Starting without the store"): open from the start, so that calls
+    // are refused at once rather than retried, with a probe every second as after any failures; logged by the core
+    void openWithoutStore() {
+        synchronized (this) {
+            failures = THRESHOLD;
+            open = true;
+            openedAt = environment.nanoTime();
+        }
+        stats.increment(InternalStatsCounter.Counter.GUARD_OPEN);
+    }
+
+    // the store was connected: closed again, logged by the core
+    synchronized void connected() {
+        failures = 0;
+        open = false;
+        probing = false;
     }
 
     // the store answered; logged once where it had not answered before: reads fall back to the source without a

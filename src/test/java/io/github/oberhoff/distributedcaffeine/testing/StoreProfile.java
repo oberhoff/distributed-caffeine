@@ -260,17 +260,6 @@ public record StoreProfile(String name, Versioning versioning, Changes changes, 
     }
 
     /**
-     * Returns this profile with another batch behaviour, for a test that needs one.
-     *
-     * @param batch how a write of several rows applies
-     * @return the profile
-     */
-    public StoreProfile with(Batch batch) {
-        return new StoreProfile(name + "-" + batch.name().toLowerCase(Locale.ROOT), versioning, changes, clock,
-                clockStepBack, snapshotReads, batch, losesWritesOnFailover, tombstoneOnPurgedRow, evicts, lossyFeed);
-    }
-
-    /**
      * Returns this profile leaving a tombstone on a write conditioned on a version of a purged row, or not.
      *
      * @param tombstoneOnPurgedRow whether such a write leaves a tombstone

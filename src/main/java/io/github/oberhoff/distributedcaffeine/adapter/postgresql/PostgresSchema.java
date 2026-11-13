@@ -43,7 +43,8 @@ import java.util.Objects;
 @SuppressWarnings({"SqlNoDataSourceInspection", "java:S2077", "SqlSourceToSinkFlow"})
 final class PostgresSchema {
 
-    private static final Logger LOGGER = System.getLogger(PostgresAdapter.class.getPackageName());
+    // the library's one logger, as the core's: the message names the adapter (README, "Deployment")
+    private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine");
     private static final String INSUFFICIENT_PRIVILEGE = "42501";
     // PostgreSQL 9.6, the oldest supported release (README, Requirements), as server_version_num
     private static final int MINIMUM_VERSION_NUM = 90600;
@@ -60,10 +61,27 @@ final class PostgresSchema {
                 PostgresStore.unbound(connection, previousTimeout);
             }
         } catch (SQLException e) {
-            // a store not reached is worth another try, as in every operation; anything else is the setup's
+            // a store not reached is worth another try, as in every operation, and so is a server restarting or a
+            // creation that collided with another; anything else is the setup's
             throw new StoreException("Checking table " + table + " failed: " + e.getMessage(), e, false,
-                    PostgresStore.connectionLost(e));
+                    (PostgresStore.connectionLost(e) && !PostgresStore.refused(e)) || restarting(e) || collided(e));
         }
+    }
+
+    // a server shutting down or starting up (operator intervention: admin_shutdown, crash_shutdown,
+    // cannot_connect_now, "the database system is starting up"), as during a restart: not reached yet
+    private static boolean restarting(SQLException e) {
+        String state = e.getSQLState();
+        return "57P01".equals(state) || "57P02".equals(state) || "57P03".equals(state);
+    }
+
+    // the table, its sequence or its schema created meanwhile by another start (duplicate_table, duplicate_schema,
+    // or unique_violation on the catalog when both create at once): the advisory lock serialises the starts of one
+    // table, but not the schema shared with other tables, nor a transaction of an attempt that lost its connection
+    // and goes on at the server until it notices. Checked again at the next attempt, which finds what was created
+    private static boolean collided(SQLException e) {
+        String state = e.getSQLState();
+        return "42P07".equals(state) || "42P06".equals(state) || "23505".equals(state);
     }
 
     private static void ensure(Connection connection, PostgresTable table, boolean schemaReset) throws SQLException {
@@ -71,8 +89,14 @@ final class PostgresSchema {
         PostgresStore.requirePrimary(connection);
         String marker = marker(connection, table);
         if (marker == null || !marker.equals(PostgresTable.MARKER)) {
+            // a concurrent start may have committed the table between the two reads, with its marker (one
+            // transaction), so the marker is read again once the table is seen (found: caches built together on a new
+            // table refused it as one without a marker)
             if (exists(connection, table)) {
-                requireResettable(connection, table, marker, schemaReset); // checked again under the lock
+                marker = marker(connection, table);
+                if (!PostgresTable.MARKER.equals(marker)) {
+                    requireResettable(connection, table, marker, schemaReset); // checked again under the lock
+                }
             }
             create(connection, table, schemaReset);
         }
@@ -183,8 +207,8 @@ final class PostgresSchema {
             try (Statement statement = connection.createStatement()) {
                 if (exists(connection, table)) {
                     requireResettable(connection, table, marker, schemaReset);
-                    LOGGER.log(Level.WARNING, "Dropping table {0} of distributed-caffeine 0.x, or empty "
-                            + "(withSchemaReset)", table);
+                    LOGGER.log(Level.WARNING, "{0}: Dropping the table of distributed-caffeine 0.x, or empty "
+                            + "(withSchemaReset)", table.name());
                     statement.execute("DROP TABLE " + table.qualified);
                 }
                 if (!schemaExists(connection, table)) {
@@ -193,7 +217,8 @@ final class PostgresSchema {
                 statement.execute(table.ddl());
             }
             connection.commit();
-            LOGGER.log(Level.INFO, "Created table {0} with its index, version sequence and schema marker", table);
+            LOGGER.log(Level.INFO, "{0}: Created the table with its index, version sequence and schema marker",
+                    table.name());
         } catch (SQLException e) {
             restore(connection, autoCommit, e);
             if (INSUFFICIENT_PRIVILEGE.equals(e.getSQLState())) {
@@ -280,8 +305,9 @@ final class PostgresSchema {
             try (ResultSet resultSet = statement.executeQuery()) {
                 resultSet.next();
                 if (!resultSet.getBoolean(1)) {
-                    LOGGER.log(Level.WARNING, "Table {0} has no index on (discriminator, state, write_time); "
-                            + "expiry and pruning will be slow. Create it as in the DDL:\n{1}", table, table.ddl());
+                    LOGGER.log(Level.WARNING, "{0}: Table {1} has no index on (discriminator, state, write_time); "
+                            + "expiry and pruning will be slow. Create it as in the DDL:\n{2}", table.name(), table,
+                            table.ddl());
                 }
             }
         }

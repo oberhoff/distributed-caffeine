@@ -20,6 +20,7 @@ import com.zaxxer.hikari.HikariDataSource;
 import io.github.oberhoff.distributedcaffeine.DistributedCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
 import io.github.oberhoff.distributedcaffeine.DistributionMode;
+import io.github.oberhoff.distributedcaffeine.StoreConfigurer;
 import io.github.oberhoff.distributedcaffeine.SynchronizationState;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Change;
@@ -100,7 +101,7 @@ abstract class PostgresConnectionTest {
 
     private DataSource listener(String application) {
         return listener(PostgresTestDatabase.HOST, database.port(),
-                database.databaseName(), application);
+                PostgresTestDatabase.DATABASE, application);
     }
 
     private static String application() {
@@ -156,7 +157,7 @@ abstract class PostgresConnectionTest {
                 database.port()));
         DistributedCache<String, String> writer = writer();
         DistributedCache<String, String> holder = cache(listener("127.0.0.1", proxy.port(),
-                database.databaseName(), application()));
+                PostgresTestDatabase.DATABASE, application()));
         writer.put("k", "old");
         assertThat(holder.getIfPresent("k")).isEqualTo("old");
 
@@ -174,7 +175,7 @@ abstract class PostgresConnectionTest {
                 database.port()));
         DistributedCache<String, String> writer = writer();
         DistributedCache<String, String> holder = cache(listener("127.0.0.1", proxy.port(),
-                database.databaseName(), application()));
+                PostgresTestDatabase.DATABASE, application()));
         writer.put("k", "old");
         assertThat(holder.getIfPresent("k")).isEqualTo("old");
 
@@ -194,9 +195,9 @@ abstract class PostgresConnectionTest {
         SilencingProxy proxy = track(new SilencingProxy(PostgresTestDatabase.HOST,
                 database.port()));
         HikariConfig config = new HikariConfig();
-        config.setJdbcUrl("jdbc:postgresql://127.0.0.1:" + proxy.port() + "/" + database.databaseName());
-        config.setUsername(database.username());
-        config.setPassword(database.password());
+        config.setJdbcUrl("jdbc:postgresql://127.0.0.1:" + proxy.port() + "/" + PostgresTestDatabase.DATABASE);
+        config.setUsername(PostgresTestDatabase.USER);
+        config.setPassword(PostgresTestDatabase.PASSWORD);
         config.setMaximumPoolSize(1);
         HikariDataSource pool = track(new HikariDataSource(config));
         DistributedCache<String, String> cache = track(strings(PostgresAdapter.newBuilder(pool, "connection", table)
@@ -225,12 +226,12 @@ abstract class PostgresConnectionTest {
         SilencingProxy proxy = track(new SilencingProxy(PostgresTestDatabase.HOST,
                 database.port()));
         HikariConfig config = new HikariConfig();
-        config.setJdbcUrl("jdbc:postgresql://127.0.0.1:" + proxy.port() + "/" + database.databaseName());
-        config.setUsername(database.username());
-        config.setPassword(database.password());
+        config.setJdbcUrl("jdbc:postgresql://127.0.0.1:" + proxy.port() + "/" + PostgresTestDatabase.DATABASE);
+        config.setUsername(PostgresTestDatabase.USER);
+        config.setPassword(PostgresTestDatabase.PASSWORD);
         config.setMaximumPoolSize(4);
         HikariDataSource pool = track(new HikariDataSource(config));
-        DataSource listener = listener("127.0.0.1", proxy.port(), database.databaseName(),
+        DataSource listener = listener("127.0.0.1", proxy.port(), PostgresTestDatabase.DATABASE,
                 application());
         // the default heartbeat (10 s): a beat takes a few slow round trips, well within it
         Duration heartbeat = Duration.ofSeconds(10);
@@ -262,7 +263,7 @@ abstract class PostgresConnectionTest {
                 database.port()));
         DistributedCache<String, String> writer = writer();
         DistributedCache<String, String> holder = cache(listener("127.0.0.1", proxy.port(),
-                database.databaseName(), application()));
+                PostgresTestDatabase.DATABASE, application()));
         writer.put("k", "before");
         assertThat(holder.getIfPresent("k")).isEqualTo("before");
 
@@ -292,11 +293,18 @@ abstract class PostgresConnectionTest {
 
     // data sources that cannot be written through
 
+    // retryable, as during a failover (VISION.md, "Starting without the store"): the cache starts without its store
+    // and stays DEGRADED while the data source reaches a standby; with withFailFast() the build fails
     @Test
-    void a_data_source_reaching_a_standby_is_refused() {
-        DistributedCaffeine<String, String> builder = strings(adapter(standby(), database.listener));
+    void a_data_source_reaching_a_standby_is_refused_as_retryable() {
+        DistributedCache<String, String> cache = track(strings(adapter(standby(), database.listener)).build());
+        assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
 
-        assertThatThrownBy(builder::build).isInstanceOf(StoreException.class).hasMessageContaining("standby");
+        DistributedCaffeine<String, String> failFast = strings(adapter(standby(), database.listener))
+                .withStore(StoreConfigurer::withFailFast);
+        assertThatThrownBy(failFast::build).isInstanceOfSatisfying(StoreException.class,
+                        e -> assertThat(e.isRetryable()).as("retryable: " + e.getMessage()).isTrue())
+                .hasMessageContaining("standby");
     }
 
     // the listening session caches share
@@ -342,9 +350,9 @@ abstract class PostgresConnectionTest {
         SilencingProxy proxy = track(new SilencingProxy(PostgresTestDatabase.HOST,
                 database.port()));
         HikariConfig config = new HikariConfig();
-        config.setJdbcUrl("jdbc:postgresql://127.0.0.1:" + proxy.port() + "/" + database.databaseName());
-        config.setUsername(database.username());
-        config.setPassword(database.password());
+        config.setJdbcUrl("jdbc:postgresql://127.0.0.1:" + proxy.port() + "/" + PostgresTestDatabase.DATABASE);
+        config.setUsername(PostgresTestDatabase.USER);
+        config.setPassword(PostgresTestDatabase.PASSWORD);
         config.setMaximumPoolSize(2);
         HikariDataSource slowPool = track(new HikariDataSource(config));
         DataSource shared = listener(application());
@@ -438,7 +446,7 @@ abstract class PostgresConnectionTest {
                 database.port()));
         DistributedCache<String, String> writer = writer();
         DistributedCache<String, String> holder = cache(listener("127.0.0.1", proxy.port(),
-                database.databaseName(), application));
+                PostgresTestDatabase.DATABASE, application));
         writer.put("k", "old");
         assertThat(holder.getIfPresent("k")).isEqualTo("old");
 
@@ -456,8 +464,8 @@ abstract class PostgresConnectionTest {
     void a_pool_that_timed_out_waiting_for_a_connection_is_not_asked_again() throws Exception {
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl(database.jdbcUrl());
-        config.setUsername(database.username());
-        config.setPassword(database.password());
+        config.setUsername(PostgresTestDatabase.USER);
+        config.setPassword(PostgresTestDatabase.PASSWORD);
         config.setMaximumPoolSize(1);
         config.setConnectionTimeout(1_000);
         HikariDataSource pool = track(new HikariDataSource(config));
@@ -500,8 +508,8 @@ abstract class PostgresConnectionTest {
     private DataSource standby() {
         PGSimpleDataSource direct = new PGSimpleDataSource();
         direct.setUrl(database.jdbcUrl());
-        direct.setUser(database.username());
-        direct.setPassword(database.password());
+        direct.setUser(PostgresTestDatabase.USER);
+        direct.setPassword(PostgresTestDatabase.PASSWORD);
         return (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class},
                 (proxy, method, args) -> {
                     Object result = invoke(direct, method, args);

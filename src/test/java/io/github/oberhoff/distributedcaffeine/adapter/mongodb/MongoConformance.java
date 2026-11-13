@@ -27,6 +27,10 @@ import org.bson.Document;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 
+import java.net.InetSocketAddress;
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * MongoDB's side of the conformance suite, on a fresh collection of the running test database.
  *
@@ -40,6 +44,7 @@ final class MongoConformance implements AdapterConformance {
     private final MongoClient client = MongoTestDatabase.get().client;
     private final String collection = MongoTestDatabase.freshCollection();
     private @Nullable MongoClient unreachable;
+    private final List<MongoClient> through = new ArrayList<>();
 
     @Override
     public Adapter<String, String> adapter(String discriminator) {
@@ -65,6 +70,34 @@ final class MongoConformance implements AdapterConformance {
     }
 
     @Override
+    public @Nullable InetSocketAddress server() {
+        return MongoTestDatabase.get().directAddress();
+    }
+
+    // a client of its own, waiting no longer than the cache's operation timeout to select the server
+    @Override
+    public Adapter<String, String> through(String host, int port) {
+        return MongoAdapter.newBuilder(clientThrough(host, port), DATABASE, collection).build();
+    }
+
+    @Override
+    public List<Adapter<String, String>> sharingThrough(String host, int port, int count) {
+        MongoClient shared = clientThrough(host, port);
+        List<Adapter<String, String>> adapters = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            adapters.add(MongoAdapter.newBuilder(shared, DATABASE, collection).withDiscriminator("shared" + i).build());
+        }
+        return adapters;
+    }
+
+    private MongoClient clientThrough(String host, int port) {
+        MongoClient created = MongoClients.create("mongodb://" + host + ":" + port
+                + "/?directConnection=true&serverSelectionTimeoutMS=2000&connectTimeoutMS=1000");
+        through.add(created);
+        return created;
+    }
+
+    @Override
     public String product() {
         return "MongoDB";
     }
@@ -74,6 +107,7 @@ final class MongoConformance implements AdapterConformance {
         if (unreachable != null) {
             unreachable.close();
         }
+        through.forEach(MongoClient::close);
     }
 
     // majority, as the adapter reads with majority read concern and would not yet see a write of w:1

@@ -82,7 +82,8 @@ import java.util.stream.Collectors;
 @SuppressWarnings({"SqlNoDataSourceInspection", "java:S2077", "SqlSourceToSinkFlow"})
 final class PostgresListener {
 
-    private static final Logger LOGGER = System.getLogger(PostgresAdapter.class.getPackageName());
+    // the library's one logger, as the core's: the message names the adapter (README, "Deployment")
+    private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine");
     // fixed, unlike a cache's operation timeout: no caller waits for the listening session, which is shared by caches
     // with different timeouts, and its failures are recovered (or noticed by the heartbeat) by the library, so the
     // bounds follow from its own commands (LISTEN, UNLISTEN, the probe of a notification), not from anyone's latency
@@ -110,7 +111,7 @@ final class PostgresListener {
      */
     @SuppressWarnings("java:S1181") // whatever fails, the registration is released before it is rethrown
     static ChangeSubscription subscribe(DataSource listenerDataSource, DataSource dataSource, String channel,
-                                        ChangeListener listener) {
+                                        String name, ChangeListener listener) {
         if (PG_STREAM == null) {
             throw new StoreException("Listening on PostgreSQL reads pgjdbc's stream, reached through the field "
                     + "QueryExecutorBase.pgStream, which pgjdbc " + DriverInfo.DRIVER_VERSION + " does not have or "
@@ -120,7 +121,7 @@ final class PostgresListener {
         Registration registration;
         synchronized (SESSIONS) {
             session = SESSIONS.computeIfAbsent(listenerDataSource, Session::new);
-            registration = session.register(channel, listener, dataSource);
+            registration = session.register(channel, name, listener, dataSource);
         }
         try {
             session.listen(registration);
@@ -206,11 +207,6 @@ final class PostgresListener {
         }
     }
 
-    // a cache named by its channel: dc_<schema>.<table>.<discriminator> (shortened with a hash where too long)
-    private static String cacheOf(String channel) {
-        return channel.startsWith("dc_") ? channel.substring(3) : channel;
-    }
-
     private static String listen(String channel) {
         return "LISTEN " + PostgresTable.quote(channel);
     }
@@ -219,6 +215,8 @@ final class PostgresListener {
 
         private final Session session;
         private final String channel;
+        // the cache's name, as its log messages begin with it
+        private final String name;
         private final ChangeListener listener;
         private final DataSource dataSource;
         // guarded by the session (not expressible as @GuardedBy): the session's connection it was last delivered on,
@@ -227,9 +225,10 @@ final class PostgresListener {
         private boolean lost;
         private volatile boolean closed;
 
-        Registration(Session session, String channel, ChangeListener listener, DataSource dataSource) {
+        Registration(Session session, String channel, String name, ChangeListener listener, DataSource dataSource) {
             this.session = session;
             this.channel = channel;
+            this.name = name;
             this.listener = listener;
             this.dataSource = dataSource;
         }
@@ -338,8 +337,8 @@ final class PostgresListener {
             this.listenerDataSource = listenerDataSource;
         }
 
-        Registration register(String channel, ChangeListener listener, DataSource dataSource) {
-            Registration registration = new Registration(this, channel, listener, dataSource);
+        Registration register(String channel, String name, ChangeListener listener, DataSource dataSource) {
+            Registration registration = new Registration(this, channel, name, listener, dataSource);
             channels.computeIfAbsent(channel, ignored -> new CopyOnWriteArrayList<>()).add(registration);
             return registration;
         }
@@ -374,8 +373,7 @@ final class PostgresListener {
                 }
                 if (held == null || (!registration.lost && generation == registration.generation)) {
                     if (held != null) {
-                        LOGGER.log(Level.WARNING, "The PostgreSQL listener for {0} is suspected silent; reconnecting",
-                                serving());
+                        LOGGER.log(Level.WARNING, "{0}: The listener is suspected silent; reconnecting", serving());
                         discard(held);
                         forEachRegistration(other -> {
                             if (other != registration && !other.lost) {
@@ -384,14 +382,14 @@ final class PostgresListener {
                         });
                     }
                     connect();
-                    LOGGER.log(Level.INFO, "The PostgreSQL listener for {0} reconnected", serving());
+                    LOGGER.log(Level.INFO, "{0}: The listener reconnected", serving());
                     delivering.forEach(other -> other.generation = generation);
                 }
                 registration.generation = generation;
                 registration.lost = false;
             }
             for (Registration other : delivering) {
-                notify(other.listener::onGap);
+                notify(other, other.listener::onGap);
             }
         }
 
@@ -532,8 +530,7 @@ final class PostgresListener {
                 try {
                     registration.listener.onChanges(List.of(message));
                 } catch (RuntimeException e) {
-                    LOGGER.log(Level.WARNING, "A listener for " + cacheOf(registration.channel)
-                            + " failed on a notification", e);
+                    LOGGER.log(Level.WARNING, registration.name + ": Its listener failed on a notification", e);
                 }
             }
         }
@@ -586,9 +583,8 @@ final class PostgresListener {
                     told.add(registration);
                 });
             }
-            LOGGER.log(Level.WARNING, "The PostgreSQL listener for {0} lost its connection ({1})", serving(),
-                    failure.getMessage());
-            told.forEach(registration -> notify(() -> registration.listener.onLost(failure)));
+            LOGGER.log(Level.WARNING, "{0}: The listener lost its connection ({1})", serving(), failure.getMessage());
+            told.forEach(registration -> notify(registration, () -> registration.listener.onLost(failure)));
         }
 
         // lets go of a broken connection; its thread ends, and its loss reported later is ignored
@@ -598,16 +594,18 @@ final class PostgresListener {
             release(broken.connection);
         }
 
-        // the caches it listens for, for its log messages: a session serves every cache on its data source
+        // the caches it listens for, as its log messages begin with them: a session serves every cache on its data
+        // source, so the names of all of them (each "PostgreSQL schema.table/discriminator")
         private String serving() {
-            return channels.keySet().stream().map(PostgresListener::cacheOf).sorted().collect(Collectors.joining(", "));
+            return channels.values().stream().flatMap(List::stream).map(registration -> registration.name).distinct()
+                    .sorted().collect(Collectors.joining(", "));
         }
 
-        private static void notify(Runnable call) {
+        private static void notify(Registration registration, Runnable call) {
             try {
                 call.run();
             } catch (RuntimeException e) {
-                LOGGER.log(Level.WARNING, "A listener failed", e);
+                LOGGER.log(Level.WARNING, registration.name + ": Its listener failed", e);
             }
         }
 

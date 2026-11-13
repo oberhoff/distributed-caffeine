@@ -99,7 +99,7 @@ import static org.assertj.core.api.Assertions.fail;
  *     untrusted one that was not checked, answers differently.</li>
  * </ul>
  * Checking after every phase, not only at the end, matters: a later write of the same key heals a divergence
- * (lesson of the current generation). Threads interleave freely, so a run is not exactly reproducible; the seed fixes
+ * (lesson of 0.7.x). Threads interleave freely, so a run is not exactly reproducible; the seed fixes
  * the operations and faults chosen.
  *
  * @author Andreas Oberhoff
@@ -110,7 +110,9 @@ public class InternalPropertyTest {
 
     private static final Duration LONG = Duration.ofHours(1);
     private static final int KEYS = 8;
-    private static final int PHASES = 40;
+    // 40 by default, -Dproperty.phases for longer runs: a touch of the polling store comes twice the operation timeout
+    // after a write of unknown outcome (20 s), later than most runs of 40 phases last in simulated time
+    private static final int PHASES = Integer.getInteger("property.phases", 40);
     private static final int OPERATIONS = 6;
     private static final long STORE_LATENCY_NANOS = TimeUnit.MICROSECONDS.toNanos(200);
     private static final long SOURCE_LATENCY_NANOS = TimeUnit.MICROSECONDS.toNanos(300);
@@ -142,6 +144,17 @@ public class InternalPropertyTest {
     // An expired confirmed write is gone, so presence cannot be asked for
     private boolean ageing;
     private static final Duration[] AGES = {Duration.ofMillis(50), Duration.ofMillis(200), Duration.ofSeconds(1), LONG};
+    // the restarting variant (VISION.md, "Starting without the store"): in some phases the plain instance is closed and
+    // built again while it cannot reach the store (a pod restarted during a partial partition), so it starts without
+    // it, loading from the source, while the others write; it reaches the store again within the phase or before the
+    // check, which then asks of it what it asks of every instance. Without a writer while it starts so, as its writes
+    // would fail (refused until connected), leaving the source ahead of the store in this model
+    private boolean restarting;
+    // the instances that cannot reach the store now, by label (their adapter refuses, retryable, as a store not
+    // reached)
+    private final Set<String> unreachable = ConcurrentHashMap.newKeySet();
+    // the instance restarted without the store in this phase, which writes nothing in it
+    private volatile @Nullable DistributedLoadingCache<String, String> writerless;
     // the deterministic mode (VISION.md, "Deterministic simulation"): one thread, simulated time, choices from the
     // seed; null in the threaded mode
     private @Nullable SimulatedEnvironment simulation;
@@ -211,6 +224,21 @@ public class InternalPropertyTest {
 
     @ParameterizedTest
     @ValueSource(longs = {1, 2, 3, 4})
+    void with_an_instance_restarted_while_it_cannot_reach_the_store(long seed) throws Exception {
+        restarting = true;
+        assertThat(run(seed, new InMemoryBackend(seed), PHASES)).as("phases checked").isEqualTo(PHASES);
+        assertThat(trace).as("restarted without the store").anyMatch(event -> event.contains("RESTART"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {1, 2})
+    void with_an_instance_restarted_while_it_cannot_reach_a_polled_store(long seed) throws Exception {
+        restarting = true;
+        assertThat(run(seed, new InMemoryBackend(seed, true), PHASES)).as("phases checked").isEqualTo(PHASES);
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {1, 2, 3, 4})
     void with_the_maximum_age_changing_while_the_instances_work_too(long seed) throws Exception {
         ageing = true;
         assertThat(run(seed, new InMemoryBackend(seed), PHASES)).as("phases checked").isEqualTo(PHASES);
@@ -244,6 +272,14 @@ public class InternalPropertyTest {
         ageing = true;
         assertThat(runDeterministically(seed, StoreProfile.of(profile))).as("phases checked").isEqualTo(PHASES);
         assertThat(trace).as("values expired while the instances worked").anyMatch(event -> event.contains("EXPIRED"));
+    }
+
+    @ParameterizedTest(name = "{0}, seed {1}")
+    @MethodSource("profilesAndSeeds")
+    void deterministically_with_an_instance_restarted_while_it_cannot_reach_the_store(String profile, long seed)
+            throws Exception {
+        restarting = true;
+        assertThat(runDeterministically(seed, StoreProfile.of(profile))).as("phases checked").isEqualTo(PHASES);
     }
 
     // a run replayed: the same seed, the same history, event by event (a profile with a feed of its own, its faults
@@ -301,9 +337,7 @@ public class InternalPropertyTest {
             // a small L1 in the threaded mode only: Caffeine's admission breaks ties with ThreadLocalRandom, seeded
             // per JVM and thread and not settable, so its evictions would differ between two deterministic runs of one
             // seed (found: the replay failed about one run in four); the threaded mode keeps evicting
-            DistributedLoadingCache<String, String> plain = builder(backend, "plain")
-                    .withCaffeine(caffeine -> caffeine.maximumSize(simulation == null ? 4 : KEYS * 2))
-                    .build(new BulkSourceLoader());
+            DistributedLoadingCache<String, String> plain = plain(backend);
             DistributedLoadingCache<String, String> populated = builder(backend, "populated")
                     .withDistributionMode(DistributionMode.UPDATE)
                     .withNegativeCaching(Duration.ofMinutes(1))
@@ -313,14 +347,22 @@ public class InternalPropertyTest {
             closeables.add(plain);
             closeables.add(populated);
             closeables.add(async);
-            List<DistributedLoadingCache<String, String>> instances = List.of(plain, populated, async.synchronous());
+            List<DistributedLoadingCache<String, String>> instances = new ArrayList<>(
+                    List.of(plain, populated, async.synchronous()));
 
             Random random = new Random(seed);
+            // a random of its own, so that the other variants' choices of a seed stay as they were
+            Random restarts = new Random(~seed * 31);
             for (int phase = 0; phase < phases; phase++) {
                 SimulatedEnvironment simulated = simulation;
+                writerless = null;
+                if (restarting && restarts.nextDouble() < 0.3) {
+                    restartWithoutStore(backend, instances, closeables);
+                }
                 if (simulated != null) {
                     runPhase(random, backend, instances, async, simulated);
                     agreeOnAge(instances);
+                    reachAgain();
                     backend.heal();
                     awaitQuiescence(backend, instances, simulated);
                     check(seed, phase, instances);
@@ -331,8 +373,17 @@ public class InternalPropertyTest {
                 for (DistributedLoadingCache<String, String> cache : instances) {
                     long writerSeed = random.nextLong();
                     long loaderSeed = random.nextLong();
-                    running.add(threads.submit(() -> write(cache, new Random(writerSeed))));
+                    if (!Objects.equals(cache, writerless)) {
+                        running.add(threads.submit(() -> write(cache, new Random(writerSeed))));
+                    }
                     running.add(threads.submit(() -> load(cache, async, new Random(loaderSeed))));
+                }
+                if (writerless != null && restarts.nextBoolean()) {
+                    long after = restarts.nextInt(30);
+                    running.add(threads.submit(() -> {
+                        pause(after);
+                        reachAgain();
+                    }));
                 }
                 long faultSeed = random.nextLong();
                 running.add(threads.submit(() -> backend.fault(new Random(faultSeed), this::trace)));
@@ -344,6 +395,7 @@ public class InternalPropertyTest {
                     future.get(30, TimeUnit.SECONDS);
                 }
                 agreeOnAge(instances);
+                reachAgain();
                 backend.heal();
                 awaitQuiescence(backend, instances);
                 check(seed, phase, instances);
@@ -360,8 +412,38 @@ public class InternalPropertyTest {
         return checked;
     }
 
+    // a plain instance with a small L1 and bulk loads returning an extra key
+    private DistributedLoadingCache<String, String> plain(PropertyBackend backend) {
+        return builder(backend, "plain")
+                .withCaffeine(caffeine -> caffeine.maximumSize(simulation == null ? 4 : KEYS * 2))
+                .build(new BulkSourceLoader());
+    }
+
+    // the restarting variant: the plain instance closed and built again while it cannot reach the store
+    private void restartWithoutStore(PropertyBackend backend, List<DistributedLoadingCache<String, String>> instances,
+                                     List<AutoCloseable> closeables) {
+        trace("RESTART plain without the store");
+        instances.get(0).close();
+        unreachable.add("plain");
+        DistributedLoadingCache<String, String> restarted = plain(backend);
+        closeables.add(restarted);
+        instances.set(0, restarted);
+        writerless = restarted;
+    }
+
+    // the store reachable again for every instance (within a phase, or before its check at the latest)
+    private void reachAgain() {
+        if (!unreachable.isEmpty()) {
+            trace("REACHABLE again");
+            unreachable.clear();
+        }
+    }
+
     private DistributedCaffeine<String, String> builder(PropertyBackend backend, String label) {
         Adapter<String, String> adapter = settings -> {
+            if (unreachable.contains(label)) {
+                throw new StoreException(label + " cannot reach the store", null, false, true);
+            }
             Store opened = backend.open(settings);
             LatencyStore slowed = new LatencyStore(opened, label);
             // without a change feed: offered as storage and scan only, so that the core polls it
@@ -545,8 +627,10 @@ public class InternalPropertyTest {
         for (DistributedLoadingCache<String, String> cache : instances) {
             Random writer = new Random(random.nextLong());
             Random loader = new Random(random.nextLong());
-            steps.add(() -> writeOnce(cache, writer));
-            remaining.add(OPERATIONS);
+            if (!Objects.equals(cache, writerless)) {
+                steps.add(() -> writeOnce(cache, writer));
+                remaining.add(OPERATIONS);
+            }
             steps.add(() -> loadOnce(cache, async, loader));
             remaining.add(OPERATIONS);
         }
@@ -570,6 +654,9 @@ public class InternalPropertyTest {
             // interruption loses it (found: injected before a step, after the last advance had delivered everything,
             // a gap lost nothing, and a gap not revalidating went unnoticed)
             if (step == faultAt) {
+                if (writerless != null && fault.nextBoolean()) {
+                    reachAgain();
+                }
                 backend.fault(fault, this::trace);
                 if (backend instanceof InMemoryBackend inMemory && fault.nextDouble() < 0.3) {
                     reuseVersion(inMemory, fault);
@@ -598,6 +685,18 @@ public class InternalPropertyTest {
         }
     }
 
+    // what keeps a run from resting: each instance's state and whether it is quiescent, and whether the store is idle
+    private static String rest(PropertyBackend backend, List<DistributedLoadingCache<String, String>> instances) {
+        StringBuilder rest = new StringBuilder("store idle " + backend.isIdle());
+        for (int instance = 0; instance < instances.size(); instance++) {
+            DistributedLoadingCache<String, String> cache = instances.get(instance);
+            rest.append(", instance ").append(instance).append(' ')
+                    .append(cache.distributedPolicy().getSynchronizationState()).append(" quiescent ")
+                    .append(((InternalDistributedLoadingCache<String, String>) cache).core.isQuiescent());
+        }
+        return rest.toString();
+    }
+
     // the store has delivered everything, every instance has processed it, and every subscription is up again
     private static void awaitQuiescence(PropertyBackend backend,
                                         List<DistributedLoadingCache<String, String>> instances) {
@@ -609,7 +708,7 @@ public class InternalPropertyTest {
                     ((InternalDistributedLoadingCache<String, String>) cache).core.isQuiescent());
             quiet = idle ? quiet + 1 : 0;
             if (System.nanoTime() > deadline) {
-                throw new AssertionError("delivery did not come to rest");
+                throw new AssertionError("delivery did not come to rest: " + rest(backend, instances));
             }
             pause(2);
         }
@@ -660,7 +759,8 @@ public class InternalPropertyTest {
             String key = found.find() ? found.group(1) : "";
             List<String> history = trace.stream().filter(event -> event.contains(key + " ")
                     || event.contains(key + "=") || event.contains(key + "#") || event.contains("ALL")
-                    || event.contains("FAULT") || event.contains("AGE")).toList();
+                    || event.contains("FAULT") || event.contains("AGE") || event.contains("RESTART")
+                    || event.contains("REACHABLE")).toList();
             fail("seed " + seed + ", phase " + phase + ":\n  " + String.join("\n  ", violations)
                     + "\nhistory of " + key + ":\n  "
                     + String.join("\n  ", history.subList(Math.max(0, history.size() - 60), history.size())));
@@ -858,11 +958,18 @@ public class InternalPropertyTest {
         // has no feed. The clock follows the simulated time in microseconds and moves at least a microsecond per
         // reading, as a real one moves between two writes: the simulated time stands still within a step, and writes
         // stamped equal to an invalidateAll's control row would be hidden by it (found: most seeds failed so, a
-        // confirmed write hidden)
+        // confirmed write hidden). A clock counting in milliseconds moves so only within the simulated millisecond:
+        // a thousand readings in one would carry it into the next ones, ahead of the simulated time, so that a write
+        // a millisecond after the control row, the allowance waited, was stamped in the control row's millisecond and
+        // hidden by it (found 2026-11-12 on the mongodb profile in a long run); a real clock is not moved by reading it
         InMemoryBackend(long seed, StoreProfile profile, SimulatedEnvironment simulation) {
             java.util.concurrent.atomic.AtomicLong last = new java.util.concurrent.atomic.AtomicLong();
-            this.database = new InMemoryDatabase(() -> last.updateAndGet(previous -> Math.max(previous + 1,
-                    simulation.currentTimeMillis() * 1_000 + simulation.nanoTime() / 1_000 % 1_000)), seed, profile);
+            boolean millis = profile.clock() == StoreProfile.Clock.MILLIS;
+            this.database = new InMemoryDatabase(() -> last.updateAndGet(previous -> {
+                long now = simulation.currentTimeMillis() * 1_000 + simulation.nanoTime() / 1_000 % 1_000;
+                long next = Math.max(previous + 1, now);
+                return millis ? Math.max(previous, Math.min(next, Math.floorDiv(now, 1_000) * 1_000 + 999)) : next;
+            }), seed, profile);
             this.database.simulate(simulation.forDatabase());
             this.polling = false;
             this.simulation = simulation;
@@ -882,7 +989,16 @@ public class InternalPropertyTest {
             if (!polling) {
                 return database.openStore("cache");
             }
-            ScanOnlyStore store = new ScanOnlyStore(database.openFeed("cache"));
+            // forgotten when closed (an instance restarted): a store that no longer scans would keep the run from
+            // ever resting
+            ScanOnlyStore store = new ScanOnlyStore(database.openFeed("cache")) {
+                @Override
+                public void close() {
+                    scanning.remove(this);
+                    scansAtHeal.remove(this);
+                    super.close();
+                }
+            };
             scanning.add(store);
             return store;
         }
@@ -1017,6 +1133,8 @@ public class InternalPropertyTest {
                         + (value instanceof Row row ? row.state() + "@" + row.version()
                         + (row.value() == null ? ""
                                 : ":" + new String(row.value(), java.nio.charset.StandardCharsets.UTF_8))
+                        // the age decides what the control row hides (InternalCore#readRows)
+                        + " age " + row.age().toNanos() / 1_000 + "us"
                         : String.valueOf(value))));
                 return parts.toString();
             }

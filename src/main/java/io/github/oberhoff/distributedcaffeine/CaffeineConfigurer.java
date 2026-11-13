@@ -435,8 +435,14 @@ public final class CaffeineConfigurer<K, V> {
     // be, as its duration is one for all copies. Without a bound (no maximum age, or one for the store only),
     // Caffeine's own fixed expiry, as configured. Applied once, so that the builder can build again
     Caffeine<InternalKey<K>, InternalValue<V>> caffeine(Duration maximumAge) {
+        return caffeine(maximumAge, maximumAge);
+    }
+
+    // as above, with the maximum age for copies no store confirmed (InternalExpiry#unconfirmedMaximumAge): the store's
+    // also where the other copies are unbounded by it (the maximum age for the store only)
+    Caffeine<InternalKey<K>, InternalValue<V>> caffeine(Duration maximumAge, Duration unconfirmedMaximumAge) {
         if (!expiryApplied) {
-            applyExpiry(maximumAge);
+            applyExpiry(maximumAge, unconfirmedMaximumAge);
             expiryApplied = true;
         } else if (internalExpiry != null) {
             internalExpiry.reset();
@@ -445,14 +451,15 @@ public final class CaffeineConfigurer<K, V> {
     }
 
     // the user's Expiry, the fixed durations emulated under a maximum age, or else Caffeine's own fixed expiry
-    private void applyExpiry(Duration maximumAge) {
+    private void applyExpiry(Duration maximumAge, Duration unconfirmedMaximumAge) {
         if (expiry != null) {
-            internalExpiry = new InternalExpiry<>(expiry, maximumAge, ticker);
+            internalExpiry = new InternalExpiry<>(expiry, maximumAge, unconfirmedMaximumAge, ticker);
             caffeine.expireAfter(internalExpiry);
-        } else if (!maximumAge.equals(StoreConfigurer.UNBOUNDED_AGE)) {
+        } else if (!maximumAge.equals(StoreConfigurer.UNBOUNDED_AGE)
+                || !unconfirmedMaximumAge.equals(StoreConfigurer.UNBOUNDED_AGE)) {
             // expireAfterWrite at the maximum age without one set, as the policy shows it, also after the maximum age
             // changed (lowered to it otherwise)
-            internalExpiry = new InternalExpiry<>(maximumAge, ticker,
+            internalExpiry = new InternalExpiry<>(maximumAge, unconfirmedMaximumAge, ticker,
                     expireAfterWrite == null ? Long.MAX_VALUE : InternalExpiry.nanos(expireAfterWrite),
                     expireAfterAccess == null ? InternalExpiry.NONE : InternalExpiry.nanos(expireAfterAccess));
             caffeine.expireAfter(internalExpiry);
@@ -476,6 +483,12 @@ public final class CaffeineConfigurer<K, V> {
 
     boolean isRecordingStats() {
         return recordingStats;
+    }
+
+    // whether a local expiry was set (expireAfterWrite, expireAfterAccess or expireAfter), which bounds the copies
+    // without a maximum age
+    boolean hasExpiry() {
+        return expireAfterWrite != null || expireAfterAccess != null || expiry != null;
     }
 
     boolean isRefreshing() {

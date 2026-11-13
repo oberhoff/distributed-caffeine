@@ -60,8 +60,8 @@ abstract class PostgresNotifyQueueTest {
                 .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(1_000))
                 .build()) {
             // a session of another application, not of the pool: when it ends, its backend ends
-            Connection stuck = java.sql.DriverManager.getConnection(database.jdbcUrl(), database.username(),
-                    database.password());
+            Connection stuck = java.sql.DriverManager.getConnection(database.jdbcUrl(), PostgresTestDatabase.USER,
+                    PostgresTestDatabase.PASSWORD);
             cache.put("k", "before");
 
             // a listening session left idle in a transaction: the queue cannot drain past it

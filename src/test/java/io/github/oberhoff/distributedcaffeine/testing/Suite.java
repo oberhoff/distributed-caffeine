@@ -55,6 +55,8 @@ public @interface Suite {
         PROPERTY(true),
         /** The adapter's own tests on a single server: schema, formats, connections, restarts. */
         ADAPTER(false),
+        /** A store reached through several addresses, paused as a whole while a cache is built. */
+        OUTAGE(false),
         /** Members failing and taking over. */
         FAILOVER(false),
         /** A sharded cluster. */

@@ -60,6 +60,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
@@ -112,6 +113,10 @@ final class InternalCore<K, V> {
     private static final System.Logger LOGGER = System.getLogger(DistributedCaffeine.class.getPackageName());
     private static final long RESUME_MIN_MILLIS = 250;
     private static final long RESUME_MAX_MILLIS = 30_000;
+    // a cache started without its store: how often it warns that the store is still not reached, and how long it
+    // waits after a check of the store failed (another layout, a missing right) before it tries again
+    private static final Duration NOT_REACHED_WARNING_INTERVAL = Duration.ofMinutes(5);
+    private static final Duration FAILED_CHECK_RETRY = Duration.ofMinutes(5);
 
     // the hashes this thread is loading as their owner, to detect a loader requesting its own key; emptied after each
     // load, and kept per thread to spare an allocation per load
@@ -183,6 +188,19 @@ final class InternalCore<K, V> {
     // unchanged writes nothing (unless the update always writes)
     interface Remapping<K, V> {
         @Nullable V apply(K key, @Nullable V current);
+    }
+
+    // how a cache started without its store connects it (VISION.md, "Starting without the store"): connect creates the
+    // store and makes it ready for distribution (DistributedCaffeine#connect), throwing a retryable StoreException
+    // while the store is not reached and anything else for a check that failed; cause is why build() did not reach it;
+    // unbounded tells that the copies have neither a maximum age nor an expiry, so that those loaded meanwhile live
+    // until the store is reached (said in the warnings)
+    record Connector(Supplier<Connected> connect, StoreException cause, boolean unbounded) {
+    }
+
+    // a store connected, and how long size pruning spares a row for its kind of change source
+    // (DistributedCaffeine#pruneGrace)
+    record Connected(Store store, Duration pruneGrace) {
     }
 
     // what an atomic update found and left
@@ -263,7 +281,7 @@ final class InternalCore<K, V> {
     // how long a row is spared from size pruning at least (see DistributedCaffeine#pruneGrace): so that a load's write
     // on "missing" does not apply over a newer row pruned while the load ran (unless the load took longer), and,
     // polled, a write is never deleted before a poll could see it
-    private final Duration pruneGrace;
+    private volatile Duration pruneGrace;
     private volatile boolean subscriptionUp = true;
     // null without distribution, like the subscription
     private final @Nullable InternalHeartbeat heartbeat;
@@ -280,6 +298,14 @@ final class InternalCore<K, V> {
     private final AtomicLong losses = new AtomicLong();
     private volatile long resumeDelayMillis = RESUME_MIN_MILLIS;
     private final AtomicReference<@Nullable ScheduledFuture<?>> resumeTask = new AtomicReference<>();
+    // a cache started without its store (VISION.md, "Starting without the store"): the stand-in until the store is
+    // connected, how to connect it, the wait before the next attempt (doubling as resumes do), its task, and when the
+    // store was last warned of as not reached; null for a cache whose store answered at build()
+    private final @Nullable InternalPendingStore pending;
+    private final @Nullable Connector connector;
+    private volatile long connectDelayMillis = RESUME_MIN_MILLIS;
+    private final AtomicReference<@Nullable ScheduledFuture<?>> connectTask = new AtomicReference<>();
+    private volatile long notReachedWarned;
     private volatile boolean closed;
 
     @SuppressWarnings("java:S2637") // l1 is assigned in the try below, before anything can fail after it
@@ -292,13 +318,20 @@ final class InternalCore<K, V> {
                  DistributionMode distributionMode,
                  @Nullable Duration negativeCachingExpiry, long maximumSize, Duration maintenanceInterval,
                  Duration pruneGrace, Duration heartbeatInterval, int loadAttempts, InternalStatsCounter stats,
-                 Runnable onClose, InternalEnvironment environment) {
+                 Runnable onClose, @Nullable Connector connector, InternalEnvironment environment) {
         this.environment = requireNonNull(environment);
         this.name = requireNonNull(name);
         this.clock = new InternalVersion(environment, this::clockAhead);
         this.loadAttempts = loadAttempts;
         this.stats = requireNonNull(stats);
         this.guard = new InternalStoreGuard(name, stats, environment);
+        // started without its store: refused at once until connected, before the subscription below reports its loss
+        this.pending = store instanceof InternalPendingStore standIn ? standIn : null;
+        this.connector = connector;
+        if (pending != null) {
+            requireNonNull(connector, "a cache started without its store needs a connector");
+            guard.openWithoutStore();
+        }
         this.store = requireNonNull(store);
         this.hasher = requireNonNull(hasher);
         this.keySerializer = requireNonNull(keySerializer);
@@ -342,7 +375,11 @@ final class InternalCore<K, V> {
             this.heartbeat = new InternalHeartbeat(clock, this::beat, this::silenced, this::gap);
             this.delivery = new InternalDelivery(name, storeExecutor, this::apply, this::gap, this::lost);
             this.subscription = feed.subscribe(delivery);
-            if (losses.get() > 0) {
+            if (pending != null) {
+                // started without its store: no delivery before the connect, which the supervision's resume subscribes
+                subscriptionUp = false;
+                superviseResume();
+            } else if (losses.get() > 0) {
                 superviseResume(); // lost while subscribing, before the subscription could be resumed
             }
         } else {
@@ -350,6 +387,9 @@ final class InternalCore<K, V> {
         }
         scheduleMaintenance();
         scheduleHeartbeat();
+        if (connector != null) {
+            startWithoutStore(connector);
+        }
     }
 
     // keys and lifecycle
@@ -371,7 +411,7 @@ final class InternalCore<K, V> {
         }
         closed = true;
         for (AtomicReference<@Nullable ScheduledFuture<?>> scheduled : List.of(maintenanceTask, heartbeatTask,
-                resumeTask)) {
+                resumeTask, connectTask)) {
             ScheduledFuture<?> task = scheduled.get();
             if (task != null) {
                 task.cancel(false);
@@ -1210,13 +1250,13 @@ final class InternalCore<K, V> {
     // the key and the value are nullable arrays (byte @Nullable []), which Sonar does not read
     @SuppressWarnings("java:S4449")
     private void advance(Map<String, Write> writes, boolean put) {
-        Collection<Write> pending = new ArrayList<>(writes.values());
-        for (int attempt = 1; !pending.isEmpty(); attempt++) {
+        Collection<Write> remaining = new ArrayList<>(writes.values());
+        for (int attempt = 1; !remaining.isEmpty(); attempt++) {
             if (attempt > ADVANCE_ATTEMPTS) {
                 throw new StoreException("A write was refused " + ADVANCE_ATTEMPTS + " times, each time by a newer "
                         + "version of the key written concurrently; it can be tried again", null, false, true);
             }
-            Collection<Write> attempted = pending;
+            Collection<Write> attempted = remaining;
             WriteResult result = put ? guard.put(() -> store.write(attempted))
                     : guard.write(() -> store.write(attempted));
             // applied at the version the store reports: its own, where it assigns one (VISION.md, "Target design:
@@ -1252,7 +1292,7 @@ final class InternalCore<K, V> {
                 writes.put(hash, above);
                 again.add(above);
             }
-            pending = again;
+            remaining = again;
         }
     }
 
@@ -2408,6 +2448,8 @@ final class InternalCore<K, V> {
             return;
         }
         long seen = losses.get();
+        // a cache started without its store: its feed cannot resume before the connect, which says so itself
+        boolean connectedBefore = pending == null || pending.isConnected();
         try {
             current.resume();
         } catch (RuntimeException e) {
@@ -2417,14 +2459,17 @@ final class InternalCore<K, V> {
             // attempts after it a line each: an outage of minutes logged a trace every 30 s (found: the deterministic
             // property test spent seconds printing them)
             String failed = name + ": Resuming the change feed failed; trying again in " + delay + " ms";
-            if (delay == RESUME_MIN_MILLIS) {
+            if (connectedBefore && delay == RESUME_MIN_MILLIS) {
                 LOGGER.log(System.Logger.Level.WARNING, failed, e);
-            } else {
+            } else if (connectedBefore) {
                 LOGGER.log(System.Logger.Level.WARNING, failed + ": " + e.getMessage());
             }
             if (!closed) {
                 resumeTask.set(InternalMaintenance.schedule(environment, () -> execute(this::attemptResume),
                         Duration.ofMillis(delay)));
+                if (!connectedBefore && requireNonNull(pending).isConnected()) {
+                    resumeNow(); // connected while this attempt failed: at once rather than after the backoff
+                }
             }
             return;
         }
@@ -2461,7 +2506,7 @@ final class InternalCore<K, V> {
     // as for a feed interrupted, every read checks its copy (README, "Distribution interrupted"); otherwise copies
     // stayed trusted until the heartbeat noticed the silence, two intervals later
     private boolean feedUp() {
-        return subscriptionUp && !(subscription instanceof InternalPollingStore.Poller poller && poller.isFailing())
+        return subscriptionUp && !(subscription instanceof InternalPollingStore.PollStatus polls && polls.isFailing())
                 && (heartbeat == null || !heartbeat.isSilent());
     }
 
@@ -2636,9 +2681,14 @@ final class InternalCore<K, V> {
             }
         }
         this.maximumAge = age;
-        // L1's expiry is this library's whenever the copies are bounded by the age (CaffeineConfigurer#caffeine)
-        if (!maximumAgeForStoreOnly && expiry != null) {
-            expiry.maximumAge(InternalExpiry.nanos(age));
+        // L1's expiry is this library's whenever the copies are bounded by the age (CaffeineConfigurer#caffeine), with
+        // the maximum age for the store only those no store confirmed
+        if (expiry != null) {
+            if (maximumAgeForStoreOnly) {
+                expiry.unconfirmedMaximumAge(InternalExpiry.nanos(age));
+            } else {
+                expiry.maximumAge(InternalExpiry.nanos(age));
+            }
             expiry.reapply(l1.synchronous().policy());
         }
     }
@@ -2761,6 +2811,116 @@ final class InternalCore<K, V> {
             LOGGER.log(System.Logger.Level.WARNING, message, e);
         } else {
             LOGGER.log(System.Logger.Level.WARNING, message);
+        }
+    }
+
+    // starting without the store (VISION.md, "Starting without the store"): build() did not reach it, so the cache
+    // starts as in an outage (the guard open: misses load from the source, writes fail) and connects in the background,
+    // with a backoff as resumes have; the connect closes the guard and resumes the feed, a gap that checks what was
+    // loaded meanwhile
+    private void startWithoutStore(Connector connecting) {
+        notReachedWarned = environment.nanoTime();
+        LOGGER.log(System.Logger.Level.WARNING, name + ": The store is not available ("
+                + connecting.cause().getMessage() + "); the cache starts without it and connects in the background. "
+                + "Until then misses load from the source, writes fail, and its state is DEGRADED"
+                + unboundedNote(connecting)
+                + " (StoreConfigurer#withFailFast() fails the build instead)");
+        scheduleConnect(Duration.ofMillis(RESUME_MIN_MILLIS));
+    }
+
+    private static String unboundedNote(Connector connecting) {
+        return connecting.unbounded() ? "; with neither a maximum age nor an expiry, the values loaded meanwhile are "
+                + "kept until it is reached" : "";
+    }
+
+    private void scheduleConnect(Duration delay) {
+        if (!closed) {
+            connectTask.set(InternalMaintenance.scheduleAfter(environment, () -> {
+                try {
+                    storeExecutor.execute(this::attemptConnect);
+                } catch (RejectedExecutionException e) {
+                    // a closed executor ends the attempts with the cache
+                }
+            }, delay));
+        }
+    }
+
+    private void attemptConnect() {
+        InternalPendingStore standIn = pending;
+        Connector connecting = connector;
+        if (closed || standIn == null || connecting == null) {
+            return;
+        }
+        Connected connected;
+        try {
+            connected = connecting.connect().get();
+        } catch (StoreException e) {
+            if (!e.isRetryable()) {
+                failedCheck(e);
+                return;
+            }
+            notReached(e, connecting);
+            // one attempt at a time (each schedules the next), as for resumes
+            long delay = connectDelayMillis;
+            connectDelayMillis = Math.min(RESUME_MAX_MILLIS, delay * 2);
+            scheduleConnect(Duration.ofMillis(jittered(delay)));
+            return;
+        } catch (RuntimeException e) {
+            failedCheck(e);
+            return;
+        }
+        // set before the stand-in passes calls on: nothing was pruned before, as maintenance failed until now
+        pruneGrace = connected.pruneGrace();
+        standIn.connect(connected.store());
+        if (closed) {
+            return; // the stand-in closed the store, or the close closes it
+        }
+        guard.connected();
+        LOGGER.log(System.Logger.Level.INFO, name + ": The store was reached; the cache started without it is "
+                + "connected, and what it loaded meanwhile is checked against the store");
+        resumeNow();
+    }
+
+    // the backoff's wait with jitter (±20 %), so that instances started together do not try in step
+    private long jittered(long delay) {
+        return delay * 4 / 5 + environment.random(Math.max(1, delay * 2 / 5));
+    }
+
+    // not reached again: warned of every few minutes, not at every attempt
+    private void notReached(StoreException e, Connector connecting) {
+        long now = environment.nanoTime();
+        if (now - notReachedWarned >= NOT_REACHED_WARNING_INTERVAL.toNanos()) {
+            notReachedWarned = now;
+            LOGGER.log(System.Logger.Level.WARNING, name + ": The store has still not been available since the cache "
+                    + "started (" + e.getMessage() + "); misses load from the source, writes fail"
+                    + unboundedNote(connecting));
+        }
+    }
+
+    // the store answered, but the cache cannot use it (another layout, a missing right, a store that cannot distribute
+    // as configured): an error found only now, which no restart repairs, so logged as one at every attempt; tried again
+    // after a while, as a right can be granted while the cache runs. The reason is not exposed beyond DEGRADED: only
+    // a human can act on it (VISION.md, "Starting without the store")
+    private void failedCheck(RuntimeException e) {
+        String message = name + ": The store was reached, but the cache cannot use it (" + e.getMessage() + "); it "
+                + "stays DEGRADED, loading misses from the source, and tries again in " + FAILED_CHECK_RETRY.toMinutes()
+                + " minutes";
+        // a configuration the store refused, or one the core refused at DistributedCaffeine#distributing, is logged
+        // without a stack trace, and anything else, a bug, with one
+        if (e instanceof StoreException || e instanceof IllegalStateException) {
+            LOGGER.log(System.Logger.Level.ERROR, message);
+        } else {
+            LOGGER.log(System.Logger.Level.ERROR, message, e);
+        }
+        scheduleConnect(FAILED_CHECK_RETRY);
+    }
+
+    // the feed resumed now rather than after the supervision's backoff, which kept failing before the connect: the
+    // attempt scheduled is taken over; an attempt in progress calls this again once it scheduled the next
+    private void resumeNow() {
+        ScheduledFuture<?> scheduled = resumeTask.get();
+        if (subscription != null && scheduled != null && scheduled.cancel(false)) {
+            execute(this::attemptResume);
         }
     }
 

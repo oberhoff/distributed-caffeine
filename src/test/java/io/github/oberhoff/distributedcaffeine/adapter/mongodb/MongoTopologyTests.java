@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
 
 import io.github.oberhoff.distributedcaffeine.AdapterConformanceTest;
+import io.github.oberhoff.distributedcaffeine.AdapterOutageTest;
 import io.github.oberhoff.distributedcaffeine.CacheBackend;
 import io.github.oberhoff.distributedcaffeine.CaffeineParityTest;
 import io.github.oberhoff.distributedcaffeine.InternalCoreTest;
@@ -153,6 +154,16 @@ abstract class MongoTopologyTests implements Topology.Tests {
         @Override
         protected AdapterConformance conformance() {
             return new MongoConformance();
+        }
+    }
+
+    @Nested
+    @Suite(Kind.OUTAGE)
+    class Outages extends AdapterOutageTest {
+
+        @Override
+        protected Outage outage() {
+            return new MongoOutage();
         }
     }
 

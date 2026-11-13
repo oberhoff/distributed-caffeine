@@ -14,7 +14,7 @@ keeps a connection open for listening. In short:
 The table, its index and a sequence for its versions are created when the first cache is built. If the user lacks the
 rights to create them, building fails with the DDL to run instead, which also suits migration tools. A table created by
 another version of this library is refused. `withSchemaReset()` is meant for the migration from 0.x: it drops and
-recreates a table of 0.x (or an empty one), never one of another version of this generation or one holding other rows.
+recreates a table of 0.x (or an empty one), never one of another layout version from 0.8 on or one holding other rows.
 Instances of 0.x still running fail on the new table, so stop them before the first new instance starts, or accept
 their errors until they are replaced. Remove `withSchemaReset()` once the migration is done.
 
@@ -50,12 +50,18 @@ them. PgBouncer does from version 1.21 with `max_prepared_statements` above zero
 [Managed and cloud databases](#managed-and-cloud-databases)). Otherwise `prepareThreshold=0` on the data source turns
 them off.
 
+A pooler in statement mode refuses the transaction that creates the table, and building a cache fails, since the
+cache needs transactions. After a server restart, PgBouncer lends each of its server connections broken by the restart
+once more: the first statement on each fails, a write with an unknown outcome, as during the restart itself.
+
 ## Standby servers
 
 Reading has to reach the primary, because a standby may not yet have what the primary has notified. A data source
 reaching a standby, always or for some connections only (for example with several hosts and `targetServerType=any` in
-the connection URL, or a load balancer in front of the servers), fails building a cache or the operations that reach it;
-each connection is checked once. `targetServerType=primary` in the connection URL keeps it on the primary. What the
+the connection URL, or a load balancer in front of the servers), is refused as retryable, as during a failover: a cache
+built then starts without its store (`DEGRADED`, warning every 5 minutes) and connects once a primary answers there, or
+with `withFailFast()` the build fails; operations reaching a standby fail and are retried. Each connection is checked
+once. `targetServerType=primary` in the connection URL keeps it on the primary. What the
 check cannot see is a load balancer that routes every statement on its own, such as Pgpool-II with statement-level load
 balancing, because the check and the read may then reach different servers — the connections of the caches have to stay
 on the primary there.
@@ -66,7 +72,10 @@ The cache's operation timeout (`withOperationTimeout(...)`, 10 seconds by defaul
 connection borrowed for an operation, restored before the connection goes back, so an operation waiting for an answer
 on a connection the network silently stopped carrying fails in time, and caches sharing a data source may have
 different timeouts. The wait for a pooled connection is the pool's own (such as HikariCP's `connectionTimeout`, 30
-seconds by default): set it no higher than the operation timeout, or an exhausted pool keeps callers waiting longer. A
+seconds by default): set it no higher than the operation timeout, or an exhausted pool keeps callers waiting longer.
+Opening a connection is the pool's or the driver's: a data source without a pool needs pgjdbc's `loginTimeout` (and
+`connectTimeout`), or a server that accepts connections but answers nothing (paused, or behind a network dropping
+packets) holds every connect, the build's included, for about a minute rather than the operation timeout. A
 listening connection that dies silently is detected by the cache's heartbeat and replaced.
 
 The network timeout bounds waiting for an answer, not sending: Java sockets have no write timeout, so a write too large

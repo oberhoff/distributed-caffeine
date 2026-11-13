@@ -656,7 +656,9 @@ abstract class MongoAdapterTest {
         try (LogCapture log = new LogCapture()) {
             cache(Function.identity()).put("k", "v");
             cache(Function.identity());
-            assertThat(log.count("Created collection")).as("once, by the first: " + log.text()).isEqualTo(1);
+            assertThat(log.count("Created the collection")).as("once, by the first: " + log.text()).isEqualTo(1);
+            assertThat(log.text()).as("named as the cache")
+                    .containsPattern("MongoDB \\S+/\\S+: Created the collection");
         }
 
         var created = database.client.getDatabase("adapter").getCollection(collection);

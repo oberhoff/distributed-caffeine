@@ -36,20 +36,17 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.LockSupport;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Listening without R2DBC (VISION.md, "PostgreSQL listening without R2DBC"): how fast notifications reach one session
- * per instance, and at what cost to PostgreSQL, for pgjdbc's own getNotifications (limited to ~750/s per session),
- * notifications batched per writer after the commit, and pgjdbc's stream taken over (what the adapter does). The
- * R2DBC variant it was measured against is gone with the dependency; its figures stay recorded in VISION.md. One
+ * per instance, and at what cost to PostgreSQL, for pgjdbc's own getNotifications (limited to ~750/s per session) and
+ * pgjdbc's stream taken over (what the adapter does). The R2DBC variant and notifications batched per writer after the
+ * commit, measured against them once, are gone; their figures stay recorded in VISION.md. One
  * channel; writes paced by two writers, to random keys of 10,000 or to one hot key. Measures the time until a
  * notification arrives (over all instances) and PostgreSQL's CPU from the container's cgroup counters.
  * <p>
@@ -81,31 +78,9 @@ class PostgresListenerExperimentTest {
                 RETURNING r.id, r.version)
             SELECT w.version, pg_notify('rows', 'WRITTEN|' || w.id || '|' || w.version || '|' || ?) FROM w""";
 
-    // the write without its notification: sent after the commit, batched per writer (the BATCHED variants)
-    private static final String UPSERT_ONLY = """
-            WITH w AS (
-                INSERT INTO rows AS r (id, key, value, state, version, write_time)
-                VALUES (?, ?, ?, 'VALUE', (extract(epoch from clock_timestamp()) * 1000000)::bigint, now())
-                ON CONFLICT (id) DO UPDATE SET value = excluded.value, state = 'VALUE',
-                    version = greatest(r.version + 1, excluded.version), write_time = now()
-                RETURNING r.id, r.version)
-            SELECT w.version FROM w""";
-
     // TAKEOVER: pgjdbc connects through a pooled DataSource, then the listener reads pgjdbc's stream itself
-    // BATCHED: pgjdbc listening, notifications sent by each writer after commit, at most one per window, each
-    // carrying every write of the window
     private enum Listener {
-        JDBC(0), BATCHED_2MS(2), BATCHED_5MS(5), TAKEOVER(0);
-
-        final int windowMillis;
-
-        Listener(int windowMillis) {
-            this.windowMillis = windowMillis;
-        }
-
-        boolean batched() {
-            return windowMillis > 0;
-        }
+        JDBC, TAKEOVER
     }
 
     @Test
@@ -220,11 +195,9 @@ class PostgresListenerExperimentTest {
         long begin = System.nanoTime();
         List<Thread> writers = new ArrayList<>();
         for (int w = 0; w < WRITERS; w++) {
-            BlockingQueue<String> pending = new LinkedBlockingQueue<>();
-            Thread sender = kind.batched() ? sender(container, pending, kind.windowMillis) : null;
             Thread writer = new Thread(() -> {
                 try (Connection connection = connect(container);
-                     PreparedStatement statement = connection.prepareStatement(kind.batched() ? UPSERT_ONLY : UPSERT)) {
+                     PreparedStatement statement = connection.prepareStatement(UPSERT)) {
                     for (int seq = next.getAndIncrement(); seq < total; seq = next.getAndIncrement()) {
                         long due = begin + (long) seq * 1_000_000_000L / rate;
                         while (System.nanoTime() < due) {
@@ -234,20 +207,11 @@ class PostgresListenerExperimentTest {
                         statement.setString(1, id);
                         statement.setBytes(2, id.getBytes(StandardCharsets.UTF_8));
                         statement.setBytes(3, ("v" + seq).getBytes(StandardCharsets.UTF_8));
-                        if (!kind.batched()) {
-                            statement.setInt(4, seq);
-                        }
+                        statement.setInt(4, seq);
                         started[seq] = System.nanoTime();
                         try (ResultSet resultSet = statement.executeQuery()) {
                             resultSet.next();
-                            if (kind.batched()) {
-                                pending.add("WRITTEN|" + id + "|" + resultSet.getLong(1) + "|" + seq);
-                            }
                         }
-                    }
-                    if (sender != null) {
-                        pending.add("");
-                        sender.join();
                     }
                 } catch (Exception e) {
                     throw new IllegalStateException(e);
@@ -297,66 +261,14 @@ class PostgresListenerExperimentTest {
         return (PGStream) field.get(connection.unwrap(BaseConnection.class).getQueryExecutor());
     }
 
-    // returns true for the stop marker; a batched payload carries several writes, separated by ';'
+    // returns true for the stop marker
     private static boolean recordArrival(String payload, long[] latency, long[] started, long now) {
         if (payload.equals("STOP")) {
             return true;
         }
-        for (String part : payload.split(";", -1)) {
-            int seq = Integer.parseInt(part.substring(part.lastIndexOf('|') + 1));
-            latency[seq] = (now - started[seq]) / 1_000;
-        }
+        int seq = Integer.parseInt(payload.substring(payload.lastIndexOf('|') + 1));
+        latency[seq] = (now - started[seq]) / 1_000;
         return false;
-    }
-
-    // sends the writes queued after their commits: at most one notification per window, each with every write
-    // queued in the meantime (up to PostgreSQL's 8000 bytes per payload); an empty entry ends it
-    private static Thread sender(PostgreSQLContainer container, BlockingQueue<String> pending, int windowMillis) {
-        Thread thread = new Thread(() -> {
-            try (Connection connection = connect(container);
-                 PreparedStatement notify = connection.prepareStatement("SELECT pg_notify('rows', ?)")) {
-                long last = 0;
-                boolean end = false;
-                while (!end) {
-                    String first = pending.take();
-                    long due = last + windowMillis * 1_000_000L;
-                    long wait = due - System.nanoTime();
-                    if (wait > 0) {
-                        LockSupport.parkNanos(wait);
-                    }
-                    List<String> drained = new ArrayList<>();
-                    drained.add(first);
-                    pending.drainTo(drained);
-                    end = drained.remove("");
-                    StringBuilder payload = new StringBuilder();
-                    for (String part : drained) {
-                        if (payload.length() + part.length() + 1 > 7_900) {
-                            send(notify, payload);
-                        }
-                        if (!payload.isEmpty()) {
-                            payload.append(';');
-                        }
-                        payload.append(part);
-                    }
-                    if (!payload.isEmpty()) {
-                        send(notify, payload);
-                    }
-                    last = System.nanoTime();
-                }
-            } catch (Exception e) {
-                throw new IllegalStateException(e);
-            }
-        });
-        thread.start();
-        return thread;
-    }
-
-    private static void send(PreparedStatement notify, StringBuilder payload) throws Exception {
-        notify.setString(1, payload.toString());
-        try (ResultSet resultSet = notify.executeQuery()) {
-            resultSet.next();
-        }
-        payload.setLength(0);
     }
 
     private static long postgresCpuMicros(PostgreSQLContainer container) throws Exception {

@@ -31,7 +31,8 @@ import java.util.concurrent.Executors;
  * A TCP proxy that can stop carrying anything on the connections it holds without closing them, as a network that
  * drops packets does: what is sent into such a connection is accepted and dropped, and nothing comes back. It can let
  * a few more bytes through first, which cuts a message off in the middle. Connections accepted afterwards are carried
- * as usual.
+ * as usual, unless new connections are silenced too (a server paused, or a network dropping everything). A target
+ * that refuses the connection gets the client's closed at once, as a server stopped behind the address does.
  *
  * @author Andreas Oberhoff
  */
@@ -51,6 +52,7 @@ public final class SilencingProxy implements AutoCloseable {
     private final Set<Budget> budgets = ConcurrentHashMap.newKeySet();
     private volatile long delayMillis;
     private volatile long requestDelayMillis;
+    private volatile boolean silencingNew;
 
     /**
      * Starts a proxy on a free local port.
@@ -109,6 +111,17 @@ public final class SilencingProxy implements AutoCloseable {
     }
 
     /**
+     * Silences every connection accepted from now on from its start, or carries them again: a server that accepts
+     * connections but answers nothing, as a paused one does, or a network that drops every packet after the
+     * handshake. Connections silenced so stay silent.
+     *
+     * @param silencing whether new connections are silenced
+     */
+    public void silenceNewConnections(boolean silencing) {
+        silencingNew = silencing;
+    }
+
+    /**
      * Delays everything the proxy carries from now on by the given time per chunk, in either direction: a slow
      * network or a database slow to answer, rather than a broken one.
      *
@@ -149,11 +162,20 @@ public final class SilencingProxy implements AutoCloseable {
         while (!serverSocket.isClosed()) {
             try {
                 Socket client = serverSocket.accept();
-                Socket server = new Socket(targetHost, targetPort);
+                Socket server;
+                try {
+                    server = new Socket(targetHost, targetPort);
+                } catch (IOException e) {
+                    closeQuietly(client); // the target refused: the client is refused too
+                    continue;
+                }
                 sockets.add(client);
                 sockets.add(server);
                 clients.add(client);
                 Budget budget = new Budget();
+                if (silencingNew) {
+                    budget.limit(0);
+                }
                 budgets.add(budget);
                 executor.execute(() -> pump(client, server, budget, true));
                 executor.execute(() -> pump(server, client, budget, false));

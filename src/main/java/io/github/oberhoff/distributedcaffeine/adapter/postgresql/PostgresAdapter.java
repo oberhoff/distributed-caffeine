@@ -35,8 +35,9 @@ import static java.util.Objects.requireNonNull;
  * }</pre>
  * An adapter serves one cache: building a second cache with the same adapter fails while the first is open.
  * <p>
- * Requires {@code org.postgresql:postgresql} and PostgreSQL 9.6 or later; a standby is refused. The cache's operation
- * timeout applies to each connection it borrows, so caches sharing a data source may have different ones.
+ * Requires {@code org.postgresql:postgresql} and PostgreSQL 9.6 or later; a standby is refused (as retryable, as during
+ * a failover). The cache's operation timeout applies to each connection it borrows, so caches sharing a data source may
+ * have different ones.
  * <p>
  * To receive changes (every distribution mode but {@code NONE}), the caches on a data source hold one of its
  * connections for as long as they listen. A pool's leak detection (such as HikariCP's {@code leakDetectionThreshold})
@@ -92,9 +93,15 @@ public final class PostgresAdapter<K, V> implements Adapter<K, V> {
         return new PostgresStore(dataSource, listenerDataSource, table, settings.operationTimeout());
     }
 
+    // caches on the same client wait once for a store that does not answer (Adapter#client)
+    @Override
+    public Object client() {
+        return dataSource;
+    }
+
     @Override
     public String toString() {
-        return "PostgreSQL " + schemaName + "." + tableName + "/" + discriminator;
+        return PostgresTable.name(schemaName, tableName, discriminator);
     }
 
     /**
@@ -147,7 +154,7 @@ public final class PostgresAdapter<K, V> implements Adapter<K, V> {
 
         /**
          * Drops and recreates the table if distributed-caffeine 0.x created it, or if it is empty; one of another
-         * version of this generation, or holding other rows, is never dropped. Meant for the migration from 0.x:
+         * layout version from 0.8 on, or holding other rows, is never dropped. Meant for the migration from 0.x:
          * instances of 0.x still running fail on the new table, so stop them first or accept their errors until they
          * are replaced. Remove it once the migration is done.
          *

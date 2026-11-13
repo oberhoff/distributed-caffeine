@@ -309,10 +309,12 @@ public abstract class StoreContractTest extends AbstractContractTest {
     void contract7_read_returns_value_rows_older_than_the_maximum_age_as_expired_with_their_version() {
         Store writer = open();
         long old = written(writer, entry("old", "o"));
-        pause(100);
+        pause(1_500);
         long young = written(writer, entry("young", "y"));
 
-        Duration maxAge = Duration.ofMillis(60);
+        // wide margins on both sides: a slow runner may take hundreds of milliseconds between two calls (found on
+        // GitHub with 100 ms and 60 ms)
+        Duration maxAge = Duration.ofSeconds(1);
         Map<String, Row> rows = writer.read(List.of("old", "young"), maxAge);
         assertThat(rows.get("old").state()).isEqualTo(State.EXPIRED);
         assertThat(rows.get("old").value()).isNull();
@@ -508,11 +510,12 @@ public abstract class StoreContractTest extends AbstractContractTest {
     void contract7_expire_marks_rows_at_least_the_maximum_age_old_at_the_given_version() {
         Store writer = open();
         long written = written(writer, entry("old", "o"));
-        pause(400);
+        pause(1_500);
         long young = written(writer, entry("young", "y"));
         long version = nextVersion();
 
-        assertThat(writer.expire(Duration.ofMillis(300), version, ALL)).isEqualTo(1);
+        // wide margins on both sides, so that a slow runner leaves the young row young
+        assertThat(writer.expire(Duration.ofSeconds(1), version, ALL)).isEqualTo(1);
 
         Row old = writer.read(List.of("old"), LONG).get("old");
         assertThat(old.state()).isEqualTo(State.EXPIRED);
@@ -530,14 +533,15 @@ public abstract class StoreContractTest extends AbstractContractTest {
     void contract7_an_expired_row_is_kept_for_the_grace_period_from_its_expiry() {
         Store writer = open();
         writer.write(List.of(entry("h1", "v")));
-        pause(400);
-        assertThat(writer.expire(Duration.ofMillis(300), nextVersion(), ALL)).isEqualTo(1);
+        pause(1_500);
+        assertThat(writer.expire(Duration.ofSeconds(1), nextVersion(), ALL)).isEqualTo(1);
 
-        assertThat(writer.pruneTombstones(Duration.ofMillis(300), ALL)).as("its value was older, the expiry is not")
+        // wide margins on both sides, so that a slow runner leaves the expiry young
+        assertThat(writer.pruneTombstones(Duration.ofSeconds(1), ALL)).as("its value was older, the expiry is not")
                 .isZero();
         assertThat(writer.read(List.of("h1"), LONG).get("h1").state()).isEqualTo(State.EXPIRED);
-        pause(400);
-        assertThat(writer.pruneTombstones(Duration.ofMillis(300), ALL)).isEqualTo(1);
+        pause(1_500);
+        assertThat(writer.pruneTombstones(Duration.ofSeconds(1), ALL)).isEqualTo(1);
     }
 
     @Test
@@ -597,17 +601,20 @@ public abstract class StoreContractTest extends AbstractContractTest {
         for (int i = 0; i < 3; i++) {
             writer.write(List.of(entry("old" + i, "v")));
         }
-        pause(300);
+        pause(1_500);
         for (int i = 0; i < 3; i++) {
             writer.write(List.of(entry("young" + i, "v")));
         }
 
-        assertThat(writer.pruneToSize(1, Duration.ofMillis(150), ALL)).as("the old ones beyond the rank").isEqualTo(3);
+        // wide margins on both sides, so that a slow runner leaves the young rows young (failed under load with 300 ms
+        // and 150 ms)
+        assertThat(writer.pruneToSize(1, Duration.ofSeconds(1), ALL)).as("the old ones beyond the rank")
+                .isEqualTo(3);
         assertThat(writer.read(List.of("old0", "old1", "old2", "young0", "young1", "young2"), LONG).keySet())
                 .containsExactlyInAnyOrder("young0", "young1", "young2");
 
-        pause(300);
-        assertThat(writer.pruneToSize(1, Duration.ofMillis(150), ALL)).as("old enough now").isEqualTo(2);
+        pause(1_500);
+        assertThat(writer.pruneToSize(1, Duration.ofSeconds(1), ALL)).as("old enough now").isEqualTo(2);
     }
 
     @Test
@@ -615,10 +622,11 @@ public abstract class StoreContractTest extends AbstractContractTest {
         Store writer = open();
         writer.write(List.of(entry("value", "v")));
         writer.write(List.of(tombstone("old")));
-        pause(600);
+        pause(1_500);
         writer.write(List.of(tombstone("young")));
 
-        assertThat(writer.pruneTombstones(Duration.ofMillis(300), ALL)).isEqualTo(1);
+        // wide margins on both sides, as above (found on GitHub with 600 ms and 300 ms)
+        assertThat(writer.pruneTombstones(Duration.ofSeconds(1), ALL)).isEqualTo(1);
 
         assertThat(writer.read(List.of("value", "old", "young"), LONG).keySet())
                 .containsExactlyInAnyOrder("value", "young");

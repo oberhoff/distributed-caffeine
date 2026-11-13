@@ -40,6 +40,7 @@ final class RedisSlotEnforcingDriver extends RedisDriver {
     final AtomicInteger refused = new AtomicInteger();
 
     RedisSlotEnforcingDriver(RedisDriver inner) {
+        super(inner.client());
         this.inner = inner;
     }
 

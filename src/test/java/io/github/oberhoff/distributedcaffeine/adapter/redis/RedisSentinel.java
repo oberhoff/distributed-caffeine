@@ -23,9 +23,11 @@ import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.PortBinding;
 import com.github.dockerjava.api.model.Ulimit;
 import io.github.oberhoff.distributedcaffeine.testing.Ports;
+import io.lettuce.core.ClientOptions;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisCommandExecutionException;
 import io.lettuce.core.RedisURI;
+import io.lettuce.core.SocketOptions;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.internal.HostAndPort;
 import io.lettuce.core.resource.ClientResources;
@@ -351,6 +353,13 @@ final class RedisSentinel implements RedisTopology, AutoCloseable {
     // Sentinel turns the old primary into a replica of the new one once it is back
     @Override
     public void revive() {
+        revive(false);
+    }
+
+    // told to follow the new primary (REPLICAOF), as an operator does, unless Sentinel did so within 15 s: after a
+    // failover from a primary dead before Sentinel took it for down, Redis 6.2.0's Sentinel lists no replica for the
+    // old primary (no +slave after +switch-master, unlike Redis 8's) and leaves it a primary of its own for good
+    private void revive(boolean told) {
         if (killed < 0) {
             return;
         }
@@ -361,6 +370,13 @@ final class RedisSentinel implements RedisTopology, AutoCloseable {
         }
         int revived = killed;
         killed = -1;
+        if (told && !awaitUpTo(() -> role(revived).equals("slave"), Duration.ofSeconds(15), Duration.ofMillis(200))) {
+            try (StatefulRedisSentinelConnection<String, String> sentinel = sentinel();
+                 StatefulRedisConnection<String, String> direct = direct(revived)) {
+                InetSocketAddress primary = (InetSocketAddress) sentinel.sync().getMasterAddrByName(PRIMARY);
+                direct.sync().replicaof(primary.getHostString(), primary.getPort());
+            }
+        }
         // Sentinel turns a returning old primary into a replica of the new one
         try {
             require(() -> role(revived).equals("slave"), "node " + revived + " back as the replica");
@@ -416,6 +432,91 @@ final class RedisSentinel implements RedisTopology, AutoCloseable {
     // as a replica (found 2026-11-02: a segmentation fault in Storage::LatestSeqNumber, the node gone)
     private String role(int node) {
         return replication(node).getOrDefault("role", "unreachable");
+    }
+
+    // every running node (the primary, the replica, the sentinel), for pausing them all (PausedContainers)
+    List<GenericContainer<?>> containers() {
+        return nodes.stream().filter(GenericContainer::isRunning).toList();
+    }
+
+    // a client of its own through the sentinel, of the given library, waiting at most a second to connect and per
+    // command, mapping the addresses Sentinel reports as the shared ones do (Lettuce's through their resources, which
+    // its shutdown leaves running); Redisson's connecting on first use, so that it can be created while the servers
+    // are out
+    RedisOutage.Client ownClient(RedisOutage.Library library) {
+        return switch (library) {
+            case LETTUCE -> {
+                RedisClient own = RedisClient.create(resources, RedisURI.Builder.sentinel("127.0.0.1", ports.get(2),
+                        PRIMARY).withTimeout(Duration.ofSeconds(1)).build());
+                own.setOptions(ClientOptions.builder().socketOptions(SocketOptions.builder()
+                        .connectTimeout(Duration.ofSeconds(1)).build()).build());
+                yield new RedisOutage.Client(LettuceRedis.of(own), own::shutdown);
+            }
+            case JEDIS -> {
+                RedisSentinelClient own = RedisSentinelClient.builder()
+                        .masterName(PRIMARY)
+                        .sentinels(Set.of(new redis.clients.jedis.HostAndPort("127.0.0.1", ports.get(2))))
+                        .clientConfig(DefaultJedisClientConfig.builder()
+                                .connectionTimeoutMillis(1_000).socketTimeoutMillis(1_000)
+                                .hostAndPortMapper(address -> new redis.clients.jedis.HostAndPort("127.0.0.1",
+                                        address.getPort()))
+                                .build())
+                        .build();
+                yield new RedisOutage.Client(JedisRedis.of(own), own);
+            }
+            case REDISSON -> {
+                Config config = new Config().setLazyInitialization(true);
+                config.useSentinelServers()
+                        .setMasterName(PRIMARY)
+                        .addSentinelAddress("redis://127.0.0.1:" + ports.get(2))
+                        .setCheckSentinelsList(false)
+                        .setSentinelsDiscovery(false)
+                        .setConnectTimeout(1_000)
+                        .setTimeout(1_000)
+                        .setNatMapper(address -> new org.redisson.misc.RedisURI(address.getScheme(), "127.0.0.1",
+                                address.getPort()));
+                RedissonClient own = Redisson.create(config);
+                yield new RedisOutage.Client(RedissonRedis.of(own), own::shutdown);
+            }
+        };
+    }
+
+    // the primary killed while Sentinel waits a minute before taking it for down, so that a cache built meanwhile
+    // finds no primary to write to; closing has Sentinel take it for down after a second again and fail over on its
+    // own, as after kill, and the old primary come back as the replica. Not SENTINEL FAILOVER: Redis 6.2's Sentinel
+    // promoted no one on it within a minute while the dead primary was not yet down in its view, and Redis 8's, with
+    // down-after lowered right after, took the new primary for down and failed back to the old one restarting
+    io.github.oberhoff.distributedcaffeine.AdapterOutageTest.Interruption withoutPrimary() {
+        awaitInSync();
+        // a Sentinel paused by a test before (PausedContainers) stays in TILT mode for 30 s and fails over no one, and
+        // Redis 6.2.0's, just started, enters it again and again for over a minute
+        if (!awaitUpTo(() -> {
+            try (StatefulRedisSentinelConnection<String, String> sentinel = sentinel()) {
+                return sentinel.sync().info("sentinel").contains("sentinel_tilt:0");
+            } catch (RuntimeException e) {
+                return false;
+            }
+        }, Duration.ofMinutes(3), Duration.ofMillis(500))) {
+            throw new IllegalStateException("Sentinel still in TILT mode after 3 minutes; " + sentinelView());
+        }
+        int before = primary();
+        downAfter(60_000);
+        GenericContainer<?> node = nodes.get(before);
+        try (KillContainerCmd kill = node.getDockerClient().killContainerCmd(node.getContainerId())) {
+            kill.exec();
+        }
+        killed = before;
+        return () -> {
+            downAfter(1_000);
+            require(() -> primary() == 1 - before, "Sentinel promoting node " + (1 - before));
+            revive(true);
+        };
+    }
+
+    private void downAfter(long millis) {
+        try (StatefulRedisSentinelConnection<String, String> sentinel = sentinel()) {
+            sentinel.sync().set(PRIMARY, "down-after-milliseconds", String.valueOf(millis));
+        }
     }
 
     @Override

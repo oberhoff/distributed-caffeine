@@ -184,9 +184,9 @@ final class InternalPollingStore implements Store, ChangeFeed {
     }
 
     // rewrites the keys as they are now, conditionally on their version and at a version above it: a newer write
-    // announces itself, a deleted
-    // row has nothing to announce, a row hidden by the cut-off stays hidden (rewritten, it would come back); best
-    // effort, a failure only leaves what the overlap left
+    // announces itself, a deleted row has nothing to announce, a row hidden by the cut-off stays hidden (rewritten, it
+    // would come back), and the control row takes the rows written after it along (touchControl); best effort, a
+    // failure only leaves what the overlap left
     @SuppressWarnings("FutureReturnValueIgnored") // the delayed touch is scheduled for its effect, never cancelled
     private void touchLater(Duration delay, Supplier<Set<String>> hashes) {
         Runnable touch = () -> {
@@ -204,29 +204,120 @@ final class InternalPollingStore implements Store, ChangeFeed {
     }
 
     private void touch(Set<String> hashes) {
-        if (hashes.isEmpty()) {
-            return;
+        Set<String> values = new LinkedHashSet<>(hashes);
+        boolean control = values.remove(Store.CONTROL_HASH);
+        if (!values.isEmpty()) {
+            touchValues(values);
         }
+        if (control) {
+            touchControl();
+        }
+    }
+
+    // value rows and tombstones as they are now; the control row is read only to leave the rows it hides alone, never
+    // rewritten here (a new write time for it would hide every row written since: see touchControl)
+    private void touchValues(Set<String> hashes) {
         List<String> toRead = new ArrayList<>(hashes);
         toRead.add(Store.CONTROL_HASH);
         Map<String, Row> read = store.read(toRead, Duration.ofNanos(Long.MAX_VALUE));
         Row control = read.get(Store.CONTROL_HASH);
         List<Write> writes = new ArrayList<>();
         read.forEach((hash, row) -> {
-            // a row the control row hides stays hidden (rewritten, it would come back); the control row itself is
-            // rewritten like any row, its change being an invalidateAll
-            if (!hash.equals(Store.CONTROL_HASH) && control != null && row.age().compareTo(control.age()) >= 0) {
-                return;
+            // a row the control row hides stays hidden (rewritten, it would come back)
+            if (!hash.equals(Store.CONTROL_HASH) && (control == null || row.age().compareTo(control.age()) < 0)) {
+                writes.add(rewrite(hash, row));
             }
-            long version = clock.next(row.version());
-            byte[] value = row.value();
-            writes.add(row.state() == State.VALUE && value != null
-                    ? Write.value(hash, row.key(), value, version).ifVersion(row.version())
-                    : Write.tombstone(hash, version).ifVersion(row.version()));
         });
         if (!writes.isEmpty()) {
             store.write(writes);
         }
+    }
+
+    // the control row of an invalidateAll that may have come too late for every poll, rewritten so that a poll finds
+    // it. The rewrite gives it a new write time, and every row written at or before the control row counts as missing,
+    // so the rows written after its first write would be lost (found 2026-11-12: a touch 20 s after an invalidateAll of
+    // unknown outcome hid every value written in those 20 s, by every instance; VISION.md, "Fixed: the polling store's
+    // touch re-stamped the control row"). So they are rewritten after it, as they are, conditionally on their version:
+    // younger than it again. One read tells them apart, its ages comparable: younger than the control row, written
+    // after it; the others were hidden before and stay so. Rows committed between that read and the control row's
+    // rewrite are looked for once more; a row whose commit becomes visible later still (slower than the overlap) stays
+    // hidden, the race accepted. Rewritten rows get a new write time too, so they live another maximum age
+    private void touchControl() {
+        Row first = store.read(List.of(Store.CONTROL_HASH), Duration.ofNanos(Long.MAX_VALUE)).get(Store.CONTROL_HASH);
+        if (first == null) {
+            return;
+        }
+        long start = environment.nanoTime();
+        Map<String, Row> read = readWithControl(first.age().plus(overlap));
+        Row control = read.get(Store.CONTROL_HASH);
+        if (control == null) {
+            return;
+        }
+        Map<String, Long> hidden = new HashMap<>();
+        List<Write> younger = new ArrayList<>();
+        read.forEach((hash, row) -> {
+            if (hash.equals(Store.CONTROL_HASH)) {
+                return;
+            }
+            if (row.age().compareTo(control.age()) >= 0) {
+                hidden.put(hash, row.version());
+            } else {
+                younger.add(rewrite(hash, row));
+            }
+        });
+        Write stamp = rewrite(Store.CONTROL_HASH, control);
+        if (store.write(List.of(stamp)).isRefused(stamp)) {
+            return; // a newer invalidateAll meanwhile: nothing re-stamped, the newer one announces itself
+        }
+        // a write right after the control row may carry its write time (a clock counting in milliseconds) or an
+        // earlier one (a clock stepping back), and would be hidden by it: waited out, as invalidateAll does
+        waitClockAllowance();
+        if (!younger.isEmpty()) {
+            store.write(younger);
+        }
+        // once more: the rows committed meanwhile, now hidden by the new write time, unless hidden before already
+        Map<String, Row> after = readWithControl(Duration.ofNanos(environment.nanoTime() - start).plus(overlap));
+        Row stamped = after.get(Store.CONTROL_HASH);
+        List<Write> meanwhile = new ArrayList<>();
+        after.forEach((hash, row) -> {
+            Long before = hidden.get(hash);
+            if (!hash.equals(Store.CONTROL_HASH) && stamped != null && row.age().compareTo(stamped.age()) >= 0
+                    && (before == null || before != row.version())) {
+                meanwhile.add(rewrite(hash, row));
+            }
+        });
+        if (!meanwhile.isEmpty()) {
+            store.write(meanwhile);
+        }
+    }
+
+    private void waitClockAllowance() {
+        Duration allowance = store.clockAllowance();
+        if (!allowance.isZero() && !allowance.isNegative()) {
+            try {
+                environment.sleep(allowance);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    // the rows changed within the window, with the control row, in one read (their ages comparable)
+    private Map<String, Row> readWithControl(Duration window) {
+        Set<String> hashes = scan.changedWithin(window).stream().map(Change::hash)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        hashes.add(Store.CONTROL_HASH);
+        return store.read(new ArrayList<>(hashes), Duration.ofNanos(Long.MAX_VALUE));
+    }
+
+    // a row written again as it is, at a version above its own and only if it still has that version: a newer write
+    // announces itself, a deleted row has nothing to announce
+    private Write rewrite(String hash, Row row) {
+        long version = clock.next(row.version());
+        byte[] value = row.value();
+        return row.state() == State.VALUE && value != null
+                ? Write.value(hash, row.key(), value, version).ifVersion(row.version())
+                : Write.tombstone(hash, version).ifVersion(row.version());
     }
 
     // a closed executor ends the polling with the cache
@@ -248,8 +339,16 @@ final class InternalPollingStore implements Store, ChangeFeed {
         return poller;
     }
 
+    // what a subscription tells of its polls (InternalCore#feedUp): the poller's own, or a cache's started without its
+    // store, passing on its poller's
+    interface PollStatus {
+
+        // whether the latest poll failed: changes may be missed until one succeeds
+        boolean isFailing();
+    }
+
     // one subscription: polls on the store executor, one poll at a time
-    final class Poller implements ChangeSubscription {
+    final class Poller implements ChangeSubscription, PollStatus {
 
         private final ChangeListener listener;
         private final AtomicReference<@Nullable ScheduledFuture<?>> task = new AtomicReference<>();
@@ -278,7 +377,8 @@ final class InternalPollingStore implements Store, ChangeFeed {
         // whether the latest poll failed: changes may be missed until one succeeds (and reports the gap); the core
         // trusts no copy meanwhile and shows it as DEGRADED, also on an instance that neither reads nor writes through
         // the store
-        boolean isFailing() {
+        @Override
+        public boolean isFailing() {
             return failed;
         }
 

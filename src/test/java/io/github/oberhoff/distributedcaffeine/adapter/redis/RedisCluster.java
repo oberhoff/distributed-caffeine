@@ -846,6 +846,92 @@ final class RedisCluster implements RedisTopology, AutoCloseable {
         return state.toString();
     }
 
+    // every running node, for pausing them all (PausedContainers)
+    List<GenericContainer<?>> containers() {
+        return nodes.stream().filter(GenericContainer::isRunning).toList();
+    }
+
+    // a cluster client of its own, of the given library, waiting at most a second to connect and per command,
+    // mapping the addresses the cluster reports as the shared ones do (Lettuce's through their resources, which its
+    // shutdown leaves running); Redisson's connecting on first use, so that it can be created while the nodes are out
+    RedisOutage.Client ownClient(RedisOutage.Library library) {
+        return switch (library) {
+            case LETTUCE -> {
+                io.lettuce.core.cluster.RedisClusterClient own = io.lettuce.core.cluster.RedisClusterClient.create(
+                        resources, RedisURI.builder().withHost("127.0.0.1").withPort(ports.get(0))
+                                .withTimeout(Duration.ofSeconds(1)).build());
+                own.setOptions(ClusterClientOptions.builder()
+                        .socketOptions(SocketOptions.builder().connectTimeout(Duration.ofSeconds(1)).build()).build());
+                yield new RedisOutage.Client(LettuceRedis.of(own), own::shutdown);
+            }
+            case JEDIS -> {
+                RedisClusterClient own = RedisClusterClient.builder()
+                        .nodes(Set.of(new redis.clients.jedis.HostAndPort("127.0.0.1", ports.get(0))))
+                        .clientConfig(DefaultJedisClientConfig.builder()
+                                .connectionTimeoutMillis(1_000).socketTimeoutMillis(1_000)
+                                .hostAndPortMapper(address -> new redis.clients.jedis.HostAndPort("127.0.0.1",
+                                        address.getPort()))
+                                .build())
+                        .build();
+                yield new RedisOutage.Client(JedisRedis.of(own), own);
+            }
+            case REDISSON -> {
+                Config config = new Config().setLazyInitialization(true);
+                config.useClusterServers()
+                        .addNodeAddress("redis://127.0.0.1:" + ports.get(0))
+                        .setScanInterval(1_000)
+                        .setConnectTimeout(1_000)
+                        .setTimeout(1_000)
+                        .setNatMapper(address -> new org.redisson.misc.RedisURI(address.getScheme(), "127.0.0.1",
+                                address.getPort()));
+                RedissonClient own = Redisson.create(config);
+                yield new RedisOutage.Client(RedissonRedis.of(own), own::shutdown);
+            }
+        };
+    }
+
+    // whether a primary can be lost before the cluster fails over (withoutPrimary): the nodes' own failover, not a
+    // controller's
+    boolean losesPrimary() {
+        return kind == Kind.REPLICATED;
+    }
+
+    // the primary of the key's slot killed while every node waits a minute before taking it for failed, so that a
+    // cache built meanwhile finds no primary for its slot; closing has the replica take over at once (CLUSTER FAILOVER
+    // TAKEOVER, which needs no votes) and the old primary come back as its replica
+    io.github.oberhoff.distributedcaffeine.AdapterOutageTest.Interruption withoutPrimary(String key) {
+        int slot = SlotHash.getSlot(key);
+        awaitInSync(slot);
+        Shard before = shard(slot);
+        int replica = before.replicas().get(0);
+        nodeTimeout(-1, 60_000);
+        GenericContainer<?> node = nodes.get(before.primary());
+        try (KillContainerCmd kill = node.getDockerClient().killContainerCmd(node.getContainerId())) {
+            kill.exec();
+        }
+        killed = before.primary();
+        return () -> {
+            try (StatefulRedisConnection<String, String> connection = direct(replica)) {
+                connection.sync().clusterFailover(false, true);
+            }
+            require(() -> shard(slot).primary() == replica, "node " + replica + " promoted for slot " + slot);
+            nodeTimeout(before.primary(), 1_000);
+            revive();
+        };
+    }
+
+    // every node's cluster-node-timeout but the one skipped (killed): how long it waits before taking a silent node
+    // for failed
+    private void nodeTimeout(int skipped, long millis) {
+        for (int index = 0; index < count; index++) {
+            if (index != skipped) {
+                try (StatefulRedisConnection<String, String> connection = direct(index)) {
+                    connection.sync().configSet("cluster-node-timeout", String.valueOf(millis));
+                }
+            }
+        }
+    }
+
     @Override
     public void close() {
         redisson.shutdown();

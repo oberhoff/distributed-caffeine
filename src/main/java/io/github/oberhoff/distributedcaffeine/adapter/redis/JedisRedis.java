@@ -60,7 +60,7 @@ public final class JedisRedis {
      */
     public static RedisDriver of(RedisClient client) {
         requireNonNull(client, CLIENT_REQUIRED);
-        return new Driver(new Pooled(client::getPool), "Jedis");
+        return new Driver(client, new Pooled(client::getPool), "Jedis");
     }
 
     /**
@@ -71,7 +71,7 @@ public final class JedisRedis {
      */
     public static RedisDriver of(RedisSentinelClient client) {
         requireNonNull(client, CLIENT_REQUIRED);
-        return new Driver(new Pooled(() -> {
+        return new Driver(client, new Pooled(() -> {
             Iterator<Pool<Connection>> pools = client.getPrimaryNodesConnectionMap().values().iterator();
             if (!pools.hasNext()) {
                 throw new IllegalStateException("Sentinel names no primary");
@@ -88,7 +88,7 @@ public final class JedisRedis {
      */
     public static RedisDriver of(RedisClusterClient client) {
         requireNonNull(client, CLIENT_REQUIRED);
-        return new Driver(new Source() {
+        return new Driver(client, new Source() {
             // a command without keys (INFO) to the owner of slot 0, any node serving as well
             @Override
             public Lease borrow(@Nullable String key) {
@@ -138,7 +138,8 @@ public final class JedisRedis {
         private final Source source;
         private final String name;
 
-        Driver(Source source, String name) {
+        Driver(Object client, Source source, String name) {
+            super(client);
             this.source = source;
             this.name = name;
         }

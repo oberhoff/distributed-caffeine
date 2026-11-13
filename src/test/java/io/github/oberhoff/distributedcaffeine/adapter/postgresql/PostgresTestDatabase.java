@@ -75,9 +75,9 @@ final class PostgresTestDatabase implements AutoCloseable {
     static final String HOST = "localhost";
     static final String LISTENER_APPLICATION = "dc-test-listener";
     static final String STATEMENT_POOLED = "statement_pooled";
-    private static final String USER = "test";
-    private static final String PASSWORD = "test";
-    private static final String DATABASE = "test";
+    static final String USER = "test";
+    static final String PASSWORD = "test";
+    static final String DATABASE = "test";
     private static final String PGDATA = "/var/lib/postgresql/data/pgdata";
     private static final String POOLER_IMAGE = "pgbouncer/pgbouncer:latest";
     private static final int POOLER_PORT = 6432;
@@ -268,6 +268,11 @@ final class PostgresTestDatabase implements AutoCloseable {
         return direct;
     }
 
+    // every running container (the primary, the standby, the pooler), for pausing them all (PausedContainers)
+    List<GenericContainer<?>> allContainers() {
+        return containers.stream().filter(GenericContainer::isRunning).toList();
+    }
+
     int port() {
         return primaryPort;
     }
@@ -275,18 +280,6 @@ final class PostgresTestDatabase implements AutoCloseable {
     int standbyPort() {
         requireStandby();
         return standbyPort;
-    }
-
-    String username() {
-        return USER;
-    }
-
-    String password() {
-        return PASSWORD;
-    }
-
-    String databaseName() {
-        return DATABASE;
     }
 
     int major() {
@@ -330,6 +323,17 @@ final class PostgresTestDatabase implements AutoCloseable {
      */
     @Nullable String onStandby(String sql) throws SQLException {
         return query(standbyPort(), sql);
+    }
+
+    /**
+     * Runs a statement on the primary directly; the first column of its first row, if any.
+     *
+     * @param sql the statement
+     * @return the first column of the first row, or null
+     * @throws SQLException if it fails
+     */
+    @Nullable String onPrimary(String sql) throws SQLException {
+        return query(port(), sql);
     }
 
     private static @Nullable String query(int port, String sql) throws SQLException {

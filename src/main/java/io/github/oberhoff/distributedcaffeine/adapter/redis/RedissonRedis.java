@@ -27,7 +27,7 @@ import static java.util.Objects.requireNonNull;
  * <p>
  * Redisson's own timeouts and retries apply within the cache's operation timeout. Redisson replaces a connection the
  * network silently stopped carrying only when its ping fails ({@code pingConnectionInterval}, 30 seconds by default);
- * until then, commands on it time out. A shorter interval, such as one second, recovers sooner.
+ * until then, commands on it time out. A shorter interval, such as 1 second, recovers sooner.
  *
  * @author Andreas Oberhoff
  */
@@ -56,6 +56,7 @@ public final class RedissonRedis {
         private final RedissonClient client;
 
         Driver(RedissonClient client) {
+            super(client);
             this.client = client;
         }
 

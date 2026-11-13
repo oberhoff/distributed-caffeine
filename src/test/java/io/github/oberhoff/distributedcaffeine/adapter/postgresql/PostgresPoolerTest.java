@@ -71,8 +71,8 @@ abstract class PostgresPoolerTest {
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl("jdbc:postgresql://" + database.poolerHost() + ":" + database.poolerPort() + "/"
                 + PostgresTestDatabase.STATEMENT_POOLED + "?prepareThreshold=0");
-        config.setUsername(database.username());
-        config.setPassword(database.password());
+        config.setUsername(PostgresTestDatabase.USER);
+        config.setPassword(PostgresTestDatabase.PASSWORD);
         config.setMaximumPoolSize(4);
         config.setInitializationFailTimeout(-1);
         try (HikariDataSource pooled = new HikariDataSource(config)) {
