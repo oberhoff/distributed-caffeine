@@ -3092,13 +3092,19 @@ final class InternalCore<K, V> {
                         value = new InternalValue<>(found, current.version(), current.epoch(), current.age());
                     }
                     commit(key, value);
+                    // Caffeine gets a copy: the instance committed may be replaced in L1 before this line (a put
+                    // racing the refresh), and marking it then would silence that put's REPLACED event as well (found
+                    // by the parity test). Still holding the value the refresh started from (the commit did not
+                    // replace it), Caffeine installs the copy, unmarked; otherwise it discards the copy as overtaken,
+                    // with a REPLACED event for the copy alone, silenced
+                    InternalValue<V> result = new InternalValue<>(value.value(), value.version(), value.epoch(),
+                            Duration.ofNanos(value.age())).bind(key);
                     CompletableFuture<InternalValue<V>> held = l1.asMap().get(key);
-                    if (held == null || !held.isDone() || held.isCompletedExceptionally() || held.join() != value) {
-                        // not held (a newer value was): Caffeine discards it, with a REPLACED event to silence
-                        value.replacementSilent(true);
+                    if (held == null || !held.isDone() || held.isCompletedExceptionally()
+                            || held.join() != oldValue) {
+                        result.replacementSilent(true);
                     }
-                    // held: Caffeine finds the identical instance and discards nothing
-                    return value;
+                    return result;
                 } finally {
                     release(key);
                 }

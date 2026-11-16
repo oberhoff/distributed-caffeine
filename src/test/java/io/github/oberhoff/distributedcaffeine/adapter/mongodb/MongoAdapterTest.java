@@ -480,8 +480,12 @@ abstract class MongoAdapterTest {
         proxy.close(); // nothing answers on that port any more
         long started = System.nanoTime();
         assertThatThrownBy(() -> cache.put("k", "during")).isInstanceOf(StoreException.class);
-        assertThat(Duration.ofNanos(System.nanoTime() - started)).as("one server selection, not three")
-                .isLessThan(Duration.ofMillis(1_900));
+        // one wait for a server (1 s, not retried), or two if the driver had not noticed the closed proxy yet: then
+        // the pooled connection fails first, the driver's own retry waits for a server and throws that socket error
+        // (CommandOperationHelper#chooseRetryableWriteException), which the core retries once, into the wait.
+        // Three attempts of the core would wait three times
+        assertThat(Duration.ofNanos(System.nanoTime() - started)).as("one or two server selections, not three")
+                .isLessThan(Duration.ofMillis(2_900));
     }
 
     @Test

@@ -448,9 +448,15 @@ public class InternalDistributionTest {
             }
         }
 
+        // converged: each key held at the last value, or not held at all. InternalCore#apply checks a message below the
+        // held version against the store, which drops the copy if the store has moved on meanwhile. The last value's
+        // message, arriving after that, finds nothing held to update, as population never adds a key
+        InternalCore<String, String> core = ((InternalDistributedCache<String, String>) second).core;
+        await(() -> backend.isIdle() && core.isQuiescent());
         for (int i = 0; i < 20; i++) {
             String key = "k" + i;
-            await(() -> "v5".equals(held(second, key)));
+            assertThat(held(second, key)).as(key).isIn("v5", null);
+            assertThat(second.getIfPresent(key)).as(key).isEqualTo("v5");
         }
     }
 

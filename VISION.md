@@ -6732,6 +6732,15 @@ New ones go here as they come up while building.
 
 ### Options for later
 
+- **A pending `AsyncCache.put` kept against messages** (found 2026-11-16, `InternalAsyncTest` flaking under load on
+  GitHub). `putAsync` holds its future in L1 at once but reserves the key only when the store work starts, on the
+  store executor; a message arriving in between finds a future in flight without a reservation and drops it, like a
+  load's (see reservations, build plan step 4). The written value is then not held here, though nothing stale is
+  served (the next read loads it). Seen with the instance's own echo of an earlier write, delivered late. Unlike a
+  load's, a put's future needs no drop: its write applies above whatever version is stored, so a message arriving
+  before its store work starts announces an older write (one arriving after meets the reservation, as now). Options: reserve in `putAsync` before the future enters L1 (a
+  reservation for a future that may never complete must then end with it), or mark put futures for `apply` to leave
+  alone. Costs a missed cache entry per race, so not urgent; the test waits for its own echoes instead.
 - **Async misses without a waiting thread** (measured, see "Cost of the direction" under Async variants). Decided
   2026-10-21: stay on Java 17 and the current design for now; until then, async users with many concurrent slow
   misses pass a virtual-thread executor themselves (`withStore(store -> store.withExecutor(...))`, Java 21+). Two options when it matters:

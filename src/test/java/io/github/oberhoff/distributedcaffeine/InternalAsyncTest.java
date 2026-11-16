@@ -741,6 +741,9 @@ class InternalAsyncTest {
         DistributedAsyncCache<String, String> first = cache();
         DistributedAsyncCache<String, String> second = cache();
         second.synchronous().putAll(Map.of("a", "1", "b", "2", "c", "3"));
+        // its own messages delivered first: one arriving while setValue's put is pending, not reserved yet, drops it
+        // from L1, as InternalCore#putAsync describes, and the value written would not be held here
+        await(() -> database.isIdle() && core(second).isQuiescent());
         ConcurrentMap<String, CompletableFuture<String>> map = second.asMap();
 
         for (Map.Entry<String, CompletableFuture<String>> entry : map.entrySet()) {

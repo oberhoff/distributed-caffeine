@@ -122,6 +122,10 @@ class InternalStatsTest {
     void a_compute_writing_on_a_held_value_is_one_store_operation() {
         DistributedCache<String, String> cache = cache();
         cache.asMap().compute("k", (key, current) -> "1"); // read and write: held
+        // its own message delivered first: arriving after the next write, below the version then held, it would be
+        // checked by a read of its own, as InternalCore#apply does with such a message
+        InternalCore<String, String> core = ((InternalDistributedCache<String, String>) cache).core;
+        await(() -> database.isIdle() && core.isQuiescent());
         long reads = stats(cache).storeReadCount();
         long writes = stats(cache).storeWriteCount();
 
