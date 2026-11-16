@@ -310,8 +310,9 @@ abstract class PostgresAdapterTest {
 
         await(() -> holder.distributedPolicy().stats().gapCount() > gaps
                 && holder.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
-        assertThat(holder.getIfPresent("k")).as("checked after the gap")
-                .isEqualTo("written while the session was down");
+        // awaited, not read once: a reconnect quicker than the write (found on GitHub) checks "old" after the gap, and
+        // the write then arrives as a message, delivered asynchronously. Missed by both, "old" would stay for good
+        await(() -> "written while the session was down".equals(holder.getIfPresent("k")));
     }
 
     // schema
