@@ -643,6 +643,219 @@ maximum age is the actual bound of staleness.
   write may expire), threaded and deterministic on every store profile (304 runs green), each run asserting that
   values expired.
 
+### Rebuild while serving: `invalidateAllBeforeMark` and `invalidateAllOlderThan` (decided 2026-11-14, revised 2026-11-16, not built)
+
+**The use case:** a job rebuilds the cache with many puts (it does not load through the cache; where its values come
+from is its own business) and drops whatever it did not put, while the cache keeps serving. An `invalidateAll()` first
+is not an option: every instance would miss until the rebuild got to its keys.
+
+```java
+StoreMark mark = cache.distributedPolicy().markStore();   // the store's time, read from the store
+for (Map<K, V> batch : batches) {
+    cache.putAll(batch);
+}
+cache.distributedPolicy().invalidateAllBeforeMark(mark);   // only after a complete fill
+```
+
+Two methods, one mechanism (the backdated cut-off below), differing in where the cut-off comes from:
+
+| Method                              | Cut-off                                       | For                                                                                                |
+|-------------------------------------|-----------------------------------------------|----------------------------------------------------------------------------------------------------|
+| `invalidateAllBeforeMark(StoreMark)` | just before a time read from the store earlier | a rebuild: exact against latency, the store's clock on both sides                                  |
+| `invalidateAllOlderThan(Duration)`   | the store's `now − olderThan` at the write     | a one-off sweep ("drop everything not written within 24 hours"), where milliseconds do not matter |
+
+A `retainOnly(keys)` (`invalidateAllExcept`) was considered and not adopted: with the values put anyway, the cut-off
+covers it; it would only pay for "valid keys known, values unchanged", by renewing the retained rows' ages (rewritten
+conditionally on their version, churning every holder's copy, or a store-side touch that must not revive hidden or
+too old rows).
+
+**How.** It is the cut-off of "Target design: `invalidateAll` by the store's time", backdated:
+
+- **In the store:** one write of the control row, its write time `max(current cut-off, cut-off asked for)` by the
+  store's clock. Every row the rebuild did not rewrite is older, so it is hidden at once, on every read of every
+  instance (reads carry the control row), and `pruneTombstones` deletes it. No scan, no tombstone and no message per
+  row, whatever the size of the cache.
+- **Every write renews a row's age** (checked 2026-11-14): `put` and `putAll` advance every key unconditionally at a
+  fresh version (`InternalCore#putValues`), equal values included, and every adapter sets the write time from the
+  store's clock. Loads by traffic during the rebuild write too, so they are younger than the cut-off and kept, which
+  is right: they came from the source. Reads renew nothing.
+- **On every instance, the message moves the epoch instead of clearing L1.** Every held copy becomes untrusted and is
+  checked on its next read (`InternalCore#confirmOrDrop`, one row read): a hidden row drops it, a copy the rebuild
+  wrote is kept. While the store does not answer, copies are served unconfirmed rather than missed. Clearing would be
+  correct too, but costs little more than this only because the rebuild's own writes already sent every holder of a
+  rewritten key to the store once (`INVALIDATE` drops the copy, `UPDATE` reads it again).
+- **On the calling instance** the same as `invalidateAll()`, except for the clear: the atomic map operations wait
+  (`clearing`), the epoch moves. The wait for the clock allowance after the write, and the second epoch move after
+  `distrustWithinAllowance`, protect writes right after the cut-off; with the cut-off at least the allowance back
+  (a mark taken at least the allowance ago, measured locally with `System.nanoTime()` from `markStore()`, or
+  `olderThan` at least the allowance), a write after the call is younger than the cut-off by more than the allowance,
+  so both can be skipped.
+- **`NONE`:** the store hides the rows, and the calling instance moves its epoch (without a subscription
+  `InternalCore#feedUp` is true, so trust is the epoch alone). Other instances keep their copies until they expire
+  locally, as for `invalidateAll()` and for the rebuild's writes themselves.
+- **`withMaximumAgeForStoreOnly()`:** a hidden row reads as a tombstone there too (see that section), so the copies go.
+
+**Why a mark from the store for a rebuild, not a duration measured by the caller (2026-11-16).** A duration is turned
+into a cut-off by the store when the control write *executes* (`now − olderThan`). Whatever lies between measuring it
+and that execution (network latency, queueing in the store, a GC pause after measuring) moves the cut-off later than
+the rebuild's start, always in the same direction: into the rebuild's first writes, which are then hidden. Without a
+loader a hidden key is gone until its next write. Widening by the clock allowance only bounds this by an assumption
+(10 ms by default), never guarantees it. A mark read from the store before the first write does not have this error:
+every write of the fill is sent after `markStore()` has returned, so the store stamps it at or after the mark, and a
+cut-off just before the mark never hides it, whatever the latency. The two remaining sources of error compare as
+follows; the mark wins because latency is common and a clock step is rare:
+
+|                           | Duration (`invalidateAllOlderThan`)                       | Mark (`invalidateAllBeforeMark`)          |
+|---------------------------|-----------------------------------------------------------|-------------------------------------------|
+| Latency, pause            | cut-off moved into the fill, bounded only by an assumption | no effect                                 |
+| Store clock steps forward | fill rows hidden (misses)                                 | stale rows kept (the safe direction)      |
+| Store clock steps back    | stale rows kept (the safe direction)                      | fill rows hidden (misses)                 |
+| Cost                      | none                                                      | one store round trip at `markStore()`     |
+
+A duration also stays a duration: an `Instant` would compare the caller's wall clock with the store's, the skew this
+design never takes on ("Clock: only the store's clock"). The mark is the store's own time, so the same holds for it.
+
+**The mark.** `StoreMark` is opaque: the store's time as the adapter reads it, with the same clock expression it uses
+for write times (so mark and write times are comparable), plus the local `System.nanoTime()` of the read (for skipping
+the allowance wait). Not an `Instant` in the API, so that nobody compares it with a wall clock. A mark belongs to the
+cache it was taken from; one of another cache is rejected. A mark older than the current cut-off changes nothing (the
+maximum keeps the later one). `markStore()` fails while the store does not answer, like the fill's writes would.
+
+**The SPI change: two `Store` methods.**
+
+- **Reading the store's time** for the mark: `now()` or `clock_timestamp()` as the adapter's write times
+  (PostgreSQL, JDBC), `$$NOW` (MongoDB, cluster time), `TIME` (Redis). On a Redis cluster, from the node holding the
+  control row, the clock the cut-off is compared against there; how rows on other nodes compare follows what
+  `invalidateAll()` does today, to check when built.
+- **Writing the control row backdated:** as `write` does (the version proposed by the core, advanced as for any row,
+  announced as one change), but with the write time `max(current write time, cut-off)`, atomically, so that the
+  cut-off only ever moves forward: a backdated call landing just after a concurrent full `invalidateAll()` must not
+  reveal the rows that one hid. The cut-off is given either as a mark (the adapter writes one unit of its write-time
+  resolution before it, since rows written at or before the control row are hidden: a fill row stamped at the mark's
+  very tick stays visible, and a stale row at that tick survives, the safe direction) or as an age (`now − olderThan`
+  in the statement). Per adapter: `GREATEST` in the statement (PostgreSQL; JDBC through a new parameter of
+  `PrimitiveStore`'s row primitive, which always writes `now` today), the maximum in the Redis script, a pipeline
+  update with `$max` on MongoDB.
+- A field on `Write` instead was rejected: it would mean something for one hash only. Names and signatures are
+  settled when built (one backdated write taking either form, or the age turned into a mark by the core).
+
+**Open: telling the two kinds of `invalidateAll` apart.** A control-row message carries only a version, so an
+instance cannot tell a full `invalidateAll()` (clear L1) from a backdated one (move the epoch).
+1. **Always move the epoch.** Correct for both, but after a full `invalidateAll()` dead copies stay in memory until
+   read or evicted, and it changes behaviour the property tests cover.
+2. **The kind in the control row's value** (today `controlBytes`, never read), the control row read when its message
+   arrives: one row read per `invalidateAll`. Leaning to this one, since `invalidateAll()` stays as it is. Any mix-up
+   errs on the safe side: an instance that misses a full one's message, or reads a backdated value written over it,
+   moves its epoch, which is always correct; it clears only where a full one was written.
+
+**When to call it.**
+
+- **A rebuild job:** `markStore()` before its first write, `invalidateAllBeforeMark(mark)` after its last write has
+  returned. Rows written between the mark and the first write are other writers' or loads', as current as the
+  rebuild's, and kept.
+- **A rebuild spread over several workers or machines:** one coordinator takes the mark before it starts the first
+  worker, and makes the call after the last one has finished. The workers' clocks do not matter, nor does the
+  coordinator's.
+- **A one-off sweep without a rebuild:** `invalidateAllOlderThan(duration)`, a one-off maximum age that also works on a
+  cache built without one, and hides at once instead of expiring by maintenance. Its latency error (milliseconds)
+  does not matter against a duration of hours.
+- **Only after a complete fill.** A `put` that failed or ended with an unknown outcome is retried until it succeeds
+  (it is idempotent); if the fill cannot complete, the call is skipped. Called after a partial fill, the cut-off hides
+  every key the fill did not reach: without a loader, missing until their next write. Relevant at startup, where a pod
+  may start without the store and its puts fail.
+- A wrapper `rebuild(Supplier<Map<K, V>>)` (mark, call the supplier, `putAll`, the call only if every put succeeded)
+  is possible later, so that the order cannot go wrong; the two methods stay the primitives.
+
+**The motivating case (2026-11-14, clarified 2026-11-16):** a database is the source of truth, about 1,000 entries,
+and every pod used to read all of them into a local cache at every restart. Changes go directly to the database and
+are announced over a pub/sub the application cannot change, each event reaching only one pod (at most once, no
+replay). All pods can be down at once, so events can be lost unnoticed. No loader (a miss is a miss), no maximum age,
+no source versions, and the entries should always be hot. The coordination across pods is the cache's job. The
+recipe for the README:
+
+1. `UPDATE` mode: a write on one pod replaces the copies the others hold.
+2. On start: `markStore()`, read all entries from the database, `putAll`, then `invalidateAllBeforeMark(mark)` once
+   the fill has completed. Keys deleted while nobody listened are hidden on every pod; the filling pod's L1 is hot.
+3. On an event (one pod): `asMap().compute(key, (k, current) -> database.find(k))`, `null` removing the key. The
+   value is read from the database inside the atomic operation (atomic across instances), so events handled out of
+   order or twice never leave an older value: whichever applies last reads the database last.
+
+Costs per restart at this size: 1,000 writes and, on each running pod, at most 1,000 copies dropped or read again. A
+key created by an event on another pod costs one store read on its first access here (`UPDATE` replaces held copies,
+it adds none); zero store reads would take a replicated mode (see "Options for later", `UPSERT`). Rolling deploys: an
+old-version pod restarting after new ones fills with its values and hides keys only the new version writes, until the
+next new-version start or event.
+
+**Windows left open (worked through 2026-11-14 and 2026-11-16, by reasoning; the property-test variant below is to
+confirm them):**
+
+1. **A rebuild's put over a newer value** (inherent to any rebuild, not to the drop): the job computes K's value,
+   another writer puts or invalidates K (in the motivating case, an event handled on another pod between the fill's
+   database read and its put), then the job's `put` lands. `put` is unconditional, so the job's older value wins,
+   until K's next write or its expiry. Absent if the job is the only writer; otherwise reading each batch right before
+   putting it keeps the window short (milliseconds at 1,000 entries); closing it needs source versions and a
+   conditional write (`compute` keeping the newer version), not part of this design. Documented with the method.
+2. **A racing load** (only with a loader): a load that read the source before a key was deleted there and writes
+   after the cut-off counts as touched and is kept. It has to overlap the call itself (a load writing during the
+   rebuild is written after the cut-off and kept, rightly). The race accepted for `invalidateAll()` (2026-10-28), with
+   its bound: the key's next write or the maximum age.
+3. **The delivery delay:** other instances serve their copies until the control-row message arrives: milliseconds
+   with a native feed, up to a poll interval on MariaDB and MySQL, until local expiry in `NONE`. The bound every
+   change has; a gap moves the epoch, so a lost message is covered by the revalidation.
+4. **The store's clock stepping** by J during the rebuild. With a mark: back, up to J of the rebuild's earliest writes
+   are stamped before the mark and hidden (misses); forward, nothing is hidden wrongly. With a duration (beyond its
+   allowance): forward, up to J of the rebuild's earliest writes are hidden; back, untouched rows written up to J
+   before the start are kept. Not on MongoDB (cluster time); possible on PostgreSQL and Redis, for example on a
+   failover to a server whose clock differs. Documented, as for `invalidateAll()`.
+5. **`invalidateAllOlderThan` only: the time between measuring and executing** moves the cut-off later by that
+   time, hiding writes from that last moment. Irrelevant for its purpose (sweeps); the reason a rebuild takes a mark.
+
+**Windows closed, provided it is built as described:**
+
+6. **A concurrent full `invalidateAll()`** is never undone by a backdated call landing after it, only because each
+   store applies `max(current cut-off, cut-off asked for)` atomically; never the core reading the cut-off and writing
+   it back. The rebuild's writes before the full one are lost, which is what `invalidateAll()` means.
+7. **A read in flight on another instance** that read a now hidden row before the control write and installs it after
+   the epoch moved installs it at the older epoch, untrusted, checked on its next read: the mechanism that covers it
+   for `invalidateAll()`.
+8. **A mix-up of the two kinds** (open point, option 2) ends in an epoch move, always correct; an instance clears
+   only where a full one was written.
+9. **Overlapping rebuilds:** each call's cut-off is its own mark, and it only moves forward, so the later call hides
+   only rows written before its mark, none it wrote itself.
+10. **A write with an unknown outcome:** if it never landed, its key is hidden, a miss (without a loader, until its
+    next write: hence the retry before the call, see "Only after a complete fill"); if it lands later, it is written
+    after the cut-off and kept, with the rebuild's value.
+11. **Latency for a rebuild:** closed by the mark (see "Why a mark from the store").
+
+**Alternatives considered (2026-11-14, 2026-11-16):**
+
+- **Enumerating the store (`getAllFromStore()` without keys), then invalidating what the rebuild did not write:** a
+  scan with keys and values is a new SPI method in every adapter (per node on a Redis cluster), the result can be
+  millions of rows on the heap, and traffic's writes during the rebuild need tracking. Rejected.
+- **Tombstones for every row older than the age** (`Store#expire` with the target state `TOMBSTONE`, returning the
+  hashes so that the caller drops its copies at once): exact, and every instance drops only what goes, but a tombstone
+  and a message per dropped row, and four adapters to change, plus the polling window
+  (`InternalPollingStore#expiredWithin` selects `EXPIRED` only) and PostgreSQL's `expireCursor` (one per state). The
+  fallback if the backdated cut-off proves unworkable. `Store#expire` itself, unchanged, is not a removal: under
+  `withMaximumAgeForStoreOnly()` its messages are ignored and an expired row leaves the trusted copy in place
+  (`InternalCore#ignoredExpiry`, `InternalCore#read`), sound only because no row expires younger than the maximum age.
+- **A duration for the rebuild too** (the 2026-11-14 version, `System.nanoTime()` around the fill, later with a local
+  mark and widening by the clock allowance): no extra round trip and SPI method, but the latency error above, in the
+  harmful direction. Replaced by the store mark.
+- **A second cache, switched over (blue-green):** no library change, but the store holds two copies, and the switch
+  needs coordination across instances, which then read different generations while it spreads.
+- **The application remembering the previous rebuild's key set** and calling `invalidateAll(previous − current)`:
+  keys loaded by traffic are in neither set, so a key deleted at the source stays until it expires.
+- **Waiting for the maximum age:** no code, but only with a maximum age and only if waiting that long is acceptable.
+
+**To test when built:** per store, rows written before the mark (or older than the age) hidden and later ones kept,
+including a row stamped at the mark's own tick; the cut-off never moving back under a concurrent full
+`invalidateAll()` or an older mark; copies on other instances revalidated (hidden dropped, rewritten kept) in
+`INVALIDATE`, `UPDATE` and with the maximum age for the store only; `NONE` on the calling instance; a mark of another
+cache rejected; a property-test variant with a rebuild phase under traffic and injected store latency: after the call,
+no value served that was written before the mark, none of the fill's values hidden, except the racing load accepted
+above.
+
 ### Refresh
 
 Caffeine's `refreshAfterWrite` stays as configured; the library adds four rules around it.
@@ -6512,7 +6725,10 @@ core's fallback thread on the simulation; replay across JVMs checked.
 
 ## Open design questions
 
-None at the moment. New ones go here as they come up while building.
+New ones go here as they come up while building.
+
+- **How an instance tells a full `invalidateAll()` from a backdated one** (2026-11-14): see "Rebuild while serving",
+  open point; leaning to the kind in the control row's value.
 
 ### Options for later
 

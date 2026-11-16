@@ -30,6 +30,7 @@ import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 import static java.util.Objects.requireNonNull;
@@ -150,19 +151,50 @@ public abstract class AdapterConformanceTest {
      */
     public static void recovers(DistributedCache<String, String> other, DistributedCache<String, String> started,
                                 Duration within) {
+        recovers(other, started, within, () -> "");
+    }
+
+    /**
+     * Asserts the same as {@link #recovers(DistributedCache, DistributedCache, Duration)}, a failure describing the
+     * store's state as well: for a topology of several servers, what each one is and holds of {@code "held"} (two
+     * servers both taking writes as primaries leave each cache in step with its own, which no cache can notice).
+     *
+     * @param other   the other instance
+     * @param started the cache started without its store
+     * @param within  how long the connect may take
+     * @param state   the store's state, read only on a failure; empty where there is nothing to add
+     */
+    public static void recovers(DistributedCache<String, String> other, DistributedCache<String, String> started,
+                                Duration within, Supplier<String> state) {
         assertThat(Awaiting.awaitUpTo(() -> started.distributedPolicy().getSynchronizationState()
-                == SynchronizationState.SYNCHRONIZED, within, Duration.ofMillis(50))).as("connected").isTrue();
+                == SynchronizationState.SYNCHRONIZED, within, Duration.ofMillis(50)))
+                .as(described("connected", state)).isTrue();
         assertThat(Awaiting.awaitUpTo(() -> "stored".equals(started.getIfPresent("held")), within,
-                Duration.ofMillis(50))).as("the value loaded meanwhile gave way to the stored one: "
-                + started.getIfPresent("held")).isTrue();
+                Duration.ofMillis(50))).as(described(() -> "the value loaded meanwhile gave way to the stored one: "
+                + started.getIfPresent("held"), state)).isTrue();
         assertThat(Awaiting.awaitUpTo(() -> other.distributedPolicy().getSynchronizationState()
-                == SynchronizationState.SYNCHRONIZED, within, Duration.ofMillis(50))).as("the other one too").isTrue();
+                == SynchronizationState.SYNCHRONIZED, within, Duration.ofMillis(50)))
+                .as(described("the other one too", state)).isTrue();
         put(other, "held", "from the other", within);
         assertThat(Awaiting.awaitUpTo(() -> "from the other".equals(started.getIfPresent("held")), within,
-                Duration.ofMillis(50))).as("a change of the other one reaches the started one").isTrue();
+                Duration.ofMillis(50))).as(described(() -> "a change of the other one reaches the started one: "
+                + started.getIfPresent("held"), state)).isTrue();
         put(started, "held", "from the started", within);
         assertThat(Awaiting.awaitUpTo(() -> "from the started".equals(other.getIfPresent("held")), within,
-                Duration.ofMillis(50))).as("a change of the started one reaches the other one").isTrue();
+                Duration.ofMillis(50))).as(described(() -> "a change of the started one reaches the other one: "
+                + other.getIfPresent("held"), state)).isTrue();
+    }
+
+    // a failure's description with the store's state appended, both read only when the assertion fails
+    private static Supplier<String> described(String what, Supplier<String> state) {
+        return described(() -> what, state);
+    }
+
+    private static Supplier<String> described(Supplier<String> what, Supplier<String> state) {
+        return () -> {
+            String described = state.get();
+            return described.isEmpty() ? what.get() : what.get() + "; the store: " + described;
+        };
     }
 
     /**

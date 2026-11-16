@@ -93,10 +93,12 @@ public abstract class AdapterOutageTest {
         return outage;
     }
 
+    // a key is its own hash, so that a failure can describe its row on each server (Outage#describe)
     private DistributedCache<String, String> build(Adapter<String, String> adapter, boolean failFast) {
         DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(adapter)
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
+                .withHashProvider((key, hasher) -> key)
                 .withStore(store -> failFast ? store.withOperationTimeout(SHORT).withFailFast()
                         : store.withOperationTimeout(SHORT))
                 .build();
@@ -142,7 +144,7 @@ public abstract class AdapterOutageTest {
             startsDegraded(started);
         }
 
-        recovers(other, started, CONNECT);
+        recovers(other, started, CONNECT, () -> outage.describe("held"));
     }
 
     // paused across several of the connect's attempts, each bounded by the operation timeout: none hangs (MongoDB's
@@ -167,7 +169,7 @@ public abstract class AdapterOutageTest {
             }
         }
 
-        recovers(other, started, CONNECT);
+        recovers(other, started, CONNECT, () -> outage.describe("held"));
     }
 
     @Test
@@ -192,7 +194,7 @@ public abstract class AdapterOutageTest {
             startsDegraded(started);
         }
 
-        recovers(other, started, BACK);
+        recovers(other, started, BACK, () -> outage.describe("held"));
     }
 
     @Test
@@ -217,7 +219,7 @@ public abstract class AdapterOutageTest {
             startsDegraded(started);
         }
 
-        recovers(other, started, BACK);
+        recovers(other, started, BACK, () -> outage.describe("held"));
     }
 
     @Test
@@ -315,6 +317,17 @@ public abstract class AdapterOutageTest {
          */
         default Interruption withoutPrimary() {
             throw new UnsupportedOperationException("no primary to lose here");
+        }
+
+        /**
+         * Describes the store's state for a failure: for a topology of several servers, each server's role and
+         * replication and its copy of the key's row.
+         *
+         * @param key the cache's key, its own hash
+         * @return the description; empty where there is nothing to add
+         */
+        default String describe(String key) {
+            return "";
         }
 
         /**

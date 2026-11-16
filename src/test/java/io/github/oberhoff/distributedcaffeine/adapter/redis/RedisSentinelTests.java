@@ -90,7 +90,7 @@ abstract class RedisSentinelTests {
         @Override
         protected Outage outage() {
             return new RedisOutage(() -> sentinel.ownClient(RedisOutage.Library.LETTUCE), sentinel::containers,
-                    key -> sentinel.withoutPrimary(), false);
+                    key -> sentinel.withoutPrimary(), false, sentinel::describe);
         }
     }
 
@@ -100,7 +100,7 @@ abstract class RedisSentinelTests {
         @Override
         protected Outage outage() {
             return new RedisOutage(() -> sentinel.ownClient(RedisOutage.Library.JEDIS), sentinel::containers,
-                    key -> sentinel.withoutPrimary(), true);
+                    key -> sentinel.withoutPrimary(), true, sentinel::describe);
         }
     }
 
@@ -110,7 +110,7 @@ abstract class RedisSentinelTests {
         @Override
         protected Outage outage() {
             return new RedisOutage(() -> sentinel.ownClient(RedisOutage.Library.REDISSON), sentinel::containers,
-                    key -> sentinel.withoutPrimary(), false);
+                    key -> sentinel.withoutPrimary(), false, sentinel::describe);
         }
     }
 

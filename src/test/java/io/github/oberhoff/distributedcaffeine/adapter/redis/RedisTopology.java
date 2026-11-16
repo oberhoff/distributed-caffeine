@@ -51,7 +51,8 @@ interface RedisTopology {
     void failover(String key);
 
     /**
-     * Each node of the key's shard: role, replication link and offset, and its copy of the key (what a failover left).
+     * Each node of the key's shard: role, replication link and offset, and its copy of the key (what a failover left);
+     * behind Sentinel also Sentinel's view (the primary it names, TILT mode).
      *
      * @param key the key, a hash
      * @return the description

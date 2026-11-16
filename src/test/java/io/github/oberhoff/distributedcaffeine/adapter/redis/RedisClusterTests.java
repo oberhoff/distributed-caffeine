@@ -59,7 +59,7 @@ abstract class RedisClusterTests {
         @Override
         protected Outage outage() {
             return new RedisOutage(() -> cluster.ownClient(RedisOutage.Library.LETTUCE), cluster::containers,
-                    cluster.losesPrimary() ? cluster::withoutPrimary : null, false);
+                    cluster.losesPrimary() ? cluster::withoutPrimary : null, false, cluster::describe);
         }
     }
 
@@ -69,7 +69,7 @@ abstract class RedisClusterTests {
         @Override
         protected Outage outage() {
             return new RedisOutage(() -> cluster.ownClient(RedisOutage.Library.JEDIS), cluster::containers,
-                    cluster.losesPrimary() ? cluster::withoutPrimary : null, true);
+                    cluster.losesPrimary() ? cluster::withoutPrimary : null, true, cluster::describe);
         }
     }
 
@@ -79,7 +79,7 @@ abstract class RedisClusterTests {
         @Override
         protected Outage outage() {
             return new RedisOutage(() -> cluster.ownClient(RedisOutage.Library.REDISSON), cluster::containers,
-                    cluster.losesPrimary() ? cluster::withoutPrimary : null, false);
+                    cluster.losesPrimary() ? cluster::withoutPrimary : null, false, cluster::describe);
         }
     }
 

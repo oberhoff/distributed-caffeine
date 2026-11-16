@@ -419,6 +419,15 @@ final class RedisSentinel implements RedisTopology, AutoCloseable {
                 described.append("node ").append(node).append(": ").append(e.getMessage()).append("; ");
             }
         }
+        // Sentinel's own view, which may differ from the nodes' (a node it demoted still taking writes as a primary)
+        try (StatefulRedisSentinelConnection<String, String> sentinel = sentinel()) {
+            String info = sentinel.sync().info("sentinel");
+            described.append("Sentinel: primary node ").append(primary()).append(", ")
+                    .append(info.lines().filter(line -> line.startsWith("sentinel_tilt:")).findFirst()
+                            .orElse("sentinel_tilt unknown").trim());
+        } catch (RuntimeException e) {
+            described.append("Sentinel: ").append(e.getMessage());
+        }
         return described.toString();
     }
 

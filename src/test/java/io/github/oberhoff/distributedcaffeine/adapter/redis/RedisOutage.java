@@ -65,18 +65,22 @@ final class RedisOutage implements Outage {
     private final Supplier<Client> clients;
     private final Supplier<List<GenericContainer<?>>> containers;
     private final @Nullable Function<String, Interruption> withoutPrimary;
+    private final Function<String, String> describe;
     private final List<Client> opened = new ArrayList<>();
     // clients created before any outage, for a library that cannot create them during one
     private final Deque<Client> created = new ArrayDeque<>();
 
     // withoutPrimary: given a key of the cache's slot, its primary lost until closed; null where not supported.
     // createdBefore: the library's clients cannot be created while the servers are out, so the two a test uses (the
-    // other instance's and the started one's) are created now
+    // other instance's and the started one's) are created now. describe: the topology's description of a row's shard
+    // (RedisTopology#describe)
     RedisOutage(Supplier<Client> clients, Supplier<List<GenericContainer<?>>> containers,
-                @Nullable Function<String, Interruption> withoutPrimary, boolean createdBefore) {
+                @Nullable Function<String, Interruption> withoutPrimary, boolean createdBefore,
+                Function<String, String> describe) {
         this.clients = clients;
         this.containers = containers;
         this.withoutPrimary = withoutPrimary;
+        this.describe = describe;
         if (createdBefore) {
             for (int i = 0; i < 2; i++) {
                 Client client = clients.get();
@@ -112,6 +116,11 @@ final class RedisOutage implements Outage {
             throw new UnsupportedOperationException("no primary to lose here");
         }
         return withoutPrimary.apply(new RedisKeys(name, RedisAdapter.DEFAULT_DISCRIMINATOR).schema());
+    }
+
+    @Override
+    public String describe(String key) {
+        return describe.apply(new RedisKeys(name, RedisAdapter.DEFAULT_DISCRIMINATOR).row(key));
     }
 
     @Override
