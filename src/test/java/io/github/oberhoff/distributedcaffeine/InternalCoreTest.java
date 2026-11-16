@@ -69,9 +69,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.await;
+import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.awaitUpTo;
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.pause;
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -1159,19 +1161,27 @@ public class InternalCoreTest {
         // the in-memory store's faults: skipped on a real database before anything is set up
         InMemoryDatabase faults = backend.faults();
         AtomicInteger loads = new AtomicInteger();
-        DistributedLoadingCache<String, String> cache = loading(key -> "v" + loads.incrementAndGet());
+        // the removals, for a failure to say who replaced the copy: once (CI, 2026-11-16) v2 was never held after the
+        // refresh returned it with outcomeUnknown false, not reproduced locally in 65 runs
+        DistributedLoadingCache<String, String> cache = builder(LONG)
+                .withCaffeine(caffeine -> caffeine
+                        .removalListener((key, value, cause) -> removals.add(cause + " " + key + "=" + value)))
+                .build(key -> "v" + loads.incrementAndGet());
+        closeables.add(cache);
         assertThat(cache.get("k")).isEqualTo("v1");
         faults.failNextWrites(InternalStoreGuard.ATTEMPTS, outcomeUnknown); // every attempt of the refresh's write
 
         assertThat(cache.refresh("k").get(5, TimeUnit.SECONDS)).as("the store's failure does not fail the refresh")
                 .isEqualTo("v2");
-        if (!outcomeUnknown) {
-            // held, unconfirmed (a write that landed after all may already have dropped it with its own message)
-            await(() -> "v2".equals(cache.policy().getIfPresentQuietly("k")));
-        } else {
-            // the refresh's future completes before Caffeine installs its value: v1 until it is installed or dropped
-            await(() -> !"v1".equals(cache.policy().getIfPresentQuietly("k")));
-        }
+        // held, unconfirmed (a write that landed after all may already have dropped it with its own message); with
+        // the outcome unknown, the refresh's future completes before Caffeine installs its value: v1 until it is
+        // installed or dropped
+        BooleanSupplier settled = outcomeUnknown ? () -> !"v1".equals(cache.policy().getIfPresentQuietly("k"))
+                : () -> "v2".equals(cache.policy().getIfPresentQuietly("k"));
+        assertThat(awaitUpTo(settled, Duration.ofSeconds(20), Duration.ofMillis(5)))
+                .as("settled (held %s, loads %s, %s, removals %s)", cache.policy().getIfPresentQuietly("k"), loads,
+                        cache.distributedPolicy().stats(), removals)
+                .isTrue();
         faults.failNextWrites(0, false); // the store answers again
 
         // checked against the store: the refreshed value where the failed write landed after all, the stored one
