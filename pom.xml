@@ -33,7 +33,7 @@
         <assertj.version>3.27.7</assertj.version>
         <testcontainers.version>2.0.5</testcontainers.version>
         <hikaricp.version>7.1.0</hikaricp.version>
-        <mariadb.version>3.5.11</mariadb.version>
+        <mariadb.version>4.0.0</mariadb.version>
         <mysql.version>26.10.0</mysql.version>
         <lincheck.version>3.7</lincheck.version>
         <jmh.version>1.37</jmh.version>
