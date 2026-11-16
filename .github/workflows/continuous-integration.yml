@@ -9,34 +9,64 @@ on:
     branches:
       - '**'
 
+# read only: the jobs check out and report through the job's own tokens (annotations, summary, artifacts)
+permissions:
+  contents: read
+
+# a newer push to a pull request or another branch cancels the run it outdates, so that bursts (Dependabot opens
+# several pull requests at once) do not queue outdated groups for the 20 runners; on main and develop every commit
+# keeps its run and its result
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/develop' }}
+
 jobs:
   continuous-integration:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    # a group takes about 5-7 min: a hanging test ends here, not after GitHub's six hours
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
           # one runner per group, as in the nightly full matrix (nightly-full-matrix-tests.yml), so the store suites
-          # neither wait for nor disturb each other. Only the first group runs the whole build (Error Prone and
-          # NullAway, javadoc, packaging); the store groups compile without Error Prone and stop after the tests.
-          # Together the groups cover every test of a single run, the integration tests on the latest image of each
-          # store (-DrunsOnGitHub)
-          - name: Test in-memory
+          # neither wait for nor disturb each other, and groups of about 5-7 min each, as a run takes as long as its
+          # longest group. Only the first group runs the whole build (Error Prone and NullAway, javadoc, packaging);
+          # the others compile without Error Prone and stop after the tests. Together the groups cover every test of a
+          # single run, the integration tests on the latest image of each store (-DrunsOnGitHub)
+          # the in-memory tests in two groups: A with the whole build, B with the two longest classes (about 3 and
+          # 2.5 min on GitHub's runners)
+          - name: Test in-memory A
             goal: clean verify
-            tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
-          - name: Test MongoDB, PostgreSQL
+            tests: "!%regex[.*(IntegrationTest|jmh_generated|InternalPathParityTest|InternalPropertyTest).*]"
+          - name: Test in-memory B
             goal: -DskipErrorProne test
-            tests: "MongoIntegrationTest$*,PostgresIntegrationTest$*"
-          - name: Test Redis, Valkey
+            tests: "InternalPathParityTest,InternalPropertyTest"
+          - name: Test MongoDB
             goal: -DskipErrorProne test
-            tests: "RedisIntegrationTest$Redis_*,RedisIntegrationTest$Valkey_*"
-          - name: Test Dragonfly, Kvrocks
+            tests: "MongoIntegrationTest$*"
+          - name: Test PostgreSQL
             goal: -DskipErrorProne test
-            tests: "RedisIntegrationTest$Dragonfly_*,RedisIntegrationTest$Kvrocks_*"
-          - name: Test MariaDB, MySQL
+            tests: "PostgresIntegrationTest$*"
+          - name: Test Redis
             goal: -DskipErrorProne test
-            tests: "JdbcIntegrationTest$*"
+            tests: "RedisIntegrationTest$Redis_*"
+          - name: Test Valkey
+            goal: -DskipErrorProne test
+            tests: "RedisIntegrationTest$Valkey_*"
+          - name: Test Dragonfly
+            goal: -DskipErrorProne test
+            tests: "RedisIntegrationTest$Dragonfly_*"
+          - name: Test Kvrocks
+            goal: -DskipErrorProne test
+            tests: "RedisIntegrationTest$Kvrocks_*"
+          - name: Test MariaDB
+            goal: -DskipErrorProne test
+            tests: "JdbcIntegrationTest$MariaDB_*"
+          - name: Test MySQL
+            goal: -DskipErrorProne test
+            tests: "JdbcIntegrationTest$MySQL_*"
     steps:
       - name: Checkout branch
         uses: actions/checkout@v7
@@ -55,32 +85,11 @@ jobs:
         # nothing tested. Single quotes: in double quotes bash expands the nested class names ($Redis_*) as variables
         # and every group runs the whole test class
         run: mvn -B ${{ matrix.goal }} -DrunsOnGitHub '-Dtest=${{ matrix.tests }}'
-      # the failures each test JVM recorded (testing.FailureLog), as Surefire's reports keep only the last topology
-      # of a class: an annotation each, readable through the API (a job's check run), the whole list in the job
-      # summary (GitHub shows at most 10 error annotations per step), and the files as an artifact
       - name: Report failed tests
         if: failure()
-        run: |
-          shopt -s nullglob
-          files=(target/test-failures/*.txt)
-          [ ${#files[@]} -gt 0 ] || exit 0
-          {
-            echo "### Failed tests"
-            echo
-            sort -u "${files[@]}" | while IFS=$'\t' read -r test message; do echo "- **${test}**: ${message}"; done
-          } >> "$GITHUB_STEP_SUMMARY"
-          sort -u "${files[@]}" | while IFS=$'\t' read -r test message; do
-            title=${test//%/%25}; title=${title//,/%2C}; title=${title//:/%3A}
-            echo "::error title=${title}::${message//%/%25}"
-          done
-      - name: Keep the failed tests
-        if: failure()
-        uses: actions/upload-artifact@v7
+        uses: ./.github/workflows/common/report-failed-tests
         with:
-          name: failed-tests-${{ strategy.job-index }}
-          path: target/test-failures/
-          if-no-files-found: ignore
-          retention-days: 14
+          artifact-name: failed-tests-${{ strategy.job-index }}
 
   # one check under the name the single job had, which branch protection can require however the groups change;
   # always(), as a job skipped after a failed group would count as passed
@@ -89,6 +98,7 @@ jobs:
     needs: continuous-integration
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Require every group to pass
         run: test "${{ needs.continuous-integration.result }}" = success

@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import io.github.oberhoff.distributedcaffeine.testing.ShardedScenarios;
 import org.jetbrains.lincheck.datastructures.IntGen;
 import org.jetbrains.lincheck.datastructures.ModelCheckingOptions;
 import org.jetbrains.lincheck.datastructures.Operation;
@@ -192,8 +193,9 @@ public abstract class AbstractTwoInstanceLinearizabilityTest {
     @Test
     @EnabledIfSystemProperty(named = "modelchecking", matches = "true")
     void model_checking() {
-        new ModelCheckingOptions().iterations(10).invocationsPerIteration(500).threads(3).actorsPerThread(3)
-                .sequentialSpecification(Model.class).check(getClass());
+        // a shard of the scenarios on request, to check them in parallel jobs (-Dlincheck.shard=k/n)
+        ShardedScenarios.options(new ModelCheckingOptions(), 10).invocationsPerIteration(500).threads(3)
+                .actorsPerThread(3).sequentialSpecification(Model.class).check(getClass());
     }
 
     @Test

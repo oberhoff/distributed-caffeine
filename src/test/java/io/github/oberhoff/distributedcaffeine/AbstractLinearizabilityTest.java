@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import io.github.oberhoff.distributedcaffeine.testing.ShardedScenarios;
 import org.jetbrains.lincheck.datastructures.IntGen;
 import org.jetbrains.lincheck.datastructures.ModelCheckingOptions;
 import org.jetbrains.lincheck.datastructures.Operation;
@@ -194,8 +195,9 @@ public abstract class AbstractLinearizabilityTest {
     @Test
     @EnabledIfSystemProperty(named = "modelchecking", matches = "true")
     void model_checking() {
-        // more on request, to hunt a rare interleaving (-Dlincheck.iterations=…)
-        new ModelCheckingOptions().iterations(Integer.getInteger("lincheck.iterations", 10))
+        // more on request, to hunt a rare interleaving (-Dlincheck.iterations=…), and a shard of them, to check them
+        // in parallel jobs (-Dlincheck.shard=k/n)
+        ShardedScenarios.options(new ModelCheckingOptions(), Integer.getInteger("lincheck.iterations", 10))
                 .invocationsPerIteration(500)
                 .threads(3).actorsPerThread(3)
                 .sequentialSpecification(model()).check(getClass());

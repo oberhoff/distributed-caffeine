@@ -160,6 +160,19 @@ class InternalStatsTest {
     }
 
     @Test
+    void a_put_over_a_row_ahead_reports_it_by_itself_without_a_feed() {
+        assumeTrue(keepsProposals(), "a store assigning every write keeps no proposal ahead");
+        writeAhead(new InternalVersion().fresh() + (TimeUnit.HOURS.toMillis(1) << 20));
+        // no subscription: no message of its own write tells the clock, only the write's result or a read
+        DistributedCache<String, String> cache = track(builder().withDistributionMode(DistributionMode.NONE).build());
+
+        cache.put("k", "v");
+
+        assertThat(stats(cache).clockAheadCount()).as("seen in the put's result or the read of its refusal")
+                .isPositive();
+    }
+
+    @Test
     void a_row_a_year_ahead_is_written_over_without_carrying_the_clock_along() {
         Assumptions.assumeTrue(keepsProposals(), "a store assigning every write keeps no proposal far ahead: see "
                 + "the test below");
@@ -326,7 +339,9 @@ class InternalStatsTest {
         assertThat(holder.getIfPresent("k")).isEqualTo("v");
 
         database.resumeDelivery();
+        // counted one after the other on the store's thread: the message, then what became of it
         await(() -> stats(holder).writtenMessageCount() == 1);
+        await(() -> stats(holder).ignoredMessageCount() + stats(holder).replacedCount() >= 1);
         assertThat(stats(holder).ignoredMessageCount()).isEqualTo(1);
         assertThat(stats(holder).replacedCount()).isZero();
     }

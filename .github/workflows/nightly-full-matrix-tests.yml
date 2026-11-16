@@ -9,10 +9,15 @@ on:
     - cron: "0 2 * * *"
   workflow_dispatch:
 
+# read only: the marker lives in the Actions cache, and the jobs report through their own tokens
+permissions:
+  contents: read
+
 jobs:
   changes:
     name: Check for changes since the last nightly
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       sha: ${{ steps.head.outputs.sha }}
       changed: ${{ github.event_name != 'schedule' || steps.marker.outputs.cache-hit != 'true' }}
@@ -48,87 +53,65 @@ jobs:
     needs: changes
     if: needs.changes.outputs.changed == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # most jobs take up to about 25 min on a slow day, a hanging test ending here; a job naming a timeout of its own
+    # (interleavings A) gets that
+    timeout-minutes: ${{ matrix.timeout || 45 }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # a job per store major, so a failed job names the major and "Re-run failed jobs" repeats only that one; the
-          # setup and compiling cost about 30 s per job. Longest first, as at most 20 jobs run at once (account-wide)
-          # and the rest wait: the bound is the interleavings job (50-70 min on GitHub's runners), while the whole
-          # matrix is about 800 runner-minutes, so the queued jobs still finish before it. Then the store majors
-          # (MongoDB, Redis and Valkey about 20-30 min each, MySQL about 18, PostgreSQL about 12), the in-memory suites
-          # on each store profile (the default is jdbc), and MariaDB, the shortest, last. The experiments
-          # (-Dexperiments) and the managed Redis services (-Dredis.external) stay manual. Model checking in jobs of
-          # its own, apart from the in-memory suites: it takes about 50-70 min for the interleavings and 35-45 min for
-          # each of the three linearizability classes (measured 2026-11-12, when one job with the in-memory suites ran
-          # into the timeout, and 2026-11-16). The linearizability classes run in three JVMs at once (a JVM per class,
-          # reuseForks=false), as model checking keeps about one of the runner's four CPUs busy: one after another they
-          # took 119 of the 120 min
-          - name: Test model checking, interleavings
-            tests: "InternalInterleavingTest"
+          # small jobs of at most about 15-20 min, as GitHub starts matrix jobs in no particular order and at most 20
+          # run at once (account-wide), the rest waiting: a run then takes about its runner-minutes / 20 plus its
+          # longest job, whichever jobs start first (seen 2026-11-16, when store majors took the slots while the
+          # 50-70 min model checking jobs waited). A failed job names its part, and "Re-run failed jobs" repeats only
+          # that one; the setup and compiling cost about 30 s per job. The experiments (-Dexperiments) and the managed
+          # Redis services (-Dredis.external) stay manual
+          # model checking: the interleavings by method, D every method that A to C leave, so that a new one runs
+          # without a change here. A method takes about 3-7 min on GitHub's runners (500 invocations; their speed
+          # varies by a factor of two), a_load_finding_* six times that (3,000), so its job alone has a longer bound.
+          # The linearizability classes in three shards each, a third of their Lincheck scenarios per job
+          # (ShardedScenarios), their stress tests running in the in-memory suites
+          - name: Test model checking, interleavings A
+            tests: "InternalInterleavingTest#a_load_finding_*"
             flags: -Dmodelchecking=true
-          - name: Test model checking, linearizability
-            tests: "InternalLinearizability*Test"
-            flags: -Dmodelchecking=true -DforkCount=3
-          - name: Test MongoDB 9
-            tests: "MongoIntegrationTest$Mongo_9_*"
-          - name: Test MongoDB 4
-            tests: "MongoIntegrationTest$Mongo_4_*"
-          - name: Test Redis 6
-            tests: "RedisIntegrationTest$Redis_6_*"
-          - name: Test MongoDB 8
-            tests: "MongoIntegrationTest$Mongo_8_*"
-          - name: Test MongoDB 7
-            tests: "MongoIntegrationTest$Mongo_7_*"
-          - name: Test MongoDB 6
-            tests: "MongoIntegrationTest$Mongo_6_*"
-          - name: Test Redis 7
-            tests: "RedisIntegrationTest$Redis_7_*"
-          - name: Test Redis 8
-            tests: "RedisIntegrationTest$Redis_8_*"
-          - name: Test Valkey 7
-            tests: "RedisIntegrationTest$Valkey_7_*"
-          - name: Test Valkey 8
-            tests: "RedisIntegrationTest$Valkey_8_*"
-          - name: Test Valkey 9
-            tests: "RedisIntegrationTest$Valkey_9_*"
-          - name: Test Dragonfly 1
-            tests: "RedisIntegrationTest$Dragonfly_1_*"
-          - name: Test Dragonfly 2
-            tests: "RedisIntegrationTest$Dragonfly_2_*"
-          - name: Test Kvrocks 2
-            tests: "RedisIntegrationTest$Kvrocks_2_*"
-          - name: Test MongoDB 5
-            tests: "MongoIntegrationTest$Mongo_5_*"
-          - name: Test MySQL 5
-            tests: "JdbcIntegrationTest$MySQL_5_*"
-          - name: Test MySQL 26
-            tests: "JdbcIntegrationTest$MySQL_26_*"
-          - name: Test MySQL 8
-            tests: "JdbcIntegrationTest$MySQL_8_*"
-          - name: Test MySQL 9
-            tests: "JdbcIntegrationTest$MySQL_9_*"
-          - name: Test PostgreSQL 18
-            tests: "PostgresIntegrationTest$Postgres_18_*"
-          - name: Test PostgreSQL 9
-            tests: "PostgresIntegrationTest$Postgres_9_*"
-          - name: Test PostgreSQL 17
-            tests: "PostgresIntegrationTest$Postgres_17_*"
-          - name: Test PostgreSQL 16
-            tests: "PostgresIntegrationTest$Postgres_16_*"
-          - name: Test PostgreSQL 15
-            tests: "PostgresIntegrationTest$Postgres_15_*"
-          - name: Test PostgreSQL 14
-            tests: "PostgresIntegrationTest$Postgres_14_*"
-          - name: Test PostgreSQL 13
-            tests: "PostgresIntegrationTest$Postgres_13_*"
-          - name: Test PostgreSQL 12
-            tests: "PostgresIntegrationTest$Postgres_12_*"
-          - name: Test PostgreSQL 11
-            tests: "PostgresIntegrationTest$Postgres_11_*"
-          - name: Test PostgreSQL 10
-            tests: "PostgresIntegrationTest$Postgres_10_*"
+            timeout: 75
+          - name: Test model checking, interleavings B
+            tests: "InternalInterleavingTest#a_load_racing_a_*"
+            flags: -Dmodelchecking=true
+          - name: Test model checking, interleavings C
+            tests: "InternalInterleavingTest#two_*"
+            flags: -Dmodelchecking=true
+          - name: Test model checking, interleavings D
+            tests: "InternalInterleavingTest,!InternalInterleavingTest#a_load_finding_*+a_load_racing_a_*+two_*"
+            flags: -Dmodelchecking=true
+          - name: Test model checking, linearizability, one instance 1/3
+            tests: "InternalLinearizabilityTest#model_checking"
+            flags: -Dmodelchecking=true -Dlincheck.shard=1/3
+          - name: Test model checking, linearizability, one instance 2/3
+            tests: "InternalLinearizabilityTest#model_checking"
+            flags: -Dmodelchecking=true -Dlincheck.shard=2/3
+          - name: Test model checking, linearizability, one instance 3/3
+            tests: "InternalLinearizabilityTest#model_checking"
+            flags: -Dmodelchecking=true -Dlincheck.shard=3/3
+          - name: Test model checking, linearizability, invalidateAll 1/3
+            tests: "InternalLinearizabilityInvalidateAllTest#model_checking"
+            flags: -Dmodelchecking=true -Dlincheck.shard=1/3
+          - name: Test model checking, linearizability, invalidateAll 2/3
+            tests: "InternalLinearizabilityInvalidateAllTest#model_checking"
+            flags: -Dmodelchecking=true -Dlincheck.shard=2/3
+          - name: Test model checking, linearizability, invalidateAll 3/3
+            tests: "InternalLinearizabilityInvalidateAllTest#model_checking"
+            flags: -Dmodelchecking=true -Dlincheck.shard=3/3
+          - name: Test model checking, linearizability, two instances 1/3
+            tests: "InternalLinearizabilityTwoInstancesTest#model_checking"
+            flags: -Dmodelchecking=true -Dlincheck.shard=1/3
+          - name: Test model checking, linearizability, two instances 2/3
+            tests: "InternalLinearizabilityTwoInstancesTest#model_checking"
+            flags: -Dmodelchecking=true -Dlincheck.shard=2/3
+          - name: Test model checking, linearizability, two instances 3/3
+            tests: "InternalLinearizabilityTwoInstancesTest#model_checking"
+            flags: -Dmodelchecking=true -Dlincheck.shard=3/3
+          # the in-memory suites on each store profile (the default is jdbc)
           - name: Test in-memory
             tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
           - name: Test in-memory, postgresql
@@ -146,14 +129,112 @@ jobs:
           - name: Test in-memory, postgresql-stepping
             tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
             flags: -Dinmemory.profile=postgresql-stepping
+          # a store major of about 15 min or more in two jobs: its heaviest topologies (MongoDB: the three-node replica
+          # sets, the only ones with the failover suite; the others: the latest image, the only one with every suite) and
+          # the rest of the major, by exclusion, so a topology added later runs in the rest without a change here
+          - name: Test MongoDB 4, three-node replica sets
+            tests: "MongoIntegrationTest$Mongo_4_*__Three_Node_Replica_Set"
+          - name: Test MongoDB 4, other topologies
+            tests: "MongoIntegrationTest$Mongo_4_*,!MongoIntegrationTest$Mongo_4_*__Three_Node_Replica_Set"
+          - name: Test MongoDB 5, three-node replica sets
+            tests: "MongoIntegrationTest$Mongo_5_*__Three_Node_Replica_Set"
+          - name: Test MongoDB 5, other topologies
+            tests: "MongoIntegrationTest$Mongo_5_*,!MongoIntegrationTest$Mongo_5_*__Three_Node_Replica_Set"
+          - name: Test MongoDB 6, three-node replica sets
+            tests: "MongoIntegrationTest$Mongo_6_*__Three_Node_Replica_Set"
+          - name: Test MongoDB 6, other topologies
+            tests: "MongoIntegrationTest$Mongo_6_*,!MongoIntegrationTest$Mongo_6_*__Three_Node_Replica_Set"
+          - name: Test MongoDB 7, three-node replica sets
+            tests: "MongoIntegrationTest$Mongo_7_*__Three_Node_Replica_Set"
+          - name: Test MongoDB 7, other topologies
+            tests: "MongoIntegrationTest$Mongo_7_*,!MongoIntegrationTest$Mongo_7_*__Three_Node_Replica_Set"
+          - name: Test MongoDB 8, three-node replica sets
+            tests: "MongoIntegrationTest$Mongo_8_*__Three_Node_Replica_Set"
+          - name: Test MongoDB 8, other topologies
+            tests: "MongoIntegrationTest$Mongo_8_*,!MongoIntegrationTest$Mongo_8_*__Three_Node_Replica_Set"
+          - name: Test MongoDB 9, three-node replica sets
+            tests: "MongoIntegrationTest$Mongo_9_*__Three_Node_Replica_Set"
+          - name: Test MongoDB 9, other topologies
+            tests: "MongoIntegrationTest$Mongo_9_*,!MongoIntegrationTest$Mongo_9_*__Three_Node_Replica_Set"
+          - name: Test Redis 6, latest
+            tests: "RedisIntegrationTest$Redis_6_2_latest"
+          - name: Test Redis 6, other topologies
+            tests: "RedisIntegrationTest$Redis_6_*,!RedisIntegrationTest$Redis_6_2_latest"
+          - name: Test Redis 7, latest
+            tests: "RedisIntegrationTest$Redis_7_latest"
+          - name: Test Redis 7, other topologies
+            tests: "RedisIntegrationTest$Redis_7_*,!RedisIntegrationTest$Redis_7_latest"
+          - name: Test Redis 8, latest
+            tests: "RedisIntegrationTest$Redis_8_latest"
+          - name: Test Redis 8, other topologies
+            tests: "RedisIntegrationTest$Redis_8_*,!RedisIntegrationTest$Redis_8_latest"
+          - name: Test Valkey 7, latest
+            tests: "RedisIntegrationTest$Valkey_7_2_latest"
+          - name: Test Valkey 7, other topologies
+            tests: "RedisIntegrationTest$Valkey_7_*,!RedisIntegrationTest$Valkey_7_2_latest"
+          - name: Test Valkey 8, latest
+            tests: "RedisIntegrationTest$Valkey_8_latest"
+          - name: Test Valkey 8, other topologies
+            tests: "RedisIntegrationTest$Valkey_8_*,!RedisIntegrationTest$Valkey_8_latest"
+          - name: Test Valkey 9, latest
+            tests: "RedisIntegrationTest$Valkey_9_latest"
+          - name: Test Valkey 9, other topologies
+            tests: "RedisIntegrationTest$Valkey_9_*,!RedisIntegrationTest$Valkey_9_latest"
+          - name: Test Dragonfly 1, latest
+            tests: "RedisIntegrationTest$Dragonfly_1_latest"
+          - name: Test Dragonfly 1, other topologies
+            tests: "RedisIntegrationTest$Dragonfly_1_*,!RedisIntegrationTest$Dragonfly_1_latest"
+          - name: Test Dragonfly 2, latest
+            tests: "RedisIntegrationTest$Dragonfly_2_latest"
+          - name: Test Dragonfly 2, other topologies
+            tests: "RedisIntegrationTest$Dragonfly_2_*,!RedisIntegrationTest$Dragonfly_2_latest"
+          - name: Test Kvrocks 2
+            tests: "RedisIntegrationTest$Kvrocks_2_*"
+          - name: Test MySQL 5, latest
+            tests: "JdbcIntegrationTest$MySQL_5_7_latest"
+          - name: Test MySQL 5, other topologies
+            tests: "JdbcIntegrationTest$MySQL_5_*,!JdbcIntegrationTest$MySQL_5_7_latest"
+          - name: Test MySQL 8, latest
+            tests: "JdbcIntegrationTest$MySQL_8_latest"
+          - name: Test MySQL 8, other topologies
+            tests: "JdbcIntegrationTest$MySQL_8_*,!JdbcIntegrationTest$MySQL_8_latest"
+          - name: Test MySQL 9, latest
+            tests: "JdbcIntegrationTest$MySQL_9_latest"
+          - name: Test MySQL 9, other topologies
+            tests: "JdbcIntegrationTest$MySQL_9_*,!JdbcIntegrationTest$MySQL_9_latest"
+          - name: Test MySQL 26, latest
+            tests: "JdbcIntegrationTest$MySQL_26_latest"
+          - name: Test MySQL 26, other topologies
+            tests: "JdbcIntegrationTest$MySQL_26_*,!JdbcIntegrationTest$MySQL_26_latest"
+          # the store majors under about 15 min in one job each
+          - name: Test PostgreSQL 9
+            tests: "PostgresIntegrationTest$Postgres_9_*"
+          - name: Test PostgreSQL 10
+            tests: "PostgresIntegrationTest$Postgres_10_*"
+          - name: Test PostgreSQL 11
+            tests: "PostgresIntegrationTest$Postgres_11_*"
+          - name: Test PostgreSQL 12
+            tests: "PostgresIntegrationTest$Postgres_12_*"
+          - name: Test PostgreSQL 13
+            tests: "PostgresIntegrationTest$Postgres_13_*"
+          - name: Test PostgreSQL 14
+            tests: "PostgresIntegrationTest$Postgres_14_*"
+          - name: Test PostgreSQL 15
+            tests: "PostgresIntegrationTest$Postgres_15_*"
+          - name: Test PostgreSQL 16
+            tests: "PostgresIntegrationTest$Postgres_16_*"
+          - name: Test PostgreSQL 17
+            tests: "PostgresIntegrationTest$Postgres_17_*"
+          - name: Test PostgreSQL 18
+            tests: "PostgresIntegrationTest$Postgres_18_*"
           - name: Test MariaDB 10
             tests: "JdbcIntegrationTest$MariaDB_10_*"
-          - name: Test MariaDB 13
-            tests: "JdbcIntegrationTest$MariaDB_13_*"
           - name: Test MariaDB 11
             tests: "JdbcIntegrationTest$MariaDB_11_*"
           - name: Test MariaDB 12
             tests: "JdbcIntegrationTest$MariaDB_12_*"
+          - name: Test MariaDB 13
+            tests: "JdbcIntegrationTest$MariaDB_13_*"
     steps:
       - name: Checkout branch
         uses: actions/checkout@v7
@@ -172,29 +253,8 @@ jobs:
         # tests) fails instead of passing with nothing tested. Single quotes: in double quotes bash expands the nested
         # class names ($Mongo_4_*) as variables and every group runs the whole test class
         run: mvn -B -DskipErrorProne test '-Dtest=${{ matrix.tests }}' ${{ matrix.flags }}
-      # the failures each test JVM recorded (testing.FailureLog), as Surefire's reports keep only the last topology
-      # of a class: an annotation each, readable through the API (a job's check run), the whole list in the job
-      # summary (GitHub shows at most 10 error annotations per step), and the files as an artifact
       - name: Report failed tests
         if: failure()
-        run: |
-          shopt -s nullglob
-          files=(target/test-failures/*.txt)
-          [ ${#files[@]} -gt 0 ] || exit 0
-          {
-            echo "### Failed tests"
-            echo
-            sort -u "${files[@]}" | while IFS=$'\t' read -r test message; do echo "- **${test}**: ${message}"; done
-          } >> "$GITHUB_STEP_SUMMARY"
-          sort -u "${files[@]}" | while IFS=$'\t' read -r test message; do
-            title=${test//%/%25}; title=${title//,/%2C}; title=${title//:/%3A}
-            echo "::error title=${title}::${message//%/%25}"
-          done
-      - name: Keep the failed tests
-        if: failure()
-        uses: actions/upload-artifact@v7
+        uses: ./.github/workflows/common/report-failed-tests
         with:
-          name: failed-tests-${{ strategy.job-index }}
-          path: target/test-failures/
-          if-no-files-found: ignore
-          retention-days: 14
+          artifact-name: failed-tests-${{ strategy.job-index }}

@@ -1260,9 +1260,12 @@ final class InternalCore<K, V> {
             WriteResult result = put ? guard.put(() -> store.write(attempted))
                     : guard.write(() -> store.write(attempted));
             // applied at the version the store reports: its own, where it assigns one (VISION.md, "Target design:
-            // versions applied as well as each store can")
+            // versions applied as well as each store can"). Seen like a version read: an assigning store puts it
+            // above a row written ahead, which this clock would otherwise learn only from its own write's message,
+            // after the write returned, and without a feed (distribution mode NONE) never
             for (Write write : attempted) {
                 if (!result.isRefused(write) && result.version(write) != write.version()) {
+                    clock.observe(result.version(write));
                     writes.put(write.hash(), write.at(result.version(write)));
                 }
             }

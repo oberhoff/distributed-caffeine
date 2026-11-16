@@ -209,8 +209,11 @@ class InternalInterleavingTest {
     // answered absent from the memory of a load that read before the write. The invariant alone would pass a stale
     // absence (it serves nothing)
     // with 3,000 interleavings: its window (the write's message applied between the load's read and its recording
-    // the absence) was missed in 500, found within 36 s in 3,000 (an absence kept despite the raised reservation)
+    // the absence) was missed in 500, found within 36 s in 3,000 (an absence kept despite the raised reservation).
+    // Six times the others' time: about 6 min locally, 20-40 min on GitHub's runners, whose speed varies by a factor
+    // of two
     @Test
+    @Timeout(3_600)
     void a_load_finding_nothing_racing_a_write_elsewhere() {
         race(3_000, StoreProfile.REDIS, fixture -> {
         }, fixture -> List.of(
