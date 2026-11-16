@@ -53,54 +53,82 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # longest first, as at most 20 jobs run at once and the rest wait: model checking first, the in-memory
-          # suites on each store profile (the default is jdbc), the shortest, last; the experiments (-Dexperiments)
-          # and the managed Redis services (-Dredis.external) stay manual. Model checking in two groups of its own,
-          # apart from the in-memory suites: on GitHub's runners it takes about 50 min for the interleavings and over
-          # an hour for the linearizability tests (measured 2026-11-12, when one group with the in-memory suites ran
-          # into the timeout)
+          # a job per store major, so a failed job names the major and "Re-run failed jobs" repeats only that one; the
+          # setup and compiling cost about 30 s per job. Longest first, as at most 20 jobs run at once (account-wide)
+          # and the rest wait: the bound is the interleavings job (50-70 min on GitHub's runners), while the whole
+          # matrix is about 800 runner-minutes, so the queued jobs still finish before it. Then the store majors
+          # (MongoDB, Redis and Valkey about 20-30 min each, MySQL about 18, PostgreSQL about 12), the in-memory suites
+          # on each store profile (the default is jdbc), and MariaDB, the shortest, last. The experiments
+          # (-Dexperiments) and the managed Redis services (-Dredis.external) stay manual. Model checking in jobs of
+          # its own, apart from the in-memory suites: it takes about 50-70 min for the interleavings and 35-45 min for
+          # each of the three linearizability classes (measured 2026-11-12, when one job with the in-memory suites ran
+          # into the timeout, and 2026-11-16). The linearizability classes run in three JVMs at once (a JVM per class,
+          # reuseForks=false), as model checking keeps about one of the runner's four CPUs busy: one after another they
+          # took 119 of the 120 min
           - name: Test model checking, interleavings
             tests: "InternalInterleavingTest"
             flags: -Dmodelchecking=true
           - name: Test model checking, linearizability
             tests: "InternalLinearizability*Test"
-            flags: -Dmodelchecking=true
-          - name: Test MongoDB 4-5
-            tests: "MongoIntegrationTest$Mongo_4_*,MongoIntegrationTest$Mongo_5_*"
-          - name: Test MongoDB 6-7
-            tests: "MongoIntegrationTest$Mongo_6_*,MongoIntegrationTest$Mongo_7_*"
-          - name: Test MongoDB 8-9
-            tests: "MongoIntegrationTest$Mongo_8_*,MongoIntegrationTest$Mongo_9_*"
-          - name: Test PostgreSQL 9-13
-            tests: "PostgresIntegrationTest$Postgres_9_*,PostgresIntegrationTest$Postgres_10_*,PostgresIntegrationTest$Postgres_11_*,PostgresIntegrationTest$Postgres_12_*,PostgresIntegrationTest$Postgres_13_*"
-          - name: Test PostgreSQL 14-18
-            tests: "PostgresIntegrationTest$Postgres_14_*,PostgresIntegrationTest$Postgres_15_*,PostgresIntegrationTest$Postgres_16_*,PostgresIntegrationTest$Postgres_17_*,PostgresIntegrationTest$Postgres_18_*"
+            flags: -Dmodelchecking=true -DforkCount=3
+          - name: Test MongoDB 9
+            tests: "MongoIntegrationTest$Mongo_9_*"
+          - name: Test MongoDB 4
+            tests: "MongoIntegrationTest$Mongo_4_*"
           - name: Test Redis 6
             tests: "RedisIntegrationTest$Redis_6_*"
-          - name: Test Redis 7-8
-            tests: "RedisIntegrationTest$Redis_7_*,RedisIntegrationTest$Redis_8_*"
-          - name: Test Valkey
-            tests: "RedisIntegrationTest$Valkey_*"
-          - name: Test Dragonfly
-            tests: "RedisIntegrationTest$Dragonfly_*"
-          - name: Test Kvrocks
-            tests: "RedisIntegrationTest$Kvrocks_*"
-          - name: Test MariaDB 10
-            tests: "JdbcIntegrationTest$MariaDB_10_*"
-          - name: Test MariaDB 11
-            tests: "JdbcIntegrationTest$MariaDB_11_*"
-          - name: Test MariaDB 12
-            tests: "JdbcIntegrationTest$MariaDB_12_*"
-          - name: Test MariaDB 13
-            tests: "JdbcIntegrationTest$MariaDB_13_*"
+          - name: Test MongoDB 8
+            tests: "MongoIntegrationTest$Mongo_8_*"
+          - name: Test MongoDB 7
+            tests: "MongoIntegrationTest$Mongo_7_*"
+          - name: Test MongoDB 6
+            tests: "MongoIntegrationTest$Mongo_6_*"
+          - name: Test Redis 7
+            tests: "RedisIntegrationTest$Redis_7_*"
+          - name: Test Redis 8
+            tests: "RedisIntegrationTest$Redis_8_*"
+          - name: Test Valkey 7
+            tests: "RedisIntegrationTest$Valkey_7_*"
+          - name: Test Valkey 8
+            tests: "RedisIntegrationTest$Valkey_8_*"
+          - name: Test Valkey 9
+            tests: "RedisIntegrationTest$Valkey_9_*"
+          - name: Test Dragonfly 1
+            tests: "RedisIntegrationTest$Dragonfly_1_*"
+          - name: Test Dragonfly 2
+            tests: "RedisIntegrationTest$Dragonfly_2_*"
+          - name: Test Kvrocks 2
+            tests: "RedisIntegrationTest$Kvrocks_2_*"
+          - name: Test MongoDB 5
+            tests: "MongoIntegrationTest$Mongo_5_*"
           - name: Test MySQL 5
             tests: "JdbcIntegrationTest$MySQL_5_*"
+          - name: Test MySQL 26
+            tests: "JdbcIntegrationTest$MySQL_26_*"
           - name: Test MySQL 8
             tests: "JdbcIntegrationTest$MySQL_8_*"
           - name: Test MySQL 9
             tests: "JdbcIntegrationTest$MySQL_9_*"
-          - name: Test MySQL 26
-            tests: "JdbcIntegrationTest$MySQL_26_*"
+          - name: Test PostgreSQL 18
+            tests: "PostgresIntegrationTest$Postgres_18_*"
+          - name: Test PostgreSQL 9
+            tests: "PostgresIntegrationTest$Postgres_9_*"
+          - name: Test PostgreSQL 17
+            tests: "PostgresIntegrationTest$Postgres_17_*"
+          - name: Test PostgreSQL 16
+            tests: "PostgresIntegrationTest$Postgres_16_*"
+          - name: Test PostgreSQL 15
+            tests: "PostgresIntegrationTest$Postgres_15_*"
+          - name: Test PostgreSQL 14
+            tests: "PostgresIntegrationTest$Postgres_14_*"
+          - name: Test PostgreSQL 13
+            tests: "PostgresIntegrationTest$Postgres_13_*"
+          - name: Test PostgreSQL 12
+            tests: "PostgresIntegrationTest$Postgres_12_*"
+          - name: Test PostgreSQL 11
+            tests: "PostgresIntegrationTest$Postgres_11_*"
+          - name: Test PostgreSQL 10
+            tests: "PostgresIntegrationTest$Postgres_10_*"
           - name: Test in-memory
             tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
           - name: Test in-memory, postgresql
@@ -118,6 +146,14 @@ jobs:
           - name: Test in-memory, postgresql-stepping
             tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
             flags: -Dinmemory.profile=postgresql-stepping
+          - name: Test MariaDB 10
+            tests: "JdbcIntegrationTest$MariaDB_10_*"
+          - name: Test MariaDB 13
+            tests: "JdbcIntegrationTest$MariaDB_13_*"
+          - name: Test MariaDB 11
+            tests: "JdbcIntegrationTest$MariaDB_11_*"
+          - name: Test MariaDB 12
+            tests: "JdbcIntegrationTest$MariaDB_12_*"
     steps:
       - name: Checkout branch
         uses: actions/checkout@v7

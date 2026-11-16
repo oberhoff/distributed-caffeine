@@ -72,7 +72,7 @@ final class JdbcReplication implements AutoCloseable {
         proxy = new SilencingProxy(primary.getHost(), primary.getMappedPort(3306));
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl("jdbc:" + driver + "://127.0.0.1:" + proxy.port() + "/" + primary.getDatabaseName()
-                + (mariadb ? "" : "?allowPublicKeyRetrieval=true&useSSL=false"));
+                + (mariadb ? "?sslMode=disable" : "?allowPublicKeyRetrieval=true&useSSL=false"));
         config.setUsername(primary.getUsername());
         config.setPassword(primary.getPassword());
         config.setMaximumPoolSize(8);
@@ -81,7 +81,8 @@ final class JdbcReplication implements AutoCloseable {
     }
 
     private JdbcDatabaseContainer<?> node(String image, String alias, int serverId) {
-        JdbcDatabaseContainer<?> node = mariadb ? new MariaDBContainer(image) : new MySQLContainer(image);
+        JdbcDatabaseContainer<?> node = mariadb
+                ? new MariaDBContainer(image).withUrlParam("sslMode", "disable") : new MySQLContainer(image);
         node.withNetwork(network).withNetworkAliases(alias);
         if (mariadb) {
             node.withCommand("--server-id=" + serverId, "--log-bin=binlog");

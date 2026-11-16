@@ -83,7 +83,8 @@ final class JdbcTestDatabase implements AutoCloseable {
 
     // started at a fixed host port, which it keeps across a restart (stopServer, startServer)
     private JdbcDatabaseContainer<?> server(String image, int port) {
-        JdbcDatabaseContainer<?> server = mysql ? new MySQLContainer(image) : new MariaDBContainer(image);
+        JdbcDatabaseContainer<?> server = mysql ? new MySQLContainer(image)
+                : new MariaDBContainer(image).withUrlParam("sslMode", "disable");
         server.withCommand("--character-set-server=utf8mb4")
                 .withCreateContainerCmdModifier(cmd -> cmd.withHostConfig(requireNonNull(cmd.getHostConfig())
                         .withPortBindings(new PortBinding(Binding.bindPort(port), ExposedPort.tcp(3306)))));
@@ -162,14 +163,15 @@ final class JdbcTestDatabase implements AutoCloseable {
     }
 
     // MySQL's default authentication sends the password encrypted by the server's key, which a connection without
-    // TLS must be allowed to fetch
+    // TLS must be allowed to fetch; MariaDB Connector/J 4 requires TLS by default, which MariaDB images before 11.4
+    // do not offer (no certificate of their own)
     static String url(String driver, String host, int port) {
         return get().urlOf(driver, host, port);
     }
 
     private String urlOf(String driver, String host, int port) {
         return "jdbc:" + driver + "://" + host + ":" + port + "/" + container.getDatabaseName()
-                + (mysql ? "?allowPublicKeyRetrieval=true&useSSL=false" : "");
+                + (mysql ? "?allowPublicKeyRetrieval=true&useSSL=false" : "?sslMode=disable");
     }
 
     private static HikariDataSource pool(String driver, String host, int port) {
