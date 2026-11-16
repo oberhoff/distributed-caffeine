@@ -20,7 +20,7 @@
         <caffeine.sources>${project.build.directory}/caffeine-sources</caffeine.sources>
         <caffeine.version>3.3.1</caffeine.version>
         <hash4j.version>0.31.0</hash4j.version>
-        <fory.version>1.7.7</fory.version>
+        <fory.version>1.7.8</fory.version>
         <jspecify.version>1.0.1</jspecify.version>
         <mongodb.version>5.14.0</mongodb.version>
         <postgresql.version>42.7.14</postgresql.version>
