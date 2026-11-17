@@ -30,6 +30,7 @@ import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Collection;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -126,8 +127,18 @@ final class InternalPendingStore implements Store, ChangeFeed {
     }
 
     @Override
+    public Instant time() {
+        return store().time();
+    }
+
+    @Override
     public WriteResult write(Collection<Write> writes) {
         return store().write(writes);
+    }
+
+    @Override
+    public WriteResult writeControl(Write control, Instant before) {
+        return store().writeControl(control, before);
     }
 
     @Override

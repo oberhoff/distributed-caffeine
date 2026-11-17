@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine.spi;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -99,6 +100,19 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
                                           long version);
 
     /**
+     * Writes the {@link Store#CONTROL_HASH control row} as {@link #advanceRow} writes a value, but backdated: with the
+     * write time the later of the row's current one and the last instant of the store's resolution before
+     * {@code before}, a new row with that instant ({@link Store#writeControl}).
+     *
+     * @param key     the key, as written
+     * @param value   the value
+     * @param version the version the row gets
+     * @param before  the earliest write time that stays visible
+     * @return whether it was written; {@code false} if the row has a version at least as large
+     */
+    protected abstract boolean advanceControl(byte[] key, byte[] value, long version, Instant before);
+
+    /**
      * Writes a row only if it still has the expected version.
      *
      * @param hash     the hash
@@ -144,7 +158,8 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
 
     /**
      * Returns the rows of the cache written within the given duration before the scan, by the store's clock, without
-     * key and value ({@link ChangeScan}); rows written earlier may be returned too.
+     * key and value ({@link ChangeScan}), and the {@link Store#CONTROL_HASH control row} whatever its write time; rows
+     * written earlier may be returned too.
      *
      * @param within how far back
      * @return the rows
@@ -204,6 +219,16 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
             }
         }
         return WriteResult.refused(conflicts);
+    }
+
+    @Override
+    public WriteResult writeControl(Write control, Instant before) {
+        if (!CONTROL_HASH.equals(control.hash()) || !control.isAdvance() || control.isTombstone()) {
+            throw new IllegalArgumentException("control must be an advancing value write of the control row");
+        }
+        boolean applied = advanceControl(requireNonNull(control.key()), requireNonNull(control.value()),
+                control.version(), requireNonNull(before, "before cannot be null"));
+        return WriteResult.refused(applied ? Set.of() : Set.of(CONTROL_HASH));
     }
 
     // one write by the primitive of its condition: false if the condition refused it

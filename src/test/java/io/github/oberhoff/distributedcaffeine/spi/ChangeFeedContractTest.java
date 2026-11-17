@@ -183,6 +183,20 @@ public abstract class ChangeFeedContractTest extends AbstractContractTest {
     }
 
     @Test
+    void contract1_a_backdated_write_of_the_control_row_is_announced_like_any_write() {
+        Store writer = open();
+        writer.write(List.of(entry("a", "1")));
+        RecordingListener observer = new RecordingListener();
+        subscribe(open(), observer);
+
+        long control = writtenControl(writer, writer.time().minus(Duration.ofHours(1)));
+
+        observer.await(m -> m.stream().anyMatch(message -> Store.CONTROL_HASH.equals(message.hash())), TIMEOUT);
+        assertThat(observer.settle(QUIET))
+                .containsExactly(new Change(Change.Kind.WRITTEN, Store.CONTROL_HASH, control));
+    }
+
+    @Test
     void contract1_expire_announces_only_the_rows_it_expired() {
         Store writer = open();
         // opened before the writes: opening a store takes long enough on some stores to age the young row

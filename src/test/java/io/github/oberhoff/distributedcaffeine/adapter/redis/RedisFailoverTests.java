@@ -17,6 +17,7 @@ package io.github.oberhoff.distributedcaffeine.adapter.redis;
 
 import io.github.oberhoff.distributedcaffeine.DistributedCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
+import io.github.oberhoff.distributedcaffeine.DistributedPolicy;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
@@ -34,11 +35,13 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.awaitUpTo;
+import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.pause;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -187,6 +190,50 @@ abstract class RedisFailoverTests {
         }
         put(writer, "revived");
         converges(holder, "revived");
+    }
+
+    // a refill across the primary dying (VISION.md, "Refill while serving"): the mark and the fill replicated before,
+    // invalidateAllBeforeMark retried until the replica that took over takes it, as an application retries a failed
+    // call (it is idempotent); then both caches drop what the refill did not write and keep what it did
+    @Test
+    void a_refill_rides_out_the_primary_dying_abruptly() {
+        Assumptions.assumeTrue(topology.revives(), "a killed node does not return as a replica here");
+        DistributedCache<String, String> writer = cache();
+        DistributedCache<String, String> holder = cache();
+        writer.putAll(Map.of("stale", "old", "fill", "old"));
+        assertThat(holder.getIfPresent("stale")).isEqualTo("old");
+        pause(50);
+        DistributedPolicy.StoreMark mark = writer.distributedPolicy().markStore();
+        writer.put("fill", "new");
+        pause(500); // replicated: the replica taking over has the fill
+
+        try {
+            topology.kill(row);
+            assertThat(awaitUpTo(() -> {
+                try {
+                    writer.distributedPolicy().invalidateAllBeforeMark(mark);
+                    return true;
+                } catch (StoreException e) {
+                    return false;
+                }
+            }, CONVERGENCE, Duration.ofMillis(200))).as("invalidated on the new primary").isTrue();
+            for (DistributedCache<String, String> cache : List.of(writer, holder)) {
+                assertThat(awaitUpTo(() -> quietly(cache, "stale") == null, CONVERGENCE, Duration.ofMillis(200)))
+                        .as("the key the refill did not write dropped").isTrue();
+                assertThat(awaitUpTo(() -> "new".equals(quietly(cache, "fill")), CONVERGENCE,
+                        Duration.ofMillis(200))).as("the refill's write kept").isTrue();
+            }
+        } finally {
+            topology.revive();
+        }
+    }
+
+    private static @Nullable String quietly(DistributedCache<String, String> cache, String key) {
+        try {
+            return cache.getIfPresent(key);
+        } catch (StoreException e) {
+            return "failed";
+        }
     }
 
     // resharding in a cluster: while a writer keeps writing, the slot of the cache's keyspace moves to another primary

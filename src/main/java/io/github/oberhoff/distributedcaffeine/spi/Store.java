@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.spi;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Collection;
 import java.util.Map;
 
@@ -39,7 +40,7 @@ import java.util.Map;
  *     (the core compares them with the age of the {@link #CONTROL_HASH control row}). An age is reported as it is,
  *     negative for a row written after that instant (a read that is not one snapshot, a clock stepped back), never
  *     raised to zero: two such rows would compare as equal. A clock that never goes backwards is best; a wall clock is
- *     fine within the core's allowance for skew.</li>
+ *     fine within the core's allowance for skew. {@link #time()} reads the same clock.</li>
  *     <li><b>Visibility and durability:</b> a read, on any instance of the cache, reflects every write that was
  *     confirmed (returned to its writer) before the read began: its version, or a later one. A confirmed write is not
  *     lost later, unless in an event (a crash, a failover) that every subscription of the change feed sees as a loss
@@ -115,6 +116,16 @@ public interface Store extends AutoCloseable {
         return Duration.ofMillis(10);
     }
 
+    /**
+     * Reads the store's time now, by the clock that sets the write times ({@link Row#age()}), so that a time read
+     * here and a write time compare: a write that begins after this call returned is written at this time or later,
+     * unless the clock steps back. The core takes it as the mark of {@code invalidateAllBeforeMark} (VISION.md,
+     * "Refill while serving"), read from where the {@link #CONTROL_HASH control row} is written.
+     *
+     * @return the store's time, at the resolution of its write times
+     */
+    Instant time();
+
     // writes: "announces" names what the store's ChangeFeed, if it has one, delivers on commit
 
     /**
@@ -136,6 +147,19 @@ public interface Store extends AutoCloseable {
      * @return which writes were refused, and the versions the store assigned other than proposed
      */
     WriteResult write(Collection<Write> writes);
+
+    /**
+     * Writes the {@link #CONTROL_HASH control row} backdated (VISION.md, "Refill while serving"): as {@link #write}
+     * writes an advancing value, announced the same way, but with the write time the later of the row's current one
+     * and the last instant of the store's resolution before {@code before}, decided and written as one step, so that
+     * the cut-off only ever moves forward. Every row written at or before the new write time counts as missing from
+     * then on; a row written at {@code before} itself is not, nor any written later.
+     *
+     * @param control an advancing write of the control row
+     * @param before  the earliest write time that stays visible, a time of {@link #time()}
+     * @return whether the write was refused, and the version the store assigned other than proposed
+     */
+    WriteResult writeControl(Write control, Instant before);
 
     // maintenance: scheduled by the core, idempotent here. Each call changes at most a limit of rows, so that no call
     // grows with the cache (one statement over millions of rows outlasted the store's timeout, measured: VISION.md,

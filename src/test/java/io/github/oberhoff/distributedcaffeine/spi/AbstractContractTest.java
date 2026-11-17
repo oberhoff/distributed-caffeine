@@ -22,6 +22,7 @@ import org.junit.jupiter.api.BeforeEach;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -209,6 +210,17 @@ public abstract class AbstractContractTest {
             throw new AssertionError("the write conflicted: " + write);
         }
         return result.version(write);
+    }
+
+    // writes the control row backdated (Store#writeControl) and returns the version it was applied at; it must not
+    // be refused
+    protected static long writtenControl(Store store, Instant before) {
+        Write control = control();
+        WriteResult result = store.writeControl(control, before);
+        if (result.isRefused(control)) {
+            throw new AssertionError("the backdated control row was refused");
+        }
+        return result.version(control);
     }
 
     // whether a single write was applied

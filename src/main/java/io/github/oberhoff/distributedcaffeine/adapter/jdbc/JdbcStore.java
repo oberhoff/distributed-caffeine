@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine.adapter.jdbc;
 import io.github.oberhoff.distributedcaffeine.spi.PrimitiveStore;
 import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.State;
+import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import org.jspecify.annotations.Nullable;
 
@@ -373,6 +374,18 @@ final class JdbcStore extends PrimitiveStore {
 
     // reads
 
+    // the server's clock, as every write time is set
+    @Override
+    public Instant time() {
+        return run(Kind.READ, connection -> {
+            try (PreparedStatement statement = prepare(connection, "SELECT " + dialect.now);
+                 ResultSet resultSet = statement.executeQuery()) {
+                resultSet.next();
+                return dialect.time(resultSet, 1);
+            }
+        });
+    }
+
     @Override
     @SuppressWarnings("java:S6909") // each chunk prepares a statement of its own, the discriminator set on each
     protected Map<String, Row> readRows(Collection<String> hashes) {
@@ -440,11 +453,18 @@ final class JdbcStore extends PrimitiveStore {
                             + answering + "): changes may have been missed", null, false, true);
                 }
             }
-            String sql = "SELECT id, state, version, write_time, %s FROM %s WHERE discriminator = ? AND write_time > ?"
+            // the control row whatever its write time (ChangeScan: a backdated one is stamped before every window),
+            // by its primary key in a second part rather than an OR, which would leave both indexes unused
+            String select = "SELECT id, state, version, write_time, %s FROM %s WHERE discriminator = ? AND "
                     .formatted(dialect.now, table);
+            String sql = select + "write_time > ? UNION ALL " + select + "id = ? AND write_time <= ?";
+            Object from = dialect.parameter(now.minus(within.toNanos() / 1_000, ChronoUnit.MICROS));
             try (PreparedStatement statement = prepare(connection, sql)) {
                 statement.setString(1, discriminator);
-                statement.setObject(2, dialect.parameter(now.minus(within.toNanos() / 1_000, ChronoUnit.MICROS)));
+                statement.setObject(2, from);
+                statement.setString(3, discriminator);
+                statement.setString(4, Store.CONTROL_HASH);
+                statement.setObject(5, from);
                 return heads(statement);
             }
         });
@@ -477,12 +497,27 @@ final class JdbcStore extends PrimitiveStore {
     @Override
     protected boolean advanceRow(String hash, byte @Nullable [] key, byte @Nullable [] value, State state,
                                  long version) {
+        return advance(hash, key, value, state, version, null);
+    }
+
+    // backdated: the last microsecond (DATETIME(6)) before the given time, never earlier than the row's write time
+    @Override
+    protected boolean advanceControl(byte[] key, byte[] value, long version, Instant before) {
+        return advance(Store.CONTROL_HASH, key, value, State.VALUE, version,
+                before.minusNanos(1).truncatedTo(ChronoUnit.MICROS));
+    }
+
+    // the write time the server's clock, or the given one (and the row's if later)
+    private boolean advance(String hash, byte @Nullable [] key, byte @Nullable [] value, State state, long version,
+                            @Nullable Instant writeTime) {
         String update = ("UPDATE %s SET k = COALESCE(?, k), v = ?, state = ?, version = ?, write_time = %s "
-                + "WHERE discriminator = ? AND id = ? AND version < ?").formatted(table, dialect.now);
+                + "WHERE discriminator = ? AND id = ? AND version < ?")
+                .formatted(table, writeTime == null ? dialect.now : "GREATEST(write_time, ?)");
         String insert = ("INSERT INTO %s (discriminator, id, k, v, state, version, write_time) VALUES "
-                + "(?, ?, ?, ?, ?, ?, %s)").formatted(table, dialect.now);
+                + "(?, ?, ?, ?, ?, ?, %s)").formatted(table, writeTime == null ? dialect.now : "?");
+        Advance row = new Advance(hash, key, value, state, version, writeTime);
         return run(Kind.WRITE, connection -> {
-            if (updated(connection, update, hash, key, value, state, version)) {
+            if (updated(connection, update, row)) {
                 return true;
             }
             try (PreparedStatement statement = prepare(connection, insert)) {
@@ -490,25 +525,38 @@ final class JdbcStore extends PrimitiveStore {
                 statement.setString(2, hash);
                 bind(statement, 3, key, value, state);
                 statement.setLong(6, version);
+                if (writeTime != null) {
+                    statement.setObject(7, dialect.parameter(writeTime));
+                }
                 statement.executeUpdate();
                 return true;
             } catch (SQLException e) {
                 if (!isDuplicate(e)) {
                     throw e;
                 }
-                return updated(connection, update, hash, key, value, state, version);
+                return updated(connection, update, row);
             }
         });
     }
 
-    private boolean updated(Connection connection, String update, String hash, byte @Nullable [] key,
-                            byte @Nullable [] value, State state, long version) throws SQLException {
+    // an advancing write of one row, its write time null for the server's clock
+    @SuppressWarnings({"ArrayRecordComponent", "java:S6218"}) // never compared or shown, only bound to statements
+    private record Advance(String hash, byte @Nullable [] key, byte @Nullable [] value, State state, long version,
+                           @Nullable Instant writeTime) {
+    }
+
+    private boolean updated(Connection connection, String update, Advance row) throws SQLException {
         try (PreparedStatement statement = prepare(connection, update)) {
-            bind(statement, 1, key, value, state);
-            statement.setLong(4, version);
-            statement.setString(5, discriminator);
-            statement.setString(6, hash);
-            statement.setLong(7, version);
+            bind(statement, 1, row.key(), row.value(), row.state());
+            statement.setLong(4, row.version());
+            int next = 5;
+            Instant writeTime = row.writeTime();
+            if (writeTime != null) {
+                statement.setObject(next++, dialect.parameter(writeTime));
+            }
+            statement.setString(next++, discriminator);
+            statement.setString(next++, row.hash());
+            statement.setLong(next, row.version());
             return statement.executeUpdate() > 0;
         }
     }

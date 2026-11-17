@@ -68,6 +68,8 @@ import org.bson.conversions.Bson;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
@@ -110,6 +112,8 @@ final class MongoStore implements Store, ChangeFeed {
     private static final String FIELD_VERSION = "version";
     private static final String FIELD_VALUE = "value";
     private static final String FIELD_WRITE_TIME = "writeTime";
+    // the start document's field of the time read for a mark (time)
+    private static final String FIELD_MARKED = "marked";
     private static final String FIELD_HASH = "_id.h";
     private static final String WRITE_TIME = "$writeTime";
     // how long ago a document was written, by the server's clock: one $$NOW per query
@@ -229,6 +233,11 @@ final class MongoStore implements Store, ChangeFeed {
      * </ul>
      */
     private WriteResult writeOne(ClientSession session, Write write) {
+        return writeOne(session, write, new BsonString(NOW));
+    }
+
+    // the write time an expression: the server's $$NOW, or the control row's backdated one (writeControl)
+    private WriteResult writeOne(ClientSession session, Write write, BsonValue writeTime) {
         Bson id = Filters.eq("_id", location.id(write.hash()));
         boolean onVersion = !write.isAdvance() && !write.expectsMissing();
         Bson filter = id;
@@ -237,7 +246,8 @@ final class MongoStore implements Store, ChangeFeed {
                     : Filters.eq(FIELD_VERSION, write.expected()));
         }
         BsonValue version = assigned(write.version());
-        List<Bson> pipeline = write.isTombstone() ? tombstonePipeline(version) : valuePipeline(write, version, false);
+        List<Bson> pipeline = write.isTombstone() ? tombstonePipeline(version)
+                : valuePipeline(write, version, false, writeTime);
         try {
             BsonDocument written = collection.findOneAndUpdate(session, filter, pipeline,
                     new FindOneAndUpdateOptions().upsert(!onVersion).returnDocument(ReturnDocument.AFTER)
@@ -259,6 +269,33 @@ final class MongoStore implements Store, ChangeFeed {
             }
             throw e;
         }
+    }
+
+    // the control row backdated (Store#writeControl): a single write as any, its write time the last millisecond (a
+    // BSON date) before the given time, and never earlier than the document's ($max ignores a missing field), decided
+    // under the document's lock, so that the cut-off only moves forward
+    @Override
+    public WriteResult writeControl(Write control, Instant before) {
+        if (!CONTROL_HASH.equals(control.hash()) || !control.isAdvance() || control.isTombstone()) {
+            throw new IllegalArgumentException("control must be an advancing value write of the control row");
+        }
+        BsonDateTime cutoff = new BsonDateTime(before.minusNanos(1).truncatedTo(ChronoUnit.MILLIS).toEpochMilli());
+        BsonDocument writeTime = new BsonDocument("$max", new BsonArray(List.of(
+                new BsonString("$" + FIELD_WRITE_TIME), literal(cutoff))));
+        return run(Kind.WRITE, session -> writeOne(session, control, writeTime));
+    }
+
+    // the server's $$NOW, as every write time is set, read on the primary by a write to the store's start document
+    // (seedClusterTime), which announces nothing
+    @Override
+    public Instant time() {
+        return run(Kind.WRITE, session -> {
+            BsonDocument marked = collection.findOneAndUpdate(session, Filters.eq("_id", location.startId),
+                    List.of(new BsonDocument("$set", new BsonDocument(FIELD_MARKED, new BsonString(NOW)))),
+                    new FindOneAndUpdateOptions().upsert(true).returnDocument(ReturnDocument.AFTER)
+                            .projection(Projections.include(FIELD_MARKED)));
+            return Instant.ofEpochMilli(requireNonNull(marked).getDateTime(FIELD_MARKED).getValue());
+        });
     }
 
     // max(stored + 1, floor, min(proposed, floor + bound)), the floor the server's time in the core's format. The
@@ -572,6 +609,10 @@ final class MongoStore implements Store, ChangeFeed {
     // onVersion: a write on a version, which upserts where no document is (pruned since it was read): there, with no
     // write time yet (only the filter's fields), it writes a tombstone instead, the write being a conflict
     private List<Bson> valuePipeline(Write write, BsonValue version, boolean onVersion) {
+        return valuePipeline(write, version, onVersion, new BsonString(NOW));
+    }
+
+    private List<Bson> valuePipeline(Write write, BsonValue version, boolean onVersion, BsonValue writeTime) {
         BsonValue value = literal(MongoLocation.toBson(requireNonNull(write.value()), location.valueFormat));
         BsonValue state = new BsonString(State.VALUE.name());
         if (onVersion) {
@@ -586,7 +627,7 @@ final class MongoStore implements Store, ChangeFeed {
                 .append(FIELD_VALUE, value)
                 .append(FIELD_STATE, state)
                 .append(FIELD_VERSION, version)
-                .append(FIELD_WRITE_TIME, new BsonString(NOW))));
+                .append(FIELD_WRITE_TIME, writeTime)));
     }
 
     // keeps the document's key; a new tombstone has none. The version a literal or an expression (writeOne)

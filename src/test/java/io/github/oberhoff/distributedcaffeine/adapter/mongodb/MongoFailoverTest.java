@@ -19,6 +19,7 @@ import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import io.github.oberhoff.distributedcaffeine.DistributedCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
+import io.github.oberhoff.distributedcaffeine.DistributedPolicy;
 import io.github.oberhoff.distributedcaffeine.StoredValue;
 import io.github.oberhoff.distributedcaffeine.SynchronizationState;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
@@ -253,6 +254,52 @@ abstract class MongoFailoverTest {
                             + (allNew ? ", the batch applied in full" : ", the batch failed: " + failure))
                     .isTrue();
         });
+    }
+
+    // a refill across the primary dying (VISION.md, "Refill while serving"): the mark and the fill majority-written
+    // before, invalidateAllBeforeMark sent while the primary is gone and retried until the new one takes it, as an
+    // application retries a failed call (it is idempotent); then both caches drop what the refill did not write and
+    // keep what it did
+    @Test
+    void a_refill_rides_out_the_primary_dying_abruptly() throws Throwable {
+        MongoClient client = client(Duration.ofSeconds(5));
+        DistributedCache<String, String> writer = cache(client);
+        DistributedCache<String, String> holder = cache(client);
+        writer.putAll(Map.of("stale", "old", "fill", "old"));
+        assertThat(holder.getIfPresent("stale")).isEqualTo("old");
+        pause(50);
+        DistributedPolicy.StoreMark mark = writer.distributedPolicy().markStore();
+        writer.put("fill", "new");
+
+        try {
+            replicaSet.killPreferred();
+            assertThat(awaitUpTo(() -> {
+                try {
+                    writer.distributedPolicy().invalidateAllBeforeMark(mark);
+                    return true;
+                } catch (StoreException e) {
+                    return false;
+                }
+            }, CONVERGENCE, Duration.ofMillis(250))).as("invalidated on the new primary").isTrue();
+        } finally {
+            replicaSet.start(0);
+        }
+        checkThenHandBack(() -> {
+            for (DistributedCache<String, String> cache : List.of(writer, holder)) {
+                assertThat(awaitUpTo(() -> quietly(cache, "stale") == null, CONVERGENCE, Duration.ofMillis(250)))
+                        .as("the key the refill did not write dropped").isTrue();
+                assertThat(awaitUpTo(() -> "new".equals(quietly(cache, "fill")), CONVERGENCE,
+                        Duration.ofMillis(250))).as("the refill's write kept").isTrue();
+            }
+        });
+    }
+
+    private static @Nullable String quietly(DistributedCache<String, String> cache, String key) {
+        try {
+            return cache.getIfPresent(key);
+        } catch (StoreException e) {
+            return "failed";
+        }
     }
 
     @Test

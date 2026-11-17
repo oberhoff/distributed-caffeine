@@ -40,6 +40,7 @@ import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadMXBean;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -210,6 +211,16 @@ public class AsyncLoadThreadsExperimentTest {
         @Override
         public WriteResult write(Collection<Write> writes) {
             return slow(delegate.write(writes));
+        }
+
+        @Override
+        public Instant time() {
+            return slow(delegate.time());
+        }
+
+        @Override
+        public WriteResult writeControl(Write control, Instant before) {
+            return slow(delegate.writeControl(control, before));
         }
 
         @Override

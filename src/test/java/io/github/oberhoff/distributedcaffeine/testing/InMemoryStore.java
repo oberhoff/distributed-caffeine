@@ -27,6 +27,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -72,6 +73,22 @@ public final class InMemoryStore implements Store, ChangeFeed, ChangeScan {
             return table.database().invalidating(() -> table.write(writes));
         }
         return table.database().write(() -> table.write(writes));
+    }
+
+    @Override
+    public Instant time() {
+        checkOpen();
+        return table.time();
+    }
+
+    // through the fault window of invalidateAll, as a write of the control row
+    @Override
+    public WriteResult writeControl(Write control, Instant before) {
+        checkOpen();
+        if (!Store.CONTROL_HASH.equals(control.hash()) || !control.isAdvance() || control.isTombstone()) {
+            throw new IllegalArgumentException("control must be an advancing value write of the control row");
+        }
+        return table.database().invalidating(() -> table.writeControl(control, requireNonNull(before)));
     }
 
     @Override

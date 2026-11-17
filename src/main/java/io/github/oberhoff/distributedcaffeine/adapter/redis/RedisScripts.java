@@ -82,7 +82,8 @@ final class RedisScripts {
     // version), the expected version's high and low part, the proposed version's high and low part, T for a tombstone
     // or V for a value, the key and the value (both empty for a tombstone, which keeps the row's key, or has none where
     // no row existed). Per write the result is {0} (refused) or {1, high, low} (applied at that version). An advance is
-    // never refused: its version is assigned
+    // never refused: its version is assigned. Condition B is an advance backdated (the control row, Store#writeControl):
+    // its write time, in microseconds, in place of the expected version's high part, and the row's own if later
     static final RedisScript WRITE = RedisScript.of("write", RedisScript.Reply.ARRAY, PRELUDE + """
             local kept = redis.call('GET', KEYS[5])
             if kept then
@@ -103,8 +104,13 @@ final class RedisScripts {
               local a = 4 + (i - 1) * 9
               local hash, condition, tombstone = ARGV[a + 1], ARGV[a + 2], ARGV[a + 7] == 'T'
               local row = KEYS[5 + i]
-              local stored = redis.call('HMGET', row, 'vh', 'vl', 'k')
+              local stored = redis.call('HMGET', row, 'vh', 'vl', 'k', 'w')
               local exists = stored[1] ~= false
+              local w = now
+              if condition == 'B' then
+                w = tonumber(ARGV[a + 3])
+                if stored[4] and tonumber(stored[4]) > w then w = tonumber(stored[4]) end
+              end
               local refused = false
               if condition == 'M' then
                 refused = exists
@@ -129,11 +135,11 @@ final class RedisScripts {
                   end
                   announce(hash, h, l, 'I')
                 else
-                  redis.call('HSET', row, 's', 'V', 'vh', num(h), 'vl', num(l), 'w', num(now), 'k', ARGV[a + 8],
+                  redis.call('HSET', row, 's', 'V', 'vh', num(h), 'vl', num(l), 'w', num(w), 'k', ARGV[a + 8],
                       'v', ARGV[a + 9])
                   if not reserved then
                     redis.call('ZREM', KEYS[2], hash)
-                    redis.call('ZADD', KEYS[1], num(now), hash)
+                    redis.call('ZADD', KEYS[1], num(w), hash)
                   end
                   announce(hash, h, l, 'W')
                 end
@@ -314,6 +320,13 @@ final class RedisScripts {
             redis.call('XADD', KEYS[1], 'MINID', '~', '0', '*', 'probe', '1')
             redis.call('DEL', KEYS[1])
             return 1
+            """);
+
+    // The server's clock in microseconds, as every write time is set (Store#time). KEYS[1]: the control row, only so
+    // that a cluster runs it on the node holding the cache's keys
+    static final RedisScript TIME = RedisScript.of("time", RedisScript.Reply.INTEGER, """
+            local t = redis.call('TIME')
+            return tonumber(t[1]) * 1000000 + tonumber(t[2])
             """);
 
     // Sets the schema marker where there is none and returns the one there. KEYS[1]: the marker, ARGV[1]: this

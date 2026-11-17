@@ -27,6 +27,8 @@ import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -110,6 +112,13 @@ final class InMemoryTable {
         return new VersionsResult(versions, ages);
     }
 
+    // the store's time (Store#time), as a read takes it: failed by the faults of reads
+    synchronized Instant time() {
+        checkUp();
+        checkRead();
+        return Instant.EPOCH.plus(database.nowMicros(), ChronoUnit.MICROS);
+    }
+
     private interface RowReader {
         void accept(String hash, @Nullable StoredRow row, long nowMicros);
     }
@@ -145,6 +154,20 @@ final class InMemoryTable {
     // values and tombstones, each under its condition, at the version proposed or, where the profile assigns, at one
     // the store chooses (StoreProfile.Versioning)
     synchronized WriteResult write(Collection<Write> writes) {
+        return write(writes, null);
+    }
+
+    // the control row backdated (Store#writeControl): the last tick of the profile's clock before the given time, and
+    // the row's own write time if later
+    synchronized WriteResult writeControl(Write control, Instant before) {
+        long micros = ChronoUnit.MICROS.between(Instant.EPOCH, before) - 1;
+        long cutoff = database.profile().clock() == StoreProfile.Clock.MILLIS ? Math.floorDiv(micros, 1_000) * 1_000
+                : micros;
+        return write(List.of(control), cutoff);
+    }
+
+    // backdated: the write time of a backdated control row, else null (the clock's)
+    private WriteResult write(Collection<Write> writes, @Nullable Long backdated) {
         boolean assigns = database.profile().assigns(writes.size());
         // a batch failing part way (InMemoryDatabase#failNextWritesPartly): where the store writes row by row, the
         // first half applies, the rest does not; otherwise nothing does
@@ -195,6 +218,11 @@ final class InMemoryTable {
                 if (write.isTombstone()) {
                     store(write.hash(), current == null ? NO_KEY : current.key, null, State.TOMBSTONE, version);
                     messages.add(new Change(Change.Kind.INVALIDATED, write.hash(), version));
+                } else if (backdated != null) {
+                    long writeTime = current == null ? backdated : Math.max(current.writeTimeMicros, backdated);
+                    journal(write.hash(), rows.put(write.hash(), new StoredRow(requireNonNull(write.key()),
+                            write.value(), State.VALUE, version, writeTime)));
+                    messages.add(new Change(Change.Kind.WRITTEN, write.hash(), version));
                 } else {
                     store(write.hash(), requireNonNull(write.key()), write.value(), State.VALUE, version);
                     messages.add(new Change(Change.Kind.WRITTEN, write.hash(), version));
@@ -293,7 +321,8 @@ final class InMemoryTable {
         long micros = within.toNanos() / 1_000;
         List<Change> changes = new ArrayList<>();
         rows.forEach((hash, row) -> {
-            if (now - row.writeTimeMicros <= micros) {
+            // the control row whatever its write time (ChangeScan)
+            if (now - row.writeTimeMicros <= micros || hash.equals(Store.CONTROL_HASH)) {
                 changes.add(new Change(switch (row.state) {
                     case VALUE -> Change.Kind.WRITTEN;
                     case TOMBSTONE -> Change.Kind.INVALIDATED;

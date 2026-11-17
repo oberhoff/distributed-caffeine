@@ -149,6 +149,40 @@ class InternalInterleavingTest {
                         () -> fixture.holder().getIfPresent("k")));
     }
 
+    // a backdated invalidateAll during a read through the store (VISION.md, "Refill while serving"): L1 is not cleared,
+    // so only the epoch its message moves, and the pass checking every copy, keep a value read before the cut-off
+    // from being served
+    @Test
+    void a_read_through_racing_a_backdated_invalidate_all_elsewhere() {
+        AtomicReference<DistributedPolicy.@Nullable StoreMark> mark = new AtomicReference<>();
+        race(StoreProfile.REDIS.with(StoreProfile.Clock.MONOTONIC, Duration.ZERO), fixture -> {
+            fixture.writer().put("k", "old");
+            // the mark later than the row, so that the cut-off hides it (a row at the mark's very tick stays)
+            fixture.environment().advance(Duration.ofMillis(1));
+            mark.set(fixture.writer().distributedPolicy().markStore());
+        }, fixture -> List.of(
+                () -> fixture.writer().distributedPolicy().invalidateAllBeforeMark(Objects.requireNonNull(mark.get())),
+                () -> fixture.holder().getIfPresent("k")));
+    }
+
+    // a backdated invalidateAll and a full one at once: the backdated one's earlier cut-off must not undo the full one's
+    // (the store keeps the later), and the holder, told of both, serves nothing older than either
+    @Test
+    void a_backdated_invalidate_all_racing_a_full_one() {
+        AtomicReference<DistributedPolicy.@Nullable StoreMark> mark = new AtomicReference<>();
+        race(StoreProfile.REDIS.with(StoreProfile.Clock.MONOTONIC, Duration.ZERO), fixture -> {
+            mark.set(fixture.holder().distributedPolicy().markStore());
+            fixture.writer().put("k", "old");
+            fixture.holder().getIfPresent("k");
+        }, fixture -> List.of(
+                () -> fixture.writer().invalidateAll(),
+                () -> fixture.holder().distributedPolicy().invalidateAllBeforeMark(
+                        Objects.requireNonNull(mark.get()))), fixture -> {
+            String inStore = value(fixture.holder().distributedPolicy().getFromStore("k"));
+            check(inStore == null, "the full invalidateAll undone: the store has " + inStore);
+        });
+    }
+
     // a write elsewhere whose message is lost in a gap during a load: the gap's revalidation must catch it
     @Test
     void a_load_racing_a_write_lost_in_a_gap() {

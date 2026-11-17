@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine.adapter.jdbc;
 import io.github.oberhoff.distributedcaffeine.CaffeineConfigurer;
 import io.github.oberhoff.distributedcaffeine.DistributedCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
+import io.github.oberhoff.distributedcaffeine.DistributedPolicy;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import org.jspecify.annotations.NullMarked;
@@ -30,6 +31,7 @@ import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.awaitUpTo;
@@ -206,5 +208,81 @@ abstract class JdbcFailoverTest {
                     .isTrue();
         }
         assertThat(quietly(holder, "other")).isEqualTo("replicated");
+    }
+
+    // a refill across a failover (VISION.md, "Refill while serving"): the mark taken and the fill written before it,
+    // invalidateAllBeforeMark retried until the new primary takes it, as an application retries a failed call (it is
+    // idempotent); then every cache drops what the refill did not write and keeps what it did
+    @Test
+    void a_refill_rides_out_a_failover() throws IOException {
+        JdbcReplication topology = replication();
+        String table = "failover_" + TABLES.incrementAndGet();
+        DistributedCache<String, String> writer = cache(topology, table);
+        DistributedCache<String, String> holder = cache(topology, table);
+        put(writer, "stale", "old");
+        put(writer, "fill", "old");
+        assertThat(converges(holder, "stale", "old")).isTrue();
+        pause(Duration.ofMillis(50));
+        DistributedPolicy.StoreMark mark = writer.distributedPolicy().markStore();
+        put(writer, "fill", "new");
+        topology.awaitInSync();
+
+        topology.failover();
+        invalidateAllBeforeMark(writer, mark);
+
+        for (DistributedCache<String, String> cache : List.of(writer, holder)) {
+            assertThat(converges(cache, "stale", null)).as("the key the refill did not write dropped").isTrue();
+            assertThat(converges(cache, "fill", "new")).as("the refill's write kept").isTrue();
+        }
+    }
+
+    // the backdated control row confirmed by the primary and lost with it: the store hides nothing again, and no cache
+    // may keep hiding what the store has (the epoch the message moved, the gap after the failover); a refill after
+    // the failover takes effect on every cache, also though the new primary may give its control row a version a
+    // cache saw already (a cache applies each version of the control row once)
+    @Test
+    void a_backdated_invalidation_the_failover_lost_hides_nothing_and_a_later_one_takes_effect() throws IOException {
+        JdbcReplication topology = replication();
+        String table = "failover_" + TABLES.incrementAndGet();
+        DistributedCache<String, String> writer = cache(topology, table);
+        DistributedCache<String, String> holder = cache(topology, table);
+        put(writer, "stale", "old");
+        assertThat(converges(holder, "stale", "old")).isTrue();
+        topology.awaitInSync();
+        topology.holdBackReplication();
+        pause(Duration.ofSeconds(6)); // the row older than the polls' overlap, as in the test of a lost write
+        DistributedPolicy.StoreMark lost = writer.distributedPolicy().markStore();
+
+        writer.distributedPolicy().invalidateAllBeforeMark(lost);
+        assertThat(converges(holder, "stale", null)).as("the holder polled the lost invalidation").isTrue();
+        topology.failover();
+
+        for (DistributedCache<String, String> cache : List.of(writer, holder)) {
+            assertThat(converges(cache, "stale", "old")).as(() -> "the store has the value again; the cache serves "
+                    + quietly(cache, "stale")).isTrue();
+        }
+        pause(Duration.ofMillis(50));
+        DistributedPolicy.StoreMark later = writer.distributedPolicy().markStore();
+        invalidateAllBeforeMark(writer, later);
+        for (DistributedCache<String, String> cache : List.of(writer, holder)) {
+            assertThat(converges(cache, "stale", null)).as(() -> "the later invalidation reached the cache; it serves "
+                    + quietly(cache, "stale")).isTrue();
+        }
+    }
+
+    private static void invalidateAllBeforeMark(DistributedCache<String, String> cache,
+                                                DistributedPolicy.StoreMark mark) {
+        assertThat(awaitUpTo(() -> {
+            try {
+                cache.distributedPolicy().invalidateAllBeforeMark(mark);
+                return true;
+            } catch (StoreException e) {
+                return false;
+            }
+        }, CONVERGENCE, Duration.ofMillis(200))).as("invalidated within " + CONVERGENCE).isTrue();
+    }
+
+    private static boolean converges(DistributedCache<String, String> cache, String key, @Nullable String value) {
+        return awaitUpTo(() -> Objects.equals(value, quietly(cache, key)), CONVERGENCE, Duration.ofMillis(200));
     }
 }

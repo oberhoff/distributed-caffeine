@@ -58,6 +58,21 @@ final class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V> {
     }
 
     @Override
+    public StoreMark markStore() {
+        return core.markStore();
+    }
+
+    @Override
+    public void invalidateAllBeforeMark(StoreMark mark) {
+        core.invalidateAllBeforeMark(mark);
+    }
+
+    @Override
+    public void invalidateAllOlderThan(Duration olderThan) {
+        core.invalidateAllOlderThan(olderThan);
+    }
+
+    @Override
     public Optional<StoreMaximumAge> storeMaximumAge() {
         return Optional.ofNullable(maximumAge);
     }

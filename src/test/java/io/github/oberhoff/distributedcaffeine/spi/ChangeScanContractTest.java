@@ -93,10 +93,23 @@ public abstract class ChangeScanContractTest extends AbstractContractTest {
                 .containsEntry(Store.CONTROL_HASH, new Change(Change.Kind.WRITTEN, Store.CONTROL_HASH, control));
     }
 
-    // contract point 2: deletes report nothing
+    // contract point 2: the control row in every scan, whatever its write time
 
     @Test
-    void contract2_deleted_rows_report_nothing() {
+    void contract2_the_control_row_is_reported_whatever_its_write_time() {
+        Store writer = open();
+        ChangeScan scan = scanning(open());
+        long control = writtenControl(writer, writer.time().minus(Duration.ofHours(1)));
+        pause(1_500);
+
+        assertThat(byHash(scan.changedWithin(Duration.ofSeconds(1))))
+                .containsEntry(Store.CONTROL_HASH, new Change(Change.Kind.WRITTEN, Store.CONTROL_HASH, control));
+    }
+
+    // contract point 3: deletes report nothing
+
+    @Test
+    void contract3_deleted_rows_report_nothing() {
         Store writer = open();
         ChangeScan scan = scanning(open());
         writer.write(List.of(entry("pruned", "v")));
@@ -109,10 +122,10 @@ public abstract class ChangeScanContractTest extends AbstractContractTest {
         assertThat(byHash(scan.changedWithin(Duration.ofSeconds(10)))).containsOnlyKeys("kept");
     }
 
-    // contract point 3: the own cache's rows only
+    // contract point 4: the own cache's rows only
 
     @Test
-    void contract3_a_scan_reports_nothing_of_another_cache() {
+    void contract4_a_scan_reports_nothing_of_another_cache() {
         Store theirs = openOther();
         ChangeScan scan = scanning(open());
         theirs.write(List.of(entry("h1", "theirs")));

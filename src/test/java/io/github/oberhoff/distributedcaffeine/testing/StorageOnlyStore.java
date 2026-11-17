@@ -22,6 +22,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Collection;
 import java.util.Map;
 
@@ -51,8 +52,18 @@ public class StorageOnlyStore implements Store {
     }
 
     @Override
+    public Instant time() {
+        return delegate.time();
+    }
+
+    @Override
     public WriteResult write(Collection<Write> writes) {
         return delegate.write(writes);
+    }
+
+    @Override
+    public WriteResult writeControl(Write control, Instant before) {
+        return delegate.writeControl(control, before);
     }
 
     @Override

@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
@@ -83,6 +84,52 @@ public interface DistributedPolicy<K, V> {
      * @return the maximum size, or empty if the cache was built without one
      */
     Optional<StoreMaximumSize> storeMaximumSize();
+
+    /**
+     * Reads the store's time, as the mark for {@link #invalidateAllBeforeMark(StoreMark)}: take it before the first
+     * write of a refill.
+     *
+     * @return the mark, for this instance only
+     * @throws StoreException if the store cannot be read
+     */
+    StoreMark markStore();
+
+    /**
+     * Invalidates every value written to the store before the mark, by any instance, and keeps every value written
+     * since: the end of a refill while serving, which puts every value that should stay and drops the rest. Call it
+     * once every write of the refill has succeeded; a key the refill could not write is missing afterwards. Copies
+     * are not dropped: each is checked against the store before it is served again, and all of them in the background
+     * at once, on this instance and, as its message arrives, on every other, so that the cache stays hot. A value
+     * written after the mark is kept, also one older than the refill's: a refill's {@code put} overwrites a value
+     * written meanwhile by another writer. So is a value written less than the store clock's allowance for skew before
+     * the mark (10 ms for most stores), so that no write after the mark is hidden by the clock stepping back. Takes one
+     * write, whatever the size of the cache.
+     *
+     * @param mark the mark of {@link #markStore()}, taken on this instance
+     * @throws IllegalArgumentException if the mark was taken on another instance
+     * @throws StoreException if the store cannot be written
+     */
+    void invalidateAllBeforeMark(StoreMark mark);
+
+    /**
+     * Invalidates every value written to the store longer ago than the duration, by the store's clock, and keeps every
+     * value written since, as {@link #invalidateAllBeforeMark(StoreMark)} does with a mark taken now and moved back by
+     * the duration: a one-off maximum age, also for a cache built without one.
+     *
+     * @param olderThan how long ago a value must have been written to be invalidated (not negative)
+     * @throws IllegalArgumentException if the duration is negative
+     * @throws StoreException if the store cannot be read or written
+     */
+    void invalidateAllOlderThan(Duration olderThan);
+
+    /**
+     * A time of the store's clock, taken by {@link #markStore()}: opaque, so that it is never compared with another
+     * clock.
+     *
+     * @author Andreas Oberhoff
+     */
+    interface StoreMark {
+    }
 
     /**
      * The store's maximum age as an instance applies it. The instances of a cache need the same maximum age: set it on

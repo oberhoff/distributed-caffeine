@@ -19,6 +19,7 @@ import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -133,6 +134,25 @@ public abstract class StoreContractTest extends AbstractContractTest {
         Map<String, Duration> ages = reader.readVersions(List.of("a", Store.CONTROL_HASH, "c"), LONG).ages();
         assertThat(ages.get("a")).as("and from a read of versions").isGreaterThan(ages.get(Store.CONTROL_HASH));
         assertThat(ages.get("c")).isLessThan(ages.get(Store.CONTROL_HASH));
+    }
+
+    @Test
+    void contract2_time_reads_the_clock_of_the_write_times() {
+        Store writer = open();
+        writer.write(List.of(entry("before", "1")));
+        pause(5);
+        Instant mark = writer.time();
+        writer.write(List.of(entry("after", "2")));
+        pause(5);
+        Instant later = writer.time();
+
+        Map<String, Row> rows = writer.read(List.of("before", "after"), LONG);
+        // the ages and the times from separate readings of the clock: compared with a margin for the reads between
+        Duration sinceMark = Duration.between(mark, later);
+        assertThat(rows.get("before").age()).as("written before the mark").isGreaterThan(sinceMark);
+        assertThat(rows.get("after").age()).as("written after it").isLessThanOrEqualTo(
+                sinceMark.plus(Duration.ofSeconds(5)));
+        assertThat(sinceMark).as("the clock goes forward").isPositive();
     }
 
     // contract point 3: a read reflects every write confirmed before it began, on any instance
@@ -483,6 +503,64 @@ public abstract class StoreContractTest extends AbstractContractTest {
 
         assertThat(writer.read(List.of("a", "t", "after", "young", Store.CONTROL_HASH), LONG))
                 .containsOnlyKeys("after", "young", Store.CONTROL_HASH);
+    }
+
+    @Test
+    void contract7_writeControl_hides_the_rows_written_before_the_given_time_and_no_later_one() {
+        Store writer = open();
+        Store reader = open();
+        writer.write(List.of(entry("old", "1"), entry("older", "0")));
+        pause(5);
+        Instant mark = writer.time();
+        writer.write(List.of(entry("fill", "2")));
+        pause(5);
+        writer.write(List.of(entry("late", "3")));
+
+        long control = writtenControl(writer, mark);
+
+        Map<String, Row> rows = reader.read(List.of("old", "older", "fill", "late", Store.CONTROL_HASH), LONG);
+        Duration cutoff = rows.get(Store.CONTROL_HASH).age();
+        assertThat(rows.get(Store.CONTROL_HASH).version()).isEqualTo(control);
+        assertThat(rows.get(Store.CONTROL_HASH).state()).isEqualTo(State.VALUE);
+        assertThat(rows.get("old").age()).as("written before the mark: hidden").isGreaterThanOrEqualTo(cutoff);
+        assertThat(rows.get("older").age()).isGreaterThanOrEqualTo(cutoff);
+        assertThat(rows.get("fill").age()).as("written after it, even at its very tick: kept").isLessThan(cutoff);
+        assertThat(rows.get("late").age()).isLessThan(cutoff);
+        assertThat(writer.pruneTombstones(LONG, ALL)).as("pruned as rows the control row hides").isEqualTo(2);
+    }
+
+    @Test
+    void contract7_writeControl_never_moves_the_cut_off_back() {
+        Store writer = open();
+        Instant early = writer.time();
+        pause(5);
+        writer.write(List.of(entry("a", "1")));
+        pause(5);
+        long full = written(writer, control());
+        pause(5);
+
+        long backdated = writtenControl(writer, early);
+
+        Map<String, Row> rows = writer.read(List.of("a", Store.CONTROL_HASH), LONG);
+        assertThat(rows.get(Store.CONTROL_HASH).version()).as("advanced, as any write").isGreaterThan(full)
+                .isEqualTo(backdated);
+        assertThat(rows.get("a").age()).as("still hidden by the later cut-off")
+                .isGreaterThanOrEqualTo(rows.get(Store.CONTROL_HASH).age());
+    }
+
+    @Test
+    void contract7_writeControl_creates_the_control_row_backdated() {
+        Store writer = open();
+        writer.write(List.of(entry("a", "1")));
+        pause(5);
+        Instant mark = writer.time();
+
+        writtenControl(writer, mark);
+
+        Map<String, Row> rows = writer.read(List.of("a", Store.CONTROL_HASH), LONG);
+        assertThat(rows.get(Store.CONTROL_HASH).age()).as("before the mark, so older than nothing written since")
+                .isLessThanOrEqualTo(rows.get("a").age())
+                .isPositive();
     }
 
     @Test

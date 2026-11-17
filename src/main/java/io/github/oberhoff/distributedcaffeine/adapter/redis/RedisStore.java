@@ -29,6 +29,8 @@ import org.jspecify.annotations.Nullable;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -149,11 +151,34 @@ final class RedisStore implements Store, ChangeFeed {
 
     // Redis's TIME counts microseconds, from the wall clock: the default allowance of 10 ms covers its steps back
 
+    // the server's TIME, as every write time is set, on the node of the cache's keys
+    @Override
+    public Instant time() {
+        long micros = requireNonNull((Long) run(false,
+                () -> session.eval(RedisScripts.TIME, List.of(keys.control()), List.of())));
+        return Instant.EPOCH.plus(micros, ChronoUnit.MICROS);
+    }
+
     // writes
 
     @Override
     public WriteResult write(Collection<Write> writes) {
         return write(writes, newRequestId());
+    }
+
+    // the control row backdated by the write script (condition B): its write time the last microsecond before the
+    // given time, and the row's own if later, decided in the script, so that the cut-off only moves forward
+    @Override
+    public WriteResult writeControl(Write control, Instant before) {
+        if (!CONTROL_HASH.equals(control.hash()) || !control.isAdvance() || control.isTombstone()) {
+            throw new IllegalArgumentException("control must be an advancing value write of the control row");
+        }
+        Instant cutoff = before.minusNanos(1).truncatedTo(ChronoUnit.MICROS);
+        long micros = Math.addExact(Math.multiplyExact(cutoff.getEpochSecond(), 1_000_000L), cutoff.getNano() / 1_000);
+        Set<String> refused = new LinkedHashSet<>();
+        Map<String, Long> assigned = new LinkedHashMap<>();
+        writeChunk(List.of(control), newRequestId(), RedisScripts.WRITE, refused, assigned, micros);
+        return new WriteResult(refused, assigned);
     }
 
     // the ID under which a write request is applied at most once, however often it is sent
@@ -179,7 +204,7 @@ final class RedisStore implements Store, ChangeFeed {
         for (int from = 0; from < ordered.size(); from += CHUNK) {
             List<Write> chunk = ordered.subList(from, Math.min(ordered.size(), from + CHUNK));
             try {
-                writeChunk(chunk, requestId + "-" + from / CHUNK, script, refused, assigned);
+                writeChunk(chunk, requestId + "-" + from / CHUNK, script, refused, assigned, null);
             } catch (StoreException e) {
                 throw from == 0 ? e : e.afterPartlyApplied();
             }
@@ -187,15 +212,16 @@ final class RedisStore implements Store, ChangeFeed {
         return new WriteResult(refused, assigned);
     }
 
+    // backdated: the control row's write time in microseconds (writeControl), else null
     private void writeChunk(List<Write> chunk, String requestId, RedisScript script, Set<String> refused,
-                            Map<String, Long> assigned) {
+                            Map<String, Long> assigned, @Nullable Long backdated) {
         List<String> scriptKeys = new ArrayList<>(List.of(keys.values(), keys.dead(), keys.stream(), keys.sequence(),
                 keys.request(requestId)));
         List<byte[]> arguments = new ArrayList<>(prelude());
         arguments.add(number(REQUEST_RETENTION_MILLIS));
         for (Write write : chunk) {
             scriptKeys.add(keys.row(write.hash()));
-            addArguments(arguments, write);
+            addArguments(arguments, write, backdated);
         }
         List<?> out = list(run(true, () -> session.eval(script, scriptKeys, arguments)));
         for (int i = 0; i < chunk.size(); i++) {
@@ -214,11 +240,11 @@ final class RedisStore implements Store, ChangeFeed {
 
     // one write's arguments to the write script: its hash, its condition with the version it expects, its version,
     // whether it is a tombstone, its key and its value
-    private static void addArguments(List<byte[]> arguments, Write write) {
+    private static void addArguments(List<byte[]> arguments, Write write, @Nullable Long backdated) {
         arguments.add(text(write.hash()));
-        arguments.add(text(condition(write)));
+        arguments.add(text(backdated != null ? "B" : condition(write)));
         long expected = write.isAdvance() || write.expectsMissing() ? 0 : write.expected();
-        arguments.add(number(high(expected)));
+        arguments.add(number(backdated != null ? backdated : high(expected)));
         arguments.add(number(low(expected)));
         arguments.add(number(high(write.version())));
         arguments.add(number(low(write.version())));

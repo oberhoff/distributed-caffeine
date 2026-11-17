@@ -37,6 +37,7 @@ import org.jspecify.annotations.Nullable;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -60,6 +61,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
@@ -132,7 +134,11 @@ final class InternalCore<K, V> {
     // the epoch of values loaded from the source alone while the store did not answer: never trusted, so the first
     // read with the store back checks them
     private static final int UNCONFIRMED = -1;
+    // the value of a backdated control row (backdatedBytes), telling it from a full invalidateAll's
+    private static final String BACKDATED = "backdated";
     private static final int REVALIDATION_BATCH = 1_000;
+    // no copy dropped by a revalidation pass without its check (see check)
+    private static final int KEEP_ALL = Integer.MIN_VALUE;
     private static final long REVALIDATION_PAUSE_MILLIS = 10;
     // how many absences negative caching remembers per instance: a bound on memory only (about 150 bytes each, so some
     // 15 MB when full), not on correctness. Caffeine evicts the least useful (one-off probes before keys asked for
@@ -1191,6 +1197,67 @@ final class InternalCore<K, V> {
         }
     }
 
+    // the store's time, as a mark for invalidateAllBeforeMark (VISION.md, "Refill while serving")
+    Mark markStore() {
+        checkOpen();
+        return new Mark(this, guard.read(store::time));
+    }
+
+    void invalidateAllBeforeMark(DistributedPolicy.StoreMark mark) {
+        requireNonNull(mark, "mark cannot be null");
+        if (!(mark instanceof Mark own) || own.core() != this) {
+            throw new IllegalArgumentException("the mark was taken from another cache instance");
+        }
+        invalidateAllBefore(own.time());
+    }
+
+    // a mark taken now, backdated by the duration: one form of the backdated write (VISION.md, "Refill while
+    // serving"), and the latency between measuring and writing does not move the cut-off
+    void invalidateAllOlderThan(Duration olderThan) {
+        requireNonNull(olderThan, "olderThan cannot be null");
+        if (olderThan.isNegative()) {
+            throw new IllegalArgumentException("olderThan cannot be negative");
+        }
+        Mark mark = markStore();
+        // no earlier than the epoch, before every write time: a duration of centuries hides every row
+        Instant before = olderThan.compareTo(Duration.between(Instant.EPOCH, mark.time())) >= 0 ? Instant.EPOCH
+                : mark.time().minus(olderThan);
+        invalidateAllBefore(before);
+    }
+
+    // invalidateAll backdated (VISION.md, "Refill while serving"): the control row written with its cut-off one clock
+    // allowance before the given time, so every row written before that counts as missing from now on and every row
+    // written since stays. The allowance, so that a write sent after the mark was read is never hidden however the
+    // store's clock steps within it (a refill's fill); a row written just before the mark is as current as the
+    // refill. For the same reason nothing is waited for, as invalidateAll() waits for writes after it: every write
+    // after this call is later than the mark. L1 is not cleared, so that the cache stays hot: the epoch moves, so
+    // every copy is checked against the store before it is served again (a hidden row drops it), and the pass of a
+    // gap checks them all in the background, here and, on its message, on every instance. As invalidateAll()
+    // otherwise: the atomic map operations wait for the write
+    private void invalidateAllBefore(Instant before) {
+        checkOpen();
+        Write control = Write.value(Store.CONTROL_HASH, controlBytes(keySerializer.format()),
+                backdatedBytes(valueSerializer.format()), clock.fresh());
+        Duration allowance = store.clockAllowance();
+        Instant cutoff = allowance.isNegative() ? before : before.minus(allowance);
+        clearing.lockExclusive();
+        try {
+            Map<String, Write> written = new LinkedHashMap<>(Map.of(Store.CONTROL_HASH, control));
+            advance(written, false, writes -> store.writeControl(writes.iterator().next(), cutoff));
+            // its own echo then revalidates nothing again (at the version the store applied it at)
+            controlVersion.accumulateAndGet(requireNonNull(written.get(Store.CONTROL_HASH)).version(), Math::max);
+        } finally {
+            // also after a failure, whose outcome may be unknown: checking every copy is always correct
+            epoch.incrementAndGet();
+            clearing.unlockExclusive();
+            revalidateAfter(Duration.ZERO, false);
+        }
+    }
+
+    // a mark of the store's time (DistributedPolicy#markStore), of this instance only
+    record Mark(InternalCore<?, ?> core, Instant time) implements DistributedPolicy.StoreMark {
+    }
+
     // the writes right after an invalidateAll applied here (its own, or announced): a write committed after the control
     // row but within the store clock's allowance of it can carry the same write time (a clock counting in
     // milliseconds) or an earlier one (a clock stepping back), and the store hides it like a row written before the
@@ -1207,9 +1274,23 @@ final class InternalCore<K, V> {
         }
     }
 
-    // the key and value of the control row: valid in every format (JSON's null), never read
+    // the key and value of the control row of invalidateAll(): valid in every format (JSON's null)
     private static byte[] controlBytes(StoreSettings.Format format) {
         return format == StoreSettings.Format.JSON ? "null".getBytes(StandardCharsets.UTF_8) : new byte[0];
+    }
+
+    // the value of a backdated control row: the kind of invalidateAll, read by the pass its message starts
+    private static byte[] backdatedBytes(StoreSettings.Format format) {
+        return (format == StoreSettings.Format.JSON ? "\"" + BACKDATED + "\"" : BACKDATED)
+                .getBytes(StandardCharsets.UTF_8);
+    }
+
+    // whether the control row read is a full invalidateAll's: a value, not a backdated one's (the control rows of 0.8.0
+    // hold an empty value, or JSON's null). A row read as expired (older than the maximum age) has no value to tell:
+    // revalidated, which is correct for both, and every row such a control row hides has expired anyway
+    private static boolean isFull(@Nullable Row control) {
+        byte[] value = control == null ? null : control.value();
+        return value != null && !new String(value, StandardCharsets.UTF_8).contains(BACKDATED);
     }
 
     // the store step of put and putAll (VISION.md, "Target design: monotonic versions"): every key advances, at a
@@ -1247,9 +1328,14 @@ final class InternalCore<K, V> {
      *
      * @param put whether through the guard as a put (not retried with an unknown outcome) or as a write
      */
-    // the key and the value are nullable arrays (byte @Nullable []), which Sonar does not read
-    @SuppressWarnings("java:S4449")
     private void advance(Map<String, Write> writes, boolean put) {
+        advance(writes, put, store::write);
+    }
+
+    // through the given store call: write, or writeControl. The key and the value are nullable arrays
+    // (byte @Nullable []), which Sonar does not read
+    @SuppressWarnings("java:S4449")
+    private void advance(Map<String, Write> writes, boolean put, Function<Collection<Write>, WriteResult> writing) {
         Collection<Write> remaining = new ArrayList<>(writes.values());
         for (int attempt = 1; !remaining.isEmpty(); attempt++) {
             if (attempt > ADVANCE_ATTEMPTS) {
@@ -1257,8 +1343,8 @@ final class InternalCore<K, V> {
                         + "version of the key written concurrently; it can be tried again", null, false, true);
             }
             Collection<Write> attempted = remaining;
-            WriteResult result = put ? guard.put(() -> store.write(attempted))
-                    : guard.write(() -> store.write(attempted));
+            WriteResult result = put ? guard.put(() -> writing.apply(attempted))
+                    : guard.write(() -> writing.apply(attempted));
             // applied at the version the store reports: its own, where it assigns one (VISION.md, "Target design:
             // versions applied as well as each store can"). Seen like a version read: an assigning store puts it
             // above a row written ahead, which this clock would otherwise learn only from its own write's message,
@@ -1896,7 +1982,16 @@ final class InternalCore<K, V> {
     // write can replace it. The ages of one read are measured at the same instant, so they compare like the times of
     // the writes
     private Map<String, Row> readRows(Collection<String> hashes) {
-        Map<String, Row> read = guard.read(() -> store.read(withControl(hashes), maximumAge));
+        return visible(readWithControl(hashes));
+    }
+
+    // the rows as read, the control row among them
+    private Map<String, Row> readWithControl(Collection<String> hashes) {
+        return guard.read(() -> store.read(withControl(hashes), maximumAge));
+    }
+
+    // the rows of a read with the control row (readWithControl), each as the core sees it, the control row left out
+    private Map<String, Row> visible(Map<String, Row> read) {
         Row control = read.get(Store.CONTROL_HASH);
         Map<String, Row> rows = new LinkedHashMap<>();
         read.forEach((hash, row) -> {
@@ -2257,12 +2352,13 @@ final class InternalCore<K, V> {
             return true;
         }
         stats.increment(Counter.INVALIDATED_ALL_MESSAGE);
-        // the epoch too, not only the clear: a read through the store (getIfPresent) installs after it read, with no
-        // future in L1 the clear would remove, so a value it read before the cut-off would stay trusted (found by
-        // InternalInterleavingTest, whose scenario of loads alone did not need it)
+        // the epoch, so that every copy is checked before it is served again; then the pass, whose first read tells
+        // the kind from the control row (VISION.md, "Refill while serving"): a full invalidateAll clears L1, a
+        // backdated one keeps it hot, every copy the store still has confirmed. The epoch, not only a clear, also for a
+        // full one: a read through the store (getIfPresent) installs after it read, with no future in L1 a clear would
+        // remove, so a value it read before the cut-off would stay trusted (found by InternalInterleavingTest)
         epoch.incrementAndGet();
-        l1.synchronous().invalidateAll();
-        distrustWithinAllowance();
+        revalidateAfter(store.clockAllowance(), true);
         return true;
     }
 
@@ -2415,13 +2511,39 @@ final class InternalCore<K, V> {
         }
         subscriptionUp = true;
         revalidations.incrementAndGet();
-        storeExecutor.execute(() -> {
-            try {
-                revalidateAll(revalidating);
-            } finally {
-                revalidations.decrementAndGet();
-            }
-        });
+        revalidateInBackground(revalidating, KEEP_ALL);
+    }
+
+    // the pass after an invalidateAll that may keep L1 (backdated here, or announced), once the store clock's
+    // allowance has passed: a write right after the control row may be stamped at or before it and hidden, so the epoch
+    // moves once more then (see distrustWithinAllowance) and the pass checks against it. Counted from now, so that an
+    // instance waiting for quiescence waits for it too. clearIfFull: an announced one, whose kind the pass reads; a
+    // full one's drops the copies from before the epoch now (its message's), and checks those installed since
+    private void revalidateAfter(Duration allowance, boolean clearIfFull) {
+        revalidations.incrementAndGet();
+        int dropBelow = clearIfFull ? epoch.get() : KEEP_ALL;
+        if (allowance.isZero() || allowance.isNegative()) {
+            revalidateInBackground(epoch.get(), dropBelow);
+        } else {
+            InternalMaintenance.scheduleOnce(environment,
+                    () -> revalidateInBackground(epoch.incrementAndGet(), dropBelow), allowance);
+        }
+    }
+
+    // counted by the caller (revalidations), uncounted when done
+    private void revalidateInBackground(int revalidating, int dropBelow) {
+        try {
+            storeExecutor.execute(() -> {
+                try {
+                    revalidateAll(revalidating, dropBelow);
+                } finally {
+                    revalidations.decrementAndGet();
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            // closed meanwhile: nothing left to check
+            revalidations.decrementAndGet();
+        }
     }
 
     // delivery stopped: until it is resumed, every access checks the held version against the store
@@ -2599,12 +2721,31 @@ final class InternalCore<K, V> {
     }
 
     private void check(Map<InternalKey<K>, CompletableFuture<InternalValue<V>>> toCheck, int confirmingEpoch) {
-        Map<String, Row> rows;
+        check(toCheck, confirmingEpoch, KEEP_ALL);
+    }
+
+    // what a check came to: the store did not answer, or the copies were checked
+    private enum Checked { UNREAD, CHECKED }
+
+    // dropBelow (not KEEP_ALL): the control row read with the copies tells the kind of an announced invalidateAll, and
+    // a full one's drops every copy from before its message without a check, as clearing L1 then would have (a
+    // backdated one keeps L1, VISION.md "Refill while serving"); the copies installed since are checked as any
+    private Checked check(Map<InternalKey<K>, CompletableFuture<InternalValue<V>>> toCheck, int confirmingEpoch,
+                          int dropBelow) {
+        Map<String, Row> read;
         try {
-            rows = readRows(hashes(toCheck.keySet()));
+            read = readWithControl(hashes(toCheck.keySet()));
         } catch (StoreException e) {
-            return;
+            return Checked.UNREAD;
         }
+        if (dropBelow != KEEP_ALL && isFull(read.get(Store.CONTROL_HASH))) {
+            dropOlder(dropBelow);
+            toCheck.values().removeIf(held -> {
+                InternalValue<V> value = completedValue(held);
+                return value != null && value.epoch() < dropBelow;
+            });
+        }
+        Map<String, Row> rows = visible(read);
         toCheck.forEach((internalKey, held) -> {
             InternalValue<V> value = held.join();
             if (stillStored(rows.get(internalKey.hash()), value)) {
@@ -2615,19 +2756,33 @@ final class InternalCore<K, V> {
                 l1.asMap().remove(internalKey, held);
             }
         });
+        return Checked.CHECKED;
+    }
+
+    // the copies installed before the epoch given (an announced full invalidateAll's message), each removed unless
+    // replaced meanwhile; loads in flight complete at their older epoch and are checked then
+    private void dropOlder(int epochBefore) {
+        l1.asMap().forEach((internalKey, future) -> {
+            InternalValue<V> value = completedValue(future);
+            if (value != null && value.epoch() < epochBefore) {
+                l1.asMap().remove(internalKey, future);
+            }
+        });
     }
 
     // the background pass after a gap: checks everything held in batches, rate-limited so that it does not load a
     // store that has just recovered; stops when a newer gap starts a pass of its own, or the store stops answering
-    private void revalidateAll(int revalidating) {
+    private void revalidateAll(int revalidating, int dropBelow) {
         try {
-            revalidateBatches(revalidating);
+            revalidateBatches(revalidating, dropBelow);
         } catch (RuntimeException e) {
             // e.g. the store closed meanwhile: the next read of each value checks it anyway
         }
     }
 
-    private void revalidateBatches(int revalidating) {
+    // dropBelow until a read has told the kind (check)
+    private void revalidateBatches(int revalidating, int dropBelow) {
+        int dropping = dropBelow;
         List<InternalKey<K>> held = new ArrayList<>(l1.asMap().keySet());
         for (int from = 0; from < held.size(); from += REVALIDATION_BATCH) {
             if (closed || epoch.get() != revalidating || guard.isOpen()) {
@@ -2641,8 +2796,8 @@ final class InternalCore<K, V> {
                     batch.put(internalKey, future);
                 }
             }
-            if (!batch.isEmpty()) {
-                check(batch, revalidating);
+            if (!batch.isEmpty() && check(batch, revalidating, dropping) == Checked.CHECKED) {
+                dropping = KEEP_ALL;
             }
             try {
                 environment.sleep(Duration.ofMillis(REVALIDATION_PAUSE_MILLIS));

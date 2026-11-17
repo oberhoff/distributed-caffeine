@@ -40,6 +40,9 @@ import java.sql.SQLTransientConnectionException;
 import java.sql.Statement;
 import java.sql.Types;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -50,6 +53,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.WeakHashMap;
+
+import static java.util.Objects.requireNonNull;
 
 
 /**
@@ -197,6 +202,18 @@ final class PostgresStore implements Store, ChangeFeed {
         });
     }
 
+    // the server's clock, as every write time is set: now(), the start of the statement's transaction
+    @Override
+    public Instant time() {
+        return run(Kind.READ, connection -> {
+            try (PreparedStatement statement = connection.prepareStatement("SELECT now()");
+                 ResultSet resultSet = statement.executeQuery()) {
+                resultSet.next();
+                return resultSet.getObject(1, OffsetDateTime.class).toInstant();
+            }
+        });
+    }
+
     // writes
 
     /**
@@ -273,6 +290,47 @@ final class PostgresStore implements Store, ChangeFeed {
             throw applied ? e.afterPartlyApplied() : e;
         }
         return new WriteResult(conflicts, assigned);
+    }
+
+    // the control row backdated (Store#writeControl): an upsert as write's, its write time the last microsecond
+    // (timestamptz) before the given time, and never earlier than the row's, so that the cut-off only moves forward.
+    // Exact in integer microseconds from the epoch, no floating point between
+    @Override
+    public WriteResult writeControl(Write control, Instant before) {
+        if (!CONTROL_HASH.equals(control.hash()) || !control.isAdvance() || control.isTombstone()) {
+            throw new IllegalArgumentException("control must be an advancing value write of the control row");
+        }
+        Instant writeTime = before.minusNanos(1).truncatedTo(ChronoUnit.MICROS);
+        long micros = Math.addExact(Math.multiplyExact(writeTime.getEpochSecond(), 1_000_000L),
+                writeTime.getNano() / 1_000);
+        String sql = """
+                WITH a AS (
+                    INSERT INTO %1$s AS r (discriminator, id, key, value, state, version, write_time)
+                    VALUES (?, ?, ?::%3$s, ?::%4$s, 'VALUE', %2$s,
+                        timestamptz 'epoch' + ?::bigint * interval '1 microsecond')
+                    ON CONFLICT (discriminator, id) DO UPDATE SET key = excluded.key, value = excluded.value,
+                        state = excluded.state, version = GREATEST(r.version + 1, %2$s),
+                        write_time = GREATEST(r.write_time, excluded.write_time)
+                    RETURNING r.id, r.version)
+                SELECT a.id, a.version, pg_notify(?, 'WRITTEN|' || a.id || '|' || a.version) FROM a"""
+                .formatted(t, table.nextVersion(), PostgresTable.columnType(table.keyFormat),
+                        PostgresTable.columnType(table.valueFormat));
+        Map<String, Long> written = run(Kind.WRITE, connection -> {
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, table.discriminator);
+                statement.setString(2, CONTROL_HASH);
+                bind(statement, 3, requireNonNull(control.key()), table.keyFormat);
+                bind(statement, 4, requireNonNull(control.value()), table.valueFormat);
+                statement.setLong(5, micros);
+                statement.setString(6, table.channel);
+                return versions(statement);
+            }
+        });
+        Long version = written.get(CONTROL_HASH);
+        if (version == null) {
+            return new WriteResult(Set.of(CONTROL_HASH), Map.of());
+        }
+        return new WriteResult(Set.of(), version == control.version() ? Map.of() : Map.of(CONTROL_HASH, version));
     }
 
     // maintenance: idempotent on several instances at once

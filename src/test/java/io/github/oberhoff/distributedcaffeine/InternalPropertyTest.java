@@ -63,6 +63,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
@@ -73,6 +74,7 @@ import java.util.stream.Stream;
 
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.awaitUpTo;
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.pause;
+import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
 
@@ -505,6 +507,36 @@ public class InternalPropertyTest {
     private void writeOnce(DistributedLoadingCache<String, String> cache, Random random) {
         int key = random.nextInt(KEYS);
         double choice = random.nextDouble();
+        if (choice < 0.04) {
+            // a refill while serving (VISION.md, "Refill while serving"): the source changes broadly, the refill
+            // puts every record the source holds and hides the rest. Under every key's lock, as an invalidateAll: a
+            // load that read the source before and writes after the mark is the race accepted for it, so the
+            // freshness oracle allows what the source held before; every value the refill put is confirmed, so the
+            // presence oracle fails if the cut-off hides one of them
+            lockAll(() -> {
+                sourceHeld.forEach((k, values) -> beforeInvalidateAll
+                        .computeIfAbsent(k, ignored -> ConcurrentHashMap.newKeySet()).addAll(values));
+                for (int changed = 0; changed < KEYS; changed++) {
+                    double change = random.nextDouble();
+                    if (change < 0.4) {
+                        setSource(key(changed), token(changed));
+                    } else if (change < 0.6) {
+                        setSource(key(changed), null);
+                    }
+                }
+                AtomicReference<DistributedPolicy.@Nullable StoreMark> mark = new AtomicReference<>();
+                retry(() -> mark.set(cache.distributedPolicy().markStore()));
+                Map<String, String> fill = new java.util.HashMap<>(source);
+                if (!fill.isEmpty()) {
+                    retry(() -> cache.putAll(fill));
+                }
+                retry(() -> cache.distributedPolicy().invalidateAllBeforeMark(requireNonNull(mark.get())));
+                trace("refill " + fill);
+                confirmed.clear();
+                confirmed.putAll(fill);
+            });
+            return;
+        }
         if (choice < 0.08) {
             // under every key's lock: the conditional writes below update the source after the cache, and an
             // invalidateAll in between would let a load put the old source value back
@@ -530,7 +562,7 @@ public class InternalPropertyTest {
             int other = (key + 1 + random.nextInt(KEYS - 1)) % KEYS;
             lock(Math.min(key, other), Math.max(key, other), () -> {
                 Map<String, String> values = Map.of(key(key), token(key), key(other), token(other));
-                values.forEach(InternalPropertyTest.this::setSource);
+                values.forEach(this::setSource);
                 retry(() -> cache.putAll(values));
                 confirmed.putAll(values);
             });

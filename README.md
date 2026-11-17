@@ -324,19 +324,32 @@ DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapt
 
 ### Distributed policy
 
-`distributedPolicy()` gives access to the distributed side of a cache instance: its synchronization state
-(`getSynchronizationState()`), its stats of store, synchronization and maintenance activity (`stats()`, only recorded
-with `recordStats()`), and `getFromStore(...)` and `getAllFromStore(...)`, which read the store directly, bypassing the
-instance's copies. The state is one of:
+`distributedPolicy()` gives access to the distributed side of a cache instance, as Caffeine's `policy()` does to the
+local one.
+
+#### Synchronization state
+
+`getSynchronizationState()` tells whether the instance is in step with the store, for example for a health check:
 
 * `SYNCHRONIZED`: the store answers and changes made elsewhere arrive.
 * `DEGRADED`: the store does not answer or changes made elsewhere do not arrive (see [Failures](#failures)); the
   instance recovers by itself.
 * `CLOSED`: the cache instance was closed.
 
+#### Stats
+
+`stats()` counts the instance's store, synchronization and maintenance activity, only recorded with `recordStats()`.
 Caffeine's stats (`cache.stats()`) count a value found in the store as a miss and a load, so their `hitRate()` is the
 rate of local hits and their load counts and times include the store reads; the distributed stats count these values
 as `storeHitCount`, and the calls to the source alone as `sourceLoadCount`.
+
+#### Store contents
+
+`getFromStore(...)` and `getAllFromStore(...)` read the store directly, bypassing the instance's copies and keeping
+nothing they read: to see what the store holds, for example while diagnosing. Values older than the store's maximum
+age are not returned, nor values the instance cannot read (counted as `unreadableRowCount`), as for every read.
+
+#### Store bounds
 
 `storeMaximumAge()` and `storeMaximumSize()` adjust the store's bounds at runtime, as Caffeine's
 `policy().expireAfterWrite()` and `policy().eviction()` adjust the local ones. Each is present only if the cache was
@@ -351,6 +364,12 @@ example from a configuration service.
 * **While instances differ,** as while a change reaches them one after another, values stay consistent: the shortest
   age expires values for every instance, which then load them again, and the store is pruned to the smallest size.
   The stats show it as expired values (`maintenanceExpiredCount`, `expiredCount`), store misses and loads.
+
+#### Invalidating by time
+
+`markStore()` and `invalidateAllBeforeMark(...)` drop every value written before the mark, on every instance, and keep
+every value written since (the caches stay hot, unlike after `invalidateAll()`).
+`invalidateAllOlderThan(...)` drops every value written longer ago than a duration, at the time of the call.
 
 ### Settings by goal
 
@@ -370,6 +389,7 @@ Which setting serves which goal; the rest can stay at their defaults:
 | A smaller store                                                                                 | the store's `withMaximumSize(...)`                                              |
 | Local copies kept longer than the store keeps values                                            | the store's `withMaximumAgeForStoreOnly()`                                      |
 | The maximum age or size changed at runtime                                                      | `distributedPolicy().storeMaximumAge()` or `storeMaximumSize()`                 |
+| Values written before a point in time dropped at once, e.g. after a refill while serving        | `markStore()` + `invalidateAllBeforeMark(...)` or `invalidateAllOlderThan(...)` |
 
 A value with a validity of its own, such as a token, can't be expired by an `expireAfter(...)` alone: it only drops
 the local copy, and the next read finds the value in the store again. Treat an invalid value read as missing:
