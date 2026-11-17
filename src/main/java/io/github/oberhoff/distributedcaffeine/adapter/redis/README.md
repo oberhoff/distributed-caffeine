@@ -28,7 +28,9 @@ client.
   whose connection broke, such as one the server closed while it sat in the pool after a restart, is sent once more on
   another, as Lettuce and Redisson do. Its sockets block and have no write timeout: a write too large for the socket's
   buffer, such as a large `putAll`, sent to a server that vanished without closing the connection, waits until the
-  operating system gives up (about 15 minutes on Linux, `net.ipv4.tcp_retries2`). Lettuce and Redisson bound it.
+  operating system gives up (about 15 minutes on Linux, `net.ipv4.tcp_retries2`). Lettuce and Redisson bound it; with
+  Jedis, lower `net.ipv4.tcp_retries2` (8, the lowest value RFC 1122 allows, gives about 100 seconds), or keep batches
+  small.
   A `RedisSentinelClient` or `RedisClusterClient` cannot be created while its servers are out (its constructor
   connects and throws), so an application starting during such an outage fails before any cache exists; create the
   client where that failure is retried, or use Lettuce or Redisson, whose clients are created without a server.

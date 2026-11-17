@@ -56,6 +56,18 @@ class InternalVersionTest {
         assertThat(clock.next(ahead + 5)).isGreaterThan(ahead + 5);
     }
 
+    // a retry after a refusal leaves the refusing version's millisecond, where the node bits decide every tie
+    @Test
+    void a_retry_beyond_a_version_lands_in_the_next_millisecond_and_the_clock_follows() {
+        long refusing = clock.fresh() + (10L << 20) + (5L << 10); // ten milliseconds ahead, a counter of five
+
+        long retry = clock.beyond(refusing);
+
+        assertThat(retry >>> 20).as("the next millisecond").isEqualTo((refusing >>> 20) + 1);
+        assertThat(retry).isGreaterThan(refusing);
+        assertThat(clock.fresh()).as("followed").isGreaterThan(retry);
+    }
+
     @Test
     void a_version_seen_that_is_behind_changes_nothing() {
         long before = clock.fresh();

@@ -17,6 +17,7 @@ package io.github.oberhoff.distributedcaffeine.adapter.postgresql;
 
 import io.github.oberhoff.distributedcaffeine.EndToEndBenchmark;
 import io.github.oberhoff.distributedcaffeine.RefillBenchmark;
+import io.github.oberhoff.distributedcaffeine.StoreDeadlineBenchmark;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -39,6 +40,13 @@ class PostgresBenchmarkExperimentTest {
         try (PostgresTestDatabase ignored = PostgresTestDatabase.start("postgres:18", PostgresTopology.SINGLE_SERVER);
              PostgresCacheBackend backend = new PostgresCacheBackend()) {
             EndToEndBenchmark.run("PostgreSQL 18 (single server, local container)", backend);
+        }
+    }
+
+    @Test
+    void measures_a_deadline_for_store_calls() throws Exception {
+        try (PostgresTestDatabase ignored = PostgresTestDatabase.start("postgres:18", PostgresTopology.SINGLE_SERVER)) {
+            StoreDeadlineBenchmark.run("PostgreSQL 18 (single server, local container)", PostgresCacheBackend::new);
         }
     }
 

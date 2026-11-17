@@ -15,6 +15,10 @@ Each adapter refuses the other database, naming the right adapter, and a version
 [Requirements](../../../../../../../../../README.md#requirements); the table uses the character set `utf8mb4`, which older versions
 cannot index). A driver of another name, such as a wrapper around one of these, is accepted but untested.
 
+The data source must hand out connections of the cache's own: a plain pool, never a transaction-aware data source (such
+as Spring's `TransactionAwareDataSourceProxy`), whose connection inside a transaction is the caller's, which the cache's
+commit would then commit.
+
 ## Table
 
 The table and its index are created if missing; several caches can share a table, told apart by their discriminator. The
@@ -49,7 +53,8 @@ included, beyond the operation timeout.
 The network timeout bounds waiting for an answer, not sending: Java sockets have no write timeout, so a write too large
 for the socket's buffer, such as a large `putAll`, sent to a server that vanished without closing the connection (a
 crashed host, a cut network), waits until the operating system gives up (about 15 minutes on Linux,
-`net.ipv4.tcp_retries2`) and fails only then.
+`net.ipv4.tcp_retries2`) and fails only then. To shorten it, lower `net.ipv4.tcp_retries2` on the application's hosts
+(8, the lowest value RFC 1122 allows, gives about 100 seconds), or keep batches small.
 
 ## Replication and failovers
 

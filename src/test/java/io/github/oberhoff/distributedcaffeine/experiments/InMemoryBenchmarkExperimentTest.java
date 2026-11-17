@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine.experiments;
 import io.github.oberhoff.distributedcaffeine.CacheBackend;
 import io.github.oberhoff.distributedcaffeine.EndToEndBenchmark;
 import io.github.oberhoff.distributedcaffeine.RefillBenchmark;
+import io.github.oberhoff.distributedcaffeine.StoreDeadlineBenchmark;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import io.github.oberhoff.distributedcaffeine.testing.StoreProfile;
 import org.junit.jupiter.api.Test;
@@ -41,6 +42,11 @@ class InMemoryBenchmarkExperimentTest {
         try (CacheBackend backend = CacheBackend.of(new InMemoryDatabase())) {
             EndToEndBenchmark.run("in-memory store", backend);
         }
+    }
+
+    @Test
+    void measures_a_deadline_for_store_calls() throws Exception {
+        StoreDeadlineBenchmark.run("in-memory store", () -> CacheBackend.of(new InMemoryDatabase()));
     }
 
     @Test

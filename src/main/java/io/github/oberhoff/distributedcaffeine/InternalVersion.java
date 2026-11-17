@@ -155,6 +155,16 @@ final class InternalVersion {
         return fresh > version ? fresh : above(version);
     }
 
+    // a version in the millisecond after the given one's, for a write retried after that version refused it
+    // (InternalCore#advance). Within one millisecond the node bits order two instances' versions, so a retry just above
+    // the row read (next) loses every such tie to an instance with larger node bits writing the key meanwhile, again
+    // and again, until its attempts run out (found 2026-11-17 with many threads putting one key on a store applying
+    // proposed versions conditionally: every failure on one of two instances, HotKeyPutExperimentTest). The clock
+    // follows, as for any version seen, so that this instance's later versions stay above it
+    long beyond(long version) {
+        return next(inRange((((version & ~NODE_MASK) >>> TIME_SHIFT) + 1) << TIME_SHIFT));
+    }
+
     // whether the first version is at least as new as the second
     static boolean atLeast(long version, long other) {
         if (other == ANYTHING) {

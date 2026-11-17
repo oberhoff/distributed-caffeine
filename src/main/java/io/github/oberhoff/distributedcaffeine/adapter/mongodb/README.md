@@ -49,7 +49,9 @@ retries a write within it while the primary changes. A timeout set on the client
 The timeout does not bound sending: Java sockets have no write timeout, so with the driver's default transport a write
 too large for the socket's buffer, such as a large `putAll`, sent to a primary that vanished without closing the
 connection (a crashed host, a cut network), waits until the operating system gives up (about 15 minutes on Linux,
-`net.ipv4.tcp_retries2`) and fails only then ([JAVA-1269](https://jira.mongodb.org/browse/JAVA-1269)).
+`net.ipv4.tcp_retries2`) and fails only then ([JAVA-1269](https://jira.mongodb.org/browse/JAVA-1269)). The driver's
+Netty transport (`TransportSettings.nettyBuilder()`) bounds sending; otherwise, lower `net.ipv4.tcp_retries2` (8, the
+lowest value RFC 1122 allows, gives about 100 seconds), or keep batches small.
 
 ## Failovers
 

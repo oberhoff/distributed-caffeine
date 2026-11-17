@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.adapter.jdbc;
 
 import io.github.oberhoff.distributedcaffeine.EndToEndBenchmark;
+import io.github.oberhoff.distributedcaffeine.StoreDeadlineBenchmark;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -41,6 +42,13 @@ class JdbcBenchmarkExperimentTest {
     @Test
     void measures_the_operations_end_to_end_on_mysql() throws Exception {
         measure("MySQL 26 (single server, local container)", "mysql:26", JdbcTestDatabase.MYSQL_CONNECTOR_J);
+    }
+
+    @Test
+    void measures_a_deadline_for_store_calls_on_mariadb() throws Exception {
+        try (JdbcTestDatabase ignored = JdbcTestDatabase.start("mariadb:13", JdbcTestDatabase.MARIADB_CONNECTOR_J)) {
+            StoreDeadlineBenchmark.run("MariaDB 13 (single server, local container)", JdbcCacheBackend::new);
+        }
     }
 
     private static void measure(String label, String image, String driver) throws Exception {

@@ -17,6 +17,7 @@ package io.github.oberhoff.distributedcaffeine.adapter.redis;
 
 import io.github.oberhoff.distributedcaffeine.EndToEndBenchmark;
 import io.github.oberhoff.distributedcaffeine.RefillBenchmark;
+import io.github.oberhoff.distributedcaffeine.StoreDeadlineBenchmark;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -48,6 +49,14 @@ class RedisBenchmarkExperimentTest {
             server.admin.sync().info("commandstats").lines()
                     .filter(line -> line.startsWith("cmdstat_eval") || line.startsWith("cmdstat_xread"))
                     .forEach(line -> System.out.println("  " + line));
+        }
+    }
+
+    @Test
+    void measures_a_deadline_for_store_calls_on_redis_through_jedis() throws Exception {
+        try (RedisTestServer server = new RedisTestServer("redis:8")) {
+            StoreDeadlineBenchmark.run("Redis 8 through Jedis (single server, local container)",
+                    () -> new RedisCacheBackend(JedisRedis.of(server.jedis)));
         }
     }
 

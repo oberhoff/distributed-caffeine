@@ -6805,6 +6805,16 @@ New ones go here as they come up while building.
 
 ### Options for later
 
+- ~~**A put starved on a hot key**~~ (found and built 2026-11-17). On a store applying proposed versions
+  conditionally (MariaDB, MySQL, MongoDB's batches), a refused advancing write read the row and proposed just above it
+  (`InternalVersion#next`), in the same millisecond, where the versions' node bits order two instances: one instance
+  lost every tie to the other while both wrote the key, and its put failed after its 100 attempts (8 threads on 2
+  instances putting one key: 1 put in 10^4 to 10^6 failed at store latencies up to 50 µs, every failure on one
+  instance; `HotKeyPutExperimentTest`). A retry now proposes in the millisecond after the row read
+  (`InternalVersion#beyond`), the clock following: no failure since, the refusals of first attempts unchanged.
+  Rejected: giving the put up after a second refusal as overwritten by a concurrent write (that write can be a load
+  that read the source before the put, whose stale value would then stay).
+
 - **Refill while serving: the calling instance's own writes after the mark kept trusted** (noted 2026-11-17). After
   `invalidateAllBeforeMark` every copy is revalidated, also the ones this instance wrote after the mark, which are
   provably kept. A copy installed after the mark may still hold a row written before it (a read by traffic during the
@@ -6864,6 +6874,42 @@ New ones go here as they come up while building.
   virtual threads), and a thread and pooled connection held until the operating system gives up. The Netty
   transports bound sending themselves (Lettuce, Redisson, MongoDB's `TransportSettings.nettyBuilder()`), but are not
   required of users.
+  **Measured 2026-11-17** (`StoreDeadlineBenchmark`: the end-to-end benchmark direct, then every store call on a
+  thread of a cached pool and on a virtual thread, waited for with a deadline; PostgreSQL 18, MongoDB 9, MariaDB 13 in
+  local containers, both orders, the machine otherwise idle): on platform threads the hop stays within the noise
+  between runs (latency within 10 %, throughput +1 to -7 %; one store measured direct in the two orders differs by up
+  to 25 %); virtual threads somewhat worse (up to -10 %, once -23 % throughput on MongoDB). A first run with the
+  machine busy, and the direct run always first, had suggested a cost of 10 to 20 %: the run order (JIT warm-up, data
+  growing between runs) and the load, not the hop. So a deadline on every blocking store call, on platform threads,
+  costs about nothing; to design before building: which adapters need it (the blocking ones), the threads a stuck call
+  holds, and thread-bound context of the caller (a transaction bound to the user's `DataSource`).
+  **Decided 2026-11-17: not built, documented instead** (option C). Designed: a core wrapper around the adapter's
+  store, every adapter alike, a dedicated JVM-wide cached pool of daemon platform threads (not the user's store
+  executor, which may be bounded), the deadline twice the operation timeout so that the drivers' own timeouts still
+  report first, the stuck thread not interrupted. Its caveats outweigh the rare case: the documented bound becomes twice
+  the timeout; every store call moves to another thread (a `DataSource` handing out the caller's transactional
+  connection would be decoupled from the transaction, thread-local context lost); a call merely slow becomes an unknown
+  outcome; stuck threads and connections are still held until the operating system gives up. The case is defused by
+  configuration at its source, so each blocking adapter's README names the remedies: MongoDB's Netty transport, a lower
+  `net.ipv4.tcp_retries2` (8, the lowest RFC 1122 allows, about 100 s), smaller batches. Revisit only if a user hits it.
+  Found while designing: `PostgresStore`/`JdbcStore` commit a connection whose auto-commit is off, which with a
+  `DataSource` handing out the caller's transactional connection (Spring's `TransactionAwareDataSourceProxy`) could
+  commit the caller's transaction early. **Verified 2026-11-17** (an experiment with Spring 6.2 as a test dependency, both
+  removed again; the regression test needs no Spring, see the plan): a `cache.put` inside a Spring transaction rolled back afterwards, the cache given a
+  `TransactionAwareDataSourceProxy` over a Hikari pool: the application's row inserted before the put survived the
+  rollback, the one after it did not, the cache's write stayed. `JdbcStore` (MariaDB, MySQL) commits the same way.
+  Standard setups are not affected (a plain pool hands out a connection of its own; Spring's transactions bind a
+  connection only for code asking through Spring); application servers with JTA forbid the commit on an enlisted
+  connection, so there cache writes inside a transaction fail loudly instead. Joining the caller's transaction is no
+  fix (the write rolled back while this instance holds it, and others have heard of it); nested transactions neither
+  (savepoints commit with the outer transaction; PostgreSQL, MariaDB and MySQL have no autonomous ones). JDBC cannot
+  tell whether a transaction is open (auto-commit off is also a legitimate pool setting); the databases report it in
+  their protocols, pgjdbc exposes it (`getTransactionState()`), the MariaDB and MySQL drivers only internally.
+  **Plan (decided 2026-11-17):** the rule in the JDBC adapters' READMEs (done the same day: a plain pool, never a
+  transaction-aware data source); PostgreSQL refusing a borrowed connection with an open transaction, exactly and at no
+  cost, with a regression test whose data source hands out one connection with an open transaction, as the proxy
+  does inside one (to build, as a change of its own). Not adopted: refusing known
+  transaction-aware classes by name (brittle, incomplete, unusual among comparable libraries).
 - **A tie-breaker for equal versions, so that a check transfers no value again** (decided 2026-11-10). A version
   can repeat with other content after a failover that lost a write (dimension 4 of the in-memory store profiles), so
   0.8.0 confirms a held copy by its version and its value, compared serialized (`InternalCore#stillStored`): exact,

@@ -1375,9 +1375,10 @@ final class InternalCore<K, V> {
                     // The same content at the same version is the same state, whoever wrote it
                     continue;
                 }
-                // above the row read, also where it lies too far ahead for the clock to follow it
+                // above the row read, in the millisecond after it (see InternalVersion#beyond), also where it lies too
+                // far ahead for the clock to follow it
                 Write above = new Write(hash, write.key(), write.value(),
-                        row == null ? clock.fresh() : clock.next(row.version()), Write.ADVANCE);
+                        row == null ? clock.fresh() : clock.beyond(row.version()), Write.ADVANCE);
                 writes.put(hash, above);
                 again.add(above);
             }

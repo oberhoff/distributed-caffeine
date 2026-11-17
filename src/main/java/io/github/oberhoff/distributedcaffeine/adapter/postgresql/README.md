@@ -4,7 +4,10 @@ Details of the PostgreSQL adapter beyond its configuration, which the
 [main README](../../../../../../../../../README.md) describes. Distribution uses PostgreSQL's `LISTEN`/`NOTIFY`, which
 keeps a connection open for listening. In short:
 
-* Any data source that reaches the primary works (versions: see [Requirements](../../../../../../../../../README.md#requirements)).
+* Any data source that reaches the primary works (versions: see [Requirements](../../../../../../../../../README.md#requirements)),
+  if it hands out connections of the cache's own: a plain pool, never a transaction-aware data source (such as
+  Spring's `TransactionAwareDataSourceProxy`), whose connection inside a transaction is the caller's, which the cache's
+  commit would then commit.
 * Behind a pooler in transaction mode, listening needs a direct or session-mode connection, specified using
   `withListenerDataSource(...)`.
 * Building a cache checks both, and the server's version, and fails right away with an explanation if one is not met.
@@ -81,7 +84,8 @@ listening connection that dies silently is detected by the cache's heartbeat and
 The network timeout bounds waiting for an answer, not sending: Java sockets have no write timeout, so a write too large
 for the socket's buffer, such as a large `putAll`, sent to a server that vanished without closing the connection (a
 crashed host, a cut network), waits until the operating system gives up (about 15 minutes on Linux,
-`net.ipv4.tcp_retries2`) and fails only then.
+`net.ipv4.tcp_retries2`) and fails only then. To shorten it, lower `net.ipv4.tcp_retries2` on the application's hosts
+(8, the lowest value RFC 1122 allows, gives about 100 seconds), or keep batches small.
 
 ## Failovers
 
