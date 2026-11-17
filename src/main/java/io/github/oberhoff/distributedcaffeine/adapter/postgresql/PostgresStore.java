@@ -28,6 +28,8 @@ import io.github.oberhoff.distributedcaffeine.spi.Write;
 import io.github.oberhoff.distributedcaffeine.spi.WriteResult;
 import org.jspecify.annotations.Nullable;
 import org.postgresql.PGConnection;
+import org.postgresql.core.BaseConnection;
+import org.postgresql.core.TransactionState;
 
 import javax.sql.DataSource;
 import java.net.SocketTimeoutException;
@@ -480,6 +482,7 @@ final class PostgresStore implements Store, ChangeFeed {
             throw new StoreException("Connecting to " + table + " failed: " + e.getMessage(), e, false, true);
         }
         try (connection) {
+            requireNoTransaction(connection, table.name());
             int previousTimeout = bound(connection, timeout);
             try {
                 requirePrimary(connection);
@@ -507,6 +510,21 @@ final class PostgresStore implements Store, ChangeFeed {
             // a row this store cannot read (written by hand or by another program), or a driver failing
             // unexpectedly: a store failure, not one of the caller's own
             throw new StoreException(accessing() + " failed: " + e, e, false, false);
+        }
+    }
+
+    // a connection inside a transaction of the caller, as a data source handing out the caller's connection does (a
+    // transaction-aware one, such as Spring's TransactionAwareDataSourceProxy): the commit after this store's work would
+    // commit the caller's transaction, and a rollback after a failure roll it back, so it is refused before anything
+    // runs on it (found 2026-11-17: a put inside a transaction rolled back afterwards committed the caller's rows
+    // written before it; VISION.md, "A deadline of the core's own"). pgjdbc knows from the protocol whether a
+    // transaction is open, at no cost; a connection that does not unwrap to pgjdbc's (a wrapping driver) is not checked
+    static void requireNoTransaction(Connection connection, String table) throws SQLException {
+        if (connection.isWrapperFor(BaseConnection.class)
+                && connection.unwrap(BaseConnection.class).getTransactionState() != TransactionState.IDLE) {
+            throw new StoreException(table + ": The data source handed out a connection inside a transaction, which "
+                    + "the cache would commit along with its own work. Give the adapter a plain pool, not a "
+                    + "transaction-aware data source", null, false, false);
         }
     }
 

@@ -54,6 +54,7 @@ final class PostgresSchema {
 
     static void ensure(DataSource dataSource, PostgresTable table, boolean schemaReset, Duration timeout) {
         try (Connection connection = dataSource.getConnection()) {
+            PostgresStore.requireNoTransaction(connection, table.name());
             int previousTimeout = PostgresStore.bound(connection, timeout);
             try {
                 ensure(connection, table, schemaReset);

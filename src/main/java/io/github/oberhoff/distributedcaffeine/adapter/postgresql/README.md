@@ -6,8 +6,8 @@ keeps a connection open for listening. In short:
 
 * Any data source that reaches the primary works (versions: see [Requirements](../../../../../../../../../README.md#requirements)),
   if it hands out connections of the cache's own: a plain pool, never a transaction-aware data source (such as
-  Spring's `TransactionAwareDataSourceProxy`), whose connection inside a transaction is the caller's, which the cache's
-  commit would then commit.
+  Spring's `TransactionAwareDataSourceProxy`), whose connection inside a transaction is the caller's: the cache refuses
+  such a connection with a `StoreException` rather than commit the caller's transaction.
 * Behind a pooler in transaction mode, listening needs a direct or session-mode connection, specified using
   `withListenerDataSource(...)`.
 * Building a cache checks both, and the server's version, and fails right away with an explanation if one is not met.

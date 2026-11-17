@@ -6905,10 +6905,12 @@ New ones go here as they come up while building.
   (savepoints commit with the outer transaction; PostgreSQL, MariaDB and MySQL have no autonomous ones). JDBC cannot
   tell whether a transaction is open (auto-commit off is also a legitimate pool setting); the databases report it in
   their protocols, pgjdbc exposes it (`getTransactionState()`), the MariaDB and MySQL drivers only internally.
-  **Plan (decided 2026-11-17):** the rule in the JDBC adapters' READMEs (done the same day: a plain pool, never a
+  **Plan (decided 2026-11-17), built the same day:** the rule in the JDBC adapters' READMEs (a plain pool, never a
   transaction-aware data source); PostgreSQL refusing a borrowed connection with an open transaction, exactly and at no
-  cost, with a regression test whose data source hands out one connection with an open transaction, as the proxy
-  does inside one (to build, as a change of its own). Not adopted: refusing known
+  cost (`PostgresStore#requireNoTransaction`, for every operation and the schema check at start: pgjdbc's
+  `getTransactionState()`, a connection not unwrapping to pgjdbc's left unchecked), with a `StoreException` that is no
+  retry's business; `PostgresAdapterTest.a_connection_inside_the_callers_transaction_is_refused_and_the_transaction_left_alone`
+  (a data source handing out one connection with an open transaction, as the proxy does inside one; mutation-checked). Not adopted: refusing known
   transaction-aware classes by name (brittle, incomplete, unusual among comparable libraries).
 - **A tie-breaker for equal versions, so that a check transfers no value again** (decided 2026-11-10). A version
   can repeat with other content after a failover that lost a write (dimension 4 of the in-memory store profiles), so

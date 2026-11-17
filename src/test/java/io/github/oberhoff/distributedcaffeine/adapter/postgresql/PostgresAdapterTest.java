@@ -36,10 +36,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import javax.sql.DataSource;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -65,6 +69,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 abstract class PostgresAdapterTest {
 
     private static final Duration LONG = Duration.ofHours(1);
+    // the connection of a transaction bound to the thread, as Spring binds one (transactionAware)
+    private static final ThreadLocal<@Nullable Connection> BOUND = new ThreadLocal<>();
 
     private final PostgresTestDatabase database = PostgresTestDatabase.get();
     private final String table = PostgresTestDatabase.freshTable();
@@ -99,6 +105,73 @@ abstract class PostgresAdapterTest {
     private DistributedCache<String, String> cache(Function<DistributedCaffeine<String, String>,
             DistributedCaffeine<String, String>> configuration) {
         return track(configuration.apply(strings(adapter().build())).build());
+    }
+
+    // a data source handing out the caller's connection inside the caller's transaction, as a transaction-aware one
+    // does (Spring's TransactionAwareDataSourceProxy): the cache refuses that connection rather than commit the caller's
+    // transaction along with its own work, which a put used to do, leaving the caller's rows written before it
+    // committed though the caller rolled back (VISION.md, "A deadline of the core's own")
+    @Test
+    void a_connection_inside_the_callers_transaction_is_refused_and_the_transaction_left_alone() throws Exception {
+        String rows = table + "_app";
+        try (Connection connection = database.dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE adapter." + rows + " (id text PRIMARY KEY)");
+        }
+        DataSource transactionAware = transactionAware(database.dataSource);
+        DistributedCache<String, String> cache = track(strings(PostgresAdapter.newBuilder(transactionAware, "adapter",
+                table).withListenerDataSource(database.listener).build()).build());
+
+        try (Connection transaction = database.dataSource.getConnection()) {
+            transaction.setAutoCommit(false);
+            try (Statement statement = transaction.createStatement()) {
+                statement.execute("INSERT INTO adapter." + rows + " VALUES ('before the put')");
+            }
+            BOUND.set(transaction);
+            try {
+                assertThatThrownBy(() -> cache.put("k", "v")).isInstanceOf(StoreException.class)
+                        .hasMessageContaining("inside a transaction");
+            } finally {
+                BOUND.remove();
+                transaction.rollback();
+                transaction.setAutoCommit(true);
+            }
+        }
+
+        try (Connection connection = database.dataSource.getConnection();
+             Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("SELECT count(*) FROM adapter." + rows)) {
+            resultSet.next();
+            assertThat(resultSet.getLong(1)).as("the caller's rollback undid its row").isZero();
+        }
+        assertThat(cache.distributedPolicy().store().get("k")).as("nothing written in the caller's transaction")
+                .isNull();
+        cache.put("k", "v");
+        assertThat(cache.distributedPolicy().store().get("k")).as("outside it, as before").isNotNull();
+    }
+
+    // the pool's connections, but inside a transaction bound to the thread its connection, closing it left to its owner
+    private static DataSource transactionAware(DataSource pool) {
+        return (DataSource) Proxy.newProxyInstance(DataSource.class.getClassLoader(), new Class<?>[]{DataSource.class},
+                (proxy, method, arguments) -> {
+                    Connection inTransaction = BOUND.get();
+                    if (method.getName().equals("getConnection") && inTransaction != null) {
+                        return Proxy.newProxyInstance(Connection.class.getClassLoader(),
+                                new Class<?>[]{Connection.class}, (connection, call, parameters) ->
+                                        call.getName().equals("close") ? null : invoked(call, inTransaction,
+                                                parameters));
+                    }
+                    return invoked(method, pool, arguments);
+                });
+    }
+
+    private static @Nullable Object invoked(Method method, Object target, @Nullable Object[] arguments)
+            throws Throwable {
+        try {
+            return method.invoke(target, arguments);
+        } catch (InvocationTargetException e) {
+            throw e.getCause();
+        }
     }
 
     // distribution
