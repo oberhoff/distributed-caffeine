@@ -105,15 +105,10 @@ public interface DistributedPolicy<K, V> {
         Mark mark();
 
         /**
-         * Invalidates every value written to the store before the mark, by any instance, and keeps every value written
-         * since: the end of a refill while serving, which puts every value that should stay and drops the rest. Call
-         * it once every write of the refill has succeeded; a key the refill could not write is missing afterwards.
-         * Copies are not dropped: each is checked against the store before it is served again, and all of them in the
-         * background at once, on this instance and, as its message arrives, on every other, so that the cache stays
-         * hot. A value written after the mark is kept, also one older than the refill's: a refill's {@code put}
-         * overwrites a value written meanwhile by another writer. So is a value written less than the store clock's
-         * allowance for skew before the mark (10 ms for most stores), so that no write after the mark is hidden by the
-         * clock stepping back. Takes one write, whatever the size of the cache.
+         * Invalidates every value written to the store before the mark, on every instance, and keeps every value
+         * written since, by whichever instance: the end of a refill while serving. Call it once every write of the
+         * refill has succeeded; a key the refill could not write is missing afterwards. Unlike {@code invalidateAll()},
+         * copies are not dropped but checked against the store, so that the caches stay hot.
          *
          * @param mark the mark of {@link #mark()}, taken on this instance
          * @throws IllegalArgumentException if the mark was taken on another instance

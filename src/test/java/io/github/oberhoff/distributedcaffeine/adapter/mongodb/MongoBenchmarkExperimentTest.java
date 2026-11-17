@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
 
 import io.github.oberhoff.distributedcaffeine.EndToEndBenchmark;
+import io.github.oberhoff.distributedcaffeine.RefillBenchmark;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -38,6 +39,17 @@ class MongoBenchmarkExperimentTest {
         try (MongoTestDatabase ignored = MongoTestDatabase.start("mongo:9", MongoTopology.SINGLE_NODE_REPLICA_SET);
              MongoCacheBackend backend = new MongoCacheBackend()) {
             EndToEndBenchmark.run("MongoDB 9 (single-node replica set, local container)", backend);
+        }
+    }
+
+    @Test
+    void measures_a_refill_while_serving() throws Exception {
+        try (MongoTestDatabase ignored = MongoTestDatabase.start("mongo:9", MongoTopology.SINGLE_NODE_REPLICA_SET);
+             MongoCacheBackend backend = new MongoCacheBackend()) {
+            RefillBenchmark.run("MongoDB 9 (single-node replica set, local container)", backend, 3, 10_000,
+                    100_000);
+            RefillBenchmark.run("MongoDB 9 (single-node replica set, local container)", backend, 1_024, 10_000,
+                    100_000);
         }
     }
 }

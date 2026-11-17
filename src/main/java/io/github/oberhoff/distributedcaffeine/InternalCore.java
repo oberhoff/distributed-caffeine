@@ -1660,7 +1660,7 @@ final class InternalCore<K, V> {
     void putAsync(K key, CompletableFuture<? extends @Nullable V> valueFuture) {
         InternalKey<K> internalKey = wrap(key);
         requireNonNull(valueFuture, "valueFuture cannot be null");
-        CompletableFuture<InternalValue<V>> owned = new CompletableFuture<>();
+        CompletableFuture<InternalValue<V>> owned = new PendingPut<>();
         // Caffeine counts no load for a future completed when put, but the held one is completed later
         boolean completedWhenPut = completedValue(valueFuture) != null;
         CompletableFuture<InternalValue<V>> previous = l1.asMap().get(internalKey);
@@ -1670,9 +1670,9 @@ final class InternalCore<K, V> {
             // Caffeine reports no replacement of a completed future by one completed with the identical instance
             replaced.replacementSilent(true);
         }
-        // not reserved while the future is pending: a message or a removal meanwhile drops it from L1 (a future in
-        // flight not reserved, see apply and dropOlder), so nothing outdated is held, and a future never completed
-        // holds no reservation. Reserved for the store work once it completed, released whatever happens
+        // not reserved while the future is pending, so that a future never completed holds no reservation: a removal
+        // meanwhile drops it from L1 (dropOlder), a message leaves it (PendingPut, see apply). Reserved for the store
+        // work once it completed, released whatever happens
         l1.put(internalKey, owned);
         valueFuture.whenComplete((value, failure) -> {
             if (failure != null || value == null) {
@@ -1719,6 +1719,11 @@ final class InternalCore<K, V> {
                 });
             }
         });
+    }
+
+    // the future AsyncCache.put holds in L1, told apart from a load's by a message (apply): derived futures are plain
+    // ones (CompletableFuture#newIncompleteFuture), so only the held one is marked
+    private static final class PendingPut<T> extends CompletableFuture<T> {
     }
 
     /**
@@ -2385,12 +2390,14 @@ final class InternalCore<K, V> {
             InternalKey<K> lookup = InternalKey.lookup(hash);
             CompletableFuture<InternalValue<V>> held = l1.asMap().get(lookup);
             if (held != null && !held.isDone()) {
-                if (!reserved) {
+                if (!reserved && !(held instanceof PendingPut)) {
                     // a load in flight not reserved yet (it reserves right after its future entered L1): dropped, its
                     // waiters still get its value, and its owner does not hold it
                     l1.asMap().remove(lookup, held);
                 }
-                // reserved: checked when its owner releases it
+                // reserved: checked when its owner releases it. A put's future pending, its write not started yet,
+                // stays: the write applies above whatever version is stored, so this message announces an older
+                // one (dropping it lost the put here: found 2026-11-16, its own echo of an earlier write, late)
             } else if (held != null && !reserved) {
                 // with an operation in flight, decided when it ends (release applies the version rule): its own echo,
                 // often faster than the commit to L1, then costs neither a drop nor a population read

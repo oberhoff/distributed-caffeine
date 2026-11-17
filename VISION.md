@@ -6813,7 +6813,21 @@ New ones go here as they come up while building.
   cache and a walk over L1 at the call. Saves one batched read per 1,000 held keys on one instance: only with a
   measured cost. Related, also open: a future for the caller to wait until the local pass is done, and a pass reading
   versions only (see the tie-breaker below).
-- **A pending `AsyncCache.put` kept against messages** (found 2026-11-16, `InternalAsyncTest` flaking under load on
+  **Measured 2026-11-17** (`RefillBenchmark`, experiments per store, local containers; 3 instances each holding every
+  key, 90 % of them rewritten, small values): the call takes at most 10 ms whatever the size; the passes read each held
+  copy once, 1,000 per read (300 reads for 3 x 100,000 copies), done after 1.7 s (PostgreSQL 18), 2.8 s (MongoDB 9),
+  3.4 s (Redis 8) at 100,000 keys, of which 1 s is the pacing pause; the refill itself took 2.0 to 4.4 s. Hot afterwards:
+  every rewritten key in `UPDATE` mode, the refilling instance's in `INVALIDATE` mode (the refill's messages dropped the
+  others' copies before). Verdict: trusting the caller's own writes would save a third of the rows, about a second of
+  background work at 100,000 keys: not needed. With values of 1 KB (same day): the passes at 100,000 keys took 2.9 s
+  (PostgreSQL, +1.3 s), 3.9 s (Redis, +0.6 s), 3.0 s (MongoDB, +0.1 s), the refill itself 3.1 to 5.0 s, the call
+  still at most 10 ms; in memory unchanged (1.4 s). A pass reading versions only would save at most that difference,
+  background work, at about the refill's own cost: not needed either. Local containers: over a real network 100,000
+  values of 1 KB are about 100 MB per instance, a second at 1 Gbit/s, still in the background. Both optimisations
+  stay recorded, to revisit only with measurements from a real deployment.
+- ~~**A pending `AsyncCache.put` kept against messages**~~ (built 2026-11-17: the held future is a `PendingPut`,
+  which a message leaves in L1; `InternalAsyncTest.a_message_while_a_put_is_pending_leaves_the_put_held`, mutation-
+  checked) (found 2026-11-16, `InternalAsyncTest` flaking under load on
   GitHub). `putAsync` holds its future in L1 at once but reserves the key only when the store work starts, on the
   store executor; a message arriving in between finds a future in flight without a reservation and drops it, like a
   load's (see reservations, build plan step 4). The written value is then not held here, though nothing stale is

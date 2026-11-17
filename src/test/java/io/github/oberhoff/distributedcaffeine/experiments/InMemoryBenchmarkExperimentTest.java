@@ -17,7 +17,9 @@ package io.github.oberhoff.distributedcaffeine.experiments;
 
 import io.github.oberhoff.distributedcaffeine.CacheBackend;
 import io.github.oberhoff.distributedcaffeine.EndToEndBenchmark;
+import io.github.oberhoff.distributedcaffeine.RefillBenchmark;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
+import io.github.oberhoff.distributedcaffeine.testing.StoreProfile;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
@@ -38,6 +40,14 @@ class InMemoryBenchmarkExperimentTest {
     void measures_the_operations_end_to_end() throws Exception {
         try (CacheBackend backend = CacheBackend.of(new InMemoryDatabase())) {
             EndToEndBenchmark.run("in-memory store", backend);
+        }
+    }
+
+    @Test
+    void measures_a_refill_while_serving() throws Exception {
+        try (CacheBackend backend = CacheBackend.of(new InMemoryDatabase(StoreProfile.REDIS))) {
+            RefillBenchmark.run("in-memory store (feed)", backend, 3, 10_000, 100_000);
+            RefillBenchmark.run("in-memory store (feed)", backend, 1_024, 10_000, 100_000);
         }
     }
 }

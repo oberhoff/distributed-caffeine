@@ -90,7 +90,11 @@ class InternalAsyncTest {
     }
 
     private DistributedCaffeine<String, String> builder(Function<Store, Store> wrapping) {
-        Adapter<String, String> adapter = settings -> wrapping.apply(database.openStore("cache"));
+        return builder(database, wrapping);
+    }
+
+    private DistributedCaffeine<String, String> builder(InMemoryDatabase on, Function<Store, Store> wrapping) {
+        Adapter<String, String> adapter = settings -> wrapping.apply(on.openStore("cache"));
         return DistributedCaffeine.newBuilder(InternalCoreTest.offered(adapter))
                 .withCaffeine(caffeine -> caffeine.executor(userExecutor))
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
@@ -517,6 +521,30 @@ class InternalAsyncTest {
         cache.put("k", CompletableFuture.completedFuture(null));
         await(() -> stored(cache, "k") == null);
         assertThat(get(cache.getIfPresent("k"))).isNull();
+    }
+
+    // a message arriving while a put's future is pending, before its write starts, announces an older write: the
+    // future stays held, and this instance holds the put's value once it completes (it was dropped like a load in
+    // flight; found 2026-11-16 as a flake under load, with the instance's own echo of an earlier write). On a feed,
+    // so that the message arrives exactly then
+    @Test
+    void a_message_while_a_put_is_pending_leaves_the_put_held() {
+        InMemoryDatabase feed = new InMemoryDatabase(StoreProfile.REDIS);
+        DistributedAsyncCache<String, String> cache = track(builder(feed, Function.identity()).buildAsync());
+        DistributedAsyncCache<String, String> other = track(builder(feed, Function.identity()).buildAsync());
+        feed.pauseDelivery();
+        other.synchronous().put("k", "elsewhere");
+        CompletableFuture<String> value = new CompletableFuture<>();
+        cache.put("k", value);
+
+        feed.resumeDelivery();
+        await(() -> feed.isIdle() && core(cache).isQuiescent());
+        assertThat(core(cache).l1().asMap().get(core(cache).wrap("k"))).as("still held, pending").isNotNull();
+        value.complete("mine");
+
+        await(() -> "mine".equals(stored(cache, "k")));
+        await(() -> "mine".equals(held(cache)));
+        await(() -> "mine".equals(other.synchronous().getIfPresent("k")));
     }
 
     @Test

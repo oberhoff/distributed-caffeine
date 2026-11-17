@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.adapter.redis;
 
 import io.github.oberhoff.distributedcaffeine.EndToEndBenchmark;
+import io.github.oberhoff.distributedcaffeine.RefillBenchmark;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -47,6 +48,17 @@ class RedisBenchmarkExperimentTest {
             server.admin.sync().info("commandstats").lines()
                     .filter(line -> line.startsWith("cmdstat_eval") || line.startsWith("cmdstat_xread"))
                     .forEach(line -> System.out.println("  " + line));
+        }
+    }
+
+    @Test
+    void measures_a_refill_while_serving_on_redis_through_lettuce() throws Exception {
+        try (RedisTestServer server = new RedisTestServer("redis:8");
+             RedisCacheBackend backend = new RedisCacheBackend(LettuceRedis.of(server.client))) {
+            RefillBenchmark.run("Redis 8 through Lettuce (single server, local container)", backend, 3, 10_000,
+                    100_000);
+            RefillBenchmark.run("Redis 8 through Lettuce (single server, local container)", backend, 1_024, 10_000,
+                    100_000);
         }
     }
 
