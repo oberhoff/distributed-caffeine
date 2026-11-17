@@ -131,7 +131,7 @@ class InternalDistributionModeTest {
 
         nanos.addAndGet(MAXIMUM_AGE.plusSeconds(1).toNanos());
         assertThat(holder.getIfPresent("k")).as("expired after the store's maximum age, read again").isNull();
-        assertThat(holder.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
+        assertThat(holder.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
     }
 
     @Test
@@ -143,7 +143,7 @@ class InternalDistributionModeTest {
         cache.asMap().merge("a", "+", String::concat);
 
         assertThat(cache.getIfPresent("a")).isEqualTo("1+");
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("b")).value()).isEqualTo("2");
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("b")).value()).isEqualTo("2");
     }
 
     @Test

@@ -221,7 +221,7 @@ final class InternalStoreGuard {
         if (opened) {
             String message = name + ": The store is not answering (" + cause.getMessage() + "); calls to it are "
                     + "refused, with a probe every second, until it answers again (distributedPolicy()"
-                    + ".getSynchronizationState())";
+                    + ".synchronizationState())";
             if (isUnexpected(cause)) {
                 LOGGER.log(System.Logger.Level.WARNING, message, cause);
             } else {

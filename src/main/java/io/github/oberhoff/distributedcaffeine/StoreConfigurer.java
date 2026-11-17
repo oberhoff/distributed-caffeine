@@ -63,7 +63,7 @@ public final class StoreConfigurer {
      * value from the store within about one maintenance interval after. Without a local expiry set
      * ({@code expireAfterWrite} or {@code expireAfter}), the local copies expire at the maximum age, and
      * {@code policy().expireAfterWrite()} shows it. Adjustable at runtime through
-     * {@link DistributedPolicy#storeMaximumAge()}.
+     * {@link DistributedPolicy.Store#maximumAge()}.
      * Optional: unbounded by default, as with {@code ChronoUnit.FOREVER.getDuration()}.
      *
      * @param maximumAge the maximum age (positive)
@@ -148,7 +148,7 @@ public final class StoreConfigurer {
      * Makes building fail when the store cannot be reached, instead of starting without it. By default, a cache whose
      * store does not answer when it is built (the connection refused, the host unknown, no answer within the operation
      * timeout) starts as during an outage and connects in the background: misses load from the source, writes fail,
-     * and {@link DistributedPolicy#getSynchronizationState()} is {@code DEGRADED} until the store is reached; values
+     * and {@link DistributedPolicy#synchronizationState()} is {@code DEGRADED} until the store is reached; values
      * loaded meanwhile are checked against the store then. So an application restarted while its store is down still
      * starts. With this setting the build throws instead, as does every build for a store that answers but cannot be
      * used (a schema that does not match, missing rights): for applications that should not start while their store is

@@ -154,8 +154,8 @@ abstract class PostgresAdapterTest {
         users.put("k", "user");
         users.invalidateAll();
 
-        assertThat(requireNonNull(orders.distributedPolicy().getFromStore("k")).value()).isEqualTo("order");
-        assertThat(users.distributedPolicy().getFromStore("k")).isNull();
+        assertThat(requireNonNull(orders.distributedPolicy().store().get("k")).value()).isEqualTo("order");
+        assertThat(users.distributedPolicy().store().get("k")).isNull();
         assertThat(orders.getIfPresent("k")).isEqualTo("order");
     }
 
@@ -170,7 +170,7 @@ abstract class PostgresAdapterTest {
                                 .withListenerDataSource(database.listener).<String, Order>build())
                 .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(100)).build());
         binary.put("k", new Order("o1", 3));
-        assertThat(requireNonNull(binary.distributedPolicy().getFromStore("k")).value()).isEqualTo(new Order("o1", 3));
+        assertThat(requireNonNull(binary.distributedPolicy().store().get("k")).value()).isEqualTo(new Order("o1", 3));
 
         // JSON (jsonb)
         DistributedCache<String, Order> json = track(DistributedCaffeine.newBuilder(
@@ -180,13 +180,13 @@ abstract class PostgresAdapterTest {
                         .withValueSerializer(new JacksonSerializer<>(Order.class, true)))
                 .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(100)).build());
         json.put("k", new Order("o2", 5));
-        assertThat(requireNonNull(json.distributedPolicy().getFromStore("k")).value()).isEqualTo(new Order("o2", 5));
+        assertThat(requireNonNull(json.distributedPolicy().store().get("k")).value()).isEqualTo(new Order("o2", 5));
         assertThat(columnType(table + "_json", "value")).isEqualTo("jsonb");
 
         // TEXT
         DistributedCache<String, String> text = cache(Function.identity());
         text.put("k", "ünïcödé");
-        assertThat(requireNonNull(text.distributedPolicy().getFromStore("k")).value()).isEqualTo("ünïcödé");
+        assertThat(requireNonNull(text.distributedPolicy().store().get("k")).value()).isEqualTo("ünïcödé");
         assertThat(columnType(table, "value")).isEqualTo("text");
     }
 
@@ -235,8 +235,8 @@ abstract class PostgresAdapterTest {
             String terminated = requireNonNull(listener(application));
             database.execute("SELECT pg_terminate_backend(" + terminated + ")");
             await(() -> listening(application) == 1 && !terminated.equals(listener(application))
-                    && first.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED
-                    && second.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
+                    && first.distributedPolicy().synchronizationState() == SynchronizationState.SYNCHRONIZED
+                    && second.distributedPolicy().synchronizationState() == SynchronizationState.SYNCHRONIZED);
         }
         writer.put("k", "after the reconnects");
         await(() -> first.policy().getIfPresentQuietly("k") == null
@@ -300,16 +300,16 @@ abstract class PostgresAdapterTest {
         writer.put("k", "old");
         assertThat(holder.getIfPresent("k")).isEqualTo("old");
 
-        long interruptions = holder.distributedPolicy().stats().interruptionCount();
-        long gaps = holder.distributedPolicy().stats().gapCount();
+        long interruptions = holder.distributedStats().interruptionCount();
+        long gaps = holder.distributedStats().gapCount();
         database.terminateListeners();
         // degraded from the loss until the resume, which is attempted at once: as short as a reconnect, so seen by
         // its count (beyond the ones of the cache's start), not by polling the state
-        await(() -> holder.distributedPolicy().stats().interruptionCount() > interruptions);
+        await(() -> holder.distributedStats().interruptionCount() > interruptions);
         writer.put("k", "written while the session was down");
 
-        await(() -> holder.distributedPolicy().stats().gapCount() > gaps
-                && holder.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
+        await(() -> holder.distributedStats().gapCount() > gaps
+                && holder.distributedPolicy().synchronizationState() == SynchronizationState.SYNCHRONIZED);
         // awaited, not read once: a reconnect quicker than the write (found on GitHub) checks "old" after the gap, and
         // the write then arrives as a message, delivered asynchronously. Missed by both, "old" would stay for good
         await(() -> "written while the session was down".equals(holder.getIfPresent("k")));

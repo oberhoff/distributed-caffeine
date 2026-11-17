@@ -125,7 +125,7 @@ public abstract class AbstractTwoInstanceLinearizabilityTest {
 
     @Operation
     public @Nullable String stored(@Param(name = "instance") int instance, @Param(name = "key") int key) {
-        StoredValue<String> stored = on(instance).distributedPolicy().getFromStore(key(key));
+        StoredValue<String> stored = on(instance).distributedPolicy().store().get(key(key));
         return stored == null ? null : stored.value();
     }
 

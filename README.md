@@ -325,51 +325,41 @@ DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapt
 ### Distributed policy
 
 `distributedPolicy()` gives access to the distributed side of a cache instance, as Caffeine's `policy()` does to the
-local one.
+local one: its synchronization state and its view of the store.
 
 #### Synchronization state
 
-`getSynchronizationState()` tells whether the instance is in step with the store, for example for a health check:
+`synchronizationState()` tells whether the instance is in step with the store, for example for a health check:
 
 * `SYNCHRONIZED`: the store answers and changes made elsewhere arrive.
 * `DEGRADED`: the store does not answer or changes made elsewhere do not arrive (see [Failures](#failures)); the
   instance recovers by itself.
 * `CLOSED`: the cache instance was closed.
 
-#### Stats
-
-`stats()` counts the instance's store, synchronization and maintenance activity, only recorded with `recordStats()`.
-Caffeine's stats (`cache.stats()`) count a value found in the store as a miss and a load, so their `hitRate()` is the
-rate of local hits and their load counts and times include the store reads; the distributed stats count these values
-as `storeHitCount`, and the calls to the source alone as `sourceLoadCount`.
-
 #### Store contents
 
-`getFromStore(...)` and `getAllFromStore(...)` read the store directly, bypassing the instance's copies and keeping
+`store().get(...)` and `store().getAll(...)` read the store directly, bypassing the instance's copies and keeping
 nothing they read: to see what the store holds, for example while diagnosing. Values older than the store's maximum
 age are not returned, nor values the instance cannot read (counted as `unreadableRowCount`), as for every read.
 
+`store().mark()` takes a mark of the store's time, and `store().invalidateAllBeforeMark(...)` then drops every value
+written before it, on every instance, and keeps every value written since (the caches stay hot, unlike after
+`invalidateAll()`). `store().invalidateAllOlderThan(...)` drops every value written longer ago than a duration, at the
+time of the call.
+
 #### Store bounds
 
-`storeMaximumAge()` and `storeMaximumSize()` adjust the store's bounds at runtime, as Caffeine's
+`store().maximumAge()` and `store().maximumSize()` adjust the store's bounds at runtime, as Caffeine's
 `policy().expireAfterWrite()` and `policy().eviction()` adjust the local ones. Each is present only if the cache was
 built with that bound, and each applies to the instance it is called on, so a change is made on every instance, for
 example from a configuration service.
 
-* **Maximum age:** applies at once to the instance's reads of the store, to its maintenance and to its copies (not
-  with `withMaximumAgeForStoreOnly()`). A longer age lengthens the copies held as far as their local expiry allows,
-  except under `expireAfter(...)`. With `withMaximumAgeForStoreOnly()`, it must stay at least five heartbeat
-  intervals.
-* **Maximum size:** applies from the instance's next maintenance run.
-* **While instances differ,** as while a change reaches them one after another, values stay consistent: the shortest
-  age expires values for every instance, which then load them again, and the store is pruned to the smallest size.
-  The stats show it as expired values (`maintenanceExpiredCount`, `expiredCount`), store misses and loads.
+### Distributed stats
 
-#### Invalidating by time
-
-`markStore()` and `invalidateAllBeforeMark(...)` drop every value written before the mark, on every instance, and keep
-every value written since (the caches stay hot, unlike after `invalidateAll()`).
-`invalidateAllOlderThan(...)` drops every value written longer ago than a duration, at the time of the call.
+`distributedStats()`, next to Caffeine's `stats()` and like them only recorded with `recordStats()`, counts the
+instance's store, synchronization and maintenance activity. Caffeine's stats count a value found in the store as a miss
+and a load, so their `hitRate()` is the rate of local hits and their load counts and times include the store reads; the
+distributed stats count these values as `storeHitCount`, and the calls to the source alone as `sourceLoadCount`.
 
 ### Settings by goal
 
@@ -388,8 +378,8 @@ Which setting serves which goal; the rest can stay at their defaults:
 | Less memory per instance                                                                        | Caffeine's `maximumSize(...)`, `maximumWeight(...)` or `expireAfterAccess(...)` |
 | A smaller store                                                                                 | the store's `withMaximumSize(...)`                                              |
 | Local copies kept longer than the store keeps values                                            | the store's `withMaximumAgeForStoreOnly()`                                      |
-| The maximum age or size changed at runtime                                                      | `distributedPolicy().storeMaximumAge()` or `storeMaximumSize()`                 |
-| Values written before a point in time dropped at once, e.g. after a refill while serving        | `markStore()` + `invalidateAllBeforeMark(...)` or `invalidateAllOlderThan(...)` |
+| The maximum age or size changed at runtime                                                      | `distributedPolicy().store().maximumAge()` or `maximumSize()`                   |
+| Values written before a point in time dropped at once, e.g. after a refill while serving        | `store().invalidateAllBeforeMark(...)` or `invalidateAllOlderThan(...)`         |
 
 A value with a validity of its own, such as a token, can't be expired by an `expireAfter(...)` alone: it only drops
 the local copy, and the next read finds the value in the store again. Treat an invalid value read as missing:
@@ -473,14 +463,14 @@ the local copy, and the next read finds the value in the store again. Treat an i
     * Atomic `asMap()` methods that would write nothing for a held key (`putIfAbsent` on a present key, `replace` or
       `remove` whose value does not match) answer from the held value.
     * Writes and removals fail with the unchecked `StoreException` (`io.github.oberhoff.distributedcaffeine.spi`); a
-      removal drops the local copy first. `getFromStore` and `getAllFromStore` fail too. `AsyncCache.put(key, future)`
+      removal drops the local copy first. `store().get` and `store().getAll` fail too. `AsyncCache.put(key, future)`
       cannot report the failure to its caller: the key is left absent, and the failure is logged.
     * Loads go on while writes fail because a loaded value comes from the source, so any instance can load it again,
       while a written value or a removal exists only in the cache: kept locally, it would be lost, or the other
       instances would serve the old value without an error.
     * After three failures in a row, calls to the store are refused at once instead of waiting, and one call per
       second checks whether it answers again (`refusedCount`, `guardOpenCount`).
-    * `distributedPolicy().getSynchronizationState()` cannot tell beforehand whether a write will succeed: `DEGRADED`
+    * `distributedPolicy().synchronizationState()` cannot tell beforehand whether a write will succeed: `DEGRADED`
       also covers interrupted distribution, and the store can fail right after the check. A caller that must not fail
       catches the exception: `try { cache.put(key, value); } catch (StoreException e) { ... }`.
   </details>
@@ -516,7 +506,7 @@ the local copy, and the next read finds the value in the store again. Treat an i
   <details><summary>Details</summary>
 
     * A liveness check that fails while the store does not answer (a health indicator of its database included, or
-      `getSynchronizationState()` checked) has the instances restarted one after another during an outage, for
+      `synchronizationState()` checked) has the instances restarted one after another during an outage, for
       nothing. With `withFailFast()` none can be built again until the store answers, and the whole application goes
       down, although the running instances would have served their copies and loaded misses from the source.
     * Building waits for the store up to the operation timeout per check when the network drops packets rather than

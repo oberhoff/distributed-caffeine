@@ -214,7 +214,7 @@ class MigrationExperimentTest {
     }
 
     private static @Nullable String storedValue(DistributedCache<String, String> cache, String key) {
-        StoredValue<String> stored = cache.distributedPolicy().getFromStore(key);
+        StoredValue<String> stored = cache.distributedPolicy().store().get(key);
         return stored == null ? null : stored.value();
     }
 

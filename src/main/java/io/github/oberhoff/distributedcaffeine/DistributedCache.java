@@ -39,11 +39,21 @@ import java.util.function.Function;
 public interface DistributedCache<K, V> extends Cache<K, V>, AutoCloseable {
 
     /**
-     * Returns the distributed side of this cache: its synchronization state, its stats and direct reads of the store.
+     * Returns the distributed side of this cache, as {@link #policy()} returns the local side: its synchronization
+     * state and the view of the store its instances share.
      *
      * @return the distributed policy
      */
     DistributedPolicy<K, V> distributedPolicy();
+
+    /**
+     * Returns a snapshot of this instance's store and synchronization activity, next to {@link #stats()}, which counts
+     * the local level only (a value found in the store counts there as a miss and a load). Empty unless the cache
+     * records stats ({@code recordStats()}), as Caffeine's {@code stats()}; also after {@code close()}.
+     *
+     * @return the snapshot
+     */
+    DistributedStats distributedStats();
 
     /**
      * {@inheritDoc}
@@ -70,7 +80,7 @@ public interface DistributedCache<K, V> extends Cache<K, V>, AutoCloseable {
      * <b>Distributed Caffeine:</b> A computed value is cached only if no instance wrote or removed the key during the
      * computation. If one wrote it, that value is returned instead; if one removed it, the value is computed again.
      * After three such removals in a row, the last computed value is returned without being cached ({@code
-     * distributedPolicy().stats().uncachedLoadCount()}).
+     * distributedStats().uncachedLoadCount()}).
      */
     // a mapping function resolving to null is accepted (as by ConcurrentMap.computeIfAbsent) and caches nothing.
     // Caffeine documents a null result ("or null if the computed value is null") but cannot express it for a value
@@ -86,7 +96,7 @@ public interface DistributedCache<K, V> extends Cache<K, V>, AutoCloseable {
      * only those missing there are computed. A computed value is cached only if no instance wrote or removed its key
      * during the computation. If one wrote it, that value is returned instead; if one removed it, the key is computed
      * again on its own, up to three times. If a removal meets each of these too, the last computed value is returned
-     * without being cached ({@code distributedPolicy().stats().uncachedLoadCount()}).
+     * without being cached ({@code distributedStats().uncachedLoadCount()}).
      */
     @Override
     Map<K, V> getAll(Iterable<? extends K> keys,
@@ -104,7 +114,7 @@ public interface DistributedCache<K, V> extends Cache<K, V>, AutoCloseable {
      * {@inheritDoc}
      * <p>
      * <b>Distributed Caffeine:</b> Covers only this instance's activity; its store and synchronization activity is in
-     * {@code distributedPolicy().stats()}.
+     * {@code distributedStats()}.
      */
     @Override
     CacheStats stats();
@@ -133,7 +143,7 @@ public interface DistributedCache<K, V> extends Cache<K, V>, AutoCloseable {
     /**
      * Closes this cache instance and releases its connections to the store. The local copies are dropped without
      * notifying the removal listener. Afterwards every operation throws {@link IllegalStateException}, except
-     * {@code distributedPolicy().getSynchronizationState()} and {@code distributedPolicy().stats()}. Idempotent.
+     * {@code distributedPolicy().synchronizationState()} and {@code distributedStats()}. Idempotent.
      */
     @Override
     void close();

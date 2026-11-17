@@ -107,8 +107,8 @@ abstract class JdbcRestartTest {
             }
             // the writer by its own failures (its store guard), the holder, which neither reads nor writes through
             // the store meanwhile, by its failing polls
-            assertThat(writer.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
-            await(() -> holder.distributedPolicy().getSynchronizationState() == SynchronizationState.DEGRADED);
+            assertThat(writer.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+            await(() -> holder.distributedPolicy().synchronizationState() == SynchronizationState.DEGRADED);
             assertThat(holder.getIfPresent("k")).as("a hit is served while the server is down").isEqualTo("before");
         } finally {
             JdbcTestDatabase.startServer();
@@ -123,9 +123,9 @@ abstract class JdbcRestartTest {
                 return false;
             }
         }, BACK, Duration.ofMillis(250))).as("writing again").isTrue();
-        assertThat(requireNonNull(writer.distributedPolicy().getFromStore("kept")).value())
+        assertThat(requireNonNull(writer.distributedPolicy().store().get("kept")).value())
                 .as("written before the restart, kept").isEqualTo("written before");
-        assertThat(awaitUpTo(() -> holder.distributedPolicy().getSynchronizationState()
+        assertThat(awaitUpTo(() -> holder.distributedPolicy().synchronizationState()
                 == SynchronizationState.SYNCHRONIZED, BACK, Duration.ofMillis(250))).as("polling again").isTrue();
         await(() -> "after".equals(holder.getIfPresent("k")));
         writer.put("k", "after the restart");

@@ -91,7 +91,7 @@ abstract class MongoOplogTest {
         DistributedCache<String, String> holder = cache(DistributionMode.INVALIDATE);
         writer.put("k", "before");
         assertThat(holder.getIfPresent("k")).isEqualTo("before");
-        long gaps = holder.distributedPolicy().stats().gapCount();
+        long gaps = holder.distributedStats().gapCount();
 
         MongoWatcher.simulateLag(client, true);
         writer.put("k", "written while the stream lagged");
@@ -107,7 +107,7 @@ abstract class MongoOplogTest {
         MongoWatcher.simulateLag(client, false);
 
         // the next getMore fails with CappedPositionLost: the stream reopens without its token, a gap
-        await(() -> holder.distributedPolicy().stats().gapCount() > gaps);
+        await(() -> holder.distributedStats().gapCount() > gaps);
         await(() -> holder.policy().getIfPresentQuietly("k") == null);
         assertThat(holder.getIfPresent("k")).isEqualTo("written while the stream lagged");
         writer.put("k", "written after the gap");

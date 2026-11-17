@@ -40,7 +40,7 @@ public interface DistributedLoadingCache<K, V> extends DistributedCache<K, V>, L
      * instance while it loaded; otherwise a value written meanwhile is returned instead, and after a removal the key is
      * loaded again. After three attempts in a row each met by a removal, the last loaded value is returned without
      * being cached, as Caffeine's asynchronous cache does with a load an invalidation discards ({@code
-     * distributedPolicy().stats().uncachedLoadCount()}).
+     * distributedStats().uncachedLoadCount()}).
      */
     // a loader resolving to null caches nothing.
     // Caffeine documents a null result ("or null if the computed value is null") but cannot express it for a value
@@ -56,7 +56,7 @@ public interface DistributedLoadingCache<K, V> extends DistributedCache<K, V>, L
      * only those missing there are loaded. A loaded value is cached only if no instance wrote or removed its key while
      * it loaded. If one wrote it, that value is returned instead; if one removed it, the key is loaded again on its
      * own, up to three times. If a removal meets each of these too, the last loaded value is returned without being
-     * cached ({@code distributedPolicy().stats().uncachedLoadCount()}).
+     * cached ({@code distributedStats().uncachedLoadCount()}).
      */
     @Override
     Map<K, V> getAll(Iterable<? extends K> keys);

@@ -207,7 +207,7 @@ public final class CaffeineConfigurer<K, V> {
      * durations as Caffeine does. At runtime, where instances change one after another, a duration longer than the
      * maximum age is lowered instead, also one set through {@code policy().expireAfterWrite()}:
      * {@code getExpiresAfter()} returns it lowered, and a longer maximum age set later
-     * ({@link DistributedPolicy#storeMaximumAge()}) lifts it again, up to the duration set.
+     * ({@link DistributedPolicy.Store#maximumAge()}) lifts it again, up to the duration set.
      *
      * @param duration the duration
      * @return this configurer
@@ -231,7 +231,7 @@ public final class CaffeineConfigurer<K, V> {
      * durations as Caffeine does. At runtime, where instances change one after another, a duration longer than the
      * maximum age is lowered instead, also one set through {@code policy().expireAfterWrite()}:
      * {@code getExpiresAfter()} returns it lowered, and a longer maximum age set later
-     * ({@link DistributedPolicy#storeMaximumAge()}) lifts it again, up to the duration set.
+     * ({@link DistributedPolicy.Store#maximumAge()}) lifts it again, up to the duration set.
      *
      * @param duration the duration
      * @param unit     its unit
@@ -380,7 +380,7 @@ public final class CaffeineConfigurer<K, V> {
     /**
      * See {@link Caffeine#recordStats()}.
      * <p>
-     * <b>Distributed Caffeine:</b> Also records the distributed stats ({@code distributedPolicy().stats()}).
+     * <b>Distributed Caffeine:</b> Also records the distributed stats ({@code distributedStats()}).
      *
      * @return this configurer
      */
@@ -393,7 +393,7 @@ public final class CaffeineConfigurer<K, V> {
     /**
      * See {@link Caffeine#recordStats(Supplier)}.
      * <p>
-     * <b>Distributed Caffeine:</b> Also records the distributed stats ({@code distributedPolicy().stats()}).
+     * <b>Distributed Caffeine:</b> Also records the distributed stats ({@code distributedStats()}).
      *
      * @param statsCounterSupplier the supplier of the stats counter
      * @return this configurer

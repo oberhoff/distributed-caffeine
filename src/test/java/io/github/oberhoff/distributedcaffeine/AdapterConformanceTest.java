@@ -112,7 +112,7 @@ public abstract class AdapterConformanceTest {
         AdapterConformance store = track(conformance());
         DistributedCache<String, String> cache = build(store.unreachable());
 
-        assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+        assertThat(cache.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
         assertThat(cache.get("k", key -> "source")).isEqualTo("source");
     }
 
@@ -130,7 +130,7 @@ public abstract class AdapterConformanceTest {
      * @param started the cache
      */
     public static void startsDegraded(DistributedCache<String, String> started) {
-        assertThat(started.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+        assertThat(started.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
         long before = System.nanoTime();
         assertThat(started.get("held", key -> "source")).as("a miss loads from the source").isEqualTo("source");
         assertThatThrownBy(() -> started.put("refused", "while out")).as("a write is refused")
@@ -166,13 +166,13 @@ public abstract class AdapterConformanceTest {
      */
     public static void recovers(DistributedCache<String, String> other, DistributedCache<String, String> started,
                                 Duration within, Supplier<String> state) {
-        assertThat(Awaiting.awaitUpTo(() -> started.distributedPolicy().getSynchronizationState()
+        assertThat(Awaiting.awaitUpTo(() -> started.distributedPolicy().synchronizationState()
                 == SynchronizationState.SYNCHRONIZED, within, Duration.ofMillis(50)))
                 .as(described("connected", state)).isTrue();
         assertThat(Awaiting.awaitUpTo(() -> "stored".equals(started.getIfPresent("held")), within,
                 Duration.ofMillis(50))).as(described(() -> "the value loaded meanwhile gave way to the stored one: "
                 + started.getIfPresent("held"), state)).isTrue();
-        assertThat(Awaiting.awaitUpTo(() -> other.distributedPolicy().getSynchronizationState()
+        assertThat(Awaiting.awaitUpTo(() -> other.distributedPolicy().synchronizationState()
                 == SynchronizationState.SYNCHRONIZED, within, Duration.ofMillis(50)))
                 .as(described("the other one too", state)).isTrue();
         put(other, "held", "from the other", within);
@@ -269,7 +269,7 @@ public abstract class AdapterConformanceTest {
             assertThat(started.get("miss " + i, key -> "source")).isEqualTo("source");
             assertThat(Duration.ofNanos(System.nanoTime() - before)).as("a miss waits for no store")
                     .isLessThan(Duration.ofMillis(500));
-            assertThat(started.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+            assertThat(started.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
             Awaiting.pause(250);
         }
 
@@ -325,7 +325,7 @@ public abstract class AdapterConformanceTest {
 
         proxy.silenceNewConnections(false);
         for (DistributedCache<String, String> cache : started) {
-            assertThat(Awaiting.awaitUpTo(() -> cache.distributedPolicy().getSynchronizationState()
+            assertThat(Awaiting.awaitUpTo(() -> cache.distributedPolicy().synchronizationState()
                     == SynchronizationState.SYNCHRONIZED, CONNECT, Duration.ofMillis(100))).as("connected").isTrue();
             put(cache, "written", "after", CONNECT);
         }

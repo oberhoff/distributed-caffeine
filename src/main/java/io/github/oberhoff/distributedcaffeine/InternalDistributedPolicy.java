@@ -27,62 +27,66 @@ import java.util.Optional;
 final class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V> {
 
     private final InternalCore<K, V> core;
-    // present if the cache was built with the bound
-    private final @Nullable StoreMaximumAge maximumAge;
-    private final @Nullable StoreMaximumSize maximumSize;
+    private final Store<K, V> store;
 
     InternalDistributedPolicy(InternalCore<K, V> core) {
         this.core = core;
-        this.maximumAge = core.hasMaximumAge() ? new MaximumAgeView() : null;
-        this.maximumSize = core.hasMaximumSize() ? new MaximumSizeView() : null;
+        this.store = new StoreView();
     }
 
     @Override
-    public SynchronizationState getSynchronizationState() {
+    public SynchronizationState synchronizationState() {
         return core.state();
     }
 
     @Override
-    public @Nullable StoredValue<V> getFromStore(K key) {
-        return core.getFromStore(key);
+    public Store<K, V> store() {
+        return store;
     }
 
-    @Override
-    public Map<K, StoredValue<V>> getAllFromStore(Iterable<? extends K> keys) {
-        return core.getAllFromStore(keys);
+    private final class StoreView implements Store<K, V> {
+
+        // present if the cache was built with the bound
+        private final @Nullable MaximumAge maximumAge = core.hasMaximumAge() ? new MaximumAgeView() : null;
+        private final @Nullable MaximumSize maximumSize = core.hasMaximumSize() ? new MaximumSizeView() : null;
+
+        @Override
+        public @Nullable StoredValue<V> get(K key) {
+            return core.getFromStore(key);
+        }
+
+        @Override
+        public Map<K, StoredValue<V>> getAll(Iterable<? extends K> keys) {
+            return core.getAllFromStore(keys);
+        }
+
+        @Override
+        public Optional<MaximumAge> maximumAge() {
+            return Optional.ofNullable(maximumAge);
+        }
+
+        @Override
+        public Optional<MaximumSize> maximumSize() {
+            return Optional.ofNullable(maximumSize);
+        }
+
+        @Override
+        public Mark mark() {
+            return core.markStore();
+        }
+
+        @Override
+        public void invalidateAllBeforeMark(Mark mark) {
+            core.invalidateAllBeforeMark(mark);
+        }
+
+        @Override
+        public void invalidateAllOlderThan(Duration olderThan) {
+            core.invalidateAllOlderThan(olderThan);
+        }
     }
 
-    @Override
-    public DistributedStats stats() {
-        return core.stats();
-    }
-
-    @Override
-    public StoreMark markStore() {
-        return core.markStore();
-    }
-
-    @Override
-    public void invalidateAllBeforeMark(StoreMark mark) {
-        core.invalidateAllBeforeMark(mark);
-    }
-
-    @Override
-    public void invalidateAllOlderThan(Duration olderThan) {
-        core.invalidateAllOlderThan(olderThan);
-    }
-
-    @Override
-    public Optional<StoreMaximumAge> storeMaximumAge() {
-        return Optional.ofNullable(maximumAge);
-    }
-
-    @Override
-    public Optional<StoreMaximumSize> storeMaximumSize() {
-        return Optional.ofNullable(maximumSize);
-    }
-
-    private final class MaximumAgeView implements StoreMaximumAge {
+    private final class MaximumAgeView implements MaximumAge {
 
         @Override
         public Duration getMaximumAge() {
@@ -95,7 +99,7 @@ final class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V> {
         }
     }
 
-    private final class MaximumSizeView implements StoreMaximumSize {
+    private final class MaximumSizeView implements MaximumSize {
 
         @Override
         public long getMaximumSize() {

@@ -233,7 +233,7 @@ abstract class MongoFailoverTest {
                 for (String key : held) {
                     StoredValue<String> stored;
                     try {
-                        stored = writer.distributedPolicy().getFromStore(key);
+                        stored = writer.distributedPolicy().store().get(key);
                     } catch (StoreException e) {
                         return false;
                     }
@@ -268,14 +268,14 @@ abstract class MongoFailoverTest {
         writer.putAll(Map.of("stale", "old", "fill", "old"));
         assertThat(holder.getIfPresent("stale")).isEqualTo("old");
         pause(50);
-        DistributedPolicy.StoreMark mark = writer.distributedPolicy().markStore();
+        DistributedPolicy.Mark mark = writer.distributedPolicy().store().mark();
         writer.put("fill", "new");
 
         try {
             replicaSet.killPreferred();
             assertThat(awaitUpTo(() -> {
                 try {
-                    writer.distributedPolicy().invalidateAllBeforeMark(mark);
+                    writer.distributedPolicy().store().invalidateAllBeforeMark(mark);
                     return true;
                 } catch (StoreException e) {
                     return false;
@@ -320,7 +320,7 @@ abstract class MongoFailoverTest {
                 assertThat(Duration.ofNanos(System.nanoTime() - started)).as("failing rather than waiting")
                         .isLessThan(Duration.ofSeconds(15));
             }
-            assertThat(writer.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+            assertThat(writer.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
         } finally {
             replicaSet.start(1);
             replicaSet.start(2);
@@ -336,7 +336,7 @@ abstract class MongoFailoverTest {
             }
         }, CONVERGENCE, Duration.ofMillis(500))).as("writing again").isTrue();
         await(() -> "after".equals(holder.getIfPresent("k")));
-        assertThat(writer.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
+        assertThat(writer.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
     }
 
     @Test
@@ -360,8 +360,8 @@ abstract class MongoFailoverTest {
                 assertThat(Duration.ofNanos(System.nanoTime() - started)).as("failing rather than waiting")
                         .isLessThan(Duration.ofSeconds(15));
             }
-            assertThat(writer.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
-            await(() -> holder.distributedPolicy().getSynchronizationState() == SynchronizationState.DEGRADED);
+            assertThat(writer.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+            await(() -> holder.distributedPolicy().synchronizationState() == SynchronizationState.DEGRADED);
             assertThat(holder.getIfPresent("k")).as("a hit is served while the store is down").isEqualTo("before");
         } finally {
             replicaSet.start(0);
@@ -378,14 +378,14 @@ abstract class MongoFailoverTest {
                 return false;
             }
         }, CONVERGENCE, Duration.ofMillis(500))).as("writing again").isTrue();
-        assertThat(awaitUpTo(() -> holder.distributedPolicy().getSynchronizationState()
+        assertThat(awaitUpTo(() -> holder.distributedPolicy().synchronizationState()
                 == SynchronizationState.SYNCHRONIZED, CONVERGENCE, Duration.ofMillis(250))).as("watching again")
                 .isTrue();
         await(() -> "after".equals(holder.getIfPresent("k")));
         writer.put("k", "after the resume");
         await(() -> holder.policy().getIfPresentQuietly("k") == null);
         assertThat(holder.getIfPresent("k")).isEqualTo("after the resume");
-        assertThat(writer.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
+        assertThat(writer.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
 
         // and maintenance goes on: what is written now is pruned to the maximum again
         for (int index = 0; index < 30; index++) {
@@ -442,7 +442,7 @@ abstract class MongoFailoverTest {
         // a cache started now has seen nothing yet; its first read must not be older than the confirmed write either
         DistributedCache<String, String> newcomer = cache(client);
         assertThat(newcomer.getIfPresent("k")).isEqualTo("after");
-        assertThat(requireNonNull(writer.distributedPolicy().getFromStore("k")).value()).isEqualTo("after");
+        assertThat(requireNonNull(writer.distributedPolicy().store().get("k")).value()).isEqualTo("after");
         await(() -> "after".equals(holder.getIfPresent("k")) && "after".equals(writer.getIfPresent("k")));
         for (DistributedCache<String, String> cache : List.of(writer, holder)) {
             assertThat(cache.policy().getIfPresentQuietly("k")).isNotEqualTo("doomed");
@@ -487,7 +487,7 @@ abstract class MongoFailoverTest {
             await(() -> holder.policy().getIfPresentQuietly("k") == null);
         }
         assertThat(failed).as("the failing listener keeps receiving").hasValueGreaterThanOrEqualTo(2);
-        assertThat(holder.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
+        assertThat(holder.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
     }
 
     // two caches writing 100 keys in turn while the disruption runs; a key whose write failed is not written again,
@@ -552,7 +552,7 @@ abstract class MongoFailoverTest {
         for (String key : keys) {
             StoredValue<String> stored;
             try {
-                stored = first.distributedPolicy().getFromStore(key);
+                stored = first.distributedPolicy().store().get(key);
             } catch (StoreException e) {
                 return false;
             }

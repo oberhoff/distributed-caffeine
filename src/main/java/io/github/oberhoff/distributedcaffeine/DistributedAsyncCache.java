@@ -39,7 +39,9 @@ import java.util.function.Function;
 public interface DistributedAsyncCache<K, V> extends AsyncCache<K, V>, AutoCloseable {
 
     /**
-     * Returns the distributed side of this cache: its synchronization state, its stats and direct reads of the store.
+     * Returns the distributed side of this cache: its synchronization state and the view of the store its instances
+     * share. The distributed stats are the synchronous view's ({@code synchronous().distributedStats()}), as Caffeine's
+     * stats are ({@code synchronous().stats()}).
      *
      * @return the distributed policy
      */
@@ -69,7 +71,7 @@ public interface DistributedAsyncCache<K, V> extends AsyncCache<K, V>, AutoClose
      * <b>Distributed Caffeine:</b> A computed value is cached only if no instance wrote or removed the key during the
      * computation. If one wrote it, that value is returned instead; if one removed it, the value is computed again.
      * After three such removals in a row, the last computed value is returned without being cached ({@code
-     * distributedPolicy().stats().uncachedLoadCount()}).
+     * synchronous().distributedStats().uncachedLoadCount()}).
      */
     // Caffeine's futures complete with null where nothing is found, which its types cannot express for a value type
     // that is not nullable
@@ -83,7 +85,7 @@ public interface DistributedAsyncCache<K, V> extends AsyncCache<K, V>, AutoClose
      * <b>Distributed Caffeine:</b> A computed value is cached only if no instance wrote or removed the key during the
      * computation. If one wrote it, that value is returned instead; if one removed it, the value is computed again.
      * After three such removals in a row, the last computed value is returned without being cached ({@code
-     * distributedPolicy().stats().uncachedLoadCount()}).
+     * synchronous().distributedStats().uncachedLoadCount()}).
      */
     // Caffeine's futures complete with null where nothing is found, which its types cannot express for a value type
     // that is not nullable
@@ -99,7 +101,7 @@ public interface DistributedAsyncCache<K, V> extends AsyncCache<K, V>, AutoClose
      * only those missing there are computed. A computed value is cached only if no instance wrote or removed its key
      * during the computation. If one wrote it, that value is returned instead; if one removed it, the key is computed
      * again on its own, up to three times. If a removal meets each of these too, the last computed value is returned
-     * without being cached ({@code distributedPolicy().stats().uncachedLoadCount()}).
+     * without being cached ({@code synchronous().distributedStats().uncachedLoadCount()}).
      */
     @Override
     CompletableFuture<Map<K, V>> getAll(Iterable<? extends K> keys,
@@ -112,7 +114,7 @@ public interface DistributedAsyncCache<K, V> extends AsyncCache<K, V>, AutoClose
      * only those missing there are computed. A computed value is cached only if no instance wrote or removed its key
      * during the computation. If one wrote it, that value is returned instead; if one removed it, the key is computed
      * again on its own, up to three times. If a removal meets each of these too, the last computed value is returned
-     * without being cached ({@code distributedPolicy().stats().uncachedLoadCount()}).
+     * without being cached ({@code synchronous().distributedStats().uncachedLoadCount()}).
      */
     @Override
     CompletableFuture<Map<K, V>> getAll(Iterable<? extends K> keys, BiFunction<? super Set<? extends K>,
@@ -145,7 +147,7 @@ public interface DistributedAsyncCache<K, V> extends AsyncCache<K, V>, AutoClose
     /**
      * Closes this cache instance and releases its connections to the store. The local copies are dropped without
      * notifying the removal listener. Afterwards every operation throws {@link IllegalStateException}, except
-     * {@code distributedPolicy().getSynchronizationState()} and {@code distributedPolicy().stats()}. Idempotent.
+     * {@code distributedPolicy().synchronizationState()} and {@code synchronous().distributedStats()}. Idempotent.
      */
     @Override
     void close();

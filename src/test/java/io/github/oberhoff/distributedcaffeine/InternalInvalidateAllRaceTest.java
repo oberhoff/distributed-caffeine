@@ -119,7 +119,7 @@ class InternalInvalidateAllRaceTest {
     }
 
     private static @Nullable String stored(DistributedCache<String, String> cache) {
-        StoredValue<String> stored = cache.distributedPolicy().getFromStore("k");
+        StoredValue<String> stored = cache.distributedPolicy().store().get("k");
         return stored == null ? null : stored.value();
     }
 

@@ -19,7 +19,7 @@ import org.jspecify.annotations.Nullable;
 
 /**
  * A call to the store failed. Unchecked; a cache throws it where it cannot answer without the store: a write or removal
- * while the store does not answer, a write whose outcome is unknown, {@code getFromStore}, and {@code build()} when
+ * while the store does not answer, a write whose outcome is unknown, {@code store().get}, and {@code build()} when
  * the store cannot be used. The cache has already retried what was safe to retry (a few attempts with backoff), so a
  * caller sees it only once those are spent. Its flags tell what happened:
  * <ul>

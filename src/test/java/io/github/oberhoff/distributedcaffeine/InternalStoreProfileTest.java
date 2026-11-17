@@ -113,7 +113,7 @@ class InternalStoreProfileTest {
     }
 
     private static @Nullable String stored(DistributedCache<String, String> cache, String key) {
-        StoredValue<String> stored = cache.distributedPolicy().getFromStore(key);
+        StoredValue<String> stored = cache.distributedPolicy().store().get(key);
         return stored == null ? null : stored.value();
     }
 
@@ -163,7 +163,7 @@ class InternalStoreProfileTest {
                 builder -> builder.withCaffeine(CaffeineConfigurer::recordStats));
         Thread invalidating = new Thread(clearing::invalidateAll);
         invalidating.start();
-        await(() -> writer.distributedPolicy().stats().invalidatedAllMessageCount() == 1);
+        await(() -> writer.distributedStats().invalidatedAllMessageCount() == 1);
         writer.put("k", "v"); // within the allowance, at the control row's time: hidden
         assertThat(stored(writer, "k")).isNull();
         invalidating.join();
@@ -469,7 +469,7 @@ class InternalStoreProfileTest {
         Duration maximumAge = Duration.ofMillis(300);
         DistributedCache<String, String> longer = cache(database, LONG,
                 builder -> builder.withCaffeine(caffeine -> caffeine.expireAfterWrite(LONG)));
-        longer.distributedPolicy().storeMaximumAge().orElseThrow().setMaximumAge(maximumAge);
+        longer.distributedPolicy().store().maximumAge().orElseThrow().setMaximumAge(maximumAge);
         DistributedCache<String, String> lengthening = cache(database, maximumAge,
                 builder -> builder.withCaffeine(caffeine -> caffeine.expireAfter(new Expiry<>() {
                     @Override

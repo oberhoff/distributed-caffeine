@@ -103,7 +103,7 @@ class InternalInterleavingTest {
                 environment.advance(Duration.ofSeconds(1));
                 // what a read serves, not what L1 holds: a value held but no longer trusted (a load overlapping an
                 // invalidateAll, under the old epoch) is checked against the store before it is served
-                String inStore = value(holder.distributedPolicy().getFromStore("k"));
+                String inStore = value(holder.distributedPolicy().store().get("k"));
                 String served = holder.getIfPresent("k");
                 check(served == null || served.equals(inStore), "served " + served + ", the store has " + inStore);
                 after.accept(fixture);
@@ -154,14 +154,14 @@ class InternalInterleavingTest {
     // from being served
     @Test
     void a_read_through_racing_a_backdated_invalidate_all_elsewhere() {
-        AtomicReference<DistributedPolicy.@Nullable StoreMark> mark = new AtomicReference<>();
+        AtomicReference<DistributedPolicy.@Nullable Mark> mark = new AtomicReference<>();
         race(StoreProfile.REDIS.with(StoreProfile.Clock.MONOTONIC, Duration.ZERO), fixture -> {
             fixture.writer().put("k", "old");
             // the mark later than the row, so that the cut-off hides it (a row at the mark's very tick stays)
             fixture.environment().advance(Duration.ofMillis(1));
-            mark.set(fixture.writer().distributedPolicy().markStore());
+            mark.set(fixture.writer().distributedPolicy().store().mark());
         }, fixture -> List.of(
-                () -> fixture.writer().distributedPolicy().invalidateAllBeforeMark(Objects.requireNonNull(mark.get())),
+                () -> fixture.writer().distributedPolicy().store().invalidateAllBeforeMark(Objects.requireNonNull(mark.get())),
                 () -> fixture.holder().getIfPresent("k")));
     }
 
@@ -169,16 +169,16 @@ class InternalInterleavingTest {
     // (the store keeps the later), and the holder, told of both, serves nothing older than either
     @Test
     void a_backdated_invalidate_all_racing_a_full_one() {
-        AtomicReference<DistributedPolicy.@Nullable StoreMark> mark = new AtomicReference<>();
+        AtomicReference<DistributedPolicy.@Nullable Mark> mark = new AtomicReference<>();
         race(StoreProfile.REDIS.with(StoreProfile.Clock.MONOTONIC, Duration.ZERO), fixture -> {
-            mark.set(fixture.holder().distributedPolicy().markStore());
+            mark.set(fixture.holder().distributedPolicy().store().mark());
             fixture.writer().put("k", "old");
             fixture.holder().getIfPresent("k");
         }, fixture -> List.of(
                 () -> fixture.writer().invalidateAll(),
-                () -> fixture.holder().distributedPolicy().invalidateAllBeforeMark(
+                () -> fixture.holder().distributedPolicy().store().invalidateAllBeforeMark(
                         Objects.requireNonNull(mark.get()))), fixture -> {
-            String inStore = value(fixture.holder().distributedPolicy().getFromStore("k"));
+            String inStore = value(fixture.holder().distributedPolicy().store().get("k"));
             check(inStore == null, "the full invalidateAll undone: the store has " + inStore);
         });
     }
@@ -218,7 +218,7 @@ class InternalInterleavingTest {
                 () -> fixture.writer().asMap().compute("k", (key, value) -> increment(value)),
                 () -> fixture.holder().asMap().compute("k", (key, value) -> increment(value))),
                 fixture -> {
-                    String inStore = value(fixture.holder().distributedPolicy().getFromStore("k"));
+                    String inStore = value(fixture.holder().distributedPolicy().store().get("k"));
                     check("2".equals(inStore), "two increments, the store has " + inStore);
                 });
     }
@@ -254,7 +254,7 @@ class InternalInterleavingTest {
                 () -> fixture.writer().put("k", "new"),
                 () -> fixture.holder().get("k", key -> null)),
                 fixture -> {
-                    String inStore = value(fixture.holder().distributedPolicy().getFromStore("k"));
+                    String inStore = value(fixture.holder().distributedPolicy().store().get("k"));
                     String found = fixture.holder().get("k", key -> null);
                     check(Objects.equals(found, inStore), "found " + found + ", the store has " + inStore);
                 });
@@ -271,7 +271,7 @@ class InternalInterleavingTest {
                 () -> first.set(fixture.writer().asMap().putIfAbsent("k", "a")),
                 () -> second.set(fixture.holder().asMap().putIfAbsent("k", "b"))),
                 fixture -> {
-                    String inStore = value(fixture.holder().distributedPolicy().getFromStore("k"));
+                    String inStore = value(fixture.holder().distributedPolicy().store().get("k"));
                     String a = first.get();
                     String b = second.get();
                     boolean aWon = a == null && "a".equals(inStore) && "a".equals(b);

@@ -45,7 +45,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * {@code distributedPolicy().stats()}: each counter at its source; and Caffeine's {@code stats()} counted from the
+ * {@code distributedStats()}: each counter at its source; and Caffeine's {@code stats()} counted from the
  * user's view ({@code getIfPresent} a hit or a miss, never a load).
  *
  * @author Andreas Oberhoff
@@ -115,7 +115,7 @@ class InternalStatsTest {
     }
 
     private static DistributedStats stats(DistributedCache<String, String> cache) {
-        return cache.distributedPolicy().stats();
+        return cache.distributedStats();
     }
 
     @Test
@@ -405,7 +405,7 @@ class InternalStatsTest {
         assertThat(holder.getAllPresent(List.of("kept", "changed"))).isEqualTo(Map.of("kept", "1", "changed", "2"));
 
         database.interruptSubscriptions();
-        await(() -> holder.distributedPolicy().getSynchronizationState() == SynchronizationState.DEGRADED);
+        await(() -> holder.distributedPolicy().synchronizationState() == SynchronizationState.DEGRADED);
         writer.put("changed", "3");
         assertThat(holder.getIfPresent("kept")).isEqualTo("1");
         assertThat(holder.getIfPresent("changed")).as("checked against the store").isEqualTo("3");
@@ -485,8 +485,8 @@ class InternalStatsTest {
                         .withMaximumAge(LONG).withMaximumSize(1_000)).build());
         cache.put("text", "not a number");
         assertThat(reader.getIfPresent("text")).isNull();
-        assertThat(reader.distributedPolicy().stats().unreadableRowCount()).isEqualTo(1);
-        assertThat(reader.distributedPolicy().stats().storeMissCount()).isEqualTo(1);
+        assertThat(reader.distributedStats().unreadableRowCount()).isEqualTo(1);
+        assertThat(reader.distributedStats().storeMissCount()).isEqualTo(1);
     }
 
     @Test

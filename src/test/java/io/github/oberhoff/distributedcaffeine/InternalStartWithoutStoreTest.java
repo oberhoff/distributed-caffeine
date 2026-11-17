@@ -103,7 +103,7 @@ class InternalStartWithoutStoreTest {
         try (LogCapture log = new LogCapture()) {
             DistributedLoadingCache<String, String> cache = track(builder(restarted(database)).build(key -> "source"));
 
-            assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+            assertThat(cache.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
             assertThat(cache.get("k")).isEqualTo("source");
             assertThatThrownBy(() -> cache.put("k", "written")).isInstanceOf(StoreException.class);
             assertThat(log.count("The store is not available (Connection refused); the cache starts without it"))
@@ -132,7 +132,7 @@ class InternalStartWithoutStoreTest {
             assertThat(cache.get("k")).as("the store not reached: the source").isEqualTo("source");
 
             reachable.set(true);
-            await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
+            await(() -> cache.distributedPolicy().synchronizationState() == SynchronizationState.SYNCHRONIZED);
             await(() -> "stored".equals(cache.get("k")));
 
             other.put("k", "newer");
@@ -156,7 +156,7 @@ class InternalStartWithoutStoreTest {
         reachable.set(true);
         DistributedLoadingCache<String, String> cache = track(builder(adapter).withStore(StoreConfigurer::withFailFast)
                 .build(key -> "source"));
-        assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
+        assertThat(cache.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
     }
 
     // a store that answered but cannot be used is a configuration error: never a start without it
@@ -190,7 +190,7 @@ class InternalStartWithoutStoreTest {
             await(() -> log.count("The store was reached, but the cache cannot use it") > 0);
             assertThat(log.text()).contains("offers no change feed and no change scan");
             await(() -> closed.get() == 1);
-            assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+            assertThat(cache.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
             assertThat(cache.get("k")).isEqualTo("source");
         }
     }
@@ -208,7 +208,7 @@ class InternalStartWithoutStoreTest {
         pause(1_500);
 
         assertThat(attempts.get()).isEqualTo(made);
-        assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.CLOSED);
+        assertThat(cache.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.CLOSED);
         // the adapter is free again
         track(builder(restarted(database)).build(key -> "source"));
     }

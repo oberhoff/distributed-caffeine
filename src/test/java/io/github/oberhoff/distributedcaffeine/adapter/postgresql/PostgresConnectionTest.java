@@ -145,7 +145,7 @@ abstract class PostgresConnectionTest {
     }
 
     private static void awaitState(DistributedCache<?, ?> cache, SynchronizationState state) {
-        assertThat(awaitUpTo(() -> cache.distributedPolicy().getSynchronizationState() == state, DETECTION,
+        assertThat(awaitUpTo(() -> cache.distributedPolicy().synchronizationState() == state, DETECTION,
                 Duration.ofMillis(50))).as("state " + state).isTrue();
     }
 
@@ -216,7 +216,7 @@ abstract class PostgresConnectionTest {
 
         // the broken connection is gone from the pool; a new one is carried
         cache.put("k", "after");
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("after");
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).isEqualTo("after");
     }
 
     // a slow database: slow, but not broken
@@ -249,9 +249,9 @@ abstract class PostgresConnectionTest {
             writer.put("k", value);
             await(() -> holder.policy().getIfPresentQuietly("k") == null);
             assertThat(holder.getIfPresent("k")).isEqualTo(value);
-            assertThat(holder.distributedPolicy().getSynchronizationState()).as("heartbeats are late, not missing")
+            assertThat(holder.distributedPolicy().synchronizationState()).as("heartbeats are late, not missing")
                     .isEqualTo(SynchronizationState.SYNCHRONIZED);
-            assertThat(writer.distributedPolicy().getSynchronizationState())
+            assertThat(writer.distributedPolicy().synchronizationState())
                     .isEqualTo(SynchronizationState.SYNCHRONIZED);
         }
     }
@@ -298,7 +298,7 @@ abstract class PostgresConnectionTest {
     @Test
     void a_data_source_reaching_a_standby_is_refused_as_retryable() {
         DistributedCache<String, String> cache = track(strings(adapter(standby(), database.listener)).build());
-        assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+        assertThat(cache.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
 
         DistributedCaffeine<String, String> failFast = strings(adapter(standby(), database.listener))
                 .withStore(StoreConfigurer::withFailFast);
@@ -342,7 +342,7 @@ abstract class PostgresConnectionTest {
             await(() -> holder.policy().getIfPresentQuietly("k") == null);
         }
         assertThat(failed).as("the failing listener keeps receiving").hasValueGreaterThanOrEqualTo(2);
-        assertThat(holder.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
+        assertThat(holder.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
     }
 
     @Test

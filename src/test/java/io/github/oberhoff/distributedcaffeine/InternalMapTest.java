@@ -106,7 +106,7 @@ class InternalMapTest {
     }
 
     private static @Nullable String stored(DistributedCache<String, String> cache, String key) {
-        StoredValue<String> stored = cache.distributedPolicy().getFromStore(key);
+        StoredValue<String> stored = cache.distributedPolicy().store().get(key);
         return stored == null ? null : stored.value();
     }
 
@@ -167,7 +167,7 @@ class InternalMapTest {
         // delivery stops: what second holds is no longer trusted, and the invalidation does not reach it
         database.interruptSubscriptions();
         // the interruption reaches the cache through its delivery queue
-        await(() -> second.distributedPolicy().getSynchronizationState() == SynchronizationState.DEGRADED);
+        await(() -> second.distributedPolicy().synchronizationState() == SynchronizationState.DEGRADED);
         first.invalidate("k");
 
         assertThat(second.asMap().containsKey("k")).isFalse();
@@ -428,7 +428,7 @@ class InternalMapTest {
             // at once, the copy most likely still trusted (the confirming read fails), and once the outage is
             // noticed, the copy untrusted (the read deciding on it fails)
             assertAnsweredFromTheHeldCopy(cache);
-            await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.DEGRADED);
+            await(() -> cache.distributedPolicy().synchronizationState() == SynchronizationState.DEGRADED);
             assertAnsweredFromTheHeldCopy(cache);
 
             // a decision to remove throws as well, and drops the copy first, as invalidate does

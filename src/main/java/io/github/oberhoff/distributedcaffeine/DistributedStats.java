@@ -22,12 +22,12 @@ import java.util.EnumMap;
 import java.util.Map;
 
 /**
- * A snapshot of one cache instance's store and synchronization activity, from {@code distributedPolicy().stats()};
+ * A snapshot of one cache instance's store and synchronization activity, from {@code distributedStats()};
  * recorded only if the cache records stats ({@code recordStats()}). Caffeine's own stats keep their meaning: a value
  * found in the store counts there as a miss and a successful load, so their hit rate is the rate of local hits. The
  * share of requests served without calling the source adds the store hits ({@link #storeHitCount()}):
  * <pre>{@code
- * (cache.stats().hitCount() + cache.distributedPolicy().stats().storeHitCount())
+ * (cache.stats().hitCount() + cache.distributedStats().storeHitCount())
  *         / (double) cache.stats().requestCount()
  * }</pre>
  * A message is a change made by any instance, as the store announces it.

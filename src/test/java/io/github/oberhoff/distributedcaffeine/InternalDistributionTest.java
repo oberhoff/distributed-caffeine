@@ -304,7 +304,7 @@ public class InternalDistributionTest {
         writer.put("k", "v");
         faults.gap();
         faults.resumeDelivery();
-        await(() -> loader.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
+        await(() -> loader.distributedPolicy().synchronizationState() == SynchronizationState.SYNCHRONIZED);
         settle();
         blocked.release.countDown();
 
@@ -343,7 +343,7 @@ public class InternalDistributionTest {
         release.countDown();
 
         assertThat(bulk.get(5, TimeUnit.SECONDS)).containsExactly(Map.entry("a", "a1"));
-        assertThat(writer.distributedPolicy().getFromStore("x")).as("not written over the tombstone").isNull();
+        assertThat(writer.distributedPolicy().store().get("x")).as("not written over the tombstone").isNull();
         assertThat(held(loader, "x")).isNull();
     }
 
@@ -658,7 +658,7 @@ public class InternalDistributionTest {
         keys.forEach(key -> assertThat(first.get(key)).isNull());
         faults.interruptSubscriptions();
         try {
-            await(() -> first.distributedPolicy().getSynchronizationState() == SynchronizationState.DEGRADED);
+            await(() -> first.distributedPolicy().synchronizationState() == SynchronizationState.DEGRADED);
             // no message can end these absences
             List.of("viaGet", "viaGetIfPresent", "viaContainsKey", "viaGetAll")
                     .forEach(key -> second.put(key, "written"));

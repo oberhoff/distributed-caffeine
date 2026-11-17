@@ -166,8 +166,8 @@ abstract class MongoAdapterTest {
         users.invalidateAll();
         orders.put("k", "order 2");
 
-        assertThat(requireNonNull(orders.distributedPolicy().getFromStore("k")).value()).isEqualTo("order 2");
-        assertThat(users.distributedPolicy().getFromStore("k")).isNull();
+        assertThat(requireNonNull(orders.distributedPolicy().store().get("k")).value()).isEqualTo("order 2");
+        assertThat(users.distributedPolicy().store().get("k")).isNull();
         assertThat(otherCollection.getIfPresent("k")).isEqualTo("other");
         await(() -> ordersHolder.policy().getIfPresentQuietly("k") == null);
         assertThat(ordersHolder.getIfPresent("k")).isEqualTo("order 2");
@@ -183,7 +183,7 @@ abstract class MongoAdapterTest {
                                 .<String, Order>build())
                 .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(100)).build());
         binary.put("k", new Order("o1", 3, List.of("a")));
-        assertThat(requireNonNull(binary.distributedPolicy().getFromStore("k")).value())
+        assertThat(requireNonNull(binary.distributedPolicy().store().get("k")).value())
                 .isEqualTo(new Order("o1", 3, List.of("a")));
 
         DistributedCache<String, Order> json = track(DistributedCaffeine.newBuilder(
@@ -193,7 +193,7 @@ abstract class MongoAdapterTest {
                         .withValueSerializer(new JacksonSerializer<>(Order.class, true)))
                 .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(100)).build());
         json.put("k", new Order("$o2", 5, List.of("$x", "y")));
-        assertThat(requireNonNull(json.distributedPolicy().getFromStore("k")).value())
+        assertThat(requireNonNull(json.distributedPolicy().store().get("k")).value())
                 .isEqualTo(new Order("$o2", 5, List.of("$x", "y")));
         BsonDocument stored = requireNonNull(database.client.getDatabase("adapter")
                 .getCollection(collection + "_json", BsonDocument.class)
@@ -203,8 +203,8 @@ abstract class MongoAdapterTest {
         DistributedCache<String, String> text = cache(Function.identity());
         text.put("$key", "$set");
         text.put("k", "ünïcödé");
-        assertThat(requireNonNull(text.distributedPolicy().getFromStore("$key")).value()).isEqualTo("$set");
-        assertThat(requireNonNull(text.distributedPolicy().getFromStore("k")).value()).isEqualTo("ünïcödé");
+        assertThat(requireNonNull(text.distributedPolicy().store().get("$key")).value()).isEqualTo("$set");
+        assertThat(requireNonNull(text.distributedPolicy().store().get("k")).value()).isEqualTo("ünïcödé");
     }
 
     @Test
@@ -231,8 +231,8 @@ abstract class MongoAdapterTest {
         MongoWatcher.simulateHistoryLost(database.client, new MongoLocation("adapter", collection,
                 MongoAdapter.DEFAULT_DISCRIMINATOR, Format.TEXT, Format.TEXT));
 
-        await(() -> holder.distributedPolicy().stats().gapCount() == 1);
-        await(() -> holder.distributedPolicy().stats().revalidatedCount() >= 1);
+        await(() -> holder.distributedStats().gapCount() == 1);
+        await(() -> holder.distributedStats().revalidatedCount() >= 1);
         writer.put("k", "after the gap");
         await(() -> holder.policy().getIfPresentQuietly("k") == null);
         assertThat(holder.getIfPresent("k")).isEqualTo("after the gap");
@@ -249,10 +249,10 @@ abstract class MongoAdapterTest {
         MongoWatcher.simulateInterruption(database.client, new MongoLocation("adapter", collection,
                 MongoAdapter.DEFAULT_DISCRIMINATOR, Format.TEXT, Format.TEXT));
         // counted, not awaited as a state: the core resumes at once, so DEGRADED may last milliseconds only
-        await(() -> holder.distributedPolicy().stats().interruptionCount() >= 1);
+        await(() -> holder.distributedStats().interruptionCount() >= 1);
         writer.put("k", "written while interrupted");
 
-        await(() -> holder.distributedPolicy().getSynchronizationState()
+        await(() -> holder.distributedPolicy().synchronizationState()
                 == io.github.oberhoff.distributedcaffeine.SynchronizationState.SYNCHRONIZED);
         // resumed from the token, which is a gap: the write's event arrives or the revalidation finds it
         await(() -> holder.policy().getIfPresentQuietly("k") == null);
@@ -263,11 +263,11 @@ abstract class MongoAdapterTest {
     void a_cache_joining_with_another_collection_while_the_stream_recovers_loses_no_event() {
         DistributedCache<String, String> holder =
                 cache(builder -> builder.withCaffeine(CaffeineConfigurer::recordStats));
-        long interruptions = holder.distributedPolicy().stats().interruptionCount();
+        long interruptions = holder.distributedStats().interruptionCount();
         MongoWatcher.simulateInterruption(database.client, new MongoLocation("adapter", collection,
                 MongoAdapter.DEFAULT_DISCRIMINATOR, Format.TEXT, Format.TEXT));
         // the core resumes at once; the join may come before, during or after it
-        await(() -> holder.distributedPolicy().stats().interruptionCount() > interruptions);
+        await(() -> holder.distributedStats().interruptionCount() > interruptions);
 
         // widening the stream needs it open: a join while it is lost reopens it
         String other = MongoTestDatabase.freshCollection();
@@ -280,7 +280,7 @@ abstract class MongoAdapterTest {
         writer.put("k", "new");
 
         await(() -> joining.policy().getIfPresentQuietly("k") == null);
-        await(() -> holder.distributedPolicy().getSynchronizationState()
+        await(() -> holder.distributedPolicy().synchronizationState()
                 == io.github.oberhoff.distributedcaffeine.SynchronizationState.SYNCHRONIZED);
     }
 
@@ -305,7 +305,7 @@ abstract class MongoAdapterTest {
             writer.put("k", value);
             await(() -> holder.policy().getIfPresentQuietly("k") == null);
             assertThat(holder.getIfPresent("k")).isEqualTo(value);
-            assertThat(holder.distributedPolicy().getSynchronizationState()).as("slow, not interrupted")
+            assertThat(holder.distributedPolicy().synchronizationState()).as("slow, not interrupted")
                     .isEqualTo(io.github.oberhoff.distributedcaffeine.SynchronizationState.SYNCHRONIZED);
         }
     }
@@ -348,7 +348,7 @@ abstract class MongoAdapterTest {
         assertThat(holder.getIfPresent("a")).isEqualTo("written after the drop");
         writer.put("a", "written again");
         await(() -> holder.policy().getIfPresentQuietly("a") == null);
-        assertThat(holder.distributedPolicy().getSynchronizationState())
+        assertThat(holder.distributedPolicy().synchronizationState())
                 .isEqualTo(io.github.oberhoff.distributedcaffeine.SynchronizationState.SYNCHRONIZED);
     }
 
@@ -399,7 +399,7 @@ abstract class MongoAdapterTest {
                 Duration.ofSeconds(MongoWatcher.OPERATION_TIMEOUT_SECONDS + 20), Duration.ofMillis(50)))
                 .as("resumed on a new connection, the write's event arrives").isTrue();
         assertThat(holder.getIfPresent("k")).isEqualTo("written while the stream was silent");
-        await(() -> holder.distributedPolicy().getSynchronizationState()
+        await(() -> holder.distributedPolicy().synchronizationState()
                 == io.github.oberhoff.distributedcaffeine.SynchronizationState.SYNCHRONIZED);
     }
 
@@ -464,7 +464,7 @@ abstract class MongoAdapterTest {
                 return false;
             }
         }, Duration.ofSeconds(20), Duration.ofMillis(200))).as("writing again").isTrue();
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("after");
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).isEqualTo("after");
     }
 
     @Test
@@ -510,9 +510,9 @@ abstract class MongoAdapterTest {
         writes.join();
 
         // one event per write: none lost at a reopen (and none twice)
-        await(() -> holder.distributedPolicy().stats().writtenMessageCount() >= written.get());
+        await(() -> holder.distributedStats().writtenMessageCount() >= written.get());
         pause(300);
-        assertThat(holder.distributedPolicy().stats().writtenMessageCount()).isEqualTo(written.get());
+        assertThat(holder.distributedStats().writtenMessageCount()).isEqualTo(written.get());
     }
 
     @Test
@@ -530,19 +530,19 @@ abstract class MongoAdapterTest {
         assertThat(holder.getIfPresent("k")).isEqualTo("old");
 
         // the stream is not read: no error, no event, as on a network that silently stopped carrying
-        long interruptions = holder.distributedPolicy().stats().interruptionCount();
-        long gaps = holder.distributedPolicy().stats().gapCount();
+        long interruptions = holder.distributedStats().interruptionCount();
+        long gaps = holder.distributedStats().gapCount();
         MongoWatcher.simulateLag(database.client, true);
         try {
             writer.put("k", "new");
 
-            await(() -> holder.distributedPolicy().stats().interruptionCount() > interruptions);
+            await(() -> holder.distributedStats().interruptionCount() > interruptions);
             assertThat(holder.getIfPresent("k")).as("checked against the store").isEqualTo("new");
         } finally {
             MongoWatcher.simulateLag(database.client, false);
         }
-        await(() -> holder.distributedPolicy().stats().gapCount() > gaps);
-        await(() -> holder.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
+        await(() -> holder.distributedStats().gapCount() > gaps);
+        await(() -> holder.distributedPolicy().synchronizationState() == SynchronizationState.SYNCHRONIZED);
     }
 
     @Test
@@ -575,9 +575,9 @@ abstract class MongoAdapterTest {
         MongoWatcher.simulateLag(database.client, false);
 
         // one event per write of the remaining collection: none lost at the reopen (and none twice)
-        await(() -> holder.distributedPolicy().stats().writtenMessageCount() >= written);
+        await(() -> holder.distributedStats().writtenMessageCount() >= written);
         pause(300);
-        assertThat(holder.distributedPolicy().stats().writtenMessageCount()).isEqualTo(written);
+        assertThat(holder.distributedStats().writtenMessageCount()).isEqualTo(written);
     }
 
     @Test

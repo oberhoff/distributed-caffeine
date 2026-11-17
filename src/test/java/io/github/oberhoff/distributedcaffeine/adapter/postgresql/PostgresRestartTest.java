@@ -137,8 +137,8 @@ abstract class PostgresRestartTest {
                 assertThat(Duration.ofNanos(System.nanoTime() - started)).as("failing rather than waiting")
                         .isLessThan(Duration.ofSeconds(15));
             }
-            assertThat(writer.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
-            await(() -> holder.distributedPolicy().getSynchronizationState() == SynchronizationState.DEGRADED);
+            assertThat(writer.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+            await(() -> holder.distributedPolicy().synchronizationState() == SynchronizationState.DEGRADED);
             assertThat(holder.getIfPresent("k")).as("a hit is served while the server is down").isEqualTo("before");
         } finally {
             database.startPrimary();
@@ -153,13 +153,13 @@ abstract class PostgresRestartTest {
                 return false;
             }
         }, BACK, Duration.ofMillis(250))).as("writing again").isTrue();
-        assertThat(awaitUpTo(() -> holder.distributedPolicy().getSynchronizationState()
+        assertThat(awaitUpTo(() -> holder.distributedPolicy().synchronizationState()
                 == SynchronizationState.SYNCHRONIZED, BACK, Duration.ofMillis(250))).as("listening again").isTrue();
         await(() -> "after".equals(holder.getIfPresent("k")));
         writer.put("k", "after the reconnect");
         await(() -> holder.policy().getIfPresentQuietly("k") == null);
         assertThat(holder.getIfPresent("k")).isEqualTo("after the reconnect");
-        assertThat(writer.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
+        assertThat(writer.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
 
         // and maintenance goes on: what is written now is pruned to the maximum again
         for (int index = 0; index < 30; index++) {

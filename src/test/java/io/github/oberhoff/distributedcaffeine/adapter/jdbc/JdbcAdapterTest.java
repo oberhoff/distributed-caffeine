@@ -210,11 +210,11 @@ abstract class JdbcAdapterTest {
             // retryable, as a failover in progress: the cache starts without its store (VISION.md, "Starting without
             // the store") and connects once the server takes writes
             cache = cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR);
-            assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+            assertThat(cache.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
         } finally {
             JdbcTestDatabase.asRoot("SET GLOBAL read_only = OFF");
         }
-        await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
+        await(() -> cache.distributedPolicy().synchronizationState() == SynchronizationState.SYNCHRONIZED);
         cache.put("k", "v");
     }
 
@@ -282,7 +282,7 @@ abstract class JdbcAdapterTest {
         writer.invalidateAll();
         await(() -> holder.policy().getIfPresentQuietly("k") == null);
         assertThat(holder.getIfPresent("k")).isNull();
-        assertThat(holder.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
+        assertThat(holder.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
     }
 
     @Test
@@ -294,8 +294,8 @@ abstract class JdbcAdapterTest {
         users.put("k", "user");
         users.invalidateAll();
 
-        assertThat(orders.distributedPolicy().getFromStore("k")).isNotNull();
-        assertThat(users.distributedPolicy().getFromStore("k")).isNull();
+        assertThat(orders.distributedPolicy().store().get("k")).isNotNull();
+        assertThat(users.distributedPolicy().store().get("k")).isNull();
     }
 
     // a data source that does not reset its connections: one connection, handed out again, closed by nobody
@@ -371,7 +371,7 @@ abstract class JdbcAdapterTest {
         // a read: failing, its outcome no question
         proxy.silenceOpenConnections();
         started = System.nanoTime();
-        assertThatThrownBy(() -> cache.distributedPolicy().getFromStore("k"))
+        assertThatThrownBy(() -> cache.distributedPolicy().store().get("k"))
                 .isInstanceOfSatisfying(StoreException.class, e -> {
                     assertThat(e.getMessage()).contains("got no answer within");
                     assertThat(e.isOutcomeUnknown()).isFalse();
@@ -379,7 +379,7 @@ abstract class JdbcAdapterTest {
         assertThat(Duration.ofNanos(System.nanoTime() - started)).as("failing after the timeout, not hanging")
                 .isLessThan(Duration.ofSeconds(6));
 
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("after");
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).isEqualTo("after");
     }
 
     private static Write write(long version) {

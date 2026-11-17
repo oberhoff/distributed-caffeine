@@ -229,7 +229,7 @@ class InternalPathParityTest {
         assertThat(loads).hasValue(0);
         await(() -> "stored".equals(held(path.async())));
         // the store's activity, counted alike on every path
-        DistributedStats stats = policy(path.async()).stats();
+        DistributedStats stats = stats(path.async());
         assertThat(stats.storeHitCount()).isOne();
         assertThat(stats.storeMissCount()).isZero();
         assertThat(stats.sourceLoadCount()).isZero();
@@ -243,7 +243,7 @@ class InternalPathParityTest {
 
         assertThat(path.read().read(this, KEY)).isEqualTo("loaded");
 
-        DistributedStats stats = policy(path.async()).stats();
+        DistributedStats stats = stats(path.async());
         assertThat(stats.storeHitCount()).isZero();
         assertThat(stats.storeMissCount()).isOne();
         assertThat(stats.sourceLoadCount()).isOne();
@@ -312,7 +312,7 @@ class InternalPathParityTest {
         assertThat(path.read().read(this, KEY)).isEqualTo("loaded");
 
         await(() -> held(path.async()) == null);
-        assertThat(policy(path.async()).stats().uncachedLoadCount()).isOne();
+        assertThat(stats(path.async()).uncachedLoadCount()).isOne();
         assertThat(stored(path.async())).isNull();
     }
 
@@ -380,7 +380,7 @@ class InternalPathParityTest {
         putElsewhere("stored");
 
         assertThat(path.read().read(this, KEY)).isEqualTo("stored");
-        assertThat(policy(path.async()).stats().storeHitCount()).isOne();
+        assertThat(stats(path.async()).storeHitCount()).isOne();
         assertThat(containsKey(path.async())).isTrue();
 
         assertThat(loads).hasValue(0);
@@ -393,7 +393,7 @@ class InternalPathParityTest {
         open(path.async(), null);
 
         assertThat(path.read().read(this, KEY)).isNull();
-        assertThat(policy(path.async()).stats().storeMissCount()).isOne();
+        assertThat(stats(path.async()).storeMissCount()).isOne();
         assertThat(containsKey(path.async())).isFalse();
 
         assertThat(loads).hasValue(0);
@@ -462,7 +462,7 @@ class InternalPathParityTest {
         assertThat(path.read().read(this, KEY)).isNull();
 
         assertThat(loads).as("remembered after the first load").hasValue(1);
-        assertThat(policy(path.async()).stats().negativeHitCount()).isPositive();
+        assertThat(stats(path.async()).negativeHitCount()).isPositive();
     }
 
     @ParameterizedTest
@@ -909,7 +909,7 @@ class InternalPathParityTest {
         assertThat(stored(path.async(), "kept")).isEqualTo("loaded-kept");
         assertThat(stored(path.async(), "removed")).isNull();
         await(() -> held(path.async(), "removed") == null && "loaded-kept".equals(held(path.async(), "kept")));
-        assertThat(policy(path.async()).stats().uncachedLoadCount()).isOne();
+        assertThat(stats(path.async()).uncachedLoadCount()).isOne();
     }
 
     // refreshes: through the cache, or by refreshAfterWrite on a read; "old" held here and elsewhere
@@ -1104,10 +1104,10 @@ class InternalPathParityTest {
         source = key -> null;
         // remembered by a load of the same instance
         assertThat(path.async() ? async().get(KEY).join() : sync().get(KEY)).isNull();
-        long negativeHits = policy(path.async()).stats().negativeHitCount();
+        long negativeHits = stats(path.async()).negativeHitCount();
 
         assertThat(path.read().read(this, KEY)).isNull();
-        assertThat(policy(path.async()).stats().negativeHitCount()).as("answered without the store")
+        assertThat(stats(path.async()).negativeHitCount()).as("answered without the store")
                 .isGreaterThan(negativeHits);
 
         putElsewhere("new");
@@ -1231,9 +1231,9 @@ class InternalPathParityTest {
         stopChanges(async);
         other().put(KEY, "new"); // unseen: changes stopped arriving
         database.failNextReads(Integer.MAX_VALUE);
-        DistributedPolicy<String, String> policy = policy(async);
+        DistributedPolicy.Store<String, String> store = policy(async).store();
         for (int call = 0; call < InternalStoreGuard.THRESHOLD; call++) {
-            assertThatThrownBy(() -> policy.getFromStore("other")).isInstanceOf(StoreException.class);
+            assertThatThrownBy(() -> store.get("other")).isInstanceOf(StoreException.class);
         }
         database.failNextReads(0);
         pause(TimeUnit.NANOSECONDS.toMillis(InternalStoreGuard.SUSPENSION_NANOS) + 200);
@@ -1250,7 +1250,7 @@ class InternalPathParityTest {
         } else {
             database.setPollsFailing(true);
         }
-        await(() -> policy(async).getSynchronizationState() == SynchronizationState.DEGRADED);
+        await(() -> policy(async).synchronizationState() == SynchronizationState.DEGRADED);
     }
 
     // the caches
@@ -1364,6 +1364,11 @@ class InternalPathParityTest {
         return asynchronous ? async().distributedPolicy() : sync().distributedPolicy();
     }
 
+    // the async variant's through its synchronous view, as Caffeine's stats
+    private DistributedStats stats(boolean asynchronous) {
+        return asynchronous ? async().synchronous().distributedStats() : sync().distributedStats();
+    }
+
     // whether nothing is in flight here for the key (a load, or an asynchronous put's write)
     private boolean settledLocally(boolean asynchronous) {
         InternalCore<String, String> core = core(asynchronous);
@@ -1385,7 +1390,7 @@ class InternalPathParityTest {
     }
 
     private @Nullable String stored(boolean asynchronous, String key) {
-        StoredValue<String> stored = cache(asynchronous).distributedPolicy().getFromStore(key);
+        StoredValue<String> stored = cache(asynchronous).distributedPolicy().store().get(key);
         return stored == null ? null : stored.value();
     }
 
@@ -1395,7 +1400,7 @@ class InternalPathParityTest {
 
     // through the given instance: one closed cannot read the store
     private static @Nullable String stored(DistributedCache<String, String> cache) {
-        StoredValue<String> stored = cache.distributedPolicy().getFromStore(KEY);
+        StoredValue<String> stored = cache.distributedPolicy().store().get(KEY);
         return stored == null ? null : stored.value();
     }
 

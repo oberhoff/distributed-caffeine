@@ -132,7 +132,7 @@ abstract class PostgresFailoverTest {
                 return false;
             }
         }, BACK, Duration.ofMillis(250))).as("writing on the promoted standby").isTrue();
-        assertThat(awaitUpTo(() -> holder.distributedPolicy().getSynchronizationState()
+        assertThat(awaitUpTo(() -> holder.distributedPolicy().synchronizationState()
                 == SynchronizationState.SYNCHRONIZED, BACK, Duration.ofMillis(250))).as("listening on it").isTrue();
         await(() -> "after".equals(holder.getIfPresent("k")));
         writer.put("k", "after the failover");
@@ -201,7 +201,7 @@ abstract class PostgresFailoverTest {
         writer.putAll(Map.of("stale", "old", "fill", "old"));
         assertThat(holder.getIfPresent("stale")).isEqualTo("old");
         pause(50);
-        DistributedPolicy.StoreMark mark = writer.distributedPolicy().markStore();
+        DistributedPolicy.Mark mark = writer.distributedPolicy().store().mark();
         writer.put("fill", "new");
         assertThat(awaitUpTo(() -> {
             try {
@@ -215,7 +215,7 @@ abstract class PostgresFailoverTest {
         database.promoteStandby();
         assertThat(awaitUpTo(() -> {
             try {
-                writer.distributedPolicy().invalidateAllBeforeMark(mark);
+                writer.distributedPolicy().store().invalidateAllBeforeMark(mark);
                 return true;
             } catch (StoreException e) {
                 return false;
@@ -263,7 +263,7 @@ abstract class PostgresFailoverTest {
         }, BACK, Duration.ofMillis(100))).as("the standby stopped receiving").isTrue();
         pause(50);
 
-        writer.distributedPolicy().invalidateAllBeforeMark(writer.distributedPolicy().markStore());
+        writer.distributedPolicy().store().invalidateAllBeforeMark(writer.distributedPolicy().store().mark());
         await(() -> holder.getIfPresent("stale") == null);
         database.killPrimary();
         database.promoteStandby();
@@ -275,7 +275,7 @@ abstract class PostgresFailoverTest {
         pause(50);
         assertThat(awaitUpTo(() -> {
             try {
-                writer.distributedPolicy().invalidateAllBeforeMark(writer.distributedPolicy().markStore());
+                writer.distributedPolicy().store().invalidateAllBeforeMark(writer.distributedPolicy().store().mark());
                 return true;
             } catch (StoreException e) {
                 return false;

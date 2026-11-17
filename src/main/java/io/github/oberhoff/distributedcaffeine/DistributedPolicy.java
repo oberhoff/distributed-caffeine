@@ -23,7 +23,9 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * The distributed side of a cache instance.
+ * The distributed side of a cache instance, as Caffeine's {@code policy()} is the local side: the instance's
+ * synchronization state, and a view of the store it shares with the other instances. The distributed stats are the
+ * cache's own ({@link DistributedCache#distributedStats()}), as Caffeine's stats are.
  *
  * @param <K> the key type
  * @param <V> the value type
@@ -36,99 +38,108 @@ public interface DistributedPolicy<K, V> {
      *
      * @return the state
      */
-    SynchronizationState getSynchronizationState();
+    SynchronizationState synchronizationState();
 
     /**
-     * Reads the key's value from the store, bypassing this instance's copy and without keeping what it reads. Values
-     * older than the store's maximum age are not returned, nor values this instance cannot read (counted as
-     * {@code unreadableRowCount}), which every read treats as missing.
+     * Returns the view of the store this instance shares with the other instances of the cache.
      *
-     * @param key the key
-     * @return the stored value, or {@code null} if the store holds none
+     * @return the store
      */
-    @Nullable StoredValue<V> getFromStore(K key);
+    Store<K, V> store();
 
     /**
-     * Reads the keys' values from the store, bypassing this instance's copies and without keeping what it reads.
-     * Values older than the store's maximum age are not returned, nor values this instance cannot read (counted as
-     * {@code unreadableRowCount}), which every read treats as missing.
+     * The store a cache's instances share, as one instance sees it: its contents, its bounds, and invalidation by
+     * time.
      *
-     * @param keys the keys
-     * @return the stored values found, by key
+     * @param <K> the key type
+     * @param <V> the value type
+     * @author Andreas Oberhoff
      */
-    Map<K, StoredValue<V>> getAllFromStore(Iterable<? extends K> keys);
+    interface Store<K, V> {
+
+        /**
+         * Reads the key's value from the store, bypassing this instance's copy and without keeping what it reads.
+         * Values older than the store's maximum age are not returned, nor values this instance cannot read (counted as
+         * {@code unreadableRowCount}), which every read treats as missing.
+         *
+         * @param key the key
+         * @return the stored value, or {@code null} if the store holds none
+         */
+        @Nullable StoredValue<V> get(K key);
+
+        /**
+         * Reads the keys' values from the store, bypassing this instance's copies and without keeping what it reads.
+         * Values older than the store's maximum age are not returned, nor values this instance cannot read (counted as
+         * {@code unreadableRowCount}), which every read treats as missing.
+         *
+         * @param keys the keys
+         * @return the stored values found, by key
+         */
+        Map<K, StoredValue<V>> getAll(Iterable<? extends K> keys);
+
+        /**
+         * Returns access to the store's maximum age as this instance applies it, if the cache was built with one
+         * ({@link StoreConfigurer#withMaximumAge(Duration)}), as Caffeine's {@code policy().expireAfterWrite()} gives
+         * access to the local expiry.
+         *
+         * @return the maximum age, or empty if the cache was built without one
+         */
+        Optional<MaximumAge> maximumAge();
+
+        /**
+         * Returns access to the store's maximum size as this instance applies it, if the cache was built with one
+         * ({@link StoreConfigurer#withMaximumSize(long)}), as Caffeine's {@code policy().eviction()} gives access to
+         * the local maximum size.
+         *
+         * @return the maximum size, or empty if the cache was built without one
+         */
+        Optional<MaximumSize> maximumSize();
+
+        /**
+         * Reads the store's time, as the mark for {@link #invalidateAllBeforeMark(Mark)}: take it before the first
+         * write of a refill.
+         *
+         * @return the mark, for this instance only
+         * @throws StoreException if the store cannot be read
+         */
+        Mark mark();
+
+        /**
+         * Invalidates every value written to the store before the mark, by any instance, and keeps every value written
+         * since: the end of a refill while serving, which puts every value that should stay and drops the rest. Call
+         * it once every write of the refill has succeeded; a key the refill could not write is missing afterwards.
+         * Copies are not dropped: each is checked against the store before it is served again, and all of them in the
+         * background at once, on this instance and, as its message arrives, on every other, so that the cache stays
+         * hot. A value written after the mark is kept, also one older than the refill's: a refill's {@code put}
+         * overwrites a value written meanwhile by another writer. So is a value written less than the store clock's
+         * allowance for skew before the mark (10 ms for most stores), so that no write after the mark is hidden by the
+         * clock stepping back. Takes one write, whatever the size of the cache.
+         *
+         * @param mark the mark of {@link #mark()}, taken on this instance
+         * @throws IllegalArgumentException if the mark was taken on another instance
+         * @throws StoreException if the store cannot be written
+         */
+        void invalidateAllBeforeMark(Mark mark);
+
+        /**
+         * Invalidates every value written to the store longer ago than the duration, by the store's clock, and keeps
+         * every value written since, as {@link #invalidateAllBeforeMark(Mark)} does with a mark taken now and moved
+         * back by the duration: a one-off maximum age, also for a cache built without one.
+         *
+         * @param olderThan how long ago a value must have been written to be invalidated (not negative)
+         * @throws IllegalArgumentException if the duration is negative
+         * @throws StoreException if the store cannot be read or written
+         */
+        void invalidateAllOlderThan(Duration olderThan);
+    }
 
     /**
-     * Returns a snapshot of this instance's store and synchronization activity, unlike the cache's own {@code stats()},
-     * which counts the local level only. Empty unless the cache records stats ({@code recordStats()}), as Caffeine's
-     * {@code stats()}; also after {@code close()}.
-     *
-     * @return the snapshot
-     */
-    DistributedStats stats();
-
-    /**
-     * Returns access to the store's maximum age as this instance applies it, if the cache was built with one
-     * ({@link StoreConfigurer#withMaximumAge(Duration)}), as Caffeine's {@code policy().expireAfterWrite()} gives
-     * access to the local expiry.
-     *
-     * @return the maximum age, or empty if the cache was built without one
-     */
-    Optional<StoreMaximumAge> storeMaximumAge();
-
-    /**
-     * Returns access to the store's maximum size as this instance applies it, if the cache was built with one
-     * ({@link StoreConfigurer#withMaximumSize(long)}), as Caffeine's {@code policy().eviction()} gives access to the
-     * local maximum size.
-     *
-     * @return the maximum size, or empty if the cache was built without one
-     */
-    Optional<StoreMaximumSize> storeMaximumSize();
-
-    /**
-     * Reads the store's time, as the mark for {@link #invalidateAllBeforeMark(StoreMark)}: take it before the first
-     * write of a refill.
-     *
-     * @return the mark, for this instance only
-     * @throws StoreException if the store cannot be read
-     */
-    StoreMark markStore();
-
-    /**
-     * Invalidates every value written to the store before the mark, by any instance, and keeps every value written
-     * since: the end of a refill while serving, which puts every value that should stay and drops the rest. Call it
-     * once every write of the refill has succeeded; a key the refill could not write is missing afterwards. Copies
-     * are not dropped: each is checked against the store before it is served again, and all of them in the background
-     * at once, on this instance and, as its message arrives, on every other, so that the cache stays hot. A value
-     * written after the mark is kept, also one older than the refill's: a refill's {@code put} overwrites a value
-     * written meanwhile by another writer. So is a value written less than the store clock's allowance for skew before
-     * the mark (10 ms for most stores), so that no write after the mark is hidden by the clock stepping back. Takes one
-     * write, whatever the size of the cache.
-     *
-     * @param mark the mark of {@link #markStore()}, taken on this instance
-     * @throws IllegalArgumentException if the mark was taken on another instance
-     * @throws StoreException if the store cannot be written
-     */
-    void invalidateAllBeforeMark(StoreMark mark);
-
-    /**
-     * Invalidates every value written to the store longer ago than the duration, by the store's clock, and keeps every
-     * value written since, as {@link #invalidateAllBeforeMark(StoreMark)} does with a mark taken now and moved back by
-     * the duration: a one-off maximum age, also for a cache built without one.
-     *
-     * @param olderThan how long ago a value must have been written to be invalidated (not negative)
-     * @throws IllegalArgumentException if the duration is negative
-     * @throws StoreException if the store cannot be read or written
-     */
-    void invalidateAllOlderThan(Duration olderThan);
-
-    /**
-     * A time of the store's clock, taken by {@link #markStore()}: opaque, so that it is never compared with another
+     * A time of the store's clock, taken by {@link Store#mark()}: opaque, so that it is never compared with another
      * clock.
      *
      * @author Andreas Oberhoff
      */
-    interface StoreMark {
+    interface Mark {
     }
 
     /**
@@ -139,8 +150,7 @@ public interface DistributedPolicy<K, V> {
      *
      * @author Andreas Oberhoff
      */
-    interface StoreMaximumAge {
-
+    interface MaximumAge {
         /**
          * Returns the maximum age this instance applies.
          *
@@ -171,7 +181,7 @@ public interface DistributedPolicy<K, V> {
      *
      * @author Andreas Oberhoff
      */
-    interface StoreMaximumSize {
+    interface MaximumSize {
 
         /**
          * Returns the maximum size this instance's maintenance prunes the store to.

@@ -6778,7 +6778,7 @@ New ones go here as they come up while building.
 - ~~**How an instance tells a full `invalidateAll()` from a backdated one**~~ (2026-11-14): decided 2026-11-17, the
   kind in the control row's value, read by the revalidation pass (see "Refill while serving").
 
-- **The distributed API aligned with Caffeine's** (decided 2026-11-17, to build after the refill is committed):
+- **The distributed API aligned with Caffeine's** (decided and built 2026-11-17, after the refill was committed):
   `cache.distributedStats()` next to Caffeine's `cache.stats()` (moved from `distributedPolicy().stats()`);
   `distributedPolicy()` as Caffeine's `policy()`, a direct query of the instance next to views per concern:
   `synchronizationState()` (was `getSynchronizationState()`) and `store()`, a view `DistributedPolicy.Store` with
@@ -6788,6 +6788,20 @@ New ones go here as they come up while building.
   `spi.Store` keeps its name (adapter authors never meet the view). No deprecated delegates: an old-to-new table in the
   migration notes. Considered: `store()` on the cache instead of the policy (the state would be misfiled), views only
   (`synchronization().state()`: aligned with itself, not with Caffeine).
+  `distributedStats()` is on `DistributedCache` only: an asynchronous cache reaches it through `synchronous()`, as
+  Caffeine's `AsyncCache` reaches `stats()`. The nested types lost their prefix (`Store`, `MaximumAge`, `MaximumSize`,
+  `Mark`, as Caffeine's `Policy.Eviction`). For the release notes, old to new:
+
+  | 0.8.0                                         | next                                                   |
+  |-----------------------------------------------|--------------------------------------------------------|
+  | `distributedPolicy().stats()`                 | `distributedStats()` (async: `synchronous().distributedStats()`) |
+  | `distributedPolicy().getSynchronizationState()` | `distributedPolicy().synchronizationState()`         |
+  | `distributedPolicy().getFromStore(key)`       | `distributedPolicy().store().get(key)`                 |
+  | `distributedPolicy().getAllFromStore(keys)`   | `distributedPolicy().store().getAll(keys)`             |
+  | `distributedPolicy().storeMaximumAge()`       | `distributedPolicy().store().maximumAge()`             |
+  | `distributedPolicy().storeMaximumSize()`      | `distributedPolicy().store().maximumSize()`            |
+  | `DistributedPolicy.StoreMaximumAge`, `StoreMaximumSize` | `DistributedPolicy.MaximumAge`, `MaximumSize` |
+  | (new, not in 0.8.0)                           | `store().mark()`, `invalidateAllBeforeMark`, `invalidateAllOlderThan`, `DistributedPolicy.Mark` |
 
 ### Options for later
 

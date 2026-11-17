@@ -77,7 +77,7 @@ abstract class PostgresNotifyQueueTest {
             assertThatThrownBy(() -> cache.put("k", "unannounced"))
                     .isInstanceOfSatisfying(StoreException.class, e -> assertThat(e.isOutcomeUnknown()).isFalse())
                     .hasMessageContaining("NOTIFY queue is full");
-            assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value())
+            assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value())
                     .as("nothing written unannounced").isEqualTo("before");
 
             stuck.rollback();

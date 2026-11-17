@@ -251,7 +251,7 @@ abstract class RedisRestartTests {
             startAgain();
         }
 
-        assertThat(awaitUpTo(() -> started.distributedPolicy().getSynchronizationState()
+        assertThat(awaitUpTo(() -> started.distributedPolicy().synchronizationState()
                 == SynchronizationState.SYNCHRONIZED, CONVERGENCE, Duration.ofMillis(200))).as("connected").isTrue();
         assertThat(awaitUpTo(() -> eventually(() -> started.getIfPresent("held")) == null, CONVERGENCE,
                 Duration.ofMillis(200))).as("the value loaded meanwhile dropped").isTrue();

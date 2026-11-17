@@ -163,7 +163,7 @@ public abstract class AdapterOutageTest {
                 assertThat(started.get("miss " + i, key -> "source")).isEqualTo("source");
                 assertThat(Duration.ofNanos(System.nanoTime() - before)).as("a miss waits for no store")
                         .isLessThan(Duration.ofMillis(500));
-                assertThat(started.distributedPolicy().getSynchronizationState())
+                assertThat(started.distributedPolicy().synchronizationState())
                         .isEqualTo(SynchronizationState.DEGRADED);
                 Awaiting.pause(250);
             }

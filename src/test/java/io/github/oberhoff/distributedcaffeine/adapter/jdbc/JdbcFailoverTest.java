@@ -204,7 +204,7 @@ abstract class JdbcFailoverTest {
                             && quietly(cache, "fresh") == null, CONVERGENCE, Duration.ofMillis(200)))
                     .as(() -> "the " + which + " dropped the key; it serves " + quietly(cache, "fresh") + ", holds "
                             + cache.policy().getIfPresentQuietly("fresh") + ", the replica has "
-                            + topology.row(false, table, "fresh") + "; " + cache.distributedPolicy().stats())
+                            + topology.row(false, table, "fresh") + "; " + cache.distributedStats())
                     .isTrue();
         }
         assertThat(quietly(holder, "other")).isEqualTo("replicated");
@@ -223,7 +223,7 @@ abstract class JdbcFailoverTest {
         put(writer, "fill", "old");
         assertThat(converges(holder, "stale", "old")).isTrue();
         pause(Duration.ofMillis(50));
-        DistributedPolicy.StoreMark mark = writer.distributedPolicy().markStore();
+        DistributedPolicy.Mark mark = writer.distributedPolicy().store().mark();
         put(writer, "fill", "new");
         topology.awaitInSync();
 
@@ -251,9 +251,9 @@ abstract class JdbcFailoverTest {
         topology.awaitInSync();
         topology.holdBackReplication();
         pause(Duration.ofSeconds(6)); // the row older than the polls' overlap, as in the test of a lost write
-        DistributedPolicy.StoreMark lost = writer.distributedPolicy().markStore();
+        DistributedPolicy.Mark lost = writer.distributedPolicy().store().mark();
 
-        writer.distributedPolicy().invalidateAllBeforeMark(lost);
+        writer.distributedPolicy().store().invalidateAllBeforeMark(lost);
         assertThat(converges(holder, "stale", null)).as("the holder polled the lost invalidation").isTrue();
         topology.failover();
 
@@ -262,7 +262,7 @@ abstract class JdbcFailoverTest {
                     + quietly(cache, "stale")).isTrue();
         }
         pause(Duration.ofMillis(50));
-        DistributedPolicy.StoreMark later = writer.distributedPolicy().markStore();
+        DistributedPolicy.Mark later = writer.distributedPolicy().store().mark();
         invalidateAllBeforeMark(writer, later);
         for (DistributedCache<String, String> cache : List.of(writer, holder)) {
             assertThat(converges(cache, "stale", null)).as(() -> "the later invalidation reached the cache; it serves "
@@ -271,10 +271,10 @@ abstract class JdbcFailoverTest {
     }
 
     private static void invalidateAllBeforeMark(DistributedCache<String, String> cache,
-                                                DistributedPolicy.StoreMark mark) {
+                                                DistributedPolicy.Mark mark) {
         assertThat(awaitUpTo(() -> {
             try {
-                cache.distributedPolicy().invalidateAllBeforeMark(mark);
+                cache.distributedPolicy().store().invalidateAllBeforeMark(mark);
                 return true;
             } catch (StoreException e) {
                 return false;

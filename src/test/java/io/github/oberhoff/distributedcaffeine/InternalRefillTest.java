@@ -87,7 +87,7 @@ class InternalRefillTest {
     }
 
     private static long revalidated(DistributedCache<String, String> cache) {
-        return cache.distributedPolicy().stats().revalidatedCount();
+        return cache.distributedStats().revalidatedCount();
     }
 
     @ParameterizedTest
@@ -101,16 +101,16 @@ class InternalRefillTest {
         assertThat(holder.getAll(List.of("kept", "gone"), keys -> Map.of())).hasSize(2);
         pause(20); // the mark later than the old writes, also on a clock counting in milliseconds or stepping
 
-        DistributedPolicy.StoreMark mark = refiller.distributedPolicy().markStore();
+        DistributedPolicy.Mark mark = refiller.distributedPolicy().store().mark();
         refiller.put("kept", "new");
-        refiller.distributedPolicy().invalidateAllBeforeMark(mark);
+        refiller.distributedPolicy().store().invalidateAllBeforeMark(mark);
 
         assertThat(refiller.getIfPresent("gone")).as("hidden at once on the calling instance").isNull();
         assertThat(refiller.getIfPresent("kept")).isEqualTo("new");
         await(() -> holder.policy().getIfPresentQuietly("gone") == null);
         assertThat(holder.getIfPresent("gone")).as("hidden on every instance").isNull();
         await(() -> "new".equals(holder.getIfPresent("kept")));
-        assertThat(refiller.distributedPolicy().getFromStore("gone")).isNull();
+        assertThat(refiller.distributedPolicy().store().get("gone")).isNull();
     }
 
     @Test
@@ -119,10 +119,10 @@ class InternalRefillTest {
         refiller.putAll(Map.of("a", "old", "b", "old", "gone", "old"));
         pause(20);
 
-        DistributedPolicy.StoreMark mark = refiller.distributedPolicy().markStore();
+        DistributedPolicy.Mark mark = refiller.distributedPolicy().store().mark();
         refiller.putAll(Map.of("a", "new", "b", "new"));
         long before = revalidated(refiller);
-        refiller.distributedPolicy().invalidateAllBeforeMark(mark);
+        refiller.distributedPolicy().store().invalidateAllBeforeMark(mark);
         settle(refiller);
 
         assertThat(refiller.policy().getIfPresentQuietly("a")).as("still held").isEqualTo("new");
@@ -144,9 +144,9 @@ class InternalRefillTest {
         holder.getAll(List.of("a", "gone"), keys -> Map.of());
         pause(20);
 
-        DistributedPolicy.StoreMark mark = refiller.distributedPolicy().markStore();
+        DistributedPolicy.Mark mark = refiller.distributedPolicy().store().mark();
         refiller.put("a", "new");
-        refiller.distributedPolicy().invalidateAllBeforeMark(mark);
+        refiller.distributedPolicy().store().invalidateAllBeforeMark(mark);
 
         await(() -> holder.policy().getIfPresentQuietly("gone") == null);
         settle(holder);
@@ -163,13 +163,13 @@ class InternalRefillTest {
         refiller.put("gone", "old");
         pause(20);
 
-        DistributedPolicy.StoreMark mark = refiller.distributedPolicy().markStore();
+        DistributedPolicy.Mark mark = refiller.distributedPolicy().store().mark();
         // NTP steps the clock back within what the profile declares (5 ms): the fill is stamped before the mark
         database.stepClockBack(Duration.ofMillis(4));
         refiller.put("fill", "new");
-        refiller.distributedPolicy().invalidateAllBeforeMark(mark);
+        refiller.distributedPolicy().store().invalidateAllBeforeMark(mark);
 
-        assertThat(refiller.distributedPolicy().getFromStore("fill")).as("not hidden").isNotNull();
+        assertThat(refiller.distributedPolicy().store().get("fill")).as("not hidden").isNotNull();
         assertThat(refiller.getIfPresent("fill")).isEqualTo("new");
         assertThat(refiller.getIfPresent("gone")).isNull();
     }
@@ -181,9 +181,9 @@ class InternalRefillTest {
         refiller.put("stale", "old");
         pause(20);
 
-        DistributedPolicy.StoreMark mark = refiller.distributedPolicy().markStore();
+        DistributedPolicy.Mark mark = refiller.distributedPolicy().store().mark();
         other.put("meanwhile", "written elsewhere");
-        refiller.distributedPolicy().invalidateAllBeforeMark(mark);
+        refiller.distributedPolicy().store().invalidateAllBeforeMark(mark);
 
         assertThat(refiller.getIfPresent("meanwhile")).isEqualTo("written elsewhere");
         assertThat(refiller.getIfPresent("stale")).isNull();
@@ -194,16 +194,16 @@ class InternalRefillTest {
     @Test
     void an_earlier_mark_never_undoes_a_later_full_invalidateAll() {
         DistributedCache<String, String> cache = cache();
-        DistributedPolicy.StoreMark early = cache.distributedPolicy().markStore();
+        DistributedPolicy.Mark early = cache.distributedPolicy().store().mark();
         pause(20);
         cache.put("between", "v");
         pause(20);
         cache.invalidateAll();
         cache.put("after", "v");
 
-        cache.distributedPolicy().invalidateAllBeforeMark(early);
+        cache.distributedPolicy().store().invalidateAllBeforeMark(early);
 
-        assertThat(cache.distributedPolicy().getFromStore("between")).as("hidden by the full one still").isNull();
+        assertThat(cache.distributedPolicy().store().get("between")).as("hidden by the full one still").isNull();
         assertThat(cache.getIfPresent("between")).isNull();
         assertThat(cache.getIfPresent("after")).isEqualTo("v");
     }
@@ -226,10 +226,10 @@ class InternalRefillTest {
     void a_mark_of_another_instance_is_refused() {
         DistributedCache<String, String> one = cache();
         DistributedCache<String, String> other = cache();
-        DistributedPolicy.StoreMark mark = one.distributedPolicy().markStore();
-        DistributedPolicy<String, String> policy = other.distributedPolicy();
+        DistributedPolicy.Mark mark = one.distributedPolicy().store().mark();
+        DistributedPolicy.Store<String, String> store = other.distributedPolicy().store();
 
-        assertThatThrownBy(() -> policy.invalidateAllBeforeMark(mark))
+        assertThatThrownBy(() -> store.invalidateAllBeforeMark(mark))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -242,15 +242,15 @@ class InternalRefillTest {
         cache.put("young", "v");
         holder.getAll(List.of("old", "young"), keys -> Map.of());
 
-        cache.distributedPolicy().invalidateAllOlderThan(Duration.ofMillis(150));
+        cache.distributedPolicy().store().invalidateAllOlderThan(Duration.ofMillis(150));
 
         assertThat(cache.getIfPresent("old")).isNull();
         assertThat(cache.getIfPresent("young")).isEqualTo("v");
         await(() -> holder.getIfPresent("old") == null);
         assertThat(holder.getIfPresent("young")).isEqualTo("v");
-        DistributedPolicy<String, String> policy = cache.distributedPolicy();
+        DistributedPolicy.Store<String, String> store = cache.distributedPolicy().store();
         Duration negative = Duration.ofMillis(-1);
-        assertThatThrownBy(() -> policy.invalidateAllOlderThan(negative))
+        assertThatThrownBy(() -> store.invalidateAllOlderThan(negative))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -264,11 +264,11 @@ class InternalRefillTest {
         assertThat(holder.getIfPresent("gone")).isEqualTo("old");
         pause(20);
 
-        DistributedPolicy.StoreMark mark = refiller.distributedPolicy().markStore();
-        refiller.distributedPolicy().invalidateAllBeforeMark(mark);
+        DistributedPolicy.Mark mark = refiller.distributedPolicy().store().mark();
+        refiller.distributedPolicy().store().invalidateAllBeforeMark(mark);
 
         assertThat(refiller.getIfPresent("gone")).isNull();
-        assertThat(holder.distributedPolicy().getFromStore("gone")).isNull();
+        assertThat(holder.distributedPolicy().store().get("gone")).isNull();
         assertThat(holder.getIfPresent("gone")).as("kept until it expires locally, as for any change elsewhere")
                 .isEqualTo("old");
     }
@@ -283,8 +283,8 @@ class InternalRefillTest {
         assertThat(holder.getIfPresent("gone")).isEqualTo("old");
         pause(20);
 
-        DistributedPolicy.StoreMark mark = refiller.distributedPolicy().markStore();
-        refiller.distributedPolicy().invalidateAllBeforeMark(mark);
+        DistributedPolicy.Mark mark = refiller.distributedPolicy().store().mark();
+        refiller.distributedPolicy().store().invalidateAllBeforeMark(mark);
 
         await(() -> holder.getIfPresent("gone") == null);
     }

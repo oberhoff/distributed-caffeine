@@ -198,7 +198,7 @@ public class InternalCoreTest {
         for (int i = 0; i < 20; i++) {
             assertThat(reader.get("k" + i, key -> "loaded")).isEqualTo("v" + i);
         }
-        assertThat(requireNonNull(reader.distributedPolicy().getFromStore("k0")).value()).isEqualTo("v0");
+        assertThat(requireNonNull(reader.distributedPolicy().store().get("k0")).value()).isEqualTo("v0");
     }
 
     @Test
@@ -212,7 +212,7 @@ public class InternalCoreTest {
 
         assertThat(reader.get("k", key -> "loaded")).isEqualTo("v");
         assertThat(reader.policy().getIfPresentQuietly("k")).as("held under the local expiry").isEqualTo("v");
-        StoredValue<String> stored = requireNonNull(writer.distributedPolicy().getFromStore("k"));
+        StoredValue<String> stored = requireNonNull(writer.distributedPolicy().store().get("k"));
         assertThat(stored.value()).isEqualTo("v");
         assertThat(stored.age()).isLessThan(Duration.ofMinutes(1));
         writer.put("k", "w");
@@ -247,7 +247,7 @@ public class InternalCoreTest {
     }
 
     private static void awaitGone(DistributedCache<String, String> cache) {
-        await(() -> cache.distributedPolicy().getFromStore("k") == null);
+        await(() -> cache.distributedPolicy().store().get("k") == null);
         pause(300); // the expiry's messages delivered
     }
 
@@ -258,16 +258,16 @@ public class InternalCoreTest {
         writer.put("k", "v");
         // read once the put's message is here: a message arriving while the load is about to reserve its key drops
         // the loaded copy on purpose (it is loaded again on the next read), which this test does not look at
-        await(() -> reader.distributedPolicy().stats().writtenMessageCount() >= 1);
+        await(() -> reader.distributedStats().writtenMessageCount() >= 1);
         assertThat(reader.get("k", key -> "loaded")).as("taken from the store").isEqualTo("v");
 
         awaitGone(writer);
 
         assertThat(writer.policy().getIfPresentQuietly("k"))
-                .as("not bounded by the store (%s, removals %s)", writer.distributedPolicy().stats(), removals)
+                .as("not bounded by the store (%s, removals %s)", writer.distributedStats(), removals)
                 .isEqualTo("v");
         assertThat(reader.policy().getIfPresentQuietly("k"))
-                .as("not bounded by the store (%s, removals %s)", reader.distributedPolicy().stats(), removals)
+                .as("not bounded by the store (%s, removals %s)", reader.distributedStats(), removals)
                 .isEqualTo("v");
         assertThat(reader.getIfPresent("k")).isEqualTo("v");
         AtomicInteger loads = new AtomicInteger();
@@ -294,7 +294,7 @@ public class InternalCoreTest {
         assertThat(first.asMap().merge("k", "2", (held, given) -> {
             runs.incrementAndGet();
             return held + given;
-        })).as("decided on the held copy (%s)", first.distributedPolicy().stats()).isEqualTo("12");
+        })).as("decided on the held copy (%s)", first.distributedStats()).isEqualTo("12");
         assertThat(runs).as("decided once, on a read").hasValue(1);
         await(() -> second.policy().getIfPresentQuietly("k") == null);
         assertThat(second.asMap().merge("k", "3", String::concat)).as("within the maximum age again")
@@ -315,12 +315,12 @@ public class InternalCoreTest {
         awaitGone(cache); // pruned after the grace
 
         assertThat(cache.asMap().merge("k", "2", String::concat))
-                .as("decided on the held copy (%s)", cache.distributedPolicy().stats()).isEqualTo("12");
+                .as("decided on the held copy (%s)", cache.distributedStats()).isEqualTo("12");
     }
 
     @Test
     void the_maximum_age_for_the_store_only_can_be_set_to_five_heartbeat_intervals_at_least() {
-        DistributedPolicy.StoreMaximumAge age = storeOnlyCache().distributedPolicy().storeMaximumAge().orElseThrow();
+        DistributedPolicy.MaximumAge age = storeOnlyCache().distributedPolicy().store().maximumAge().orElseThrow();
 
         Duration tooShort = STORE_AGE.minusMillis(1);
         assertThatThrownBy(() -> age.setMaximumAge(tooShort))
@@ -343,12 +343,12 @@ public class InternalCoreTest {
         assertThat(other.get("k")).isEqualTo("v1");
         assertThat(shortened.get("k")).as("from the store").isEqualTo("v1");
 
-        shortened.distributedPolicy().storeMaximumAge().orElseThrow().setMaximumAge(Duration.ofMillis(200));
+        shortened.distributedPolicy().store().maximumAge().orElseThrow().setMaximumAge(Duration.ofMillis(200));
 
         await(() -> other.policy().getIfPresentQuietly("k") == null);
         await(() -> shortened.policy().getIfPresentQuietly("k") == null);
-        assertThat(shortened.distributedPolicy().getFromStore("k")).isNull();
-        assertThat(other.distributedPolicy().getFromStore("k")).as("expired in the store").isNull();
+        assertThat(shortened.distributedPolicy().store().get("k")).isNull();
+        assertThat(other.distributedPolicy().store().get("k")).as("expired in the store").isNull();
         assertThat(other.get("k")).isEqualTo("v2");
         assertThat(loads).hasValue(2);
     }
@@ -440,7 +440,7 @@ public class InternalCoreTest {
         closeables.add(second);
 
         assertThat(second.get("k")).isEqualTo("v2");
-        assertThat(requireNonNull(second.distributedPolicy().getFromStore("k")).value())
+        assertThat(requireNonNull(second.distributedPolicy().store().get("k")).value())
                 .as("the fresh value replaced the old row")
                 .isEqualTo("v2");
         assertThat(second.estimatedSize()).isEqualTo(1);
@@ -460,7 +460,7 @@ public class InternalCoreTest {
 
         assertThat(cache.getIfPresent("k")).isNull();
         assertThat(cache.get("k", key -> 42L)).isEqualTo(42L);
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo(42L);
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).isEqualTo(42L);
     }
 
     // one load per key and JVM
@@ -547,7 +547,7 @@ public class InternalCoreTest {
         assertThat(store().read(List.of(hash("k")), LONG)).as("the source-only value was not written").isEmpty();
 
         assertThat(cache.get("k")).as("not trusted: checked, found missing, loaded properly").isEqualTo("v2");
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("v2");
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).isEqualTo("v2");
     }
 
     @ParameterizedTest
@@ -569,7 +569,7 @@ public class InternalCoreTest {
 
         // checked against the store: kept where the failed write landed after all, loaded properly where it did not
         assertThat(cache.get("k")).isEqualTo(outcomeUnknown ? "v1" : "v2");
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value())
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value())
                 .isEqualTo(outcomeUnknown ? "v1" : "v2");
     }
 
@@ -737,7 +737,7 @@ public class InternalCoreTest {
 
         assertThat(load.get(5, TimeUnit.SECONDS)).isEqualTo("newer");
         assertThat(first.getIfPresent("k")).isEqualTo("newer");
-        assertThat(requireNonNull(first.distributedPolicy().getFromStore("k")).value()).isEqualTo("newer");
+        assertThat(requireNonNull(first.distributedPolicy().store().get("k")).value()).isEqualTo("newer");
     }
 
     @Test
@@ -761,7 +761,7 @@ public class InternalCoreTest {
         release.countDown();
 
         assertThat(load.get(5, TimeUnit.SECONDS)).isEqualTo("fresh");
-        assertThat(requireNonNull(first.distributedPolicy().getFromStore("k")).value()).isEqualTo("fresh");
+        assertThat(requireNonNull(first.distributedPolicy().store().get("k")).value()).isEqualTo("fresh");
         assertThat(loads).hasValue(2);
     }
 
@@ -783,7 +783,7 @@ public class InternalCoreTest {
         assertThat(cache.get("k")).isEqualTo("outdated");
 
         assertThat(cache.estimatedSize()).isZero();
-        assertThat(cache.distributedPolicy().stats().uncachedLoadCount()).isOne();
+        assertThat(cache.distributedStats().uncachedLoadCount()).isOne();
         assertThat(store().read(List.of(hash("k")), LONG).get(hash("k")).state()).isEqualTo(State.TOMBSTONE);
     }
 
@@ -798,7 +798,7 @@ public class InternalCoreTest {
         second.put("k", "b");
 
         assertThat(first.getIfPresent("k")).as("its own write until the newer one is announced").isIn("a", "b");
-        assertThat(requireNonNull(first.distributedPolicy().getFromStore("k")).value()).isEqualTo("b");
+        assertThat(requireNonNull(first.distributedPolicy().store().get("k")).value()).isEqualTo("b");
         assertThat(plain().getIfPresent("k")).isEqualTo("b");
     }
 
@@ -1006,7 +1006,7 @@ public class InternalCoreTest {
 
         assertThat(second.getAll(List.of("a"))).isEqualTo(Map.of("a", "loaded-a"));
 
-        assertThat(requireNonNull(first.distributedPolicy().getFromStore("extra")).value()).isEqualTo("newer");
+        assertThat(requireNonNull(first.distributedPolicy().store().get("extra")).value()).isEqualTo("newer");
         assertThat(second.getIfPresent("extra")).isEqualTo("newer");
     }
 
@@ -1057,7 +1057,7 @@ public class InternalCoreTest {
         assertThat(loaded).isEqualTo(values);
 
         writer.invalidateAll(values.keySet());
-        assertThat(reader.distributedPolicy().getAllFromStore(values.keySet())).isEmpty();
+        assertThat(reader.distributedPolicy().store().getAll(values.keySet())).isEmpty();
     }
 
     // refresh
@@ -1072,7 +1072,7 @@ public class InternalCoreTest {
 
         // Caffeine completes the refresh future first and updates its map in a callback after it
         await(() -> "v2".equals(cache.getIfPresent("k")));
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("v2");
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).isEqualTo("v2");
     }
 
     @Test
@@ -1100,7 +1100,7 @@ public class InternalCoreTest {
         release.countDown();
 
         assertThat(refresh.get(5, TimeUnit.SECONDS)).isEqualTo("newer");
-        assertThat(requireNonNull(first.distributedPolicy().getFromStore("k")).value()).isEqualTo("newer");
+        assertThat(requireNonNull(first.distributedPolicy().store().get("k")).value()).isEqualTo("newer");
     }
 
     @Test
@@ -1130,8 +1130,8 @@ public class InternalCoreTest {
 
         await(() -> "fresh".equals(reader.getIfPresent("viaGet"))
                 && "fresh".equals(reader.getIfPresent("viaGetIfPresent")));
-        assertThat(requireNonNull(reader.distributedPolicy().getFromStore("viaGet")).value()).isEqualTo("fresh");
-        assertThat(requireNonNull(reader.distributedPolicy().getFromStore("viaGetIfPresent")).value())
+        assertThat(requireNonNull(reader.distributedPolicy().store().get("viaGet")).value()).isEqualTo("fresh");
+        assertThat(requireNonNull(reader.distributedPolicy().store().get("viaGetIfPresent")).value())
                 .isEqualTo("fresh");
         assertThat(reader.getIfPresent("young")).as("younger than refreshAfterWrite").isEqualTo("stored");
         assertThat(loads).hasValue(2);
@@ -1148,8 +1148,8 @@ public class InternalCoreTest {
         assertThat(cache.refreshAll(List.of("gone", "kept")).get(5, TimeUnit.SECONDS))
                 .containsExactly(Map.entry("kept", "new"));
 
-        assertThat(cache.distributedPolicy().getFromStore("gone")).isNull();
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("kept")).value()).isEqualTo("new");
+        assertThat(cache.distributedPolicy().store().get("gone")).isNull();
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("kept")).value()).isEqualTo("new");
         await(() -> other.getIfPresent("gone") == null); // once the other instance applied the message
         await(() -> cache.estimatedSize() == 1);
     }
@@ -1180,7 +1180,7 @@ public class InternalCoreTest {
                 : () -> "v2".equals(cache.policy().getIfPresentQuietly("k"));
         assertThat(awaitUpTo(settled, Duration.ofSeconds(20), Duration.ofMillis(5)))
                 .as("settled (held %s, loads %s, %s, removals %s)", cache.policy().getIfPresentQuietly("k"), loads,
-                        cache.distributedPolicy().stats(), removals)
+                        cache.distributedStats(), removals)
                 .isTrue();
         faults.failNextWrites(0, false); // the store answers again
 
@@ -1217,7 +1217,7 @@ public class InternalCoreTest {
         assertThat(cache.refresh("k").get(5, TimeUnit.SECONDS)).isNull();
 
         assertThat(cache.policy().getIfPresentQuietly("k")).isNull();
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).as("the store kept its value")
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).as("the store kept its value")
                 .isEqualTo("stored");
     }
 
@@ -1301,7 +1301,7 @@ public class InternalCoreTest {
         assertThatThrownBy(() -> cache.getIfPresent("k")).isInstanceOf(IllegalStateException.class);
         assertThatThrownBy(() -> cache.put("k", "v")).isInstanceOf(IllegalStateException.class);
         assertThatThrownBy(cache::estimatedSize).isInstanceOf(IllegalStateException.class);
-        assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.CLOSED);
+        assertThat(cache.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.CLOSED);
         DistributedCache<String, String> again = DistributedCaffeine.newBuilder(adapter)
                 .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
                         .withMaximumAge(LONG).withMaximumSize(10)).build();
@@ -1330,16 +1330,16 @@ public class InternalCoreTest {
     }
 
     @Test
-    void getFromStore_returns_value_and_age_without_filling_the_local_level() {
+    void store_get_returns_value_and_age_without_filling_the_local_level() {
         plain().put("k", "v");
         DistributedCache<String, String> cache = plain();
 
-        StoredValue<String> stored = cache.distributedPolicy().getFromStore("k");
+        StoredValue<String> stored = cache.distributedPolicy().store().get("k");
 
         assertThat(requireNonNull(stored).value()).isEqualTo("v");
         assertThat(stored.age()).isLessThan(Duration.ofSeconds(5));
         assertThat(cache.estimatedSize()).isZero();
-        assertThat(cache.distributedPolicy().getAllFromStore(List.of("k", "missing"))).containsOnlyKeys("k");
+        assertThat(cache.distributedPolicy().store().getAll(List.of("k", "missing"))).containsOnlyKeys("k");
     }
 
     // a store that delegates everything, its change feed and its scan too, for wrapping single methods in tests;

@@ -122,7 +122,7 @@ class InternalAsyncTest {
     }
 
     private static @Nullable String stored(DistributedAsyncCache<String, String> cache, String key) {
-        StoredValue<String> stored = cache.distributedPolicy().getFromStore(key);
+        StoredValue<String> stored = cache.distributedPolicy().store().get(key);
         return stored == null ? null : stored.value();
     }
 
@@ -302,7 +302,7 @@ class InternalAsyncTest {
         assertThat(get(second.getIfPresent("k"))).isEqualTo("v");
         database.interruptSubscriptions();
         // the interruption reaches the cache through its delivery queue
-        await(() -> second.distributedPolicy().getSynchronizationState() == SynchronizationState.DEGRADED);
+        await(() -> second.distributedPolicy().synchronizationState() == SynchronizationState.DEGRADED);
         first.synchronous().invalidate("k");
 
         assertThat(get(second.getIfPresent("k"))).isNull();
@@ -355,7 +355,7 @@ class InternalAsyncTest {
         first.synchronous().putAll(Map.of("a", "1", "b", "2"));
         assertThat(get(second.getAll(List.of("a", "b"), keys -> Map.of()))).hasSize(2);
         database.interruptSubscriptions();
-        await(() -> second.distributedPolicy().getSynchronizationState() == SynchronizationState.DEGRADED);
+        await(() -> second.distributedPolicy().synchronizationState() == SynchronizationState.DEGRADED);
         first.synchronous().put("a", "changed");
 
         assertThat(get(second.getAll(List.of("a", "b"), keys -> Map.of())))

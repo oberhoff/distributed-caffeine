@@ -108,24 +108,24 @@ class InternalSimulationTest {
         writer.put("k", "before");
         environment.advance(Duration.ofSeconds(2));
         assertThat(holder.getIfPresent("k")).isEqualTo("before");
-        assertThat(holder.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
+        assertThat(holder.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
 
         database.setDown(true);
         environment.advance(Duration.ofSeconds(2));
-        assertThat(holder.distributedPolicy().getSynchronizationState()).as("its polls failing")
+        assertThat(holder.distributedPolicy().synchronizationState()).as("its polls failing")
                 .isEqualTo(SynchronizationState.DEGRADED);
-        assertThat(holder.distributedPolicy().stats().interruptionCount()).as("within the grace").isZero();
+        assertThat(holder.distributedStats().interruptionCount()).as("within the grace").isZero();
         environment.advance(Duration.ofMinutes(6));
-        assertThat(holder.distributedPolicy().stats().interruptionCount()).as("its delivery lost past the grace")
+        assertThat(holder.distributedStats().interruptionCount()).as("its delivery lost past the grace")
                 .isPositive();
-        assertThat(holder.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+        assertThat(holder.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
         assertThat(holder.policy().getIfPresentQuietly("k")).as("still held").isEqualTo("before");
 
         database.setDown(false);
         environment.advance(Duration.ofMinutes(1));
-        assertThat(holder.distributedPolicy().getSynchronizationState()).as("resumed")
+        assertThat(holder.distributedPolicy().synchronizationState()).as("resumed")
                 .isEqualTo(SynchronizationState.SYNCHRONIZED);
-        assertThat(holder.distributedPolicy().stats().gapCount()).as("the resume a gap").isPositive();
+        assertThat(holder.distributedStats().gapCount()).as("the resume a gap").isPositive();
         writer.put("k", "after");
         environment.advance(Duration.ofSeconds(2));
         assertThat(holder.getIfPresent("k")).isEqualTo("after");
@@ -141,21 +141,21 @@ class InternalSimulationTest {
         DistributedCache<String, String> cache = cache(database, environment);
         cache.put("k", "v");
 
-        DistributedPolicy<String, String> policy = cache.distributedPolicy();
+        DistributedPolicy.Store<String, String> store = cache.distributedPolicy().store();
         database.setDown(true);
         for (int call = 0; call < InternalStoreGuard.THRESHOLD; call++) {
-            assertThatThrownBy(() -> policy.getFromStore("k")).isInstanceOf(StoreException.class);
+            assertThatThrownBy(() -> store.get("k")).isInstanceOf(StoreException.class);
         }
         database.setDown(false);
-        assertThat(policy.stats().guardOpenCount()).isEqualTo(1);
-        assertThatThrownBy(() -> policy.getFromStore("k")).as("refused while suspended")
+        assertThat(cache.distributedStats().guardOpenCount()).isEqualTo(1);
+        assertThatThrownBy(() -> store.get("k")).as("refused while suspended")
                 .isInstanceOf(StoreException.class).hasMessageContaining("refused");
-        assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+        assertThat(cache.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
 
         environment.advance(Duration.ofNanos(InternalStoreGuard.SUSPENSION_NANOS));
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).as("the probe")
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).as("the probe")
                 .isEqualTo("v");
-        assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
+        assertThat(cache.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
     }
 
     // a feed that stops delivering without a word (a scan answering nothing while writes are made): the heartbeat
@@ -184,16 +184,16 @@ class InternalSimulationTest {
         silent.set(true);
         writer.put("k", "while silent");
         environment.advance(Duration.ofSeconds(30));
-        assertThat(holder.distributedPolicy().stats().interruptionCount()).as("silenced").isPositive();
-        assertThat(holder.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+        assertThat(holder.distributedStats().interruptionCount()).as("silenced").isPositive();
+        assertThat(holder.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
         assertThat(holder.getIfPresent("k")).as("checked against the store, not served stale")
                 .isEqualTo("while silent");
 
         silent.set(false);
         environment.advance(Duration.ofSeconds(30));
-        assertThat(holder.distributedPolicy().getSynchronizationState()).as("delivering again")
+        assertThat(holder.distributedPolicy().synchronizationState()).as("delivering again")
                 .isEqualTo(SynchronizationState.SYNCHRONIZED);
-        assertThat(holder.distributedPolicy().stats().gapCount()).isPositive();
+        assertThat(holder.distributedStats().gapCount()).isPositive();
     }
 
     // a store with a feed of its own, delivering late and twice at random: under one seed, every run sees the same
@@ -230,7 +230,7 @@ class InternalSimulationTest {
             }
             environment.advance(Duration.ofSeconds(1));
             trace.add(String.valueOf(holder.getIfPresent("k4")));
-            trace.add(holder.distributedPolicy().stats().toString());
+            trace.add(holder.distributedStats().toString());
         }
         return trace;
     }
@@ -256,11 +256,11 @@ class InternalSimulationTest {
         environment.advance(Duration.ZERO); // the message applied by the holder, no time passing
         holder.put("k", "within the allowance");
         assertThat(holder.getIfPresent("k")).isEqualTo("within the allowance");
-        long revalidated = holder.distributedPolicy().stats().revalidatedCount();
+        long revalidated = holder.distributedStats().revalidatedCount();
 
         environment.advance(allowance);
         assertThat(holder.getIfPresent("k")).isEqualTo("within the allowance");
-        assertThat(holder.distributedPolicy().stats().revalidatedCount()).as("checked once the allowance passed")
+        assertThat(holder.distributedStats().revalidatedCount()).as("checked once the allowance passed")
                 .isGreaterThan(revalidated);
     }
 
@@ -281,10 +281,10 @@ class InternalSimulationTest {
         assertThat(holder.policy().getIfPresentQuietly("k")).as("held before the maximum age").isEqualTo("v");
         environment.advance(Duration.ofMinutes(20));
         assertThat(holder.policy().getIfPresentQuietly("k")).as("expired in L1").isNull();
-        assertThat(holder.distributedPolicy().getFromStore("k")).as("expired in the store").isNull();
+        assertThat(holder.distributedPolicy().store().get("k")).as("expired in the store").isNull();
         assertThat(holder.getIfPresent("k")).isNull();
         // announced by maintenance (the copy itself expired in L1 first, so none was dropped by the message)
-        assertThat(holder.distributedPolicy().stats().expiredMessageCount()).as("expired by maintenance").isPositive();
+        assertThat(holder.distributedStats().expiredMessageCount()).as("expired by maintenance").isPositive();
     }
 
     // the clock's random node and the wall clock from the environment: the same seed proposes the same versions
@@ -324,11 +324,11 @@ class InternalSimulationTest {
 
             assertThat(attempts.get()).as("backed off to one attempt every 30 s").isBetween(100, 160);
             assertThat(log.count("The store has still not been available")).as("every 5 minutes").isBetween(10, 13);
-            assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+            assertThat(cache.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
 
             reachable.set(true);
             environment.advance(Duration.ofSeconds(40));
-            assertThat(cache.distributedPolicy().getSynchronizationState()).as("connected within one backoff")
+            assertThat(cache.distributedPolicy().synchronizationState()).as("connected within one backoff")
                     .isEqualTo(SynchronizationState.SYNCHRONIZED);
             cache.put("k", "v");
             assertThat(cache.getIfPresent("k")).isEqualTo("v");
@@ -362,7 +362,7 @@ class InternalSimulationTest {
 
         assertThat(calls.get()).as("one connect after the build").isEqualTo(2);
         assertThat(closed.get()).as("the store connected after the close").isEqualTo(1);
-        assertThat(built.get(0).distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.CLOSED);
+        assertThat(built.get(0).distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.CLOSED);
     }
 
     // the polling store touches the keys of a write of unknown outcome again two operation timeouts later (20 s), so
@@ -388,7 +388,7 @@ class InternalSimulationTest {
 
         environment.advance(Duration.ofSeconds(30)); // the touch comes 16 to 24 s after the invalidateAll
 
-        StoredValue<String> stored = writer.distributedPolicy().getFromStore("k");
+        StoredValue<String> stored = writer.distributedPolicy().store().get("k");
         assertThat(stored).as("still in the store").isNotNull();
         assertThat(requireNonNull(stored).value()).isEqualTo("written after the invalidateAll");
         assertThat(clearing.getIfPresent("k")).isEqualTo("written after the invalidateAll");

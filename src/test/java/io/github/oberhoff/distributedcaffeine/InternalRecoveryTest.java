@@ -166,7 +166,7 @@ public class InternalRecoveryTest {
         DistributedCache<String, String> cache = holder();
         cache.put("k", "v");
         backend.induceGap();
-        await(() -> cache.distributedPolicy().stats().revalidationKeptCount() > 0 && core(cache).isQuiescent());
+        await(() -> cache.distributedStats().revalidationKeptCount() > 0 && core(cache).isQuiescent());
         int calls = storeCalls.get();
 
         assertThat(cache.getIfPresent("k")).isEqualTo("v");
@@ -211,8 +211,8 @@ public class InternalRecoveryTest {
         cache.put("l", second);
         backend.induceGap();
 
-        await(() -> cache.distributedPolicy().stats().revalidationKeptCount() == 2);
-        assertThat(cache.distributedPolicy().stats().revalidationDroppedCount()).as("not dropped").isZero();
+        await(() -> cache.distributedStats().revalidationKeptCount() == 2);
+        assertThat(cache.distributedStats().revalidationDroppedCount()).as("not dropped").isZero();
         assertThat(cache.getIfPresent("k")).isSameAs(first);
         assertThat(cache.getIfPresent("l")).isSameAs(second);
     }
@@ -241,31 +241,31 @@ public class InternalRecoveryTest {
         other.put("k", "old");
         assertThat(cache.getIfPresent("k")).isEqualTo("old");
         pause(600); // beats delivered: no silence
-        assertThat(cache.distributedPolicy().stats().interruptionCount()).isZero();
-        assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
+        assertThat(cache.distributedStats().interruptionCount()).isZero();
+        assertThat(cache.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
 
         try (LogCapture log = new LogCapture()) {
             // delivery stops without any error: the change is not announced, the copy would be served for good
             faults.pauseDelivery();
             other.put("k", "new");
 
-            await(() -> cache.distributedPolicy().stats().interruptionCount() == 1);
-            assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+            await(() -> cache.distributedStats().interruptionCount() == 1);
+            assertThat(cache.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
             assertThat(cache.getIfPresent("k")).as("checked against the store").isEqualTo("new");
             // logged on the heartbeat's thread right after the count, so awaited as well
             await(() -> log.count("The change feed seems silent") >= 1);
             assertThat(log.count("The change feed seems silent")).as("logged once: " + log.text()).isEqualTo(1);
 
             // delivering again: the next beat ends the silence with a gap (after those of the resumes while silent)
-            long gaps = cache.distributedPolicy().stats().gapCount();
+            long gaps = cache.distributedStats().gapCount();
             faults.resumeDelivery();
-            await(() -> cache.distributedPolicy().stats().gapCount() > gaps);
-            await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
+            await(() -> cache.distributedStats().gapCount() > gaps);
+            await(() -> cache.distributedPolicy().synchronizationState() == SynchronizationState.SYNCHRONIZED);
             // logged after the count, as above
             await(() -> log.text().contains("Changes may have been missed"));
         }
-        assertThat(cache.distributedPolicy().stats().interruptionCount()).isEqualTo(1);
-        assertThat(cache.distributedPolicy().stats().invalidatedMessageCount()).as("beats are not counted").isZero();
+        assertThat(cache.distributedStats().interruptionCount()).isEqualTo(1);
+        assertThat(cache.distributedStats().invalidatedMessageCount()).as("beats are not counted").isZero();
     }
 
     @Test
@@ -342,7 +342,7 @@ public class InternalRecoveryTest {
         assertThat(cache.getIfPresent("k")).isEqualTo("old");
 
         faults.interruptSubscriptions();
-        await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.DEGRADED);
+        await(() -> cache.distributedPolicy().synchronizationState() == SynchronizationState.DEGRADED);
         other.put("k", "new");
 
         assertThat(cache.getIfPresent("k")).as("checked against the store although no message arrived")
@@ -352,7 +352,7 @@ public class InternalRecoveryTest {
         assertThat(storeCalls.get()).as("checked on every access").isGreaterThan(checks);
 
         faults.resumeSubscriptions(true);
-        await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED
+        await(() -> cache.distributedPolicy().synchronizationState() == SynchronizationState.SYNCHRONIZED
                 && core(cache).isQuiescent());
         int afterResume = storeCalls.get();
         assertThat(cache.getIfPresent("k")).isEqualTo("new");
@@ -373,7 +373,7 @@ public class InternalRecoveryTest {
 
         faults.resumeSubscriptions(false);
 
-        await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
+        await(() -> cache.distributedPolicy().synchronizationState() == SynchronizationState.SYNCHRONIZED);
         await(() -> held(cache, "k") == null || "new".equals(held(cache, "k")));
         assertThat(cache.getIfPresent("k")).isEqualTo("new");
     }
@@ -391,7 +391,7 @@ public class InternalRecoveryTest {
         for (int i = 0; i < InternalStoreGuard.THRESHOLD; i++) {
             assertThat(cache.get("miss" + i)).isEqualTo("source-miss" + i);
         }
-        await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.DEGRADED);
+        await(() -> cache.distributedPolicy().synchronizationState() == SynchronizationState.DEGRADED);
 
         assertThat(cache.get("held")).isEqualTo("v");
         assertThat(cache.get("another")).isEqualTo("source-another");
@@ -457,13 +457,13 @@ public class InternalRecoveryTest {
             assertThat(cache.get("miss" + i)).isEqualTo("miss" + i + "-" + (i + 1));
         }
         assertThat(cache.get("k")).isEqualTo("k-4");
-        assertThat(cache.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
+        assertThat(cache.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.DEGRADED);
 
         faults.setDown(false);
 
-        await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
+        await(() -> cache.distributedPolicy().synchronizationState() == SynchronizationState.SYNCHRONIZED);
         assertThat(cache.get("k")).as("the source-only value is checked and loaded properly").isEqualTo("k-5");
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("k-5");
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).isEqualTo("k-5");
     }
 
     // logging: what happens without a caller, once per incident and its end, not per call
@@ -490,7 +490,7 @@ public class InternalRecoveryTest {
             assertThat(log.count(MAINTENANCE_FAILED)).as("the guard's warning covers it\n%s", log.text()).isZero();
 
             faults.setDown(false);
-            await(() -> cache.distributedPolicy().getSynchronizationState() == SynchronizationState.SYNCHRONIZED);
+            await(() -> cache.distributedPolicy().synchronizationState() == SynchronizationState.SYNCHRONIZED);
             await(() -> log.count(ANSWERS_AGAIN) == 1);
             assertThat(log.count(NOT_ANSWERING)).isEqualTo(1);
         }
@@ -509,7 +509,7 @@ public class InternalRecoveryTest {
         try (LogCapture log = new LogCapture()) {
             faults.failNextWrites(Integer.MAX_VALUE, false); // every write fails, maintenance's too, reads answer
             for (int i = 0; i < 100; i++) {
-                cache.distributedPolicy().getFromStore("k");
+                cache.distributedPolicy().store().get("k");
                 pause(10);
             }
 

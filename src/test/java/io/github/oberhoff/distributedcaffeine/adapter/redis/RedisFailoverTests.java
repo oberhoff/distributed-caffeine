@@ -203,7 +203,7 @@ abstract class RedisFailoverTests {
         writer.putAll(Map.of("stale", "old", "fill", "old"));
         assertThat(holder.getIfPresent("stale")).isEqualTo("old");
         pause(50);
-        DistributedPolicy.StoreMark mark = writer.distributedPolicy().markStore();
+        DistributedPolicy.Mark mark = writer.distributedPolicy().store().mark();
         writer.put("fill", "new");
         pause(500); // replicated: the replica taking over has the fill
 
@@ -211,7 +211,7 @@ abstract class RedisFailoverTests {
             topology.kill(row);
             assertThat(awaitUpTo(() -> {
                 try {
-                    writer.distributedPolicy().invalidateAllBeforeMark(mark);
+                    writer.distributedPolicy().store().invalidateAllBeforeMark(mark);
                     return true;
                 } catch (StoreException e) {
                     return false;

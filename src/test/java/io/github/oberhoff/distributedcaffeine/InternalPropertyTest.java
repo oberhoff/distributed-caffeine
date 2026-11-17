@@ -480,7 +480,7 @@ public class InternalPropertyTest {
         int instance = random.nextInt(instances.size());
         Duration age = AGES[random.nextInt(AGES.length)];
         trace("AGE instance " + instance + " " + age);
-        instances.get(instance).distributedPolicy().storeMaximumAge().orElseThrow().setMaximumAge(age);
+        instances.get(instance).distributedPolicy().store().maximumAge().orElseThrow().setMaximumAge(age);
     }
 
     // the change reached every instance: the same maximum age everywhere before the check, long enough that nothing
@@ -489,7 +489,7 @@ public class InternalPropertyTest {
         if (ageing) {
             trace("AGE all " + LONG);
             for (DistributedLoadingCache<String, String> instance : instances) {
-                instance.distributedPolicy().storeMaximumAge().orElseThrow().setMaximumAge(LONG);
+                instance.distributedPolicy().store().maximumAge().orElseThrow().setMaximumAge(LONG);
             }
         }
     }
@@ -524,13 +524,13 @@ public class InternalPropertyTest {
                         setSource(key(changed), null);
                     }
                 }
-                AtomicReference<DistributedPolicy.@Nullable StoreMark> mark = new AtomicReference<>();
-                retry(() -> mark.set(cache.distributedPolicy().markStore()));
+                AtomicReference<DistributedPolicy.@Nullable Mark> mark = new AtomicReference<>();
+                retry(() -> mark.set(cache.distributedPolicy().store().mark()));
                 Map<String, String> fill = new java.util.HashMap<>(source);
                 if (!fill.isEmpty()) {
                     retry(() -> cache.putAll(fill));
                 }
-                retry(() -> cache.distributedPolicy().invalidateAllBeforeMark(requireNonNull(mark.get())));
+                retry(() -> cache.distributedPolicy().store().invalidateAllBeforeMark(requireNonNull(mark.get())));
                 trace("refill " + fill);
                 confirmed.clear();
                 confirmed.putAll(fill);
@@ -710,7 +710,7 @@ public class InternalPropertyTest {
                 throw new AssertionError("delivery did not come to rest in 5 simulated minutes");
             }
             simulated.advance(Duration.ofMillis(100));
-            boolean idle = instances.stream().allMatch(cache -> cache.distributedPolicy().getSynchronizationState()
+            boolean idle = instances.stream().allMatch(cache -> cache.distributedPolicy().synchronizationState()
                     == SynchronizationState.SYNCHRONIZED) && backend.isIdle() && instances.stream().allMatch(cache ->
                     ((InternalDistributedLoadingCache<String, String>) cache).core.isQuiescent());
             quiet = idle ? quiet + 1 : 0;
@@ -723,7 +723,7 @@ public class InternalPropertyTest {
         for (int instance = 0; instance < instances.size(); instance++) {
             DistributedLoadingCache<String, String> cache = instances.get(instance);
             rest.append(", instance ").append(instance).append(' ')
-                    .append(cache.distributedPolicy().getSynchronizationState()).append(" quiescent ")
+                    .append(cache.distributedPolicy().synchronizationState()).append(" quiescent ")
                     .append(((InternalDistributedLoadingCache<String, String>) cache).core.isQuiescent());
         }
         return rest.toString();
@@ -735,7 +735,7 @@ public class InternalPropertyTest {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         int quiet = 0;
         while (quiet < 3) {
-            boolean idle = instances.stream().allMatch(cache -> cache.distributedPolicy().getSynchronizationState()
+            boolean idle = instances.stream().allMatch(cache -> cache.distributedPolicy().synchronizationState()
                     == SynchronizationState.SYNCHRONIZED) && backend.isIdle() && instances.stream().allMatch(cache ->
                     ((InternalDistributedLoadingCache<String, String>) cache).core.isQuiescent());
             quiet = idle ? quiet + 1 : 0;
@@ -759,7 +759,7 @@ public class InternalPropertyTest {
         }
         for (int key = 0; key < KEYS; key++) {
             String k = key(key);
-            StoredValue<String> stored = instances.get(0).distributedPolicy().getFromStore(k);
+            StoredValue<String> stored = instances.get(0).distributedPolicy().store().get(k);
             String inStore = stored == null ? null : stored.value();
             String inSource = source.get(k);
             if (inStore != null && !inStore.equals(inSource)

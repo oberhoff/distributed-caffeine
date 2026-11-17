@@ -44,7 +44,7 @@ public interface DistributedAsyncLoadingCache<K, V> extends DistributedAsyncCach
      * instance while it loaded; otherwise a value written meanwhile is returned instead, and after a removal the key is
      * loaded again. After three attempts in a row each met by a removal, the last loaded value is returned without
      * being cached, as Caffeine's asynchronous cache does with a load an invalidation discards ({@code
-     * distributedPolicy().stats().uncachedLoadCount()}).
+     * synchronous().distributedStats().uncachedLoadCount()}).
      */
     // Caffeine's futures complete with null where nothing is found, which its types cannot express for a value type
     // that is not nullable
@@ -59,7 +59,7 @@ public interface DistributedAsyncLoadingCache<K, V> extends DistributedAsyncCach
      * only those missing there are loaded. A loaded value is cached only if no instance wrote or removed its key while
      * it loaded. If one wrote it, that value is returned instead; if one removed it, the key is loaded again on its
      * own, up to three times. If a removal meets each of these too, the last loaded value is returned without being
-     * cached ({@code distributedPolicy().stats().uncachedLoadCount()}).
+     * cached ({@code synchronous().distributedStats().uncachedLoadCount()}).
      */
     @Override
     CompletableFuture<Map<K, V>> getAll(Iterable<? extends K> keys);

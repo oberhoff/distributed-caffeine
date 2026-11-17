@@ -129,6 +129,11 @@ class InternalDistributedCache<K, V> implements DistributedCache<K, V> {
     }
 
     @Override
+    public DistributedStats distributedStats() {
+        return core.stats();
+    }
+
+    @Override
     public void close() {
         core.close();
     }

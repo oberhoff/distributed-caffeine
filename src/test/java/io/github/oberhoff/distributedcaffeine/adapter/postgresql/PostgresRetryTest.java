@@ -214,7 +214,7 @@ abstract class PostgresRetryTest {
             cache.put("k", "v");
 
             assertThat(executions).as("two rejected, the third lands").hasValue(3);
-            assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("v");
+            assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).isEqualTo("v");
         }
     }
 

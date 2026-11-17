@@ -217,8 +217,8 @@ class InternalRetryTest {
         cache.put("k", "v");
 
         assertThat(puts).hasValue(3);
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("v");
-        assertThat(cache.distributedPolicy().stats().storeFailureCount()).isZero();
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).isEqualTo("v");
+        assertThat(cache.distributedStats().storeFailureCount()).isZero();
     }
 
     @Test
@@ -230,7 +230,7 @@ class InternalRetryTest {
                 .isInstanceOfSatisfying(StoreException.class, e -> assertThat(e.isOutcomeUnknown()).isTrue());
 
         assertThat(puts).hasValue(1);
-        assertThat(cache.distributedPolicy().stats().unknownOutcomeCount()).isEqualTo(1);
+        assertThat(cache.distributedStats().unknownOutcomeCount()).isEqualTo(1);
         assertThat(cache.policy().getIfPresentQuietly("k")).as("not held: whether it was written is unknown")
                 .isNull();
     }
@@ -245,7 +245,7 @@ class InternalRetryTest {
 
         assertThat(conditionalWrites).hasValue(2);
         assertThat(cache.getIfPresent("k")).isEqualTo("v");
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("v");
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).isEqualTo("v");
     }
 
     // an atomic map method's write is repeated after an unknown outcome; refused then, it is told by its row: its own
@@ -262,7 +262,7 @@ class InternalRetryTest {
 
         assertThat(conditionalWrites).hasValue(2);
         assertThat(cache.getIfPresent("k")).isEqualTo("v");
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("v");
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).isEqualTo("v");
     }
 
     @Test
@@ -274,7 +274,7 @@ class InternalRetryTest {
         assertThat(cache.asMap().merge("k", "1", InternalRetryTest::sum)).isEqualTo("2");
 
         assertThat(conditionalWrites).hasValue(2);
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("2");
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).isEqualTo("2");
         assertThat(cache.getIfPresent("k")).isEqualTo("2");
     }
 
@@ -286,7 +286,7 @@ class InternalRetryTest {
 
         assertThat(cache.asMap().remove("k", "v")).isTrue();
 
-        assertThat(cache.distributedPolicy().getFromStore("k")).isNull();
+        assertThat(cache.distributedPolicy().store().get("k")).isNull();
         assertThat(cache.getIfPresent("k")).isNull();
     }
 
@@ -299,7 +299,7 @@ class InternalRetryTest {
         assertThat(cache.asMap().merge("k", "1", InternalRetryTest::sum)).isEqualTo("2");
 
         assertThat(conditionalWrites).hasValue(2);
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("2");
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).isEqualTo("2");
     }
 
     @Test
@@ -312,10 +312,10 @@ class InternalRetryTest {
                 .isInstanceOfSatisfying(StoreException.class, e -> assertThat(e.isOutcomeUnknown()).isTrue());
 
         assertThat(conditionalWrites).hasValue(2);
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("2");
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).isEqualTo("2");
         assertThat(cache.policy().getIfPresentQuietly("k")).as("not held: whether it was written is unknown")
                 .isNull();
-        assertThat(cache.distributedPolicy().stats().unknownOutcomeCount()).isEqualTo(1);
+        assertThat(cache.distributedStats().unknownOutcomeCount()).isEqualTo(1);
     }
 
     @Test
@@ -329,7 +329,7 @@ class InternalRetryTest {
         assertThatThrownBy(() -> cache.asMap().compute("k", (k, v) -> v + "b"))
                 .isInstanceOfSatisfying(StoreException.class, e -> assertThat(e.isOutcomeUnknown()).isTrue());
 
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("x");
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).isEqualTo("x");
         assertThat(cache.policy().getIfPresentQuietly("k")).isNull();
     }
 
@@ -342,7 +342,7 @@ class InternalRetryTest {
         assertThat(cache.asMap().compute("k", (k, v) -> v + "b")).isEqualTo("ab");
 
         assertThat(conditionalWrites).hasValue(2);
-        assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("ab");
+        assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).isEqualTo("ab");
     }
 
     // a store applying the versions the core proposes (as MariaDB/MySQL), whatever profile the suite runs under

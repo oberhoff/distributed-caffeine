@@ -132,7 +132,7 @@ class InternalPollingTest {
 
         await(() -> holder.policy().getIfPresentQuietly("k") == null);
         assertThat(holder.getIfPresent("k")).isEqualTo("new");
-        assertThat(holder.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
+        assertThat(holder.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
     }
 
     @Test
@@ -169,7 +169,7 @@ class InternalPollingTest {
 
         // the expiry's message arrives (the copy may have expired locally before it, at the same maximum age)
         // counted before it is applied
-        await(() -> holder.distributedPolicy().stats().expiredMessageCount() > 0
+        await(() -> holder.distributedStats().expiredMessageCount() > 0
                 && holder.policy().getIfPresentQuietly("k") == null);
     }
 

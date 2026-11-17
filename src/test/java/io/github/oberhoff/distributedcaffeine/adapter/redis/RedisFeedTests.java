@@ -165,7 +165,7 @@ abstract class RedisFeedTests {
         assertThat(gap).as("the trimmed entries' numbers skipped").isTrue();
         assertThat(holder.getIfPresent("k1")).isEqualTo("new");
         assertThat(holder.getIfPresent("k2")).isEqualTo("after");
-        assertThat(awaitUpTo(() -> holder.distributedPolicy().getSynchronizationState()
+        assertThat(awaitUpTo(() -> holder.distributedPolicy().synchronizationState()
                 == SynchronizationState.SYNCHRONIZED, Duration.ofSeconds(30), Duration.ofMillis(50))).isTrue();
     }
 
@@ -193,8 +193,8 @@ abstract class RedisFeedTests {
             await(() -> first.policy().getIfPresentQuietly("k") == null
                     && second.policy().getIfPresentQuietly("k") == null);
         }
-        assertThat(first.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
-        assertThat(second.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
+        assertThat(first.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
+        assertThat(second.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
         // in a cluster the readers are per keyspace anyway, and no shared read is ever made (Valkey from 8 reports
         // server_mode, not redis_mode)
         String server = admin().info("server");
@@ -243,7 +243,7 @@ abstract class RedisFeedTests {
             await(() -> holder.policy().getIfPresentQuietly("k") == null);
         }
         assertThat(failed).as("the failing listener keeps receiving").hasValueGreaterThanOrEqualTo(2);
-        assertThat(holder.distributedPolicy().getSynchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
+        assertThat(holder.distributedPolicy().synchronizationState()).isEqualTo(SynchronizationState.SYNCHRONIZED);
     }
 
     @Test

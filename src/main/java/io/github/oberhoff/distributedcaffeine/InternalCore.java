@@ -1038,7 +1038,7 @@ final class InternalCore<K, V> {
                     + "instances and the store servers)"
                     + (aheadMillis > InternalVersion.FOLLOW_LIMIT_MILLIS
                     ? "; more than a day: not followed, a write on such a key goes just above it"
-                    : "; followed: the versions here move ahead with it") + " (distributedPolicy().stats()"
+                    : "; followed: the versions here move ahead with it") + " (distributedStats()"
                     + ".clockAheadCount())");
         }
     }
@@ -1203,7 +1203,7 @@ final class InternalCore<K, V> {
         return new Mark(this, guard.read(store::time));
     }
 
-    void invalidateAllBeforeMark(DistributedPolicy.StoreMark mark) {
+    void invalidateAllBeforeMark(DistributedPolicy.Mark mark) {
         requireNonNull(mark, "mark cannot be null");
         if (!(mark instanceof Mark own) || own.core() != this) {
             throw new IllegalArgumentException("the mark was taken from another cache instance");
@@ -1254,8 +1254,8 @@ final class InternalCore<K, V> {
         }
     }
 
-    // a mark of the store's time (DistributedPolicy#markStore), of this instance only
-    record Mark(InternalCore<?, ?> core, Instant time) implements DistributedPolicy.StoreMark {
+    // a mark of the store's time (DistributedPolicy.Store#mark), of this instance only
+    record Mark(InternalCore<?, ?> core, Instant time) implements DistributedPolicy.Mark {
     }
 
     // the writes right after an invalidateAll applied here (its own, or announced): a write committed after the control
@@ -2808,7 +2808,7 @@ final class InternalCore<K, V> {
         }
     }
 
-    // whether the cache was built with a maximum age, so that it can be set (DistributedPolicy.StoreMaximumAge)
+    // whether the cache was built with a maximum age, so that it can be set (DistributedPolicy.MaximumAge)
     boolean hasMaximumAge() {
         return ageBounded;
     }
@@ -2851,7 +2851,7 @@ final class InternalCore<K, V> {
         }
     }
 
-    // whether the cache was built with a maximum size, so that it can be set (DistributedPolicy.StoreMaximumSize)
+    // whether the cache was built with a maximum size, so that it can be set (DistributedPolicy.MaximumSize)
     boolean hasMaximumSize() {
         return sizeBounded;
     }
@@ -3389,7 +3389,7 @@ final class InternalCore<K, V> {
             LOGGER.log(System.Logger.Level.WARNING, name + ": A stored value could not be read and counts as a miss, "
                     + "so it is loaded again: " + e.getMessage() + (cause == null ? "" : " (" + cause + ")")
                     + ". The instances may use different serializers or value classes, which is expected during a "
-                    + "rolling update that changes them (distributedPolicy().stats().unreadableRowCount())");
+                    + "rolling update that changes them (distributedStats().unreadableRowCount())");
         }
     }
 

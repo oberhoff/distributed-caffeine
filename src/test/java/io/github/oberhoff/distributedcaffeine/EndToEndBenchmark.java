@@ -166,7 +166,7 @@ public final class EndToEndBenchmark {
     }
 
     private static long storeCalls(DistributedCache<String, String> cache) {
-        DistributedStats stats = cache.distributedPolicy().stats();
+        DistributedStats stats = cache.distributedStats();
         return stats.storeReadCount() + stats.storeWriteCount();
     }
 
@@ -386,14 +386,14 @@ public final class EndToEndBenchmark {
             }
             Thread.sleep(1_000);
             CacheStats hitsBefore = first.stats().plus(second.stats());
-            DistributedStats storeBefore = first.distributedPolicy().stats().plus(second.distributedPolicy().stats());
+            DistributedStats storeBefore = first.distributedStats().plus(second.distributedStats());
             long writesBefore = writesSent.get();
             long incarnationsBefore = incarnationsStarted.get();
             measuring.set(true);
             Thread.sleep(5_000);
             measuring.set(false);
             CacheStats hits = first.stats().plus(second.stats()).minus(hitsBefore);
-            DistributedStats store = first.distributedPolicy().stats().plus(second.distributedPolicy().stats())
+            DistributedStats store = first.distributedStats().plus(second.distributedStats())
                     .minus(storeBefore);
             long writes = writesSent.get() - writesBefore;
             long incarnations = incarnationsStarted.get() - incarnationsBefore;

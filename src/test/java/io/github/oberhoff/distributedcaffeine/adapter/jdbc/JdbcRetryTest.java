@@ -249,7 +249,7 @@ abstract class JdbcRetryTest {
             cache.put("k", "v");
 
             assertThat(executions.get()).as("two rejected, then the third attempt").isGreaterThanOrEqualTo(3);
-            assertThat(requireNonNull(cache.distributedPolicy().getFromStore("k")).value()).isEqualTo("v");
+            assertThat(requireNonNull(cache.distributedPolicy().store().get("k")).value()).isEqualTo("v");
         }
     }
 

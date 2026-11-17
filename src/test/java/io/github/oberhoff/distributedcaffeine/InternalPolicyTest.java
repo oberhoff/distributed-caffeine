@@ -118,7 +118,7 @@ class InternalPolicyTest {
         eviction.setMaximum(1);
         cache.cleanUp();
         assertThat(cache.estimatedSize()).isEqualTo(1);
-        assertThat(cache.distributedPolicy().getAllFromStore(List.of("a", "b", "c"))).as("L1 only").hasSize(3);
+        assertThat(cache.distributedPolicy().store().getAll(List.of("a", "b", "c"))).as("L1 only").hasSize(3);
     }
 
     @Test
@@ -208,7 +208,7 @@ class InternalPolicyTest {
         assertThat(expiration.putIfAbsent("k", "other", Duration.ofMinutes(1))).isEqualTo("v");
         assertThat(expiration.compute("k", (key, current) -> current + "!", Duration.ofMinutes(3)))
                 .isEqualTo("v!");
-        assertThat(requireNonNull(first.distributedPolicy().getFromStore("k")).value()).isEqualTo("v!");
+        assertThat(requireNonNull(first.distributedPolicy().store().get("k")).value()).isEqualTo("v!");
         assertThat(expiration.getExpiresAfter("k").orElseThrow()).isGreaterThan(Duration.ofMinutes(2));
         assertThat(expiration.oldest(5)).containsOnlyKeys("k");
     }
@@ -270,17 +270,17 @@ class InternalPolicyTest {
                         .withValueSerializer(StringSerializer.ofString()))
                 .build());
 
-        assertThat(bounded.distributedPolicy().storeMaximumAge().orElseThrow().getMaximumAge()).isEqualTo(LONG);
-        assertThat(bounded.distributedPolicy().storeMaximumSize().orElseThrow().getMaximumSize()).isEqualTo(1_000);
-        assertThat(unbounded.distributedPolicy().storeMaximumAge()).isEmpty();
-        assertThat(unbounded.distributedPolicy().storeMaximumSize()).isEmpty();
+        assertThat(bounded.distributedPolicy().store().maximumAge().orElseThrow().getMaximumAge()).isEqualTo(LONG);
+        assertThat(bounded.distributedPolicy().store().maximumSize().orElseThrow().getMaximumSize()).isEqualTo(1_000);
+        assertThat(unbounded.distributedPolicy().store().maximumAge()).isEmpty();
+        assertThat(unbounded.distributedPolicy().store().maximumSize()).isEmpty();
     }
 
     @Test
     void the_store_bounds_are_set_and_checked_as_the_builder_does() {
         DistributedCache<String, String> cache = track(builder().build());
-        DistributedPolicy.StoreMaximumAge age = cache.distributedPolicy().storeMaximumAge().orElseThrow();
-        DistributedPolicy.StoreMaximumSize size = cache.distributedPolicy().storeMaximumSize().orElseThrow();
+        DistributedPolicy.MaximumAge age = cache.distributedPolicy().store().maximumAge().orElseThrow();
+        DistributedPolicy.MaximumSize size = cache.distributedPolicy().store().maximumSize().orElseThrow();
 
         age.setMaximumAge(Duration.ofMinutes(10));
         size.setMaximumSize(5);
@@ -303,7 +303,7 @@ class InternalPolicyTest {
         DistributedCache<String, String> cache = track(builder().withCaffeine(caffeine -> caffeine.ticker(nanos::get))
                 .build());
         Policy.FixedExpiration<String, String> writing = cache.policy().expireAfterWrite().orElseThrow();
-        DistributedPolicy.StoreMaximumAge age = cache.distributedPolicy().storeMaximumAge().orElseThrow();
+        DistributedPolicy.MaximumAge age = cache.distributedPolicy().store().maximumAge().orElseThrow();
         cache.put("k", "v");
         assertThat(writing.getExpiresAfter()).as("the maximum age without one set").isEqualTo(LONG);
 
@@ -331,7 +331,7 @@ class InternalPolicyTest {
         DistributedCache<String, String> cache = track(builder().withCaffeine(caffeine -> caffeine
                 .expireAfterWrite(Duration.ofMinutes(50))).build());
         Policy.FixedExpiration<String, String> writing = cache.policy().expireAfterWrite().orElseThrow();
-        DistributedPolicy.StoreMaximumAge age = cache.distributedPolicy().storeMaximumAge().orElseThrow();
+        DistributedPolicy.MaximumAge age = cache.distributedPolicy().store().maximumAge().orElseThrow();
         assertThat(writing.getExpiresAfter()).isEqualTo(Duration.ofMinutes(50));
 
         age.setMaximumAge(Duration.ofMinutes(30));
@@ -380,7 +380,7 @@ class InternalPolicyTest {
         AtomicLong nanos = new AtomicLong();
         DistributedCache<String, String> cache = track(builder().withCaffeine(caffeine -> caffeine.ticker(nanos::get)
                 .expireAfter(Expiry.writing((String key, String value) -> Duration.ofMinutes(50)))).build());
-        DistributedPolicy.StoreMaximumAge age = cache.distributedPolicy().storeMaximumAge().orElseThrow();
+        DistributedPolicy.MaximumAge age = cache.distributedPolicy().store().maximumAge().orElseThrow();
         cache.put("k", "v");
 
         age.setMaximumAge(Duration.ofMinutes(10));
