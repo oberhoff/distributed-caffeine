@@ -6,7 +6,8 @@ name: Nightly Full Matrix Tests
 # (-DrunsOnGitHub)
 on:
   schedule:
-    - cron: "0 2 * * *"
+    # GitHub reads cron in UTC: 01:00 UTC is 02:00 in Central European winter time (03:00 in summer time)
+    - cron: "0 1 * * *"
   workflow_dispatch:
 
 # read only: the marker lives in the Actions cache, and the jobs report through their own tokens
