@@ -36,8 +36,9 @@ otherwise values enter only through writes such as `put`. The two levels split t
    their values' validity.
 3. **When a copy goes, the instance asks the store,** and only if the store has no valid value, the source.
 
-So a local expiry or eviction sends an instance back to the store; only the store's maximum age makes a value go
-everywhere, so that the next read calls the source. In detail:
+**Important:** the maximum age, if set, is the lifetime of a value, not of a copy. It counts from the value's write to
+the store, so every instance drops its copy at the same moment, no matter when it got the copy and in every distribution
+mode, and the next read then calls the source.
 
 * **Reads:** the local cache first, then the store, then the source. A value loaded from the source is written to the
   store for the other instances.
@@ -159,7 +160,7 @@ Caffeine's except where it has to reach the store:
   instance; only eviction and expiry by the local bounds stay local.
 * With distribution, the removal listener also reports copies dropped or replaced by changes made on other instances.
 * Sizes, iteration and stats cover only the copies of the instance they are called on. In Caffeine's stats, a value
-  found in the store counts as a miss and a load (see [Distributed policy](#distributed-policy)).
+  found in the store counts as a miss and a load (see [Distributed stats](#distributed-stats)).
 * While the store does not answer, reads go on from what is held or, on a miss, from the source; writes and removals
   throw the unchecked `StoreException`.
 * Eviction by weak and soft references is not supported.
@@ -233,7 +234,8 @@ The distribution mode decides what a change made elsewhere does to the copies of
 
 * `INVALIDATE` (the default): a change elsewhere drops the copy; the new value is read on demand.
 * `UPDATE`: a write elsewhere replaces the copy right away; an invalidation or an expiry drops it.
-* `NONE`: changes are not distributed; a local copy stays until it expires or is evicted.
+* `NONE`: no change is distributed, not even a removal or `invalidateAll()`; a copy stays until it expires or is
+  evicted.
 
 ```java
 DistributedCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
@@ -343,9 +345,9 @@ nothing they read: to see what the store holds, for example while diagnosing. Va
 age are not returned, nor values the instance cannot read (counted as `unreadableRowCount`), as for every read.
 
 `store().mark()` takes a mark of the store's time, and `store().invalidateAllBeforeMark(...)` then drops every value
-written before it, on every instance, and keeps every value written since (the caches stay hot, unlike after
-`invalidateAll()`). `store().invalidateAllOlderThan(...)` drops every value written longer ago than a duration, at the
-time of the call.
+written before it, on every instance (with distribution), and keeps every value written since (the caches stay hot,
+unlike after `invalidateAll()`). `store().invalidateAllOlderThan(...)` drops every value written longer ago than a
+duration, at the time of the call.
 
 #### Store bounds
 
@@ -383,8 +385,8 @@ Which setting serves which goal; the rest can stay at their defaults:
 
 Caffeine's `expireAfter(...)` can't expire a value with a validity of its own, such as a token: it drops only the local
 copy, and the next read finds the value in the store again, since the store keeps every value for the same maximum age.
-Check the validity on read instead: when a value has expired, `invalidate(key)` removes it on every instance and in the
-store, and the next read loads a fresh one.
+Check the validity on read instead: when a value has expired, `invalidate(key)` removes it in the store and, with
+distribution, on every instance, and the next read loads a fresh one.
 
 ## Remarks
 
@@ -392,7 +394,7 @@ store, and the next read loads a fresh one.
 
 * **Local only:** `estimatedSize()`, the sizes and iteration of `asMap()` and its sets, `stats()`, `cleanUp()` and
   what `policy()` reports concern only the copies of the instance they are called on, as do the synchronization state
-  and the stats of `distributedPolicy()`.
+  of `distributedPolicy()` and `distributedStats()`.
 * **Shared:** every write and removal goes to the store, and with distribution to the other instances, whichever
   method makes it: also the sets of `asMap()` (such as `keySet().remove(key)` or `values().removeIf(...)`), the writes
   of `policy().expireVariably()`, and `invalidateAll()` or `asMap().clear()`.

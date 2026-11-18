@@ -35,7 +35,8 @@ public enum SynchronizationState {
     DEGRADED,
 
     /**
-     * The cache instance was closed; every operation throws, except the state and the stats of the distributed policy.
+     * The cache instance was closed; every operation throws, except the synchronization state and the distributed
+     * stats.
      */
     CLOSED
 }
