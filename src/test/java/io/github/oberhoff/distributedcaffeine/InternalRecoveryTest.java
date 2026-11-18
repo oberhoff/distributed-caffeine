@@ -45,6 +45,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import java.util.stream.IntStream;
 
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.pause;
 import static java.util.Objects.requireNonNull;
@@ -322,7 +323,8 @@ public class InternalRecoveryTest {
         faults.gap();
         faults.resumeDelivery();
 
-        await(() -> held(cache, "k0") == null && held(cache, "k24") == null);
+        // the pass drops in batches in no particular key order: wait for every changed key, not the first and last
+        await(() -> IntStream.range(0, 25).allMatch(i -> held(cache, "k" + i) == null));
         for (int i = 25; i < 50; i++) {
             assertThat(held(cache, "k" + i)).isEqualTo("old");
         }
