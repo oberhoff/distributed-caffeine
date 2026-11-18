@@ -381,9 +381,10 @@ Which setting serves which goal; the rest can stay at their defaults:
 | The maximum age or size changed at runtime                                                      | `distributedPolicy().store().maximumAge()` or `maximumSize()`                   |
 | Values written before a point in time dropped at once, e.g. after a refill while serving        | `store().invalidateAllBeforeMark(...)` or `invalidateAllOlderThan(...)`         |
 
-A value with a validity of its own, such as a token, can't be expired by an `expireAfter(...)` alone: it only drops
-the local copy, and the next read finds the value in the store again. Treat an invalid value read as missing:
-`invalidate(key)` removes it on every instance and in the store, and the next read loads a fresh one.
+Caffeine's `expireAfter(...)` can't expire a value with a validity of its own, such as a token: it drops only the local
+copy, and the next read finds the value in the store again, since the store keeps every value for the same maximum age.
+Check the validity on read instead: when a value has expired, `invalidate(key)` removes it on every instance and in the
+store, and the next read loads a fresh one.
 
 ## Remarks
 
