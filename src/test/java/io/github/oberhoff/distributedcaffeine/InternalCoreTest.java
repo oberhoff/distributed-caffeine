@@ -1161,14 +1161,16 @@ public class InternalCoreTest {
         // the in-memory store's faults: skipped on a real database before anything is set up
         InMemoryDatabase faults = backend.faults();
         AtomicInteger loads = new AtomicInteger();
-        // the removals, for a failure to say who replaced the copy: once (CI, 2026-11-16) v2 was never held after the
-        // refresh returned it with outcomeUnknown false, not reproduced locally in 65 runs
+        // the removals, for a failure to say who replaced the copy
         DistributedLoadingCache<String, String> cache = builder(LONG)
-                .withCaffeine(caffeine -> caffeine
+                .withCaffeine(caffeine -> caffeine.recordStats()
                         .removalListener((key, value, cause) -> removals.add(cause + " " + key + "=" + value)))
                 .build(key -> "v" + loads.incrementAndGet());
         closeables.add(cache);
         assertThat(cache.get("k")).isEqualTo("v1");
+        // v1's own echo first: arriving after the refresh, it dropped the unconfirmed v2, which carries the lowest
+        // version (CI, 2026-11-16 and 2026-11-18: removals REPLACED v1, EXPLICIT v2)
+        await(() -> cache.distributedStats().writtenMessageCount() >= 1);
         faults.failNextWrites(InternalStoreGuard.ATTEMPTS, outcomeUnknown); // every attempt of the refresh's write
 
         assertThat(cache.refresh("k").get(5, TimeUnit.SECONDS)).as("the store's failure does not fail the refresh")
