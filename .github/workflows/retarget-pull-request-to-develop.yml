@@ -1,7 +1,11 @@
 name: Retarget Pull Request to Develop
 
+# pull_request_target, not pull_request: a pull request from a fork gets a read-only token under pull_request,
+# whatever the permissions below say, so retargeting would fail for exactly the outside contributions it is for. Safe
+# only as long as this workflow never checks out or runs the pull request's code: it changes the base branch through
+# the API alone
 on:
-  pull_request:
+  pull_request_target:
     branches:
       - main
     types:
@@ -21,9 +25,10 @@ jobs:
   retarget-pull-request-to-develop:
     name: Retarget Pull Request to Develop
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Change base branch to develop
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const previousBase = context.payload.pull_request.base.ref;

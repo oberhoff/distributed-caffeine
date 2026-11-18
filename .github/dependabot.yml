@@ -5,8 +5,28 @@ updates:
     target-branch: "develop"
     schedule:
       interval: "weekly"
+    # minor and patch updates in two pull requests a week, the plugins apart from what the library and its tests use,
+    # so that a burst neither queues a CI run per update nor needs a merge each; a major update keeps a pull request of
+    # its own, as it needs a look (a new driver major changes what the README's requirements name)
+    groups:
+      maven-plugins:
+        update-types: [ "minor", "patch" ]
+        patterns:
+          - "org.apache.maven.plugins:*"
+          - "org.jacoco:jacoco-maven-plugin"
+          - "com.mycila:license-maven-plugin"
+          - "org.sonatype.central:central-publishing-maven-plugin"
+      maven-dependencies:
+        update-types: [ "minor", "patch" ]
+        patterns:
+          - "*"
   - package-ecosystem: "github-actions"
     directory: "/"
     target-branch: "develop"
     schedule:
       interval: "weekly"
+    # every action in one pull request, majors included: an action's major rarely changes what a workflow passes it
+    groups:
+      github-actions:
+        patterns:
+          - "*"

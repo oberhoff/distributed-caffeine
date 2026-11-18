@@ -8,7 +8,13 @@ on:
   schedule:
     # GitHub reads cron in UTC
     - cron: "42 0 * * *"
+  # by hand: develop unless another branch, tag or commit is given, whichever branch the dialog's "Use workflow from"
+  # shows (it preselects main, the last release, and only picks the copy of this file that runs)
   workflow_dispatch:
+    inputs:
+      ref:
+        description: The branch, tag or commit to test
+        default: develop
 
 # read only: the marker lives in the Actions cache, and the jobs report through their own tokens
 permissions:
@@ -23,18 +29,21 @@ jobs:
       sha: ${{ steps.head.outputs.sha }}
       changed: ${{ github.event_name != 'schedule' || steps.marker.outputs.cache-hit != 'true' }}
     steps:
-      - name: Resolve develop
+      # one commit for the whole run: every group checks it out, so a push meanwhile changes nothing, and the passed
+      # marker below names what every group tested; scheduled runs have no inputs, so they test develop
+      - name: Resolve the commit
         id: head
         env:
           GH_TOKEN: ${{ github.token }}
-        run: echo "sha=$(gh api repos/${{ github.repository }}/commits/develop --jq .sha)" >> "$GITHUB_OUTPUT"
+          REF: ${{ inputs.ref || 'develop' }}
+        run: echo "sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${REF}" --jq .sha)" >> "$GITHUB_OUTPUT"
       # a cache entry per tested commit marks it as done: a nightly without new commits on develop finds the marker
       # and skips every group; marked when the run starts, so a failed commit is not retested each night either.
       # Each nightly lookup keeps the entry from expiring (7 days unused)
       - name: Look up the marker
         id: marker
         if: github.event_name == 'schedule'
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: nightly-marker
           key: nightly-tested-${{ steps.head.outputs.sha }}
@@ -44,7 +53,7 @@ jobs:
         run: echo "${{ steps.head.outputs.sha }}" > nightly-marker
       - name: Save the marker
         if: github.event_name == 'schedule' && steps.marker.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: nightly-marker
           key: nightly-tested-${{ steps.head.outputs.sha }}
@@ -240,14 +249,14 @@ jobs:
           - name: Test MariaDB 13
             tests: "JdbcIntegrationTest$MariaDB_13_*"
     steps:
-      - name: Checkout branch
-        uses: actions/checkout@v7
+      - name: Checkout the commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # nightly: the develop commit resolved above, as scheduled runs start from the default branch, so every
-          # group tests the marked commit even if develop moves meanwhile; by hand: the branch chosen
-          ref: ${{ github.event_name == 'schedule' && needs.changes.outputs.sha || github.ref }}
+          # the commit resolved above, not the run's own: a scheduled run starts from the default branch (main), a
+          # run by hand from the branch the dialog shows
+          ref: ${{ needs.changes.outputs.sha }}
       - name: Set up JDK 17
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -262,3 +271,22 @@ jobs:
         uses: ./.github/workflows/common/report-failed-tests
         with:
           artifact-name: failed-tests-${{ strategy.job-index }}
+
+  # a cache entry per commit that passed every group, which the release (continuous-delivery.yml) requires of the
+  # commit it releases: the run itself carries the commit of the branch it started from, not the one tested, and a run
+  # skipped by the marker above passes without testing anything. The release finds it through the API, whichever
+  # branch's scope it was saved in
+  passed:
+    name: Mark the commit as passed
+    needs: [ changes, group ]
+    if: needs.group.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Create the marker
+        run: echo "${{ needs.changes.outputs.sha }}" > nightly-passed
+      - name: Save the marker
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: nightly-passed
+          key: nightly-passed-${{ needs.changes.outputs.sha }}

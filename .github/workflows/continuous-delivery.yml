@@ -1,46 +1,190 @@
 name: Continuous Delivery (CD)
 
+# a release of develop's head, started by hand from any branch (Actions, "Run workflow", or gh workflow run
+# continuous-delivery.yml -f version=X.Y.Z): sets the version, tags it, deploys it to Maven Central, and only then
+# pushes the release commit and its tag to develop and main, creates the GitHub release and starts the next
+# development version. Pushes and the release are the maintainer's, through REPOSITORY_TOKEN (a fine-grained personal
+# access token: this repository only, Contents read and write, with an expiry; renewed in the repository's secrets), so
+# that no github-actions[bot] appears and the pushes start CI as anyone's do. The deploy runs here, not in a workflow
+# of its own triggered by the release, so that nothing deploys without the checks below. Maven Central keeps the
+# deployment until it is published by hand in its portal (autoPublish false, pom.xml), the last check before the one
+# step that cannot be undone
 on:
-  release:
-    types: [ created ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version to release (X.Y.Z); empty for the current version without -SNAPSHOT
+        required: false
+      next-version:
+        description: The next development version (X.Y.Z-SNAPSHOT); empty for the next minor
+        required: false
+      prerelease:
+        description: Mark the GitHub release as a pre-release
+        type: boolean
+        default: false
 
-# read only: the deploy goes to Maven Central with its own credentials
+# the job's own token only reads: actions to find the CI run and the nightly's marker of the commit released; what
+# writes is REPOSITORY_TOKEN
 permissions:
   contents: read
+  actions: read
+
+# one release at a time, never cancelled halfway
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
   continuous-delivery:
     name: Continuous Delivery (CD)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # REPOSITORY_TOKEN writes (pushes, the tag, the release), so only the steps that need it get it: no credentials in
+    # .git/config (persist-credentials), a token only where gh calls the API, and the pushes authenticated per command.
+    # The Maven steps, whose plugins run with the signing key and the Central tokens, see neither
     steps:
-      - name: Checkout branch
-        uses: actions/checkout@v7
+      # develop, whichever branch the run was started from ("Run workflow" preselects the default branch, main); the
+      # steps are those of the branch chosen, so main's copy of this file runs unless develop is chosen
+      - name: Checkout develop
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # the whole history, to check the released commit's place in it
+          ref: develop
+          # the whole history and the tags, to check the tag and to push main as a fast-forward
           fetch-depth: 0
-      # a release event has no branch filter (GitHub ignores one): only a commit on main, which reaches it through a
-      # tested pull request, is deployed, whatever tag the release was created from
-      - name: Require a commit on main
-        run: |
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::The release's commit $GITHUB_SHA is not on main: not deployed"
-            exit 1
-          fi
+          persist-credentials: false
+      - name: Resolve the commit
+        id: commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Set up JDK 17
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: maven
+          # no Maven cache: CI and the nightly fill it on develop, running every test library and plugin, so a jar
+          # manipulated there would reach the build that signs; the release downloads everything from Maven Central
           server-id: central
           server-username: MAVEN_CENTRAL_USERNAME_TOKEN
           server-password: MAVEN_CENTRAL_PASSWORD_TOKEN
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase: GPG_PASSPHRASE
+      - name: Resolve the versions
+        id: versions
+        env:
+          VERSION: ${{ inputs.version }}
+          NEXT_VERSION: ${{ inputs.next-version }}
+        run: |
+          current=$(mvn -B -q org.apache.maven.plugins:maven-help-plugin:3.5.1:evaluate \
+            -Dexpression=project.version -DforceStdout)
+          version=${VERSION:-${current%-SNAPSHOT}}
+          if [[ ! "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::The version must be X.Y.Z, not ${version}"
+            exit 1
+          fi
+          next=${NEXT_VERSION:-${BASH_REMATCH[1]}.$((BASH_REMATCH[2] + 1)).0-SNAPSHOT}
+          if [[ ! "$next" =~ ^[0-9]+\.[0-9]+\.[0-9]+-SNAPSHOT$ ]]; then
+            echo "::error::The next version must be X.Y.Z-SNAPSHOT, not ${next}"
+            exit 1
+          fi
+          if [ "$(printf '%s\n' "$version" "${next%-SNAPSHOT}" | sort -V | tail -1)" = "$version" ]; then
+            echo "::error::The next version ${next} must be above ${version}"
+            exit 1
+          fi
+          if [ -n "$(git ls-remote --tags origin "refs/tags/v${version}")" ]; then
+            echo "::error::The tag v${version} exists already"
+            exit 1
+          fi
+          echo "Releasing ${version} from ${current}, next ${next}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "next=${next}" >> "$GITHUB_OUTPUT"
+      # the commit released has passed CI (on its push to develop) and the full matrix (nightly-full-matrix-tests.yml
+      # marks every commit that passed every group): a release commit only changes the version
+      - name: Require CI to have passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          runs="repos/${GITHUB_REPOSITORY}/actions/workflows/continuous-integration.yml/runs"
+          conclusion=$(gh api "${runs}?head_sha=${SHA}&event=push" --jq '.workflow_runs[0].conclusion // "none"')
+          if [ "$conclusion" != success ]; then
+            echo "::error::CI on ${SHA} is ${conclusion}, not success"
+            exit 1
+          fi
+      # through the API, not actions/cache/restore: a run reads only the caches of its own branch and the default
+      # branch, and a nightly run by hand on develop saves its marker in develop's scope, which a run started from main
+      # would not see
+      - name: Require the nightly to have passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          found=$(gh api "repos/${GITHUB_REPOSITORY}/actions/caches?key=nightly-passed-${SHA}" \
+            --jq "[.actions_caches[] | select(.key == \"nightly-passed-${SHA}\")] | length")
+          if [ "$found" = 0 ]; then
+            echo "::error::No nightly passed on ${SHA}: wait for the next one, or run it by hand on develop"
+            exit 1
+          fi
+      - name: Commit and tag the release
+        env:
+          VERSION: ${{ steps.versions.outputs.version }}
+        run: |
+          # the maintainer's identity, as in every other commit (unsigned, so they look the same)
+          git config user.name "Andreas Oberhoff"
+          git config user.email "github@oberhoff.net"
+          mvn -B -q org.codehaus.mojo:versions-maven-plugin:2.24.0:set -DnewVersion="$VERSION" \
+            -DgenerateBackupPoms=false
+          git commit -am "Prepare release v${VERSION}"
+          git tag -a "v${VERSION}" -m "Release v${VERSION}"
       - name: Deploy with Maven
-        run: mvn clean deploy -DskipTests -DskipErrorProne
+        run: mvn -B clean deploy -DskipTests -DskipErrorProne
         env:
           MAVEN_CENTRAL_USERNAME_TOKEN: ${{ secrets.MAVEN_CENTRAL_USERNAME_TOKEN }}
           MAVEN_CENTRAL_PASSWORD_TOKEN: ${{ secrets.MAVEN_CENTRAL_PASSWORD_TOKEN }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PRIVATE_KEY_PASSPHRASE }}
+      # all or nothing: develop, main and the tag move together, main only as a fast-forward (the ruleset refuses
+      # anything else). Refused if develop moved since the run started: the deployment then stays unpublished in Maven
+      # Central's portal, to be dropped there
+      - name: Push the release
+        env:
+          TOKEN: ${{ secrets.REPOSITORY_TOKEN }}
+          VERSION: ${{ steps.versions.outputs.version }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=${auth}" push --atomic origin \
+            HEAD:refs/heads/develop HEAD:refs/heads/main "refs/tags/v${VERSION}"
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.REPOSITORY_TOKEN }}
+          VERSION: ${{ steps.versions.outputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          if [ "$PRERELEASE" = true ]; then
+            gh release create "v${VERSION}" --verify-tag --title "Release v${VERSION}" \
+              --notes "Pre-release v${VERSION}" --prerelease
+          else
+            gh release create "v${VERSION}" --verify-tag --title "Release v${VERSION}" --notes "Release v${VERSION}"
+          fi
+      - name: Start the next development version
+        env:
+          NEXT_VERSION: ${{ steps.versions.outputs.next }}
+        run: |
+          mvn -B -q org.codehaus.mojo:versions-maven-plugin:2.24.0:set -DnewVersion="$NEXT_VERSION" \
+            -DgenerateBackupPoms=false
+          git commit -am "Prepare next development iteration"
+      - name: Push the next development version
+        env:
+          TOKEN: ${{ secrets.REPOSITORY_TOKEN }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=${auth}" push origin HEAD:refs/heads/develop
+      - name: Summary
+        env:
+          VERSION: ${{ steps.versions.outputs.version }}
+          NEXT_VERSION: ${{ steps.versions.outputs.next }}
+        run: |
+          {
+            echo "### Released v${VERSION}"
+            echo
+            echo "- Publish the deployment in Maven Central's portal:"
+            echo "  https://central.sonatype.com/publishing/deployments"
+            echo "- develop is at ${NEXT_VERSION}"
+          } >> "$GITHUB_STEP_SUMMARY"
