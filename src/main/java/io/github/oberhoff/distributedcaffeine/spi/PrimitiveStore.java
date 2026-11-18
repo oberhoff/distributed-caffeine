@@ -37,8 +37,8 @@ import static java.util.Objects.requireNonNull;
  * distributed cache; it may override any operation of {@link Store} with a native one later (a batch in one round
  * trip, say), one at a time. As built here: one primitive per key and operation, maintenance by scans of the cache's
  * rows without values. The {@link Store#CONTROL_HASH control row} is an ordinary row to the primitives; only
- * maintenance knows it, comparing the ages of one scan: a row at least as old as it is hidden (VISION.md, "Target
- * design: {@code invalidateAll} by the store's time, hidden on read").
+ * maintenance knows it, comparing the ages of one scan: a row at least as old as it is hidden (VISION.md,
+ * "{@code invalidateAll} by the store's time, hidden on read").
  * Every primitive concerns the rows of the store's own cache only, and runs atomically per row.
  * <p>
  * The contract, checked through {@code StoreContractTest} and {@code ChangeScanContractTest} on the

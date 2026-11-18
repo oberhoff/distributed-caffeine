@@ -42,7 +42,7 @@ import java.util.List;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Whether {@code $$CLUSTER_TIME} can serve as the version counter (VISION.md, "invalidateAll: logical"): usable in an
+ * Whether {@code $$CLUSTER_TIME} can serve as the version counter (VISION.md, "invalidateAll, logical"): usable in an
  * update pipeline and in a find projection, and strictly ordered: a read before an {@code invalidateAll} below its
  * time, a write after it above, also across a failover.
  * <p>

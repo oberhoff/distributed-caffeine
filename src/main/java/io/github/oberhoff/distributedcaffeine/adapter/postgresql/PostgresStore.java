@@ -60,9 +60,9 @@ import static java.util.Objects.requireNonNull;
 
 
 /**
- * The store of one cache instance on PostgreSQL (VISION.md, "PostgreSQL: statements and propagation measured"). Every
+ * The store of one cache instance on PostgreSQL (VISION.md, "The PostgreSQL adapter"). Every
  * write is one statement that writes and notifies ({@code pg_notify} over the rows a CTE returns), so a notification
- * exists exactly when the write committed. Versions are the store's own (VISION.md, "Target design: versions applied as
+ * exists exactly when the write committed. Versions are the store's own (VISION.md, "Versions applied as
  * well as each store can", point 6): every write takes the next value of the table's sequence, or one above the stored
  * version where that is larger, the version proposed ignored; written back to the core with the result. The sequence
  * is drawn by every write, so it lies above every version of the table: a row created anew (its tombstone deleted)

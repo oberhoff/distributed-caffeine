@@ -59,7 +59,7 @@ class InternalInvalidateAllRaceTest {
 
     private static final Duration LONG = Duration.ofHours(1);
     // the race these tests close is accepted, as the industry accepts it for loads: a load or an update that read
-    // before another instance's invalidateAll and writes after it survives it (VISION.md, "Target design: invalidateAll
+    // before another instance's invalidateAll and writes after it survives it (VISION.md, "invalidateAll
     // by the store's time, hidden on read", the repair tried and reverted 2026-11-05). A log of decisions repairs those
     // that read exactly, but not those decided on a held value (when it was written against the unheard invalidateAll
     // is unknown); closing it needs a read per operation or a check of the control row in the store's write

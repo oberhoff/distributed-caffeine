@@ -36,8 +36,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /**
- * What a deadline of the core's own for blocking store calls would cost (VISION.md, "Options for later", "A deadline
- * of the core's own"): every store call run on another thread, the caller waiting at most a deadline, as Hystrix's
+ * What a deadline of the core's own for blocking store calls would cost (VISION.md, "Open work", "A deadline of
+ * the core's own"): every store call run on another thread, the caller waiting at most a deadline, as Hystrix's
  * thread isolation and Resilience4j's {@code TimeLimiter} do. The end-to-end benchmark ({@link EndToEndBenchmark}) as
  * it is, then with that hop on platform threads (a cached pool), then on virtual threads (one per call), each on a
  * fresh backend. Run by an experiment per store.
@@ -63,9 +63,8 @@ public final class StoreDeadlineBenchmark {
          * Opens a fresh backend for one run.
          *
          * @return the backend
-         * @throws Exception if it cannot be opened
          */
-        CacheBackend open() throws Exception;
+        CacheBackend open();
     }
 
     /**

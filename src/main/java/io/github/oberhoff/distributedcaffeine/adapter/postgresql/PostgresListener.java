@@ -55,9 +55,9 @@ import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 /**
- * Listening on PostgreSQL through pgjdbc (VISION.md, "PostgreSQL listening without R2DBC" and "Connection sharing"):
- * one session per listener data source (by identity), shared by every cache instance using it, each cache on a
- * channel of its own (table and discriminator), dispatched by channel name. The payload is {@code kind|hash|version}.
+ * Listening on PostgreSQL through pgjdbc (VISION.md, "PostgreSQL listening: pgjdbc's stream taken over" and "Connection
+ * sharing"): one session per listener data source (by identity), shared by every cache instance using it, each cache on
+ * a channel of its own (table and discriminator), dispatched by channel name. The payload is {@code kind|hash|version}.
  * <p>
  * The session is one connection of the data source whose stream the listener takes over. pgjdbc connects (with
  * whatever authentication and TLS the data source is configured for) and runs the first {@code LISTEN}s; then the

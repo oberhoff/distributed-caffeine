@@ -34,7 +34,7 @@ import java.util.Map;
  *     choose per call. A store assigning in the core's domain keeps the core's format (milliseconds since 2020 above
  *     20 bits) so that both ways stay comparable on one key; one that assigns on every path, expiry included, may
  *     number its versions in a domain of its own (a sequence), above every version it issued. A deleted row no longer
- *     defends its version (VISION.md, "Target design: versions applied as well as each store can").</li>
+ *     defends its version (VISION.md, "Versions applied as well as each store can").</li>
  *     <li><b>Clock:</b> the age of a row comes from the store's clock, set by every write ({@link Row#age()}); within
  *     one read every age is measured at the same instant, so the ages of a read compare like the times of the writes
  *     (the core compares them with the age of the {@link #CONTROL_HASH control row}). An age is reported as it is,
@@ -73,7 +73,7 @@ import java.util.Map;
 public interface Store extends AutoCloseable {
 
     /**
-     * The hash of the control row (VISION.md, "Target design: {@code invalidateAll} by the store's time, hidden on
+     * The hash of the control row (VISION.md, "{@code invalidateAll} by the store's time, hidden on
      * read"): the core writes it on {@code invalidateAll}, and every row written at or before it (at least as old as
      * it) counts as missing. Maintenance never expires or prunes it, ignores the rows it hides for expiry and size
      * pruning, and deletes them in {@link #pruneTombstones}.
@@ -105,7 +105,7 @@ public interface Store extends AutoCloseable {
     VersionsResult readVersions(Collection<String> hashes, Duration maxAge);
 
     /**
-     * How far the store's clock may step back, or how coarse it counts (VISION.md, "Target design: {@code
+     * How far the store's clock may step back, or how coarse it counts (VISION.md, "{@code
      * invalidateAll} by the store's time, hidden on read"): the core waits this long before {@code invalidateAll}
      * returns, so that a write after it is never stamped at or before the control row. A store whose write times never
      * go backwards and never repeat (a monotonic counter, a strictly increasing clock) returns zero.
@@ -141,7 +141,7 @@ public interface Store extends AutoCloseable {
      * <p>
      * An advancing write is applied either conditionally, at its own version and only above the stored one (refused
      * otherwise), or by assigning: always, at a version above the stored one that the store chooses and reports in the
-     * result (VISION.md, "Target design: versions applied as well as each store can"). A store may choose per call.
+     * result (VISION.md, "Versions applied as well as each store can"). A store may choose per call.
      *
      * @param writes the writes, at most one per hash
      * @return which writes were refused, and the versions the store assigned other than proposed

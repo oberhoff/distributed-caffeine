@@ -17,6 +17,7 @@ package io.github.oberhoff.distributedcaffeine.experiments;
 
 import io.github.oberhoff.distributedcaffeine.CacheBackend;
 import io.github.oberhoff.distributedcaffeine.EndToEndBenchmark;
+import io.github.oberhoff.distributedcaffeine.MissBenchmark;
 import io.github.oberhoff.distributedcaffeine.RefillBenchmark;
 import io.github.oberhoff.distributedcaffeine.StoreDeadlineBenchmark;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
@@ -54,6 +55,13 @@ class InMemoryBenchmarkExperimentTest {
         try (CacheBackend backend = CacheBackend.of(new InMemoryDatabase(StoreProfile.REDIS))) {
             RefillBenchmark.run("in-memory store (feed)", backend, 3, 10_000, 100_000);
             RefillBenchmark.run("in-memory store (feed)", backend, 1_024, 10_000, 100_000);
+        }
+    }
+
+    @Test
+    void measures_a_miss_split_into_its_parts() {
+        try (CacheBackend backend = CacheBackend.of(new InMemoryDatabase(StoreProfile.REDIS))) {
+            MissBenchmark.run("in-memory store (feed)", backend);
         }
     }
 }

@@ -42,11 +42,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.UnaryOperator;
 
 /**
- * On start (VISION.md, "Adapter setup" and "Migration"): a replica set with majority reads is required, sharded
- * collections are refused; a collection with the schema marker of this version is used, a missing one is created (the
- * marker document first, which creates the collection, so a concurrent start sees either nothing or the marker), one
- * without the marker is refused or, with withSchemaReset() and if it may be dropped (see requireResettable), dropped
- * and recreated. A missing index only warns.
+ * On start (VISION.md, "Adapter setup" and "Schema markers and the reset"): a replica set with majority reads is
+ * required, sharded collections are refused; a collection with the schema marker of this version is used, a missing one
+ * is created (the marker document first, which creates the collection, so a concurrent start sees either nothing or the
+ * marker), one without the marker is refused or, with withSchemaReset() and if it may be dropped (see
+ * requireResettable), dropped and recreated. A missing index only warns.
  *
  * @author Andreas Oberhoff
  */
@@ -145,7 +145,8 @@ final class MongoSchema {
     // what the last old instances wrote: running old instances lose their store copies, as with the drop. Best
     // effort: a failure (a timeout after a long rollout) only warns, deleteMany keeps what it removed, the next start
     // goes on. Deletes are outside the change stream's filter, so no cache of 0.8 or later hears of them.
-    // To be removed in a later release, once no rollout from 0.7.x is expected (VISION.md, "Migration").
+    // To be removed in a later release, once no rollout from 0.7.x is expected (VISION.md, "Schema markers and the
+    // reset").
     private static void removeOldGeneration(MongoCollection<BsonDocument> collection, MongoLocation location) {
         try {
             long removed = collection.deleteMany(Filters.type("_id", BsonType.OBJECT_ID)).getDeletedCount();

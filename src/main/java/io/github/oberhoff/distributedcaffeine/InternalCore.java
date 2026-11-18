@@ -254,7 +254,7 @@ final class InternalCore<K, V> {
     // the atomic map operations (compute, replace, merge and their kin) against this instance's own invalidateAll,
     // atomic per key as in Caffeine: they hold the shared side from their decision to their commit, invalidateAll the
     // exclusive side while it writes the control row and clears L1. Otherwise one decided on a value from before the
-    // control row and written after it would survive the invalidateAll (VISION.md, "Target design: invalidateAll by
+    // control row and written after it would survive the invalidateAll (VISION.md, "invalidateAll by
     // the store's time, hidden on read"). An invalidateAll elsewhere, not heard of yet, is the race accepted
     private final InternalClearLock clearing = new InternalClearLock();
     private final AtomicInteger revalidations = new AtomicInteger();
@@ -938,7 +938,7 @@ final class InternalCore<K, V> {
     // the hot path: a trusted held value is decided on as it is, and the write, conditional on its version, is one
     // store operation, refused if a write elsewhere came since. Otherwise from the store. An invalidateAll elsewhere
     // not heard of yet is not seen by the version (it leaves the row as it is): the decision then counts as before it,
-    // the race accepted for loads and updates in flight (VISION.md, "Target design: invalidateAll by the store's time")
+    // the race accepted for loads and updates in flight (VISION.md, "invalidateAll by the store's time")
     // With the maximum age for the store only, always read: most held copies outlive their rows, and a write
     // conditioned on the held version would be refused and decided again, the remapping run twice
     private Current<V> heldOrRead(InternalKey<K> internalKey) {
@@ -1168,7 +1168,7 @@ final class InternalCore<K, V> {
         clearing.lockExclusive();
         try {
             // one row, whatever the size of the cache: every row written at or before it counts as missing from now
-            // on, and maintenance deletes those rows (VISION.md, "Target design: invalidateAll by the store's time,
+            // on, and maintenance deletes those rows (VISION.md, "invalidateAll by the store's time,
             // hidden on read"). The atomic map operations of this instance wait for it (clearing); a load in flight
             // that read before it and commits after it survives it, as in Caffeine, and so does whatever another
             // instance decided before hearing of it, as in the other distributed caches
@@ -1293,7 +1293,7 @@ final class InternalCore<K, V> {
         return value != null && !new String(value, StandardCharsets.UTF_8).contains(BACKDATED);
     }
 
-    // the store step of put and putAll (VISION.md, "Target design: monotonic versions"): every key advances, at a
+    // the store step of put and putAll (VISION.md, "Monotonic versions"): every key advances, at a
     // version larger than every one this instance has seen, so that one write is enough unless a larger version is
     // stored already (see advance). With an unknown outcome the keys are dropped from L1 (ordering rule 5). Returns
     // the version written per hash
@@ -1345,10 +1345,10 @@ final class InternalCore<K, V> {
             Collection<Write> attempted = remaining;
             WriteResult result = put ? guard.put(() -> writing.apply(attempted))
                     : guard.write(() -> writing.apply(attempted));
-            // applied at the version the store reports: its own, where it assigns one (VISION.md, "Target design:
-            // versions applied as well as each store can"). Seen like a version read: an assigning store puts it
-            // above a row written ahead, which this clock would otherwise learn only from its own write's message,
-            // after the write returned, and without a feed (distribution mode NONE) never
+            // applied at the version the store reports: its own, where it assigns one (VISION.md, "Versions applied as
+            // well as each store can"). Seen like a version read: an assigning store puts it above a row written ahead,
+            // which this clock would otherwise learn only from its own write's message, after the write returned, and
+            // without a feed (distribution mode NONE) never
             for (Write write : attempted) {
                 if (!result.isRefused(write) && result.version(write) != write.version()) {
                     clock.observe(result.version(write));
@@ -1982,11 +1982,10 @@ final class InternalCore<K, V> {
         return result.version(write);
     }
 
-    // a read through the guard, the control row read with it in the same batch (VISION.md, "Target design:
-    // invalidateAll by the store's time, hidden on read"): a row at least as old as the control row was written at or
-    // before the last invalidateAll and counts as missing, shown as a tombstone at its version, so that a conditional
-    // write can replace it. The ages of one read are measured at the same instant, so they compare like the times of
-    // the writes
+    // a read through the guard, the control row read with it in the same batch (VISION.md, "invalidateAll by the
+    // store's time, hidden on read"): a row at least as old as the control row was written at or before the last
+    // invalidateAll and counts as missing, shown as a tombstone at its version, so that a conditional write can replace
+    // it. The ages of one read are measured at the same instant, so they compare like the times of the writes
     private Map<String, Row> readRows(Collection<String> hashes) {
         return visible(readWithControl(hashes));
     }

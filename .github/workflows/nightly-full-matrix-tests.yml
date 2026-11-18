@@ -6,8 +6,8 @@ name: Nightly Full Matrix Tests
 # (-DrunsOnGitHub)
 on:
   schedule:
-    # GitHub reads cron in UTC: 01:00 UTC is 02:00 in Central European winter time (03:00 in summer time)
-    - cron: "0 1 * * *"
+    # GitHub reads cron in UTC
+    - cron: "42 0 * * *"
   workflow_dispatch:
 
 # read only: the marker lives in the Actions cache, and the jobs report through their own tokens
@@ -67,7 +67,7 @@ jobs:
           # 50-70 min model checking jobs waited). A failed job names its part, and "Re-run failed jobs" repeats only
           # that one; the setup and compiling cost about 30 s per job. The experiments (-Dexperiments) and the managed
           # Redis services (-Dredis.external) stay manual
-          # model checking: the interleavings by method, D every method that A to C leave, so that a new one runs
+          # model checking: the interleavings by method, E every method that A to D leave, so that a new one runs
           # without a change here. A method takes about 3-7 min on GitHub's runners (500 invocations; their speed
           # varies by a factor of two), a_load_finding_* six times that (3,000), so its job alone has a longer bound.
           # The linearizability classes in three shards each, a third of their Lincheck scenarios per job
@@ -83,7 +83,10 @@ jobs:
             tests: "InternalInterleavingTest#two_*"
             flags: -Dmodelchecking=true
           - name: Test model checking, interleavings D
-            tests: "InternalInterleavingTest,!InternalInterleavingTest#a_load_finding_*+a_load_racing_a_*+two_*"
+            tests: "InternalInterleavingTest#a_load_racing_an_*+a_refresh_*"
+            flags: -Dmodelchecking=true
+          - name: Test model checking, interleavings E
+            tests: "InternalInterleavingTest,!InternalInterleavingTest#a_load_finding_*+a_load_racing_a_*+a_load_racing_an_*+a_refresh_*+two_*"
             flags: -Dmodelchecking=true
           - name: Test model checking, linearizability, one instance 1/3
             tests: "InternalLinearizabilityTest#model_checking"

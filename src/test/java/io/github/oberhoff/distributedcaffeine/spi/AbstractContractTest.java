@@ -89,8 +89,8 @@ public abstract class AbstractContractTest {
         }
 
         /**
-         * Whether the store applies the writes of a call of that size by assigning their versions (VISION.md, "Target
-         * design: versions applied as well as each store can"): an advance never refused, at a version the store
+         * Whether the store applies the writes of a call of that size by assigning their versions (VISION.md,
+         * "Versions applied as well as each store can"): an advance never refused, at a version the store
          * chooses above the stored one. Otherwise conditionally, at the versions proposed.
          *
          * @param batchSize the number of writes in the call

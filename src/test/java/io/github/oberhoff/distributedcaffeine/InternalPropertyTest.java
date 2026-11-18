@@ -128,7 +128,7 @@ public class InternalPropertyTest {
     // the presence oracle: per key, the value of the last confirmed write since its last invalidation
     private final Map<String, String> confirmed = new ConcurrentHashMap<>();
     // per key, every value the source held before an invalidateAll: a load that read one before it and writes after it
-    // leaves it behind, the race accepted (VISION.md, "Target design: invalidateAll by the store's time, hidden on
+    // leaves it behind, the race accepted (VISION.md, "invalidateAll by the store's time, hidden on
     // read"), also one a write replaced before the invalidateAll (whose row maintenance then deletes, so that it no
     // longer refuses the load's write on "missing"), so the freshness oracle allows them; tokens are unique, and a
     // later write of the key replaces such a value in the store

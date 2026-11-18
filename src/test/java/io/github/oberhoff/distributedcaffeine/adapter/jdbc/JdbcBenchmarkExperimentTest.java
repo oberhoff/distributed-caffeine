@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.adapter.jdbc;
 
 import io.github.oberhoff.distributedcaffeine.EndToEndBenchmark;
+import io.github.oberhoff.distributedcaffeine.MissBenchmark;
 import io.github.oberhoff.distributedcaffeine.StoreDeadlineBenchmark;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.Test;
@@ -55,6 +56,14 @@ class JdbcBenchmarkExperimentTest {
         try (JdbcTestDatabase ignored = JdbcTestDatabase.start(image, driver);
              JdbcCacheBackend backend = new JdbcCacheBackend()) {
             EndToEndBenchmark.run(label, backend);
+        }
+    }
+
+    @Test
+    void measures_a_miss_split_into_its_parts_on_mariadb() {
+        try (JdbcTestDatabase ignored = JdbcTestDatabase.start("mariadb:13", JdbcTestDatabase.MARIADB_CONNECTOR_J);
+             JdbcCacheBackend backend = new JdbcCacheBackend()) {
+            MissBenchmark.run("MariaDB 13 (single server, local container)", backend);
         }
     }
 }

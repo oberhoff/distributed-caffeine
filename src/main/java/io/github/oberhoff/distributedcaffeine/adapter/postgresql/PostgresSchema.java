@@ -32,10 +32,11 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * On start (VISION.md, "Adapter setup" and "Migration"): a table with the schema marker of this version and the
- * expected shape is used; a missing one is created (with its schema, index and marker) under an advisory lock, or the
- * start is refused with the DDL if the rights are missing; one without the marker is refused or, with withSchemaReset()
- * and if it may be dropped (see requireResettable), dropped and recreated. A missing index only warns.
+ * On start (VISION.md, "Adapter setup" and "Schema markers and the reset"): a table with the schema marker of this
+ * version and the expected shape is used; a missing one is created (with its schema, index and marker) under an
+ * advisory lock, or the start is refused with the DDL if the rights are missing; one without the marker is refused or,
+ * with withSchemaReset() and if it may be dropped (see requireResettable), dropped and recreated. A missing index only
+ * warns.
  *
  * @author Andreas Oberhoff
  */

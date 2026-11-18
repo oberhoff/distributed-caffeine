@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
+import io.github.oberhoff.distributedcaffeine.testing.Awaiting;
 import org.jspecify.annotations.NullMarked;
 
 import java.lang.reflect.InvocationTargetException;
@@ -31,10 +32,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.BooleanSupplier;
 
 /**
- * The cost of a refill while serving (VISION.md, "Refill while serving", "Options for later"): instances holding every
+ * The cost of a refill while serving (VISION.md, "Refill while serving", "Open work"): instances holding every
  * key, a refill rewriting most of them, then {@code invalidateAllBeforeMark}. Per distribution mode and size: how long
  * the call takes, how long until every instance's revalidation pass is done, the store reads and rows the passes cost,
  * and how much of L1 is still held afterwards (hot). Run by an experiment per store; it decides whether the
@@ -43,6 +43,7 @@ import java.util.function.BooleanSupplier;
  * @author Andreas Oberhoff
  */
 @NullMarked
+@SuppressWarnings("JavaPrintToLogpoint") // a benchmark prints its table
 public final class RefillBenchmark {
 
     private static final Duration LONG = Duration.ofHours(1);
@@ -100,14 +101,15 @@ public final class RefillBenchmark {
         AtomicLong reads = new AtomicLong();
         AtomicLong rows = new AtomicLong();
         Adapter<String, String> adapter = settings -> counted(backend.open(settings), reads, rows);
-        DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(adapter)
+        Instance instance = new Instance(DistributedCaffeine.newBuilder(adapter)
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
                 .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(10_000_000))
                 .withDistributionMode(mode)
-                .build();
-        closeables.add(cache);
-        return new Instance(cache, reads, rows);
+                .build(), reads, rows);
+        // closed by the scenario; also here, should a scenario fail before
+        closeables.add(instance.cache());
+        return instance;
     }
 
     // the store, its reads counted: calls and the rows they ask, through a proxy with every interface the store has
@@ -131,6 +133,8 @@ public final class RefillBenchmark {
                 });
     }
 
+    // the instances' caches are closed at the end of the scenario, and by run should it fail before
+    @SuppressWarnings("resource")
     private String measure(DistributionMode mode, int size) {
         String prefix = "s" + scenario++ + "-";
         List<String> keys = new ArrayList<>(size);
@@ -141,8 +145,9 @@ public final class RefillBenchmark {
         for (int index = 0; index < INSTANCES; index++) {
             instances.add(instance(mode));
         }
-        DistributedCache<String, String> refiller = instances.get(0).cache();
-        putAll(refiller, keys, value("old"));
+        // the first instance refills
+        Instance refiller = instances.get(0);
+        putAll(refiller.cache(), keys, value("old"));
         for (Instance instance : instances) {
             for (int from = 0; from < size; from += BATCH) {
                 instance.cache().getAll(keys.subList(from, Math.min(size, from + BATCH)), missing -> Map.of());
@@ -150,17 +155,17 @@ public final class RefillBenchmark {
         }
         settle(instances);
 
-        DistributedPolicy.Mark mark = refiller.distributedPolicy().store().mark();
+        DistributedPolicy.Mark mark = refiller.cache().distributedPolicy().store().mark();
         List<String> rewritten = keys.subList(0, (int) (size * REWRITTEN));
         long fillStart = System.nanoTime();
-        putAll(refiller, rewritten, value("new"));
+        putAll(refiller.cache(), rewritten, value("new"));
         settle(instances);
         long fillMillis = (System.nanoTime() - fillStart) / 1_000_000;
         long readsBefore = instances.stream().mapToLong(instance -> instance.reads().get()).sum();
         long rowsBefore = instances.stream().mapToLong(instance -> instance.rows().get()).sum();
 
         long callStart = System.nanoTime();
-        refiller.distributedPolicy().store().invalidateAllBeforeMark(mark);
+        refiller.cache().distributedPolicy().store().invalidateAllBeforeMark(mark);
         long callMillis = (System.nanoTime() - callStart) / 1_000_000;
         settle(instances);
         long passMillis = (System.nanoTime() - callStart) / 1_000_000;
@@ -202,26 +207,14 @@ public final class RefillBenchmark {
 
     // every message delivered and applied, every revalidation pass done
     private void settle(List<Instance> instances) {
-        await(() -> backend.isIdle() && instances.stream().allMatch(instance -> core(instance.cache()).isQuiescent()));
+        if (!Awaiting.awaitUpTo(() -> backend.isIdle()
+                && instances.stream().allMatch(instance -> core(instance.cache()).isQuiescent()),
+                Duration.ofMinutes(10), Duration.ofMillis(1))) {
+            throw new AssertionError("not settled within 10 minutes");
+        }
     }
 
     private static InternalCore<String, String> core(DistributedCache<String, String> cache) {
         return ((InternalDistributedCache<String, String>) cache).core;
-    }
-
-    @SuppressWarnings("java:S2925") // waiting for the background passes is the point
-    private static void await(BooleanSupplier condition) {
-        long deadline = System.nanoTime() + Duration.ofMinutes(10).toNanos();
-        while (!condition.getAsBoolean()) {
-            if (System.nanoTime() > deadline) {
-                throw new AssertionError("not settled within 10 minutes");
-            }
-            try {
-                Thread.sleep(1);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException(e);
-            }
-        }
     }
 }

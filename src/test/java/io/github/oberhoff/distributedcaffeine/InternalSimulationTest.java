@@ -367,8 +367,8 @@ class InternalSimulationTest {
 
     // the polling store touches the keys of a write of unknown outcome again two operation timeouts later (20 s), so
     // that a poll finds them; for an invalidateAll that rewrite gives the control row a new write time, which hid every
-    // value written since (found 2026-11-12 by the property test in longer runs; VISION.md, "Open: the polling
-    // store's touch re-stamps the control row"): the rows written after it are rewritten after it now
+    // value written since (found 2026-11-12 by the property test in longer runs; VISION.md, "Fixed: the polling
+    // store's touch re-stamped the control row"): the rows written after it are rewritten after it now
     @Test
     @SuppressWarnings("resource") // the caches closed after the test
     void a_late_touch_of_an_invalidate_all_hides_no_value_written_since() {

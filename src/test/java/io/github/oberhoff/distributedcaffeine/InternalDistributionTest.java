@@ -234,8 +234,8 @@ public class InternalDistributionTest {
     }
 
     @Test
-    @Disabled("a load overtaken by invalidateAll is accepted until its repair (VISION.md, \"Target design: "
-            + "invalidateAll by the store's time, hidden on read\", and build plan, Later)")
+    @Disabled("a load overtaken by invalidateAll is accepted until its repair (VISION.md, \"invalidateAll "
+            + "by the store's time, hidden on read\", and \"Open work\")")
     void a_load_of_a_missing_key_overtaken_by_invalidateAll_is_invalidated_everywhere() throws Exception {
         BlockedLoad blocked = new BlockedLoad();
         blocked.source.set("old");
@@ -265,8 +265,8 @@ public class InternalDistributionTest {
     }
 
     @Test
-    @Disabled("a load overtaken by invalidateAll is accepted until its repair (VISION.md, \"Target design: "
-            + "invalidateAll by the store's time, hidden on read\", and build plan, Later)")
+    @Disabled("a load overtaken by invalidateAll is accepted until its repair (VISION.md, \"invalidateAll "
+            + "by the store's time, hidden on read\", and \"Open work\")")
     void a_load_that_read_a_tombstone_overtaken_by_invalidateAll_is_hidden() throws Exception {
         BlockedLoad blocked = new BlockedLoad();
         blocked.source.set("old");

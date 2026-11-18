@@ -43,12 +43,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Listening without R2DBC (VISION.md, "PostgreSQL listening without R2DBC"): how fast notifications reach one session
- * per instance, and at what cost to PostgreSQL, for pgjdbc's own getNotifications (limited to ~750/s per session) and
- * pgjdbc's stream taken over (what the adapter does). The R2DBC variant and notifications batched per writer after the
- * commit, measured against them once, are gone; their figures stay recorded in VISION.md. One
- * channel; writes paced by two writers, to random keys of 10,000 or to one hot key. Measures the time until a
- * notification arrives (over all instances) and PostgreSQL's CPU from the container's cgroup counters.
+ * Listening without R2DBC (VISION.md, "PostgreSQL listening: pgjdbc's stream taken over"): how fast notifications reach
+ * one session per instance, and at what cost to PostgreSQL, for pgjdbc's own getNotifications (limited to ~750/s per
+ * session) and pgjdbc's stream taken over (what the adapter does). The R2DBC variant and notifications batched per
+ * writer after the commit, measured against them once, are gone; their figures stay recorded in VISION.md. One channel;
+ * writes paced by two writers, to random keys of 10,000 or to one hot key. Measures the time until a notification
+ * arrives (over all instances) and PostgreSQL's CPU from the container's cgroup counters.
  * <p>
  * Not run by default, only with {@code -Dexperiments=true}; run with
  * {@code mvn test -Dtest=PostgresListenerExperimentTest -Dexperiments=true}.

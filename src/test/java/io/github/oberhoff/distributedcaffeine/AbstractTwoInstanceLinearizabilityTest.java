@@ -45,7 +45,7 @@ import java.util.Map;
  * so their L1 is as stale as it can be (the hot path's hardest case), and nothing runs in the background.
  * <p>
  * Not {@code invalidateAll}: an operation decided on another instance before it hears of one survives it, the race
- * accepted since 2026-10-28 (VISION.md, "Target design: {@code invalidateAll} by the store's time, hidden on read";
+ * accepted since 2026-10-28 (VISION.md, "{@code invalidateAll} by the store's time, hidden on read";
  * its repair is under "Later"). Against the instance's own atomic operations it is checked by
  * {@code InternalLinearizabilityInvalidateAllTest}.
  *

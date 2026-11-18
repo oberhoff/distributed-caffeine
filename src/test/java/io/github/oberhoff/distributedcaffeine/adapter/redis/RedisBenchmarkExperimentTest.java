@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.adapter.redis;
 
 import io.github.oberhoff.distributedcaffeine.EndToEndBenchmark;
+import io.github.oberhoff.distributedcaffeine.MissBenchmark;
 import io.github.oberhoff.distributedcaffeine.RefillBenchmark;
 import io.github.oberhoff.distributedcaffeine.StoreDeadlineBenchmark;
 import org.jspecify.annotations.NullMarked;
@@ -108,5 +109,13 @@ class RedisBenchmarkExperimentTest {
         measure("docker.dragonflydb.io/dragonflydb/dragonfly:v2.0.2",
                 "Dragonfly 2.0.2 with --lock_on_hashtags through Lettuce (single server, local container)",
                 server -> LettuceRedis.of(server.client), "--lock_on_hashtags");
+    }
+
+    @Test
+    void measures_a_miss_split_into_its_parts_on_redis_through_lettuce() {
+        try (RedisTestServer server = new RedisTestServer("redis:8");
+             RedisCacheBackend backend = new RedisCacheBackend(LettuceRedis.of(server.client))) {
+            MissBenchmark.run("Redis 8 through Lettuce (single server, local container)", backend);
+        }
     }
 }

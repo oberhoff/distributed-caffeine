@@ -25,8 +25,8 @@ import static java.util.Objects.requireNonNull;
 /**
  * One key's write ({@link Store#write}): a value or a tombstone, at the version the core proposes for it, under a
  * condition on the version the stored row has now. The store applies it at that version or assigns one itself, above
- * the stored one, and reports which ({@link WriteResult}); a row's version only ever grows (VISION.md, "Target
- * design: versions applied as well as each store can").
+ * the stored one, and reports which ({@link WriteResult}); a row's version only ever grows (VISION.md,
+ * "Versions applied as well as each store can").
  *
  * @param hash     the hash of the key
  * @param key      the serialized key, in the cache's key format; {@code null} for a tombstone, which keeps the key the

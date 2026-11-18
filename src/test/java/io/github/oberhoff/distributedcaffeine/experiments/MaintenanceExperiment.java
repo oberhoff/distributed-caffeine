@@ -36,7 +36,7 @@ import java.util.function.Consumer;
 import java.util.function.ToIntBiFunction;
 
 /**
- * What one maintenance call costs on a large cache (VISION.md, build plan, step 7, "maintenance in paced batches"):
+ * What one maintenance call costs on a large cache (VISION.md, build plan, step 6d, "maintenance in paced batches"):
  * the cache filled with rows directly, then each call timed while another instance keeps writing a probe key, whose
  * latency shows what the call does to the cache's own operations, and the messages it announces counted until they
  * have arrived. Run per store by its {@code *MaintenanceExperimentTest}, with {@code -Dexperiments=true}.
@@ -180,7 +180,7 @@ public final class MaintenanceExperiment {
                 synchronized (probes) {
                     sorted = new ArrayList<>(probes);
                 }
-                Collections.sort(sorted);
+                sorted.sort(null);
                 String delivered = changed == 0 || messages.get() == 0 ? "-"
                         : gaps.get() > 0 ? "gap after " + messages.get()
                         : messages.get() < changed ? messages.get() + " of " + changed

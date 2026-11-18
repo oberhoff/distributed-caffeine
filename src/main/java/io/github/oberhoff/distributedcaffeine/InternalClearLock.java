@@ -18,8 +18,8 @@ package io.github.oberhoff.distributedcaffeine;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 
 /**
- * The lock between the atomic map operations and this instance's own {@code invalidateAll} (VISION.md, "Target
- * design: {@code invalidateAll} by the store's time, hidden on read"): an operation holds the shared side from its
+ * The lock between the atomic map operations and this instance's own {@code invalidateAll} (VISION.md,
+ * "{@code invalidateAll} by the store's time, hidden on read"): an operation holds the shared side from its
  * decision to its commit, {@code invalidateAll} the exclusive side while it writes the control row and clears L1, so
  * that an operation is atomic per key against it, as in Caffeine.
  * <p>

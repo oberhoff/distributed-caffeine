@@ -51,7 +51,7 @@ public record StoreProfile(String name, Versioning versioning, Changes changes, 
                            boolean tombstoneOnPurgedRow, boolean evicts, boolean lossyFeed) {
 
     /**
-     * How a store applies a write and chooses its version (VISION.md, "Target design: versions applied as well as each
+     * How a store applies a write and chooses its version (VISION.md, "Versions applied as well as each
      * store can").
      */
     public enum Versioning {

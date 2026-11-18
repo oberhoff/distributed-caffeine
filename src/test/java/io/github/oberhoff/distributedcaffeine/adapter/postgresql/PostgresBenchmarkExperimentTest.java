@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.adapter.postgresql;
 
 import io.github.oberhoff.distributedcaffeine.EndToEndBenchmark;
+import io.github.oberhoff.distributedcaffeine.MissBenchmark;
 import io.github.oberhoff.distributedcaffeine.RefillBenchmark;
 import io.github.oberhoff.distributedcaffeine.StoreDeadlineBenchmark;
 import org.jspecify.annotations.NullMarked;
@@ -57,6 +58,14 @@ class PostgresBenchmarkExperimentTest {
             RefillBenchmark.run("PostgreSQL 18 (single server, local container)", backend, 3, 10_000, 100_000);
             RefillBenchmark.run("PostgreSQL 18 (single server, local container)", backend, 1_024, 10_000,
                     100_000);
+        }
+    }
+
+    @Test
+    void measures_a_miss_split_into_its_parts() {
+        try (PostgresTestDatabase ignored = PostgresTestDatabase.start("postgres:18", PostgresTopology.SINGLE_SERVER);
+             PostgresCacheBackend backend = new PostgresCacheBackend()) {
+            MissBenchmark.run("PostgreSQL 18 (single server, local container)", backend);
         }
     }
 }

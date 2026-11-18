@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongConsumer;
 
 /**
- * Versions as the core proposes them (VISION.md, "Target design: monotonic versions, proposed by the core, enforced by
+ * Versions as the core proposes them (VISION.md, "Monotonic versions, proposed by the core, enforced by
  * the store"): a hybrid logical clock, one per cache instance, packed into one positive {@code long} ordered as a
  * number: milliseconds since 2020 (43 bits, until 2298), a logical counter (10 bits) and a node id drawn at random per
  * instance (10 bits), so that two instances rarely propose the same version at the same time (an equal version is

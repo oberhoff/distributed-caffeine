@@ -22,7 +22,7 @@ import static java.util.Objects.requireNonNull;
 
 /**
  * What a {@link Store#write} did with each write: refused it, or applied it, at the version it proposed or at one the
- * store assigned (VISION.md, "Target design: versions applied as well as each store can"). A store applying a write
+ * store assigned (VISION.md, "Versions applied as well as each store can"). A store applying a write
  * conditionally (only above the stored version) applies it at the proposed version and names only the refused ones; a
  * store assigning versions (above the stored one, whatever was proposed) never refuses an advancing write and names
  * the version wherever it is not the proposed one.

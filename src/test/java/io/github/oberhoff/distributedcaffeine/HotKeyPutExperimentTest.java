@@ -53,7 +53,7 @@ import java.util.concurrent.locks.LockSupport;
 @NullMarked
 @EnabledIfSystemProperty(named = "experiments", matches = "true")
 @Timeout(600)
-@SuppressWarnings({"java:S2699", "resource"}) // an experiment reports what it measures; the caches are closed below
+@SuppressWarnings("java:S2699") // an experiment reports what it measures
 class HotKeyPutExperimentTest {
 
     private static final int INSTANCES = 2;
@@ -109,7 +109,9 @@ class HotKeyPutExperimentTest {
             future.get();
         }
         threads.shutdown();
-        threads.awaitTermination(10, TimeUnit.SECONDS);
+        if (!threads.awaitTermination(10, TimeUnit.SECONDS)) {
+            throw new IllegalStateException("the writing threads did not end within 10 s");
+        }
         long refusals = caches.stream().mapToLong(cache -> cache.distributedStats().versionRefusalCount()).sum();
         for (DistributedCache<String, String> cache : caches) {
             cache.close();

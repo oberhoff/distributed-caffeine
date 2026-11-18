@@ -91,7 +91,7 @@ import static java.util.Objects.requireNonNull;
  * document's lock and returns it ({@code findOneAndUpdate}, see {@link #writeOne}), so that a racing advance is never
  * refused; a batch of writes is one unordered bulk write, one round trip, at the versions the core proposed, with an
  * upsert per key whose outcome MongoDB reports per write (see {@link #bulkWrite}). Both write versions in the core's
- * format, so the two paths stay comparable on one key (VISION.md, "Target design: versions applied as well as each
+ * format, so the two paths stay comparable on one key (VISION.md, "Versions applied as well as each
  * store can", point 6).
  * <p>
  * The control row of {@code invalidateAll} ({@link Store#CONTROL_HASH}) is a document like any other here: the core
