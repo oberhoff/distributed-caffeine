@@ -166,7 +166,7 @@ final class SimulatedEnvironment implements InternalEnvironment {
         @Override
         public int compareTo(Delayed other) {
             Task that = (Task) other;
-            return at != that.at ? Long.compare(at, that.at) : Long.compare(order, that.order);
+            return at == that.at ? Long.compare(order, that.order) : Long.compare(at, that.at);
         }
 
         @Override
