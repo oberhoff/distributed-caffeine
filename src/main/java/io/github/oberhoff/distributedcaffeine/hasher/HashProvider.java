@@ -19,8 +19,9 @@ import java.util.UUID;
 import java.util.function.Supplier;
 
 /**
- * Computes the hash of a key, for key types that are neither {@link String}, {@link Long}, {@link Integer} or
- * {@link UUID} nor implement {@link Hashable}. Keys that are equal must have the same hash.
+ * Computes the hash of a key, for key types that are neither built in ({@link String}, {@link Long},
+ * {@link Integer}, {@link UUID} and {@link Enum enums}, see {@link Hasher#putBuiltIn}) nor implement
+ * {@link Hashable}. Keys that are equal must have the same hash.
  *
  * @param <K> the key type of the cache
  * @author Andreas Oberhoff

@@ -147,6 +147,72 @@ later work").
 
 ### Robustness
 
+*Next:*
+- **A stable hash format, specified once for good** (decided 2026-11-19, for 0.10.0, a breaking change; see
+  "Key identity: hashes"). Stored hashes must stay unchanged for years, so this break specifies every input of a
+  stored hash: the bytes that go into XXH3, not the code that produces them. XXH3 hashes the same bytes alike streamed
+  or in one shot, so any later implementation (one-shot, a lighter `Hasher`, a pool) changes no stored hash; a built-in
+  type added later was refused before, so it changes none either. Only another algorithm would break again, and
+  XXH3-128 is frozen.
+  - **Why:** today the built-in types are encoded with hash4j's stream conventions and no type marker, so values of
+    different types collide: `""` and `Integer` `0` hash alike (both the four zero bytes: a string is its chars, then
+    its length as an `int`), as do a 2-char `String` and some `Long`s from 2^33 up, or a 6-char `String` and some
+    `UUID`s; and a `Hashable` hashing `putString(id)` equals the built-in `String` key `id`. Two colliding keys in one
+    cache share a row: one gets the other's value, and a key from untrusted input could aim at another key's row.
+    It needs keys of several kinds in one cache, rare in typed caches, common under Spring (one cache for
+    `findById(Long)` and `findByName(String)`, `SimpleKey` params). Since 0.7.x. And those conventions are hash4j's,
+    with no stability promise (its README makes none) and no outside reference.
+  - **The specification** (to be written into `Hasher`'s Javadoc as the stored format, and kept here), one rule:
+    **every value's hash is XXH3-128, seeded by its kind, over its bytes;** a plain value's bytes are its natural
+    bytes, a composite's bytes are its elements' 16-byte hashes in order. One shot, the length is part of the input,
+    so no length or count is added; the seed separates the kinds, so bytes alike in two kinds never hash alike.
+    1. **Form:** the stored hash is the 32 lowercase hex characters of the 16 bytes, as `Hasher.getHash()` gives them
+       today. Hashes beginning with `#` stay reserved for the library's own rows.
+    2. **Kinds and their bytes** (each a fixed seed, listed in the Javadoc):
+       - `String`: its chars, UTF-16LE;
+       - `Long`, `Integer`: its 8 or 4 bytes, little-endian (the order the usual CPUs and XXH3's own reading use, so
+         nothing is swapped); `UUID`: its least significant `long`, then its most significant, each little-endian;
+       - enum constant: the name of its declaring class (a constant with a body of its own is an anonymous subclass),
+         the char U+0000 (which no class name contains), the constant's name, as chars;
+       - `null` (an element only): no bytes;
+       - custom hash (an element only: the string a `Hashable` or hash provider returns): its chars;
+       - `SimpleKey` (Spring), a composite: its params' 16-byte hashes in order, each param hashed by its kind. The
+         integration is not released yet, so this is its first format, not a change.
+    3. **`Hasher.putBuiltIn(part, hasher)`:** puts the part's 16-byte hash into the hasher, the same idea for a
+       provider combining built-in parts.
+    4. **Custom hashes of whole keys:** the string a `Hashable` or hash provider returns, as today. `Hasher`'s `put…`
+       methods keep hash4j's current encoding, pinned by golden values; should hash4j ever change one, methods of our
+       own reproducing the pinned bytes replace it in a normal release (no stored hash changes).
+  - **What hash4j provides:** XXH3, whose output is fixed by its specification (frozen since xxHash 0.8.0, seeded
+    variant included) and cross-checked by hash4j against the reference implementation, and the stream behind
+    `Hasher`'s `put…` methods. hash4j stays: pure Java, no `sun.misc.Unsafe` (byte-array `VarHandle`s), maintained;
+    Zero-Allocation-Hashing builds on `Unsafe`, Guava and Commons Codec lack XXH3-128. XXH3-128 stays the algorithm:
+    the fastest measured, as stable as Murmur3-128 (36.6 / 6.3 ns against 34.8 / 4.7 ns one-shot over an encoded
+    `String` / `Long`); SHA-256 took 92 / 47 ns and about 300 bytes, worth it only against deliberately crafted
+    collisions, which is not the goal.
+  - **Known answers in the build:** the official xxHash XXH3-128 sanity vectors (seeded and unseeded, every length
+    class: 0, 1–3, 4–8, 9–16, 17–128, 129–240 and longer, with the boundaries), an independent oracle for hash4j's
+    XXH3; golden values for every part of the specification (each kind and edge case: empty, BMP and surrogate chars,
+    long strings, extreme numbers, an enum constant with a body of its own, `SimpleKey`s with every element kind) and
+    for `Hasher`'s common `put…` methods. A change of stored hashes, ours or a hash4j upgrade's, fails the build.
+  - **A known-answer check at runtime:** an application's build may resolve another hash4j version than ours (Maven
+    takes the nearest declaration, Gradle the highest). The first cache build of a JVM hashes a few dozen known
+    answers (every length class and kind, a `put…` chain) and refuses to start on a mismatch, naming the hash4j
+    version this release accepts. Microseconds, once; the README's Requirements say so.
+  - **Migration by the schema marker:** a different hash format is a different layout, since rows are identified by
+    their hashes. Marker 2 on every store (MariaDB and MySQL get one, a table comment; their layout is checked by its
+    columns today): new instances refuse a schema-1 place, naming the remedies; `withSchemaReset()` may drop a
+    schema-1 place. Old and new instances never share a place, so no one serves a value the other changed (a silent
+    hash change would). Rows are not re-hashed in place: the stored key is for diagnostics, not read back, and a cache
+    may be emptied. The release notes: one cold start per cache (also for custom hashes, whose values do not change,
+    since the marker resets the whole place), a provider using `putBuiltIn` gets other hashes, the steps per store.
+  - **Built with it, as the specification's first implementation:** built-in values hashed one-shot (no stream, so no
+    thread-local, no `Thread.isVirtual()` check and no pool; virtual threads hash as fast as platform threads),
+    measured (`HashStreamBenchmarkTest`, JDK 25, a loaded laptop, 1 / 4 threads): a 19-char `String` 15.9 / 16.3 ns
+    against 23.0 / 21.5 ns with today's stream per thread, a `Long` 4.6 / 4.9 against 7.3 / 7.2 ns, a 100-char
+    `String` 66.2 / 70.1 against 62.0 / 62.1 ns (hash4j reads chars four at a time through `charAt`); today's way on a
+    virtual thread, a fresh stream, takes 31–42 ns and 416 bytes.
+
 *In a later release:*
 - **remove the cleanup of 0.7.x documents** on MongoDB (`MongoSchema#removeOldGeneration`, its test in
   `MongoAdapterTest` and the step in `MigrationExperimentTest`, the sentence in the MongoDB README; see "Schema
@@ -275,6 +341,16 @@ After the Linux baseline (see "Performance: the baseline"), each only if measure
   coalescing). It replaces the Docker Desktop numbers every item below was judged on.
 
 *Measure first:*
+- **Custom hashes without a fresh stream per hasher** (noted 2026-11-19, no stored hash changes, see "A stable hash
+  format, specified once for good"): the core hands user code `Hasher::new`, a fresh hash4j stream each (about 416 bytes; a `Hashable` putting
+  a 19-char id and a `long` took 37.6 / 40.1 ns and 520 bytes at 1 / 4 threads, hex formatting included). A stream
+  reused, the best a pool could do, took 19.4 / 20.5 ns and 32 bytes, 59.5 / 61.6 ns for a 100-char id; but a pool
+  needs a lifetime rule for user code (a hasher valid only during the call, unenforceable) and brings back the
+  question of threads (a free list per thread, or shared atomics). A lighter `Hasher`, its bytes in a small array
+  hashed one-shot (bit-identical, tested), took 19.5 / 23.6 ns and 112 bytes for the short id, but 88.4 / 93.9 ns and
+  744 bytes for the long one (it grows by copying, chars one at a time; to try: size from the first value, chars in
+  bulk). The same for `SimpleKey`s: built-in params hashed one-shot, the key over their hashes in a small array (a
+  two-param key takes three hashers today, about 1.2 KB). Decided on the Linux baseline.
 - MongoDB batches, two options (recorded 2026-10-31, for later; performance, so after the robustness work). A
   `putAll` is one unordered bulk write of `updateOne` upserts at the proposed versions, one round trip (step 5:
   45.9 ms for 100 keys with 16 concurrent single writes before, about 19 ms now, of which the constant ~16 ms
@@ -687,8 +763,19 @@ every instance:
 - XXH3-128 via hash4j, rendered as the row id together with the cache discriminator (MongoDB `_id` as `{d, h}`,
   PostgreSQL primary key `(discriminator, id)`; see "Adapter setup"), held compactly in `InternalKey` (see "How a
   message finds the held key").
-- Out of the box for `String`, `Long`, `Integer` and `UUID`; other keys implement `Hashable` or the cache is given a
-  `HashProvider`.
+- Out of the box for `String`, `Long`, `Integer`, `UUID` and enum constants; other keys implement `Hashable` or the
+  cache is given a `HashProvider`. The built-in types are listed once, in the public `Hasher.putBuiltIn(key, sink)`:
+  the core puts a key into its reused stream with it, and any hash provider can use it for a key's parts (the Spring
+  integration's `SimpleKeyHashProvider` does), so a type added there reaches all of them.
+- The built-in types' encoding (hash4j's stream conventions, no type marker) lets values of different types collide
+  (`""` and `0`); a format specified for good, XXH3-128 seeded per kind, replaces it once, in 0.10.0 (see "Open work",
+  "A stable hash format, specified once for good").
+- Enum constants (added 2026-11-19, so no stored hash changed): the name of the enum class (its declaring class, since
+  a constant with a body of its own is an anonymous subclass named by its position), then the constant's name. Not
+  the ordinal, which reordering the constants would shift; the class's name keeps `Status.ACTIVE` and `Role.ACTIVE`
+  apart. Renaming or moving the enum or a constant changes the hash, as renaming a key class's fields would; the
+  README says so. Other value types (dates and the like) stay the application's, by `Hashable` or a hash provider:
+  each has several plausible encodings, and every built-in type is a stored format to keep.
 - Messages identify keys by hash (all kinds except `INVALIDATED_ALL`), which also keeps PostgreSQL notification
   payloads small.
 - Collisions are treated as impossible (128 bits); this is stated in the docs rather than handled.
@@ -1154,9 +1241,24 @@ messages find, including during evictions, expirations and loads in flight.
 - **Identity is conceptually the hash string; `InternalKey` holds it compactly**
   (decided after the benchmark below):
   - A hash of 32 hex characters (built-in key types, and custom ones using the `Hasher`) is held as 128 bits (two
-    `long`s). Built-in key types (`String`, `Long`, `Integer`, `UUID`) go through the same `Hasher` path but read the
-    bits directly (package-private), so no string is created on the hit path; the result is bit-for-bit the hash
-    `getHash()` would give. Custom keys return their string as today and the core reads it into two `long`s
+    `long`s). Built-in key types (`String`, `Long`, `Integer`, `UUID`, enums) go through the same `Hasher` path but
+    read the bits directly (`Hasher.hashBuiltIn`), so no string is created on the hit path; the result is bit-for-bit the
+    hash `getHash()` would give. All of it lives in `Hasher`: the algorithm, the one list of built-in types
+    (`putBuiltIn(key, hasher)`, public, for hash providers) and the core's path (`hashBuiltIn(key)`, public, returning
+    hash4j's `HashValue128`), so `InternalHasher` holds no stream and no algorithm of its own (decided 2026-11-19).
+    `hashBuiltIn` reuses one stream per platform thread and takes a fresh one on a virtual thread (`Thread.isVirtual()`,
+    from Java 21, through a method handle looked up once; absent on 17, where every thread is a platform thread).
+    Measured 2026-11-19 (`HashStreamBenchmarkTest`, JDK 25, a loaded laptop: numbers to repeat on the Linux baseline):
+    - per platform thread: 20 ns per `String` key, 7 ns per `Long` key, 32 bytes (the result), at 1 and 4 threads;
+      the `isVirtual()` check costs nothing measurable;
+    - a fresh stream: 33–42 ns and 416 bytes (a 264-byte buffer inside), what a virtual thread pays per key;
+    - a stream per thread on virtual threads too (as built first): never reused, so a stream per request kept for the
+      thread's life, about 416 bytes per live virtual thread, which JEP 444 advises against;
+    - a pool of streams striped by thread id: 10 to 18 times slower under 4 threads unpadded (slots sharing cache
+      lines), padded close for `Long` but twice the time for `String`; every key writes shared memory;
+    - one-shot hashing (`hashCharsTo128Bits` over a view of the stream's encoding, bit-identical): 7 ns for `Long`,
+      but 65 ns for `String`, read char by char; the cheap path for fixed-size keys, should their speed matter.
+    Custom keys return their string as today and the core reads it into two `long`s
     without allocating (`HexFormat.fromHexDigitsToLong` per half).
   - Any other string a custom `Hashable` / `HashProvider` returns (e.g. `"order-42"`) is kept and compared as the
     string, exactly as today; that cost stays with those keys.

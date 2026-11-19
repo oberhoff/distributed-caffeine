@@ -15,9 +15,9 @@
  */
 
 /**
- * Hashing of keys, by which the store finds them. {@link String}, {@link Long}, {@link Integer} and
- * {@link java.util.UUID} keys are hashed built in; other keys implement {@link Hashable}, or the cache gets a
- * {@link HashProvider}. Both compute the hash with a {@link Hasher}.
+ * Hashing of keys, by which the store finds them. {@link String}, {@link Long}, {@link Integer}, {@link UUID} and
+ * {@link Enum enum} keys are hashed built in ({@link Hasher#putBuiltIn}); other keys implement {@link Hashable}, or
+ * the cache gets a {@link HashProvider}. Both compute the hash with a {@link Hasher}.
  *
  * @author Andreas Oberhoff
  * @see <a href="https://github.com/oberhoff/distributed-caffeine">Distributed Caffeine on GitHub</a>
@@ -26,3 +26,5 @@
 package io.github.oberhoff.distributedcaffeine.hasher;
 
 import org.jspecify.annotations.NullMarked;
+
+import java.util.UUID;

@@ -19,8 +19,9 @@ import java.util.UUID;
 import java.util.function.Supplier;
 
 /**
- * A key that computes its own hash; needed for key types other than {@link String}, {@link Long}, {@link Integer} and
- * {@link UUID}, unless a {@link HashProvider} is set. Keys that are equal must have the same hash.
+ * A key that computes its own hash; needed for key types other than the built-in ones ({@link String}, {@link Long},
+ * {@link Integer}, {@link UUID} and {@link Enum enums}, see {@link Hasher#putBuiltIn}), unless a {@link HashProvider}
+ * is set. Keys that are equal must have the same hash.
  *
  * @author Andreas Oberhoff
  */

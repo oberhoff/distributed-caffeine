@@ -43,9 +43,25 @@ class InternalKeyTest {
 
     private final InternalHasher<Object> hasher = new InternalHasher<>(null);
 
+    enum Status {
+        ACTIVE,
+        // a constant with a body of its own: an anonymous subclass, hashed by its declaring class all the same
+        CLOSED {
+            @Override
+            public String toString() {
+                return "closed";
+            }
+        }
+    }
+
+    enum Role {
+        ACTIVE
+    }
+
     static List<Object> builtInKeys() {
         return List.of("", "user:000123:profile", "ü€𝄞", 0L, Long.MIN_VALUE, 42L, 0, -7, Integer.MAX_VALUE,
-                new UUID(0, 0), UUID.fromString("123e4567-e89b-12d3-a456-426614174000"));
+                new UUID(0, 0), UUID.fromString("123e4567-e89b-12d3-a456-426614174000"), Status.ACTIVE, Status.CLOSED,
+                Role.ACTIVE);
     }
 
     private static String hashOf(Object key) {
@@ -56,6 +72,8 @@ class InternalKeyTest {
             hasher.putLong(value);
         } else if (key instanceof Integer value) {
             hasher.putInt(value);
+        } else if (key instanceof Enum<?> constant) {
+            hasher.putString(constant.getDeclaringClass().getName()).putString(constant.name());
         } else {
             hasher.putUUID((UUID) key);
         }
@@ -78,6 +96,17 @@ class InternalKeyTest {
     void equal_keys_are_equal_and_different_keys_are_not() {
         assertThat(hasher.wrap("a")).isEqualTo(hasher.wrap("a")).isNotEqualTo(hasher.wrap("b"));
         assertThat(hasher.wrap(1L)).isNotEqualTo(hasher.wrap(1));
+        assertThat(hasher.wrap(Status.ACTIVE)).isEqualTo(hasher.wrap(Status.ACTIVE))
+                .isNotEqualTo(hasher.wrap(Role.ACTIVE)).isNotEqualTo(hasher.wrap("ACTIVE"));
+    }
+
+    @Test
+    void the_hash_of_an_enum_constant_stays_the_same_across_releases() {
+        // pins the format, part of the stored hashes: the enum class's name, then the constant's
+        String expected = new Hasher().putString("io.github.oberhoff.distributedcaffeine.InternalKeyTest$Status")
+                .putString("CLOSED").getHash();
+
+        assertThat(hasher.wrap(Status.CLOSED).hash()).isEqualTo(expected);
     }
 
     @Test

@@ -20,11 +20,15 @@ import com.dynatrace.hash4j.hashing.HashFunnel;
 import com.dynatrace.hash4j.hashing.HashSink;
 import com.dynatrace.hash4j.hashing.HashStream128;
 import com.dynatrace.hash4j.hashing.HashStream64;
+import com.dynatrace.hash4j.hashing.HashValue128;
 import com.dynatrace.hash4j.hashing.Hasher128;
 import com.dynatrace.hash4j.hashing.Hasher64;
 import com.dynatrace.hash4j.hashing.Hashing;
 import org.jspecify.annotations.Nullable;
 
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.util.HexFormat;
 import java.util.Optional;
 import java.util.OptionalDouble;
@@ -32,6 +36,8 @@ import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.function.ToLongFunction;
+
+import static java.util.Objects.requireNonNull;
 
 /**
  * Computes a key's hash from its parts: put each value that {@code equals} compares, then call {@link #getHash()}. The
@@ -43,7 +49,17 @@ import java.util.function.ToLongFunction;
  */
 public final class Hasher implements HashSink {
 
+    // the algorithm of every stored hash
     private static final Hasher128 hasher128 = Hashing.xxh3_128();
+
+    // the cache's own hashing of built-in keys (hashBuiltIn) reuses one stream per platform thread, reset before each
+    // key: a fresh stream costs 416 bytes and up to 3.5 times the time (HashStreamBenchmarkTest). A virtual thread is
+    // never reused, so there a stream per thread would be kept for nothing: it takes a fresh one, as JEP 444 advises.
+    // Safe to reuse since hashing a built-in key calls no code of the application's
+    @SuppressWarnings("java:S5164") // platform threads only, which are pooled and live as long as the application
+    private static final ThreadLocal<HashStream128> STREAM = ThreadLocal.withInitial(hasher128::hashStream);
+    // Thread.isVirtual(), from Java 21 on; absent before, where every thread is a platform thread
+    private static final @Nullable MethodHandle IS_VIRTUAL = isVirtual();
 
     private final HashStream128 hashStream128;
     // tracks whether any value was put; used to reject "nothing to hash" without relying on the
@@ -392,6 +408,77 @@ public final class Hasher implements HashSink {
         hashStream128.putOptionalDouble(v);
         hasData = true;
         return this;
+    }
+
+    /**
+     * Puts a key of a built-in type into the hasher, as the cache hashes such a key: a {@code String}
+     * ({@link #putString(String)}), a {@code Long} ({@link #putLong(long)}), an {@code Integer}
+     * ({@link #putInt(int)}), a {@code UUID} ({@link #putUUID(UUID)}) or an enum constant (the name of its enum
+     * class, then its own name, each by {@link #putString(String)}). A hash provider can use it for the keys, or the
+     * parts of keys, of these types: {@code Hasher.putBuiltIn(part, hasher)}.
+     * <p>
+     * An enum constant's hash changes when its enum class or the constant is renamed or moved, as does the hash of a
+     * renamed key class's fields; reordering the constants changes nothing.
+     *
+     * @param key    the key
+     * @param hasher the hasher to put it into
+     * @return whether the key is of a built-in type, and so was put
+     */
+    public static boolean putBuiltIn(Object key, Hasher hasher) {
+        return putBuiltInTo(key, requireNonNull(hasher, "hasher cannot be null"));
+    }
+
+    /**
+     * Returns the hash of a key of a built-in type (see {@link #putBuiltIn(Object, Hasher)}) as the cache computes
+     * it: the 128 bits that {@link #getHash()} formats, without creating a string. Mainly what the cache itself uses.
+     *
+     * @param key the key
+     * @return the hash, or {@code null} if the key is of no built-in type
+     */
+    public static @Nullable HashValue128 hashBuiltIn(Object key) {
+        HashStream128 stream = isVirtualThread() ? hasher128.hashStream() : STREAM.get().reset();
+        return putBuiltInTo(key, stream) ? stream.get() : null;
+    }
+
+    // the one list of built-in types
+    private static boolean putBuiltInTo(Object key, HashSink sink) {
+        if (key instanceof String string) {
+            sink.putString(string);
+        } else if (key instanceof Long longValue) {
+            sink.putLong(longValue);
+        } else if (key instanceof Integer integerValue) {
+            sink.putInt(integerValue);
+        } else if (key instanceof UUID uuid) {
+            sink.putUUID(uuid);
+        } else if (key instanceof Enum<?> constant) {
+            // the declaring class: a constant with a body of its own is an anonymous subclass, named by its position
+            sink.putString(constant.getDeclaringClass().getName()).putString(constant.name());
+        } else {
+            return false;
+        }
+        return true;
+    }
+
+    private static @Nullable MethodHandle isVirtual() {
+        try {
+            return MethodHandles.publicLookup()
+                    .findVirtual(Thread.class, "isVirtual", MethodType.methodType(boolean.class));
+        } catch (NoSuchMethodException | IllegalAccessException e) {
+            return null;
+        }
+    }
+
+    // the handle is a constant, so the JIT reduces the check to the thread's flag
+    @SuppressWarnings("java:S1181") // invokeExact declares Throwable; isVirtual throws nothing
+    private static boolean isVirtualThread() {
+        if (IS_VIRTUAL == null) {
+            return false;
+        }
+        try {
+            return (boolean) IS_VIRTUAL.invokeExact(Thread.currentThread());
+        } catch (Throwable e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     /**

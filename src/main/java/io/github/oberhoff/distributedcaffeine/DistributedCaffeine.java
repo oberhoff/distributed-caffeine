@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine;
 import com.github.benmanes.caffeine.cache.AsyncCacheLoader;
 import com.github.benmanes.caffeine.cache.CacheLoader;
 import io.github.oberhoff.distributedcaffeine.hasher.HashProvider;
+import io.github.oberhoff.distributedcaffeine.hasher.Hasher;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeFeed;
 import io.github.oberhoff.distributedcaffeine.spi.ChangeScan;
@@ -143,8 +144,9 @@ public final class DistributedCaffeine<K, V> {
     }
 
     /**
-     * Sets how keys are hashed, for key types other than {@code String}, {@code Long}, {@code Integer} and {@code UUID}
-     * that do not implement {@code Hashable}. Keys that are equal must have the same hash.
+     * Sets how keys are hashed, for key types other than the built-in ones ({@code String}, {@code Long},
+     * {@code Integer}, {@code UUID} and enums, see {@link Hasher#putBuiltIn}) that do not implement {@code Hashable}.
+     * Keys that are equal must have the same hash.
      *
      * @param hashProvider the hash provider
      * @return this builder

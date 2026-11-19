@@ -247,8 +247,11 @@ Note: No mode creates a copy on an instance that doesn't hold the key yet; `UPDA
 
 #### Hashing (for keys)
 
-Keys are identified across instances by a hash. Keys of type `String`, `Long`, `Integer` or `UUID` are hashed out of the
-box; other keys need one of the two ways below, or their first use fails with an `IllegalStateException`.
+Keys are identified across instances by a hash. Keys of type `String`, `Long`, `Integer` or `UUID`, and enum constants,
+are hashed out of the box; other keys need one of the two ways below, or their first use fails with an
+`IllegalStateException`. An enum constant is hashed by the names of its enum class and of itself, so renaming or moving
+either changes its hash (reordering the constants does not); during a rolling update, instances on both sides of such a
+change do not share that key.
 
 If the key class cannot or should not be changed, a hash provider can be configured. The supplied hasher computes the
 hash from the values of the key.
@@ -281,7 +284,8 @@ public class Key implements Hashable {
 
 Note: Hashing must be equivalent to key equality (`equals()`-semantics) and stable across instances, so all values
 relevant for key equality (and only those) should be put into the hasher. A hash provider takes precedence over
-`Hashable`.
+`Hashable` and the built-in types; `Hasher.putBuiltIn(value, hasher)` puts a value of a built-in type as the cache
+would, for example a key's part.
 
 #### Serialization
 
