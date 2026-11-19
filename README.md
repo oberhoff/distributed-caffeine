@@ -166,8 +166,9 @@ Caffeine's except where it has to reach the store:
 * Eviction by weak and soft references is not supported.
 
 Where a method behaves differently, its Javadoc says so. For everything else, the official
-[Caffeine documentation](https://github.com/ben-manes/caffeine/wiki) applies, including how frameworks integrate a
-Caffeine cache.
+[Caffeine documentation](https://github.com/ben-manes/caffeine/wiki) applies. A framework that is handed a cache works
+with a distributed one as it is; one that creates its caches itself, through its own configuration or API, needs an
+integration instead (see [Integrations](#integrations)).
 
 ### Configuration
 
@@ -367,6 +368,15 @@ instance's store, synchronization and maintenance activity. Caffeine's stats cou
 and a load, so their `hitRate()` is the rate of local hits and their load counts and times include the store reads; the
 distributed stats count these values as `storeHitCount`, and the calls to the source alone as `sourceLoadCount`.
 
+### Integrations
+
+An integration makes a framework build its caches as distributed ones, so that code using the framework's caching
+stays as it is. The framework is an optional dependency, like the drivers (see [Requirements](#requirements)):
+
+| Framework | Integration                       | Details                                                                                                 |
+|-----------|-----------------------------------|---------------------------------------------------------------------------------------------------------|
+| Spring    | `DistributedCaffeineCacheManager` | [Spring integration](src/main/java/io/github/oberhoff/distributedcaffeine/integration/spring/README.md) |
+
 ### Settings by goal
 
 Which setting serves which goal; the rest can stay at their defaults:
@@ -544,6 +554,8 @@ distribution, on every instance, and the next read loads a fresh one.
       or newer).
 * Only if `JacksonSerializer` is used: `tools.jackson.core:jackson-databind` (3 or newer) on the classpath, an optional
   dependency like the drivers.
+* Only if `DistributedCaffeineCacheManager` is used: `org.springframework:spring-context-support` (6.2 or newer), an
+  optional dependency like the drivers.
 
 ## Installation
 

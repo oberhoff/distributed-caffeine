@@ -500,12 +500,12 @@ After the Linux baseline (see "Performance: the baseline"), each only if measure
 ### Features
 
 *In a later release:*
-- **the Spring integration** (decided 2026-11-18, see "Integrations"; after the 0.9.0 release):
-  `DistributedCaffeineCacheManager` in `...integration.spring`, so that a Spring application swaps
-  `CaffeineCacheManager` for it and keeps its annotations. In this order: a test settling how Spring's `NullValue` and
-  `SimpleKey` fare over a `DistributedCache`; the configurer's spec parsing (`caffeine.spec(...)`); a hasher for
-  `SimpleKey` and the manager; `ArchitectureTest` extended to the integration packages; a Spring context test on the
-  in-memory store; a README section; Error Prone, the Sonar check and the IDE check.
+- **the Spring integration, its rest** (built 2026-11-19, see "Integrations"): a nightly job on the oldest supported
+  Spring version (6.2).
+- **Spring specs on the manager** (deferred 2026-11-19 from the Spring integration): `setCaffeineSpec` and
+  `setCacheSpecification` (Spring Boot's `spring.cache.caffeine.spec`) applied through spec parsing in the
+  configurer. Open: how spec parsing fits into `CaffeineConfigurer`. Until then the manager refuses both, as it does
+  `setCaffeine`, rather than ignore them.
 
 *On demand:*
 - **a JCache (JSR-107) provider**, first in line of the further integrations (see "Integrations", "Which framework
@@ -5033,50 +5033,102 @@ there, not only for Caffeine's API.
 - **Layout:** `...integration.<framework>` (`spring` first, after the 0.9.0 release; `jcache` next, on demand, see "Open
   work"), in the one artifact, like the adapters. The exception is a framework whose integration has a form of its own,
   as a Quarkus extension does (below): an artifact of its own, depending on this one.
-- **Its framework is an `optional` dependency**, as the drivers are: users without it get none of its classes, and
-  an integration missing its framework fails on construction with a message naming the artifact (without a
-  version, as for the drivers).
+- **Its framework is an `optional` dependency**, as the drivers are: users without it get none of its classes. An
+  integration whose entry point is a framework subclass (Spring's manager) cannot check for its framework itself,
+  since the class fails to load without it; an integration that can check fails on construction with a message
+  naming the artifact (without a version, as for the drivers).
 - **Public API only:** an integration uses `DistributedCaffeine`, the `Distributed*` interfaces, hashers and
   serializers, never an `Internal*` class or the SPI. It stays thin, and could move to an artifact of its own
-  without a change in the core. `ArchitectureTest` is extended to enforce it, as it does the adapters' boundary.
+  without a change in the core. `ArchitectureTest` is extended to enforce it, as it does the adapters' boundary. One
+  exception, by reflection: the Spring manager reads and replaces the builder's hash provider (see "Spring" below).
 - **A framework's quirks stay in its package:** the core knows no framework type. What a framework needs of the cache
   (Spring's `SimpleKey` as a key, its `NullValue` as a value) is handled in its integration.
 - **No mechanism of its own:** an integration adds no guarantee and no store access; it builds caches, registers
   them, and closes them.
 
-**Spring: `DistributedCaffeineCacheManager`.** A subclass of Spring's `CaffeineCacheManager`, which builds each cache
-in protected methods made for this (checked on Spring 6.2's source: `createNativeCaffeineCache(String name)`,
+**Spring: `DistributedCaffeineCacheManager`.**
+
+*Built 2026-11-19; specs deferred (see "Open work"). Tested on Spring 7.0 and 6.2, the oldest supported.*
+
+A subclass of Spring's `CaffeineCacheManager`, which builds each cache
+in protected methods made for this (checked on Spring 6.2's and 7.0's source: `createNativeCaffeineCache(String name)`,
 `createAsyncCaffeineCache(String name)` since 6.1, and `adaptCaffeineCache` to wrap it). The manager overrides the
-two creating methods and takes a function from a cache's name to a `DistributedCaffeine` builder; the name usually
-becomes the adapter's discriminator, so each cache gets its own adapter (see "Adapter ownership") while all share one
-collection or table.
+two creating methods and takes a function from a cache's name to a `DistributedCaffeine` builder, a new one with a new
+adapter on every call (see "Adapter ownership"). The name usually becomes the cache's collection, table or keyspace
+(decided 2026-11-19): Spring's caches are separate regions, as Spring Data Redis's `name::` prefix has them, each can
+be inspected and dropped in the store on its own, and the discriminator stays free to keep applications sharing a
+database apart. It costs no feed: listening is shared per database (see "Connection sharing"), and a polled cache
+polls on its own either way. The cost is the store's naming rules (MariaDB and MySQL tables: letters, digits and `_`),
+documented in the Spring integration's README; the name as discriminator in one shared table had the same rules on
+Redis and none of the other gains.
 - **Kept from Spring:** caches created by name on first use (or fixed by `setCacheNames`), `setAllowNullValues`,
   `setAsyncCacheMode` (a `DistributedAsyncCache` then, for `CompletableFuture` and reactive return types),
-  `registerCustomCache`, and a loader set with `setCacheLoader` (the distributed cache built with it).
+  `registerCustomCache`, and a loader set with `setCacheLoader` or `setAsyncCacheLoader` (the distributed cache built
+  with it). Spring keeps the loader in a private field, so the manager overrides both setters to remember it.
 - **Closing:** the manager closes every cache it built at shutdown (`DisposableBean`), which `CaffeineCacheManager`
-  does not need and does not do. Spring also drops caches without closing them: `removeCache`, and every setter
-  that rebuilds the caches it created (`setAllowNullValues`, `setAsyncCacheMode`, `setCacheLoader`; checked on 6.2,
-  `refreshCommonCaches`). The manager closes a cache it built once Spring has let go of it, else its connections
-  and feed subscription would leak.
-- **Specs applied, the builder refused:** `setCaffeineSpec` and `setCacheSpecification` apply to every cache the
-  manager builds, through the configurer's spec parsing (see "The builder"), after the function's own settings, so
-  that Spring Boot's `spring.cache.caffeine.spec` works unchanged; a setting made in both fails as a setting made
-  twice in Caffeine. `setCaffeine` throws: a builder handed over cannot be read without reflection (the reason the
-  library takes a configurer, not a builder), so it would be ignored silently otherwise; its message points to the
-  function's builder (`withCaffeine`) or a spec.
+  does not need and does not do. Spring also drops caches without closing them: `removeCache`, `resetCaches` (the
+  caches created on demand), `registerCustomCache` under a name it built, and every setter that rebuilds the caches
+  it created (`setAllowNullValues`, `setAsyncCacheMode`, `setCacheLoader`; checked on 6.2, `refreshCommonCaches`).
+  The manager closes a cache it built once Spring has let go of it, else its connections and feed subscription would
+  leak: it keeps the caches it built by name (Spring's map is private), closes the previous one when it builds a
+  name again, and after `removeCache`, `resetCaches` and `registerCustomCache` those Spring no longer holds.
+- **The builder and specs refused:** `setCaffeine` throws: a builder handed over cannot be read without reflection
+  (the reason the library takes a configurer, not a builder), so it would be ignored silently otherwise; its message
+  points to the function's builder (`withCaffeine`). `setCaffeineSpec` and `setCacheSpecification` throw as well
+  until specs are applied (see "Open work": through the configurer's spec parsing, after the function's own
+  settings, so that Spring Boot's `spring.cache.caffeine.spec` works unchanged).
 - **Keys:** Spring's default key generator passes a single argument as it is and wraps several, or none, in a
-  `SimpleKey`, which no built-in hasher takes (a key without a hasher fails on first use). The integration brings a
-  hasher for `SimpleKey` that hashes its parts with the built-in hashing and refuses a part it cannot hash, naming
-  it; the manager sets it as the default. Its output is part of the stored hashes, so it stays stable across JVMs
-  and releases, like every hasher.
+  `SimpleKey`, which no built-in hasher takes (a key without a hasher fails on first use, checked by `SpringTypesTest`;
+  once hashed, a `SimpleKey` crosses the store, its serialized form included, though Fory logs a warning once per JVM
+  that `SimpleKey` uses custom JDK serialization). The key serializer stays Fory (decided 2026-11-19): the warning is
+  harmless and documented; rejected, a text serializer writing `toString()` (quiet and readable, but `toString()` is no
+  defined, faithful form of a key) and a Fory serializer of the integration's own for `SimpleKey` (code for a log line).
+  The manager sets `SimpleKeyHashProvider` on every builder, which hashes a key, and each part of a `SimpleKey`, in this
+  order: a `Hashable` by its own hash (a `SimpleKey` subclass of a key generator of the application's included); a
+  built-in type (`String`, `Long`, `Integer`, `UUID`, an enum) as the core hashes it, through `Hasher.putBuiltIn`, the
+  core's own list of them; a `SimpleKey` by the number of its parts and each part's hash (`null` as an empty string,
+  never a hash); anything else by its fallback, if constructed with one, or refused naming the type and the fixes
+  (`Hashable`, an explicit `@Cacheable(key = ...)`, a hash provider on the builder). So the provider changes no hash the
+  core computes itself, and needs no encoding of its own: a part's hash is the one it has as a key alone, so `1`, `1L`
+  and `"1"` differ as the core's hashes do. Its output is part of the stored hashes, pinned by a test, so it stays
+  stable across JVMs and releases.
+  - `SimpleKey` offers no access to its parts: they are read by reflection, a `VarHandle` on its private `params` looked
+    up once, `static final` so that the JIT treats it as a constant on the hit path (Spring on the classpath, or as an
+    automatic module, is open to it); a renamed field fails on first use, and the tests pin it. Rejected:
+    `SimpleKey.hashCode()` (32 bits, so colliding keys would share a row, and built from the parts' `hashCode()`, which
+    is per JVM for enums and identity-hashed classes); `toString()` (types lost, `"a, b"` and `"a", "b"` alike); hashing
+    Java-serialized bytes (not canonical, every part `Serializable`); a key generator of the library's own (one more
+    setup step); reading the parts by a serialization round trip (a full serialization on every access); encodings of
+    further part types in the integration (each a stored format to keep forever; enums are built in, in the core, and
+    dates and the like are the application's, by `Hashable` or a fallback); reading `InternalHasher` by reflection for
+    the built-in types (a package-private class, a method and an internal key type, against `Hasher.putBuiltIn`, public
+    and shared).
+  - Hashing is configured where users know it, on the builder, and only for what the integration cannot hash (decided
+    2026-11-19): a key of a supported type, a `Hashable` or a `SimpleKey` of these needs no configuration; a hash
+    provider set on the builder becomes the fallback of the `SimpleKeyHashProvider` the manager sets, asked only for
+    keys and parts of other types. The core's builder has no getter for its hash provider and refuses a second one, so
+    the manager reads and replaces the field by reflection, a `static final` `VarHandle` looked up once (a renamed field
+    fails on the manager's first use, and the tests pin it). It is the one exception to "Public API only": the builder
+    is ours and in the same artifact, and the alternatives cost more. Rejected: public getters on the builder
+    (Caffeine's builder has none, and getters for one integration's defaults would be arbitrary among a dozen settings);
+    a hash provider passed to the manager's constructor (a second place to configure hashing); a public
+    `SimpleKeyHashProvider` the user wraps their provider in (configuration for what the manager can do itself);
+    catching the builder's refusal of a second provider (a builder's own provider then replaced the `SimpleKey`
+    hashing).
 - **`null` results:** with `allowNullValues` (Spring's default), Spring stores its `NullValue` marker for a `null`
-  result, serialized into the store like any value. To settle by a test first: whether that works with the default
-  serializer; if not, the manager defaults to `allowNullValues=false`, and the library's negative caching
-  (`withNegativeCaching`) is the distributed way to remember misses.
-- **What changes for the user, to document:** `@CacheEvict` and `allEntries = true` act on every instance (an
-  `invalidate` and an `invalidateAll` through the store); values are serialized; store failures surface as
-  exceptions (Spring's `CacheErrorHandler` can take them); a Spring version for the nightly to test against, since
-  the overridden methods are protected API, not a formal SPI.
+  result, serialized into the store like any value. Settled by `SpringTypesTest` (2026-11-19, Spring 7.0): a null
+  written by one instance reads as a cached null on another, with Fory (the default) and with Java serialization,
+  synchronous and in async mode, since both honor `NullValue`'s `readResolve` and Spring checks the marker by
+  identity. So the manager keeps Spring's default, `allowNullValues=true`; `withNegativeCaching` stays the
+  library's own way to remember misses of a loader.
+- **What changes for the user,** documented in the Spring integration's README (`integration/spring/README.md`):
+  `@CacheEvict` and `allEntries = true` act on every instance (an `invalidate` and an `invalidateAll` through the
+  store), as does `resetCaches`; values are serialized; in an outage, writes fail with `StoreException`, so a plain
+  `@Cacheable` fails on its write after a miss unless a `CacheErrorHandler` logs it, while `@Cacheable(sync = true)`
+  loads through the cache and keeps working (tested in `DistributedCaffeineCacheManagerTest`).
+- **Spring versions:** 6.2 or newer (Spring Boot 3.4 on); the build compiles and tests against the latest (7.0),
+  and 6.2 passed the Spring tests by hand (`-Dspring.version=6.2.19`), since the overridden methods are protected
+  API, not a formal SPI. A nightly job on the oldest supported version is open (see "Open work").
 
 **Rejected:** a separate `CacheManager` from scratch (it would redo what `CaffeineCacheManager` does, and differ from
 it); `SimpleCacheManager` with hand-built caches as the documented way (no caches by name, nobody closes them);
