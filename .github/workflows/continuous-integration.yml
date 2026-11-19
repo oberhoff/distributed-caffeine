@@ -9,9 +9,11 @@ on:
     branches:
       - '**'
 
-# read only: the jobs check out and report through the job's own tokens (annotations, summary, artifacts)
+# read only: the jobs check out and report through the job's own tokens (annotations, summary, artifacts); actions to
+# look up the passed markers, the markers themselves live in the Actions cache
 permissions:
   contents: read
+  actions: read
 
 # a newer push to a pull request or another branch cancels the run it outdates, so that bursts (Dependabot opens
 # several pull requests at once) do not queue outdated groups for the 20 runners; on main and develop every commit
@@ -21,8 +23,50 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/develop' }}
 
 jobs:
+  # a cache entry per tree that passed every group (passed below) marks it as tested: a run on the same content skips
+  # the groups, such as the push to develop after a pull request whose merge result it equals, a reopened or retargeted
+  # pull request, or a commit that only changes its message. The tree, not the commit, as merging and rebasing create
+  # new commits of the same content. Found through the API, as a run reads only the caches of its own branch and the
+  # default branch, and a pull request saves in its own scope. Only markers saved from this repository's branches and
+  # pull requests count: a pull request from a fork runs its own copy of this file and could save any marker
+  changes:
+    name: Check for a tested tree
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tree: ${{ steps.marker.outputs.tree }}
+      tested: ${{ steps.marker.outputs.tested }}
+    steps:
+      - name: Look up the marker
+        id: marker
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          tree=$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${SHA}" --jq .tree.sha)
+          echo "tree=${tree}" >> "$GITHUB_OUTPUT"
+          refs=$(gh api "repos/${GITHUB_REPOSITORY}/actions/caches?key=ci-passed-${tree}" \
+            --jq ".actions_caches[] | select(.key == \"ci-passed-${tree}\") | .ref")
+          tested=false
+          for ref in $refs; do
+            case "$ref" in
+              refs/heads/*)
+                tested=true ;;
+              refs/pull/*/merge)
+                number=${ref#refs/pull/}
+                head=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number%/merge}" --jq .head.repo.full_name)
+                if [ "$head" = "$GITHUB_REPOSITORY" ]; then tested=true; fi ;;
+            esac
+          done
+          echo "tested=${tested}" >> "$GITHUB_OUTPUT"
+          if [ "$tested" = true ]; then
+            echo "::notice::Tree ${tree} already passed: skipping the groups"
+          fi
+
   continuous-integration:
     name: ${{ matrix.name }}
+    needs: changes
+    if: needs.changes.outputs.tested != 'true'
     runs-on: ubuntu-latest
     # a group takes about 5-7 min: a hanging test ends here, not after GitHub's six hours
     timeout-minutes: 30
@@ -91,14 +135,33 @@ jobs:
         with:
           artifact-name: failed-tests-${{ strategy.job-index }}
 
+  passed:
+    name: Mark the tree as passed
+    needs: [ changes, continuous-integration ]
+    if: needs.continuous-integration.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Create the marker
+        run: echo "${{ needs.changes.outputs.tree }}" > ci-passed
+      - name: Save the marker
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ci-passed
+          key: ci-passed-${{ needs.changes.outputs.tree }}
+
   # one check under the name the single job had, which branch protection can require however the groups change;
-  # always(), as a job skipped after a failed group would count as passed
+  # always(), as a job skipped after a failed group would count as passed. Skipped groups pass only for a tested tree
+  # (changes above), which also keeps the release's check of this workflow (continuous-delivery.yml) meaningful
   result:
     name: Continuous Integration (CI)
-    needs: continuous-integration
+    needs: [ changes, continuous-integration ]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require every group to pass
-        run: test "${{ needs.continuous-integration.result }}" = success
+        env:
+          GROUPS_RESULT: ${{ needs.continuous-integration.result }}
+          TESTED: ${{ needs.changes.outputs.tested }}
+        run: test "$GROUPS_RESULT" = success || { test "$GROUPS_RESULT" = skipped && test "$TESTED" = true; }

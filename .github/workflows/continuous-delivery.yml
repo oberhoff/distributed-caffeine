@@ -132,7 +132,7 @@ jobs:
           git config user.email "github@oberhoff.net"
           mvn -B -q org.codehaus.mojo:versions-maven-plugin:2.24.0:set -DnewVersion="$VERSION" \
             -DgenerateBackupPoms=false
-          git commit -am "Prepare release v${VERSION}"
+          git commit -am "Release v${VERSION}"
           git tag -a "v${VERSION}" -m "Release v${VERSION}"
       - name: Deploy with Maven
         run: mvn -B clean deploy -DskipTests -DskipErrorProne
