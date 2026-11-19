@@ -23,13 +23,14 @@ import java.io.IOException;
 import java.io.ObjectInputFilter;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.io.Serializable;
 import java.util.Arrays;
 import java.util.stream.Collectors;
 
 import static java.util.Objects.requireNonNull;
 
 /**
- * Serializes to bytes with <i>Java Object Serialization</i>; the objects must implement {@link java.io.Serializable}.
+ * Serializes to bytes with <i>Java Object Serialization</i>; the objects must implement {@link Serializable}.
  *
  * @param <T> the type of the object to serialize
  * @author Andreas Oberhoff

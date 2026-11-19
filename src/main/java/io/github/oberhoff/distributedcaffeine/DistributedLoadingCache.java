@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.LoadingCache;
+import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import org.jspecify.annotations.Nullable;
 
 import java.util.Map;
@@ -25,7 +26,7 @@ import java.util.concurrent.CompletableFuture;
  * A Caffeine {@link LoadingCache} whose instances share a store. Each instance holds its own copies, reads a key from
  * the store when it holds none, and drops or updates its copies when the key changes elsewhere. Behaves as Caffeine's
  * cache, except where a method documents otherwise. A call that needs the store and cannot reach it, or a write whose
- * outcome is unknown, throws the unchecked {@link io.github.oberhoff.distributedcaffeine.spi.StoreException}.
+ * outcome is unknown, throws the unchecked {@link StoreException}.
  *
  * @param <K> the key type
  * @param <V> the value type
