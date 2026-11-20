@@ -24,6 +24,7 @@ import io.github.oberhoff.distributedcaffeine.SynchronizationState;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.testing.Ports;
+import io.github.oberhoff.distributedcaffeine.testing.TestHashes;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.api.StatefulRedisConnection;
 import org.jspecify.annotations.NullMarked;
@@ -147,7 +148,7 @@ abstract class RedisRestartTests {
                         RedisAdapter.newBuilder(LettuceRedis.of(client), name).build())
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withHashProvider((key, hasher) -> key)
+                .withHashProvider((key, hasher) -> TestHashes.of(key))
                 .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(10_000)
                         .withOperationTimeout(Duration.ofSeconds(2)).withHeartbeatInterval(Duration.ofSeconds(2)))
                 .build();

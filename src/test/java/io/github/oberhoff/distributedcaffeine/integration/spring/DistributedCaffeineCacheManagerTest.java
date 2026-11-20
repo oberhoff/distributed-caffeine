@@ -22,6 +22,10 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.CaffeineSpec;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
+import io.github.oberhoff.distributedcaffeine.hasher.Hasher;
+import io.github.oberhoff.distributedcaffeine.serializer.ForySerializer;
+import io.github.oberhoff.distributedcaffeine.spi.Row;
+import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import org.jspecify.annotations.NullMarked;
@@ -44,6 +48,7 @@ import java.time.Duration;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.await;
@@ -104,12 +109,14 @@ class DistributedCaffeineCacheManagerTest {
         }
 
         @Cacheable("totals")
+        @SuppressWarnings("SameReturnValue") // a fixed result, which the other instance must be served from the store
         public String total() {
             source.calls.incrementAndGet();
             return "total";
         }
 
         @Cacheable("orders")
+        @SuppressWarnings("SameReturnValue") // always null: a cached null, served as such by the other instance
         public @Nullable String missing(@SuppressWarnings("unused") String id) {
             source.calls.incrementAndGet();
             return null;
@@ -121,6 +128,7 @@ class DistributedCaffeineCacheManagerTest {
         }
 
         @CacheEvict("orders")
+        @SuppressWarnings("EmptyMethod") // the annotation evicts
         public void evict(@SuppressWarnings("unused") String id) {
             // evicts only
         }
@@ -132,6 +140,7 @@ class DistributedCaffeineCacheManagerTest {
         }
 
         @CacheEvict(value = "orders", allEntries = true)
+        @SuppressWarnings("EmptyMethod") // the annotation evicts
         public void evictAll() {
             // evicts only
         }
@@ -149,6 +158,44 @@ class DistributedCaffeineCacheManagerTest {
         @Bean
         Service service(Source source) {
             return new Service(source);
+        }
+    }
+
+    // an application whose cached methods return futures: its caches in async mode, as Spring requires for them
+    static class AsyncService {
+        private final Source source;
+
+        AsyncService(Source source) {
+            this.source = source;
+        }
+
+        @Cacheable("futures")
+        public CompletableFuture<String> order(String id) {
+            source.calls.incrementAndGet();
+            return CompletableFuture.supplyAsync(() -> "order " + id);
+        }
+
+        @Cacheable("futures")
+        public CompletableFuture<String> order(String id, int version) {
+            source.calls.incrementAndGet();
+            return CompletableFuture.supplyAsync(() -> "order " + id + " v" + version);
+        }
+    }
+
+    @Configuration
+    @EnableCaching
+    static class AsyncApplication {
+        @Bean
+        DistributedCaffeineCacheManager cacheManager(InMemoryDatabase database) {
+            DistributedCaffeineCacheManager manager = new DistributedCaffeineCacheManager(
+                    name -> DistributedCaffeine.newBuilder(settings -> database.openStore(name)));
+            manager.setAsyncCacheMode(true);
+            return manager;
+        }
+
+        @Bean
+        AsyncService asyncService(Source source) {
+            return new AsyncService(source);
         }
     }
 
@@ -172,6 +219,31 @@ class DistributedCaffeineCacheManagerTest {
         context.refresh();
         closeables.add(context);
         return context.getBean(Service.class);
+    }
+
+    private AsyncService asyncInstance(Source source) {
+        AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext();
+        context.registerBean(InMemoryDatabase.class, () -> database);
+        context.registerBean(Source.class, () -> source);
+        context.register(AsyncApplication.class);
+        context.refresh();
+        closeables.add(context);
+        return context.getBean(AsyncService.class);
+    }
+
+    @Test
+    void a_future_result_cached_by_one_instance_is_served_on_another() {
+        Source source = new Source();
+        AsyncService first = asyncInstance(source);
+        AsyncService second = asyncInstance(source);
+
+        assertThat(first.order("o1")).succeedsWithin(Duration.ofSeconds(5)).isEqualTo("order o1");
+        assertThat(first.order("o1", 2)).succeedsWithin(Duration.ofSeconds(5)).isEqualTo("order o1 v2");
+        assertThat(source.calls).hasValue(2);
+
+        assertThat(second.order("o1")).succeedsWithin(Duration.ofSeconds(5)).isEqualTo("order o1");
+        assertThat(second.order("o1", 2)).succeedsWithin(Duration.ofSeconds(5)).isEqualTo("order o1 v2");
+        assertThat(source.calls).as("every result from the store").hasValue(2);
     }
 
     @Test
@@ -291,6 +363,45 @@ class DistributedCaffeineCacheManagerTest {
         assertThat(cache).isNotNull();
         cache.put(new SimpleKey("a", 1), "v");
         assertThat(cache.get(new SimpleKey("a", 1), String.class)).isEqualTo("v");
+    }
+
+    // the key bytes stored for a key of the cache orders, as its row holds them
+    private byte[] storedKey(Object key) {
+        String hash = new SimpleKeyHashProvider().getHash(key, Hasher::new).toHex();
+        Row row;
+        try (Store store = database.openStore("orders")) {
+            row = store.read(List.of(hash), Duration.ofDays(1)).get(hash);
+        }
+        assertThat(row).as("the row of %s", key).isNotNull();
+        return row.key();
+    }
+
+    @Test
+    void a_simple_key_is_stored_by_its_params_where_no_key_serializer_was_set() {
+        org.springframework.cache.Cache cache = manager().getCache("orders");
+        SimpleKey key = new SimpleKey("a", null, 7L);
+
+        assertThat(cache).isNotNull();
+        cache.put(key, "v");
+
+        byte[] stored = storedKey(key);
+        assertThat(new SimpleKeyForySerializer().deserialize(stored)).isEqualTo(key);
+        assertThat(stored).as("not by Java serialization").isNotEqualTo(new ForySerializer<>().serialize(key));
+    }
+
+    @Test
+    void a_builders_own_key_serializer_is_kept() {
+        ForySerializer<Object> own = new ForySerializer<>();
+        DistributedCaffeineCacheManager manager = new DistributedCaffeineCacheManager(name -> builder(name)
+                .withSerializers(serializers -> serializers.withKeySerializer(own)));
+        closeables.add(manager::destroy);
+        org.springframework.cache.Cache cache = manager.getCache("orders");
+        SimpleKey key = new SimpleKey("a", 7L);
+
+        assertThat(cache).isNotNull();
+        cache.put(key, "v");
+
+        assertThat(storedKey(key)).isEqualTo(own.serialize(key));
     }
 
     @Test

@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import io.github.oberhoff.distributedcaffeine.hasher.Hash;
 import io.github.oberhoff.distributedcaffeine.hasher.HashProvider;
 import io.github.oberhoff.distributedcaffeine.hasher.Hashable;
 import io.github.oberhoff.distributedcaffeine.hasher.Hasher;
@@ -32,6 +33,7 @@ import java.util.concurrent.Future;
 import java.util.function.Supplier;
 import java.util.stream.IntStream;
 
+import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -64,25 +66,14 @@ class InternalKeyTest {
                 Role.ACTIVE);
     }
 
+    // the stored format, which HasherBuiltInTest holds to an oracle of its own
     private static String hashOf(Object key) {
-        Hasher hasher = new Hasher();
-        if (key instanceof String string) {
-            hasher.putString(string);
-        } else if (key instanceof Long value) {
-            hasher.putLong(value);
-        } else if (key instanceof Integer value) {
-            hasher.putInt(value);
-        } else if (key instanceof Enum<?> constant) {
-            hasher.putString(constant.getDeclaringClass().getName()).putString(constant.name());
-        } else {
-            hasher.putUUID((UUID) key);
-        }
-        return hasher.getHash();
+        return requireNonNull(Hasher.builtInHash(key)).toHex();
     }
 
     @ParameterizedTest
     @MethodSource("builtInKeys")
-    void built_in_keys_get_the_hash_the_hasher_gives_and_equal_the_key_parsed_from_it(Object key) {
+    void built_in_keys_get_the_stored_format_s_hash_and_equal_the_key_parsed_from_it(Object key) {
         InternalKey<Object> wrapped = hasher.wrap(key);
         String expected = hashOf(key);
 
@@ -98,40 +89,33 @@ class InternalKeyTest {
         assertThat(hasher.wrap(1L)).isNotEqualTo(hasher.wrap(1));
         assertThat(hasher.wrap(Status.ACTIVE)).isEqualTo(hasher.wrap(Status.ACTIVE))
                 .isNotEqualTo(hasher.wrap(Role.ACTIVE)).isNotEqualTo(hasher.wrap("ACTIVE"));
+        assertThat(hasher.wrap("")).as("of different kinds").isNotEqualTo(hasher.wrap(0));
     }
 
     @Test
-    void the_hash_of_an_enum_constant_stays_the_same_across_releases() {
-        // pins the format, part of the stored hashes: the enum class's name, then the constant's
-        String expected = new Hasher().putString("io.github.oberhoff.distributedcaffeine.InternalKeyTest$Status")
-                .putString("CLOSED").getHash();
-
-        assertThat(hasher.wrap(Status.CLOSED).hash()).isEqualTo(expected);
-    }
-
-    @Test
-    void a_custom_hex_hash_is_compact_and_equals_its_lookup_key() {
-        String hash = new Hasher().putString("custom").getHash();
-        InternalKey<String> key = InternalKey.ofHash("k", hash);
+    void a_custom_hash_is_compact_and_equals_its_lookup_key() {
+        InternalKey<Object> key = hasher.wrap(new Custom("custom"));
+        String hash = new Hasher().putString("custom").getHash().toHex();
 
         assertThat(key.isCompact()).isTrue();
-        assertThat(key).isEqualTo(InternalKey.lookup(hash));
-        assertThat(key.hash()).isSameAs(hash);
+        assertThat(key.hash()).isEqualTo(hash);
+        assertThat(key).isEqualTo(InternalKey.lookup(hash)).hasSameHashCodeAs(InternalKey.lookup(hash));
     }
 
     @Test
-    void any_other_custom_hash_is_kept_and_compared_as_the_string() {
-        InternalKey<String> key = InternalKey.ofHash("k", "order-42");
+    void a_lookup_by_another_string_is_kept_and_compared_as_the_string() {
+        // the library's own rows, such as the heartbeat's
+        InternalKey<Object> key = InternalKey.lookup("#heartbeat");
 
         assertThat(key.isCompact()).isFalse();
-        assertThat(key.hash()).isEqualTo("order-42");
-        assertThat(key).isEqualTo(InternalKey.lookup("order-42")).hasSameHashCodeAs(InternalKey.lookup("order-42"))
-                .isNotEqualTo(InternalKey.lookup("order-43"));
+        assertThat(key.hash()).isEqualTo("#heartbeat");
+        assertThat(key).isEqualTo(InternalKey.lookup("#heartbeat")).hasSameHashCodeAs(InternalKey.lookup("#heartbeat"))
+                .isNotEqualTo(InternalKey.lookup("#other"));
     }
 
     @Test
     void uppercase_hex_is_another_string_and_never_equals_the_lowercase_hash() {
-        String lower = new Hasher().putString("x").getHash();
+        String lower = new Hasher().putString("x").getHash().toHex();
         String upper = lower.toUpperCase(Locale.ROOT);
 
         assertThat(InternalKey.lookup(upper).isCompact()).isFalse();
@@ -151,11 +135,12 @@ class InternalKeyTest {
 
     @Test
     void a_hash_provider_comes_before_hashable_and_built_in_types() {
-        HashProvider<Object> provider = (key, ignored) -> "provided";
+        Hash provided = new Hasher().putString("provided").getHash();
+        HashProvider<Object> provider = (key, ignored) -> provided;
         InternalHasher<Object> withProvider = new InternalHasher<>(provider);
 
-        assertThat(withProvider.wrap("s").hash()).isEqualTo("provided");
-        assertThat(withProvider.wrap(new Custom("p")).hash()).isEqualTo("provided");
+        assertThat(withProvider.wrap("s").hash()).isEqualTo(provided.toHex());
+        assertThat(withProvider.wrap(new Custom("p")).hash()).isEqualTo(provided.toHex());
     }
 
     @Test
@@ -164,7 +149,7 @@ class InternalKeyTest {
 
         InternalKey<Object> wrapped = hasher.wrap(key);
 
-        assertThat(wrapped.hash()).isEqualTo(new Hasher().putString("c").getHash());
+        assertThat(wrapped.hash()).isEqualTo(new Hasher().putString("c").getHash().toHex());
         assertThat(wrapped.isCompact()).isTrue();
     }
 
@@ -178,11 +163,9 @@ class InternalKeyTest {
 
     @Test
     @SuppressWarnings("DataFlowIssue") // the null hash is the point: it is rejected
-    void null_or_empty_custom_hashes_are_rejected() {
-        InternalHasher<Object> empty = new InternalHasher<>((key, ignored) -> "");
+    void a_null_custom_hash_is_rejected() {
         InternalHasher<Object> none = new InternalHasher<>((key, ignored) -> null);
 
-        assertThatThrownBy(() -> empty.wrap("k")).isInstanceOf(IllegalStateException.class);
         assertThatThrownBy(() -> none.wrap("k")).isInstanceOf(IllegalStateException.class);
     }
 
@@ -204,7 +187,7 @@ class InternalKeyTest {
 
     record Custom(String id) implements Hashable {
         @Override
-        public String getHash(Supplier<Hasher> hasher) {
+        public Hash getHash(Supplier<Hasher> hasher) {
             return hasher.get().putString(id).getHash();
         }
     }

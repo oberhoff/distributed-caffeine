@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine.integration.spring;
 
+import io.github.oberhoff.distributedcaffeine.hasher.Hash;
 import io.github.oberhoff.distributedcaffeine.hasher.HashProvider;
 import io.github.oberhoff.distributedcaffeine.hasher.Hashable;
 import io.github.oberhoff.distributedcaffeine.hasher.Hasher;
@@ -29,6 +30,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 
+import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -42,7 +44,7 @@ class SimpleKeyHashProviderTest {
 
     private record Order(String id) implements Hashable {
         @Override
-        public String getHash(Supplier<Hasher> hasher) {
+        public Hash getHash(Supplier<Hasher> hasher) {
             return hasher.get().putString("order").putString(id).getHash();
         }
     }
@@ -54,7 +56,7 @@ class SimpleKeyHashProviderTest {
         }
 
         @Override
-        public String getHash(Supplier<Hasher> hasher) {
+        public Hash getHash(Supplier<Hasher> hasher) {
             return hasher.get().putString("own").getHash();
         }
     }
@@ -64,7 +66,7 @@ class SimpleKeyHashProviderTest {
     }
 
     private static String hash(Object key) {
-        return HASHER.getHash(key, Hasher::new);
+        return HASHER.getHash(key, Hasher::new).toHex();
     }
 
     @Test
@@ -72,21 +74,19 @@ class SimpleKeyHashProviderTest {
         UUID uuid = UUID.randomUUID();
         Order order = new Order("o1");
 
-        assertThat(hash("a")).isEqualTo(new Hasher().putString("a").getHash());
-        assertThat(hash(1L)).isEqualTo(new Hasher().putLong(1L).getHash());
-        assertThat(hash(1)).isEqualTo(new Hasher().putInt(1).getHash());
-        assertThat(hash(uuid)).isEqualTo(new Hasher().putUUID(uuid).getHash());
-        assertThat(hash(Status.ACTIVE)).isEqualTo(new Hasher().putString(Status.class.getName()).putString("ACTIVE")
-                .getHash());
-        assertThat(hash(order)).isEqualTo(order.getHash(Hasher::new));
-        assertThat(hash(new OwnKey("a", 1))).as("a hashable SimpleKey keeps its own hash")
-                .isEqualTo(new Hasher().putString("own").getHash());
+        for (Object key : new Object[]{"a", 1L, 1, uuid, Status.ACTIVE}) {
+            assertThat(hash(key)).as("%s", key).isEqualTo(requireNonNull(Hasher.builtInHash(key)).toHex());
+        }
+        assertThat(hash(order)).isEqualTo(order.getHash(Hasher::new).toHex());
+        assertThat(hash(new OwnKey("a", 1))).as("a hashable SimpleKey keeps its own hash, whatever its params")
+                .isEqualTo(new Hasher().putString("own").getHash().toHex())
+                .isEqualTo(hash(new OwnKey("b")));
     }
 
     @Test
     void equal_simple_keys_hash_alike() {
-        assertThat(hash(new SimpleKey("a", 1, null, new Order("o1"))))
-                .isEqualTo(hash(new SimpleKey("a", 1, null, new Order("o1"))));
+        assertThat(hash(new SimpleKey("a", 1, null, new Order("o2"))))
+                .isEqualTo(hash(new SimpleKey("a", 1, null, new Order("o2"))));
         assertThat(hash(SimpleKey.EMPTY)).isEqualTo(hash(new SimpleKey()));
     }
 
@@ -139,18 +139,17 @@ class SimpleKeyHashProviderTest {
         assertThat(withDates.getHash(new SimpleKey("a", date), Hasher::new))
                 .isEqualTo(withDates.getHash(new SimpleKey("a", LocalDate.of(2026, 11, 19)), Hasher::new))
                 .isNotEqualTo(withDates.getHash(new SimpleKey("a", date.plusDays(1)), Hasher::new));
-        assertThat(withDates.getHash("a", Hasher::new)).as("the built-in hashing first").isEqualTo(hash("a"));
+        assertThat(withDates.getHash("a", Hasher::new).toHex()).as("the built-in hashing first").isEqualTo(hash("a"));
     }
 
     @Test
     void the_hash_of_a_simple_key_stays_the_same_across_releases() {
-        // pins the format, part of the stored hashes: the number of parts, then each part's own hash
-        String expected = new Hasher().putInt(3)
-                .putString(new Hasher().putString("a").getHash())
-                .putString("")
-                .putString(new Hasher().putLong(7L).getHash())
-                .getHash();
+        // pins the format, part of the stored hashes (SimpleKeyHashProvider's comment): the domain, the number of
+        // params, then per param a tag and its data (a string, null, a long, a custom hash); the values from hash4j's
+        // stream fed those bytes, an oracle apart from Hasher
+        Hashable custom = hasher -> hasher.get().putString("abcde").getHash();
 
-        assertThat(hash(new SimpleKey("a", null, 7L))).isEqualTo(expected);
+        assertThat(hash(new SimpleKey("a", null, 7L, custom))).isEqualTo("bb0f1795187bb24d549c0dd925097ff1");
+        assertThat(hash(SimpleKey.EMPTY)).isEqualTo("9b40bdcfca4036a111e8e65d7d4c1275");
     }
 }

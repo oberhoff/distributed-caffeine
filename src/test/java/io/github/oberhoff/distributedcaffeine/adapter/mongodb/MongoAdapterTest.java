@@ -723,9 +723,48 @@ abstract class MongoAdapterTest {
             DistributedCaffeine<String, String> builder = strings((reset ? adapter().withSchemaReset() : adapter())
                     .build());
             assertThatThrownBy(builder::build).isInstanceOf(StoreException.class)
-                    .hasMessageContaining("another version").hasMessageContaining("schema 2");
+                    .hasMessageContaining("later version").hasMessageContaining("schema 2");
         }
         assertThat(documents.countDocuments()).as("kept").isOne();
+    }
+
+    @Test
+    void a_collection_of_an_earlier_version_is_refused_unless_it_is_reset() {
+        // a collection of 0.8 or 0.9: the same layout, the marker without the hash format
+        DistributedCache<String, String> earlier = cache(Function.identity());
+        earlier.put("k", "earlier");
+        earlier.close();
+        var documents = database.client.getDatabase("adapter").getCollection(collection);
+        documents.updateOne(new Document("_id", MongoLocation.MARKER_ID),
+                new Document("$set", new Document("schema", "distributed-caffeine schema 1")));
+
+        DistributedCaffeine<String, String> unchanged = strings(adapter().build());
+        assertThatThrownBy(unchanged::build).isInstanceOf(StoreException.class)
+                .hasMessageContaining("earlier version").hasMessageContaining("withSchemaReset");
+        assertThat(documents.countDocuments()).as("kept").isGreaterThan(1);
+
+        DistributedCache<String, String> reset = track(strings(adapter().withSchemaReset().build()).build());
+        assertThat(reset.getIfPresent("k")).as("dropped with its documents").isNull();
+        reset.put("k", "v");
+        assertThat(reset.getIfPresent("k")).isEqualTo("v");
+        Document marker = documents.find(new Document("_id", MongoLocation.MARKER_ID)).first();
+        assertThat(marker).isNotNull();
+        assertThat(marker.getString("schema")).isEqualTo(MongoLocation.MARKER);
+    }
+
+    @Test
+    void a_reset_never_drops_a_collection_of_a_later_hash_format_revision() {
+        cache(Function.identity()).close();
+        var documents = database.client.getDatabase("adapter").getCollection(collection);
+        documents.updateOne(new Document("_id", MongoLocation.MARKER_ID), new Document("$set",
+                new Document("schema", "distributed-caffeine schema=1 hash=xxh3-128/2")));
+
+        for (boolean reset : new boolean[] {false, true}) {
+            DistributedCaffeine<String, String> builder = strings((reset ? adapter().withSchemaReset() : adapter())
+                    .build());
+            assertThatThrownBy(builder::build).isInstanceOf(StoreException.class)
+                    .hasMessageContaining("later version").hasMessageContaining("xxh3-128/2");
+        }
     }
 
     // to be removed with the cleanup (MongoSchema#removeOldGeneration)

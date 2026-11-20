@@ -22,6 +22,7 @@ import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import io.github.oberhoff.distributedcaffeine.spi.Write;
+import io.github.oberhoff.distributedcaffeine.testing.TestHashes;
 import io.github.oberhoff.distributedcaffeine.testing.TestStoreSettings;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
@@ -104,7 +105,7 @@ abstract class RedisFailoverTests {
         return track(DistributedCaffeine.newBuilder(adapter())
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withHashProvider((key, hasher) -> key)
+                .withHashProvider((key, hasher) -> TestHashes.of(key))
                 .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(10_000)
                         .withOperationTimeout(Duration.ofSeconds(2)).withHeartbeatInterval(Duration.ofSeconds(2)))
                 .build());

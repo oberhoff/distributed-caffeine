@@ -19,6 +19,7 @@ import com.dynatrace.hash4j.hashing.HashStream128;
 import com.dynatrace.hash4j.hashing.HashValue128;
 import com.dynatrace.hash4j.hashing.Hasher128;
 import com.dynatrace.hash4j.hashing.Hashing;
+import io.github.oberhoff.distributedcaffeine.hasher.Hash;
 import io.github.oberhoff.distributedcaffeine.hasher.Hasher;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
@@ -36,6 +37,7 @@ import org.openjdk.jmh.runner.options.Options;
 import org.openjdk.jmh.runner.options.OptionsBuilder;
 import org.openjdk.jmh.runner.options.TimeValue;
 
+import java.util.HexFormat;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReferenceArray;
@@ -44,7 +46,7 @@ import java.util.concurrent.atomic.AtomicReferenceArray;
  * How to hash a built-in key on the hit path without a stream kept per virtual thread (VISION.md, "How a message finds
  * the held key")? Hashes a key into its 128 bits; variants: a stream per thread, a fresh stream, a pool of streams
  * striped by thread id (unpadded and padded), one-shot hashing over a char view of the stream's encoding, and what is
- * built, {@link Hasher#hashBuiltIn} (a stream per platform thread, a fresh one on a virtual thread). For virtual
+ * built, {@link Hasher#builtInHash} (one-shot, seeded per kind, no stream). For virtual
  * threads, add {@code -jvmArgsAppend -Djmh.executor=VIRTUAL}.
  * <p>
  * Not run by default, only with {@code -Dexperiments=true}; run with
@@ -71,7 +73,7 @@ public class HashStreamBenchmarkTest {
     private static final int PAD = 32;
     private static final AtomicReferenceArray<HashStream128> PADDED = new AtomicReferenceArray<>(SLOTS * PAD);
 
-    @Param({"String", "Long", "String100"})
+    @Param({"String", "Long", "String100", "String1000"})
     public String keyType;
 
     private String string;
@@ -79,7 +81,12 @@ public class HashStreamBenchmarkTest {
 
     @Setup
     public void keys() {
-        string = "String100".equals(keyType) ? "user:000123:profile:".repeat(5) : "user:000123:profile";
+        string = switch (keyType) {
+            case "String100" -> "user:000123:profile:".repeat(5);
+            case "String1000" -> "user:000123:profile:".repeat(50);
+            default -> "user:000123:profile";
+        };
+        encodedString = stringBytes(string);
         number = 123_456_789L;
     }
 
@@ -98,11 +105,11 @@ public class HashStreamBenchmarkTest {
         return bits(STREAM.get().reset());
     }
 
-    // what the cache does: Hasher.hashBuiltIn, a stream per platform thread, a fresh one on a virtual thread
+    // what the cache does: Hasher.builtInHash, one-shot, seeded per kind
     @Benchmark
     public long hashBuiltIn() {
-        HashValue128 value = Hasher.hashBuiltIn(keyType.startsWith("String") ? string : (Object) number);
-        return value == null ? 0 : value.getLeastSignificantBits() ^ value.getMostSignificantBits();
+        Hash value = Hasher.builtInHash(keyType.startsWith("String") ? string : (Object) number);
+        return value == null ? 0 : value.leastSignificantBits() ^ value.mostSignificantBits();
     }
 
     @Benchmark
@@ -149,17 +156,39 @@ public class HashStreamBenchmarkTest {
     // the key's stream encoding written into bytes, hashed in one shot (hash4j reads bytes in bulk): no stream
     @Benchmark
     public long oneShotBytes() {
-        HashValue128 value = XXH3.hashBytesTo128Bits(keyType.startsWith("String") ? stringBytes(string) : longBytes(number));
+        byte[] bytes = keyType.startsWith("String") ? stringBytes(string) : longBytes(number);
+        HashValue128 value = XXH3.hashBytesTo128Bits(bytes);
         return value.getLeastSignificantBits() ^ value.getMostSignificantBits();
     }
 
     // a custom hash as a Hashable computes it: putString(id), then putLong(version)
+    // a custom hash as a Hashable computes it, putString(id) then putLong(version): the Hasher before (a fresh hash4j
+    // stream per hasher), and the Hasher built (the values encoded into a small array, hashed at once)
     @Benchmark
-    public String customFresh() {
+    public String customStream() {
+        return HexFormat.of().formatHex(XXH3.hashStream().putString(string).putLong(number).get().toByteArray());
+    }
+
+    // the parts of it: XXH3 at once over the encoded bytes alone, and the stream over the same string
+    private byte[] encodedString = new byte[0];
+
+    @Benchmark
+    public long partOneShot() {
+        HashValue128 value = XXH3.hashBytesTo128Bits(encodedString);
+        return value.getLeastSignificantBits() ^ value.getMostSignificantBits();
+    }
+
+    @Benchmark
+    public long partStream() {
+        HashValue128 value = XXH3.hashStream().putString(string).get();
+        return value.getLeastSignificantBits() ^ value.getMostSignificantBits();
+    }
+
+    @Benchmark
+    public Hash customHasher() {
         return new Hasher().putString(string).putLong(number).getHash();
     }
 
-    // the best a pool could do: a stream reused, nothing allocated for it
     @Benchmark
     public long customReused() {
         HashValue128 value = STREAM.get().reset().putString(string).putLong(number).get();
@@ -345,7 +374,8 @@ public class HashStreamBenchmarkTest {
     void run() throws Exception {
         for (int threads : new int[]{1, 8}) {
         Options options = new OptionsBuilder()
-                .include(HashStreamBenchmarkTest.class.getName() + "\\.(perThread|fresh|oneShot|oneShotBytes|pooled|pooledPadded|hashBuiltIn)$")
+                .include(HashStreamBenchmarkTest.class.getName() + "\\.(perThread|fresh|oneShot|oneShotBytes|pooled"
+                        + "|pooledPadded|hashBuiltIn|customStream|customHasher)$")
                 .forks(1)
                 .threads(threads)
                 .warmupIterations(3)

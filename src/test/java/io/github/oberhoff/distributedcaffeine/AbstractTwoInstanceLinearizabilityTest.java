@@ -19,6 +19,7 @@ import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import io.github.oberhoff.distributedcaffeine.testing.ShardedScenarios;
+import io.github.oberhoff.distributedcaffeine.testing.TestHashes;
 import org.jetbrains.lincheck.datastructures.IntGen;
 import org.jetbrains.lincheck.datastructures.ModelCheckingOptions;
 import org.jetbrains.lincheck.datastructures.Operation;
@@ -80,8 +81,8 @@ public abstract class AbstractTwoInstanceLinearizabilityTest {
         return DistributedCaffeine.newBuilder(adapter)
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                // the key as its hash: hash4j reads bytes through VarHandles, which model checking does not support
-                .withHashProvider((key, hasher) -> key)
+                // a hash without hash4j: it reads bytes through VarHandles, which model checking does not support
+                .withHashProvider((key, hasher) -> TestHashes.of(key))
                 .withDistributionMode(DistributionMode.NONE)
                 // in the calling thread, against the store executor's contract (tasks on other threads): model checking
                 // needs every step in the threads it controls. Safe here, as no operation refreshes a key not held, the

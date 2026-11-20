@@ -138,9 +138,9 @@ abstract class JdbcAdapterTest {
         comment("");
         assertThatThrownBy(() -> cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR)).isInstanceOf(StoreException.class)
                 .hasMessageContaining("without the schema marker");
-        comment(JdbcStore.MARKER_PREFIX + "2");
+        comment("distributed-caffeine schema 2");
         assertThatThrownBy(() -> cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR)).isInstanceOf(StoreException.class)
-                .hasMessageContaining("another version").hasMessageContaining("schema 2");
+                .hasMessageContaining("later version").hasMessageContaining("schema 2");
 
         comment(JdbcStore.MARKER); // as the DDL in the message creates it by hand
         DistributedCache<String, String> cache = cache(JdbcTestDatabase.DEFAULT_DISCRIMINATOR);

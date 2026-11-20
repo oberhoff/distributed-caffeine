@@ -216,8 +216,9 @@ class DistributedCaffeineTest {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> builder.withStore(store -> store.withMaximumAge(Duration.ofMinutes(1))
                 .withMaximumAge(Duration.ofMinutes(2)))).isInstanceOf(IllegalStateException.class);
-        DistributedCaffeine<String, String> withProvider = builder.withHashProvider((key, hasher) -> "a");
-        assertThatThrownBy(() -> withProvider.withHashProvider((key, hasher) -> "b"))
+        DistributedCaffeine<String, String> withProvider =
+                builder.withHashProvider((key, hasher) -> hasher.get().putString("a").getHash());
+        assertThatThrownBy(() -> withProvider.withHashProvider((key, hasher) -> hasher.get().putString("b").getHash()))
                 .isInstanceOf(IllegalStateException.class);
     }
 

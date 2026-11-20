@@ -19,6 +19,7 @@ import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.testing.InMemoryDatabase;
 import io.github.oberhoff.distributedcaffeine.testing.StoreProfile;
+import io.github.oberhoff.distributedcaffeine.testing.TestHashes;
 import org.jetbrains.lincheck.Lincheck;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
@@ -161,12 +162,13 @@ class InternalInterleavingTest {
             fixture.environment().advance(Duration.ofMillis(1));
             mark.set(fixture.writer().distributedPolicy().store().mark());
         }, fixture -> List.of(
-                () -> fixture.writer().distributedPolicy().store().invalidateAllBeforeMark(Objects.requireNonNull(mark.get())),
+                () -> fixture.writer().distributedPolicy().store()
+                        .invalidateAllBeforeMark(Objects.requireNonNull(mark.get())),
                 () -> fixture.holder().getIfPresent("k")));
     }
 
-    // a backdated invalidateAll and a full one at once: the backdated one's earlier cut-off must not undo the full one's
-    // (the store keeps the later), and the holder, told of both, serves nothing older than either
+    // a backdated invalidateAll and a full one at once: the backdated one's earlier cut-off must not undo the full
+    // one's (the store keeps the later), and the holder, told of both, serves nothing older than either
     @Test
     void a_backdated_invalidate_all_racing_a_full_one() {
         AtomicReference<DistributedPolicy.@Nullable Mark> mark = new AtomicReference<>();
@@ -297,8 +299,8 @@ class InternalInterleavingTest {
         return DistributedCaffeine.newBuilder(adapter)
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                // the key as its hash: Lincheck 3.7 does not support hash4j's VarHandle on byte arrays
-                .withHashProvider((key, hasher) -> key)
+                // a hash without hash4j: Lincheck 3.7 does not support hash4j's VarHandle on byte arrays
+                .withHashProvider((key, hasher) -> TestHashes.of(key))
                 .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(1_000)
                         .withExecutor(Runnable::run))
                 .withCaffeine(caffeine -> caffeine.executor(Runnable::run))

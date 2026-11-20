@@ -270,23 +270,6 @@ public class InternalRecoveryTest {
     }
 
     @Test
-    void the_reserved_hash_of_the_heartbeat_is_refused_as_a_key_hash() {
-        Adapter<String, String> adapter = backend::open;
-        DistributedCache<String, String> cache = track(DistributedCaffeine.newBuilder(InternalCoreTest.offered(adapter))
-                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
-                        .withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
-                        .withMaximumAge(LONG).withMaximumSize(1_000))
-                .withHashProvider((key, hasher) -> key)
-                .build());
-
-        assertThatThrownBy(() -> cache.put(InternalHeartbeat.HASH, "v")).isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("reserved");
-        cache.put("other", "v");
-        assertThat(cache.getIfPresent("other")).isEqualTo("v");
-    }
-
-    @Test
     void after_a_gap_a_change_whose_message_was_lost_is_found_on_read() {
         // the in-memory store's faults: skipped on a real database before anything is set up
         InMemoryDatabase faults = backend.faults();

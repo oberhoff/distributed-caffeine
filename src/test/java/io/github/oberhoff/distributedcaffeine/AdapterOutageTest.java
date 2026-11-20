@@ -20,6 +20,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
 import io.github.oberhoff.distributedcaffeine.testing.Awaiting;
 import io.github.oberhoff.distributedcaffeine.testing.PausedContainers;
+import io.github.oberhoff.distributedcaffeine.testing.TestHashes;
 import org.jspecify.annotations.NullMarked;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -98,7 +99,7 @@ public abstract class AdapterOutageTest {
         DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(adapter)
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withHashProvider((key, hasher) -> key)
+                .withHashProvider((key, hasher) -> TestHashes.of(key))
                 .withStore(store -> failFast ? store.withOperationTimeout(SHORT).withFailFast()
                         : store.withOperationTimeout(SHORT))
                 .build();

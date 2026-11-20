@@ -363,7 +363,8 @@ public abstract class AdapterConformanceTest {
         assertThatThrownBy(() -> build(store.adapter("default")))
                 .isInstanceOfSatisfying(StoreException.class,
                         e -> assertThat(e.isRetryable()).as("retryable: " + e.getMessage()).isFalse())
-                .hasMessageContaining("another version");
+                // the marker of a later version: never dropped by this one
+                .hasMessageContaining("later version");
     }
 
     @Test

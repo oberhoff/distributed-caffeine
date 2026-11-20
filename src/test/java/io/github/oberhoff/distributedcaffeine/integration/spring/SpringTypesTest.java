@@ -110,8 +110,8 @@ class SpringTypesTest {
 
         // async mode: a cached null completes with a wrapper of null, a miss gives no future at all
         CompletableFuture<?> future = reader.retrieve("k");
-        assertThat(future).as("a cached null, not a miss").isNotNull().succeedsWithin(Duration.ofSeconds(5)).isInstanceOfSatisfying(ValueWrapper.class,
-                wrapper -> assertThat(wrapper.get()).isNull());
+        assertThat(future).as("a cached null, not a miss").isNotNull().succeedsWithin(Duration.ofSeconds(5))
+                .isInstanceOfSatisfying(ValueWrapper.class, wrapper -> assertThat(wrapper.get()).isNull());
     }
 
     @Test
@@ -134,7 +134,8 @@ class SpringTypesTest {
 
     @Test
     void a_simple_key_crosses_the_store_once_hashed() {
-        UnaryOperator<DistributedCaffeine<Object, Object>> hashed = builder -> builder.withHashProvider(new SimpleKeyHashProvider());
+        UnaryOperator<DistributedCaffeine<Object, Object>> hashed =
+                builder -> builder.withHashProvider(new SimpleKeyHashProvider());
         CaffeineCache writer = cache(hashed);
         CaffeineCache reader = cache(hashed);
         Object key = new SimpleKey("a", 1);

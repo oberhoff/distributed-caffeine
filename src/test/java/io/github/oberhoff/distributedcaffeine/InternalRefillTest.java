@@ -94,7 +94,8 @@ class InternalRefillTest {
     @ValueSource(strings = {"jdbc", "postgresql", "mongodb", "redis", "redis-hostile", "postgresql-stepping"})
     void a_refill_hides_what_it_did_not_write_and_keeps_what_it_did_on_every_instance(String profile) {
         database = new InMemoryDatabase(StoreProfile.of(profile));
-        DistributedCache<String, String> refiller = cache(builder -> builder.withCaffeine(CaffeineConfigurer::recordStats));
+        DistributedCache<String, String> refiller =
+                cache(builder -> builder.withCaffeine(CaffeineConfigurer::recordStats));
         DistributedCache<String, String> holder = cache(builder -> builder.withCaffeine(CaffeineConfigurer::recordStats)
                 .withDistributionMode(DistributionMode.UPDATE));
         refiller.putAll(Map.of("kept", "old", "gone", "old"));
@@ -115,7 +116,8 @@ class InternalRefillTest {
 
     @Test
     void the_calling_instance_stays_hot_its_copies_revalidated_in_the_background_not_dropped() {
-        DistributedCache<String, String> refiller = cache(builder -> builder.withCaffeine(CaffeineConfigurer::recordStats));
+        DistributedCache<String, String> refiller =
+                cache(builder -> builder.withCaffeine(CaffeineConfigurer::recordStats));
         refiller.putAll(Map.of("a", "old", "b", "old", "gone", "old"));
         pause(20);
 

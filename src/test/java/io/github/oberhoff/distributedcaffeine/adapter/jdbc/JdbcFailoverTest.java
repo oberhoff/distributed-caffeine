@@ -21,6 +21,7 @@ import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
 import io.github.oberhoff.distributedcaffeine.DistributedPolicy;
 import io.github.oberhoff.distributedcaffeine.serializer.StringSerializer;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
+import io.github.oberhoff.distributedcaffeine.testing.TestHashes;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
@@ -85,7 +86,7 @@ abstract class JdbcFailoverTest {
                         topology.adapter(table))
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withHashProvider((key, hasher) -> key)
+                .withHashProvider((key, hasher) -> TestHashes.of(key))
                 .withCaffeine(CaffeineConfigurer::recordStats)
                 .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(1_000)
                         .withPollInterval(Duration.ofMillis(100)).withOperationTimeout(Duration.ofSeconds(3)))
@@ -170,12 +171,13 @@ abstract class JdbcFailoverTest {
         // confirmed by the primary, never replicated; both caches learn of it (the holder by polling)
         put(writer, "lost");
         assertThat(converges(holder, "lost")).as("the holder polled the lost write").isTrue();
-        String before = "primary " + topology.row(true, table, "k") + ", replica " + topology.row(false, table, "k");
+        String id = TestHashes.of("k").toHex();
+        String before = "primary " + topology.row(true, table, id) + ", replica " + topology.row(false, table, id);
         topology.failover();
 
         // the store now has "kept" again: no cache may go on serving "lost"
         assertThat(converges(holder, "kept")).as(() -> "the holder drops the lost write; before the failover: "
-                + before + "; after: " + topology.row(false, table, "k") + "; the holder serves " + quietly(holder))
+                + before + "; after: " + topology.row(false, table, id) + "; the holder serves " + quietly(holder))
                 .isTrue();
         assertThat(converges(writer, "kept")).as(() -> "the writer drops the lost write; it serves "
                 + quietly(writer)).isTrue();

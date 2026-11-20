@@ -106,7 +106,7 @@ abstract class RedisStoreTests {
     @Test
     void a_keyspace_written_by_another_version_is_refused_naming_what_to_delete() {
         admin.set(new RedisKeys(name, RedisAdapter.DEFAULT_DISCRIMINATOR).schema(), "2");
-        assertThatThrownBy(this::open).isInstanceOf(StoreException.class).hasMessageContaining("another version")
+        assertThatThrownBy(this::open).isInstanceOf(StoreException.class).hasMessageContaining("later version")
                 .hasMessageContaining("delete its keys");
     }
 

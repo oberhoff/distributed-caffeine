@@ -108,8 +108,8 @@ abstract class PostgresAdapterTest {
     }
 
     // a data source handing out the caller's connection inside the caller's transaction, as a transaction-aware one
-    // does (Spring's TransactionAwareDataSourceProxy): the cache refuses that connection rather than commit the caller's
-    // transaction along with its own work, which a put used to do, leaving the caller's rows written before it
+    // does (Spring's TransactionAwareDataSourceProxy): the cache refuses that connection rather than commit the
+    // caller's transaction along with its own work, which a put used to do, leaving the caller's rows written before it
     // committed though the caller rolled back (VISION.md, "A deadline of the core's own")
     @Test
     void a_connection_inside_the_callers_transaction_is_refused_and_the_transaction_left_alone() throws Exception {
@@ -470,9 +470,44 @@ abstract class PostgresAdapterTest {
             DistributedCaffeine<String, String> builder = strings((reset ? adapter().withSchemaReset() : adapter())
                     .build());
             assertThatThrownBy(builder::build).isInstanceOf(StoreException.class)
-                    .hasMessageContaining("another version").hasMessageContaining("schema 2");
+                    .hasMessageContaining("later version").hasMessageContaining("schema 2");
         }
         assertThat(query("SELECT count(*) FROM adapter.\"" + table + "\"")).as("kept").isEqualTo("1");
+    }
+
+    @Test
+    void a_table_of_an_earlier_version_is_refused_unless_it_is_reset() throws SQLException {
+        // a table of 0.8 or 0.9: the same layout, the marker without the hash format
+        DistributedCache<String, String> earlier = cache(Function.identity());
+        earlier.put("k", "earlier");
+        earlier.close();
+        database.execute("COMMENT ON TABLE adapter.\"" + table + "\" IS 'distributed-caffeine schema 1'");
+
+        DistributedCaffeine<String, String> unchanged = strings(adapter().build());
+        assertThatThrownBy(unchanged::build).isInstanceOf(StoreException.class)
+                .hasMessageContaining("earlier version").hasMessageContaining("withSchemaReset");
+        assertThat(query("SELECT count(*) FROM adapter.\"" + table + "\"")).as("kept").isNotEqualTo("0");
+
+        DistributedCache<String, String> reset = track(strings(adapter().withSchemaReset().build()).build());
+        assertThat(reset.getIfPresent("k")).as("dropped with its rows").isNull();
+        reset.put("k", "v");
+        assertThat(reset.getIfPresent("k")).isEqualTo("v");
+        assertThat(query("SELECT obj_description(to_regclass('adapter.\"" + table + "\"'))"))
+                .isEqualTo(PostgresTable.MARKER);
+    }
+
+    @Test
+    void a_reset_never_drops_a_table_of_a_later_hash_format_revision() {
+        cache(Function.identity()).close();
+        database.execute("COMMENT ON TABLE adapter.\"" + table
+                + "\" IS 'distributed-caffeine schema=1 hash=xxh3-128/2'");
+
+        for (boolean reset : new boolean[] {false, true}) {
+            DistributedCaffeine<String, String> builder = strings((reset ? adapter().withSchemaReset() : adapter())
+                    .build());
+            assertThatThrownBy(builder::build).isInstanceOf(StoreException.class)
+                    .hasMessageContaining("later version").hasMessageContaining("xxh3-128/2");
+        }
     }
 
     @Test
