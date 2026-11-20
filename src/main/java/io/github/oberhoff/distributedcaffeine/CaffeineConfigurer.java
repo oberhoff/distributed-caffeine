@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.CaffeineSpec;
 import com.github.benmanes.caffeine.cache.Expiry;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
@@ -40,6 +41,7 @@ import static java.util.Objects.requireNonNull;
  * bounds decide which copies this instance keeps and for how long, while the store's maximum age decides how long a
  * value is valid ({@link StoreConfigurer#withMaximumAge(Duration)}). A copy that goes sends the instance back to the
  * store, not to the source. Except: {@link #weakKeys()}, {@link #weakValues()} and {@link #softValues()} are rejected.
+ * In place of Caffeine's static {@code Caffeine.from}, a spec is applied by {@link #withSpec(String)}.
  *
  * @param <K> the key type of the cache
  * @param <V> the value type of the cache
@@ -403,6 +405,76 @@ public final class CaffeineConfigurer<K, V> {
         caffeine.recordStats(capturing(statsCounterSupplier));
         recordingStats = true;
         return this;
+    }
+
+    /**
+     * Applies a Caffeine spec, such as {@code "maximumSize=10000,expireAfterWrite=5m,recordStats"}, as
+     * {@link Caffeine#from(String)} reads it: each setting it names through the method of the same name, so that it is
+     * checked and applied as if called directly; a setting made before fails, as Caffeine refuses one made twice.
+     * {@code weakKeys}, {@code weakValues} and {@code softValues} are rejected, as their methods are.
+     *
+     * @param spec the spec
+     * @return this configurer
+     * @throws IllegalArgumentException if the spec is not valid ({@link CaffeineSpec#parse(String)})
+     */
+    public CaffeineConfigurer<K, V> withSpec(String spec) {
+        requireNonNull(spec, "spec cannot be null");
+        // checked by Caffeine first, for its own errors; then read here, as CaffeineSpec exposes none of its values,
+        // and Caffeine.from(spec) would bypass this configurer, which has to see each setting (the stats and the
+        // refresh for the core, the expiries bounded by the store's maximum age, the references refused)
+        String parsed = CaffeineSpec.parse(spec).toParsableString();
+        for (String option : parsed.split(",", -1)) {
+            int equals = option.indexOf('=');
+            String key = (equals < 0 ? option : option.substring(0, equals)).trim();
+            String value = equals < 0 ? "" : option.substring(equals + 1).trim();
+            switch (key) {
+                case "" -> {
+                    // an empty option, which Caffeine ignores too
+                }
+                case "initialCapacity" -> initialCapacity(Integer.parseInt(number(value)));
+                case "maximumSize" -> maximumSize(Long.parseLong(number(value)));
+                case "maximumWeight" -> maximumWeight(Long.parseLong(number(value)));
+                case "expireAfterWrite" -> expireAfterWrite(duration(value));
+                case "expireAfterAccess" -> expireAfterAccess(duration(value));
+                case "refreshAfterWrite" -> refreshAfterWrite(duration(value));
+                case "recordStats" -> recordStats();
+                case "weakKeys" -> weakKeys();
+                case "weakValues" -> weakValues();
+                case "softValues" -> softValues();
+                // a key Caffeine accepts that this release does not know: a later Caffeine's
+                default -> throw new IllegalArgumentException("The spec setting " + key + " is not supported");
+            }
+        }
+        return this;
+    }
+
+    /**
+     * Applies a Caffeine spec ({@link #withSpec(String)}).
+     *
+     * @param spec the spec
+     * @return this configurer
+     */
+    public CaffeineConfigurer<K, V> withSpec(CaffeineSpec spec) {
+        return withSpec(requireNonNull(spec, "spec cannot be null").toParsableString());
+    }
+
+    // a number as CaffeineSpec reads it: underscores allowed
+    private static String number(String value) {
+        return value.replace("_", "");
+    }
+
+    // a duration as CaffeineSpec reads it: ISO-8601 (PT5M), or a number with the unit d, h, m or s, either case
+    private static Duration duration(String value) {
+        if (value.startsWith("P") || value.startsWith("p")) {
+            return Duration.parse(value);
+        }
+        long amount = Long.parseLong(number(value.substring(0, value.length() - 1)));
+        return switch (Character.toLowerCase(value.charAt(value.length() - 1))) {
+            case 'd' -> Duration.ofDays(amount);
+            case 'h' -> Duration.ofHours(amount);
+            case 'm' -> Duration.ofMinutes(amount);
+            default -> Duration.ofSeconds(amount);
+        };
     }
 
     @Override

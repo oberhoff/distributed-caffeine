@@ -16,6 +16,8 @@
 package io.github.oberhoff.distributedcaffeine;
 
 import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.CaffeineSpec;
 import com.github.benmanes.caffeine.cache.Expiry;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.stats.ConcurrentStatsCounter;
@@ -192,6 +194,43 @@ class CaffeineConfigurerTest {
         assertThatThrownBy(() -> sized.maximumWeight(2)).isInstanceOf(IllegalStateException.class);
         assertThatThrownBy(() -> fresh.maximumSize(-1)).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> expiring.expireAfter(expiry)).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void a_spec_configures_as_caffeine_reads_it() {
+        for (String spec : List.of(
+                "initialCapacity=1_0,maximumSize=+5,expireAfterWrite=5M,expireAfterAccess=pt1h30m,refreshAfterWrite=2d,"
+                        + "recordStats",
+                " maximumWeight = 1000 , expireAfterWrite=45S ,,",
+                "expireAfterAccess=3h,refreshAfterWrite=PT10S",
+                "maximumSize=1_000_000,expireAfterWrite=1d",
+                "")) {
+            Caffeine<Object, Object> caffeine = Caffeine.from(spec);
+            if (!spec.contains("expireAfterWrite")) {
+                // without a store's maximum age, the configurer always sets one, at the unbounded age if none was set
+                caffeine.expireAfterWrite(StoreConfigurer.UNBOUNDED_AGE);
+            }
+            String expected = caffeine.toString();
+
+            assertThat(new CaffeineConfigurer<String, String>().withSpec(spec).caffeine(StoreConfigurer.UNBOUNDED_AGE))
+                    .as("[%s]", spec).hasToString(expected);
+            assertThat(new CaffeineConfigurer<String, String>().withSpec(CaffeineSpec.parse(spec))
+                    .caffeine(StoreConfigurer.UNBOUNDED_AGE)).as("[%s] parsed", spec).hasToString(expected);
+        }
+    }
+
+    @Test
+    void a_spec_is_checked_by_caffeine_and_refuses_what_the_configurer_refuses() {
+        CaffeineConfigurer<String, String> configurer = new CaffeineConfigurer<String, String>().maximumSize(5);
+        CaffeineConfigurer<String, String> malformed = new CaffeineConfigurer<>();
+        CaffeineConfigurer<String, String> weak = new CaffeineConfigurer<>();
+
+        assertThatThrownBy(() -> malformed.withSpec("maximumSize=x"))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("must be a long");
+        assertThatThrownBy(() -> weak.withSpec("maximumSize=1,weakKeys"))
+                .isInstanceOf(UnsupportedOperationException.class).hasMessageContaining("weakKeys");
+        assertThatThrownBy(() -> configurer.withSpec("maximumSize=6")).as("a setting made before")
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("maximum size was already set");
     }
 
     @Test

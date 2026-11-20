@@ -310,6 +310,9 @@ public class InternalCoreTest {
         DistributedCache<String, String> cache = storeOnly(LONG, 1).build();
         closeables.add(cache);
         cache.put("k", "1");
+        // a later millisecond: a store counting in milliseconds (Dragonfly) would make both equally old, and which one
+        // the pruning takes would depend on their hashes
+        pause(2);
         cache.put("newer", "1");
 
         awaitGone(cache); // pruned after the grace

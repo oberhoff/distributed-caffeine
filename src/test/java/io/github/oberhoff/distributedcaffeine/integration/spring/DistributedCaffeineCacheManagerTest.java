@@ -405,17 +405,45 @@ class DistributedCaffeineCacheManagerTest {
     }
 
     @Test
-    void the_builder_settings_are_refused() {
+    void a_builder_handed_over_is_refused() {
         DistributedCaffeineCacheManager manager = manager();
         Caffeine<Object, Object> caffeine = Caffeine.newBuilder();
-        CaffeineSpec spec = CaffeineSpec.parse("");
 
         assertThatThrownBy(() -> manager.setCaffeine(caffeine))
                 .isInstanceOf(UnsupportedOperationException.class).hasMessageContaining("withCaffeine");
-        assertThatThrownBy(() -> manager.setCacheSpecification("maximumSize=10"))
-                .isInstanceOf(UnsupportedOperationException.class);
-        assertThatThrownBy(() -> manager.setCaffeineSpec(spec))
-                .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
+    void a_spec_applies_to_every_cache_also_to_those_built_before() {
+        DistributedCaffeineCacheManager manager = manager();
+        Cache<Object, Object> before = nativeCache(manager, "before");
+
+        manager.setCacheSpecification("maximumSize=5,recordStats");
+
+        assertThat(nativeCache(manager, "before")).as("the cache built before, replaced").isNotSameAs(before);
+        assertThatThrownBy(before::policy).as("and closed").isInstanceOf(IllegalStateException.class);
+        for (String name : new String[]{"before", "after"}) {
+            Cache<Object, Object> cache = nativeCache(manager, name);
+            assertThat(cache.policy().eviction()).as(name).hasValueSatisfying(
+                    eviction -> assertThat(eviction.getMaximum()).isEqualTo(5));
+            assertThat(cache.policy().isRecordingStats()).as(name).isTrue();
+        }
+
+        manager.setCaffeineSpec(CaffeineSpec.parse("maximumSize=7"));
+        assertThat(nativeCache(manager, "after").policy().eviction()).hasValueSatisfying(
+                eviction -> assertThat(eviction.getMaximum()).isEqualTo(7));
+    }
+
+    @Test
+    void a_setting_made_by_both_the_spec_and_the_builder_fails_naming_the_cache() {
+        DistributedCaffeineCacheManager manager = new DistributedCaffeineCacheManager(name -> builder(name)
+                .withCaffeine(caffeine -> caffeine.maximumSize(10)));
+        closeables.add(manager::destroy);
+        manager.setCacheSpecification("maximumSize=5");
+
+        assertThatThrownBy(() -> manager.getCache("orders")).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("orders").hasMessageContaining("maximumSize=5")
+                .hasMessageContaining("maximum size was already set");
     }
 
     @Test

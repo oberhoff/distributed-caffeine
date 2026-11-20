@@ -39,10 +39,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 @NullMarked
 class CaffeineConfigurerParityTest {
 
+    // the configurer's own: the counterparts of Caffeine's static from(...), which is no configuration method
+    private static final Set<String> OWN = Set.of("withSpec(java.lang.String)",
+            "withSpec(com.github.benmanes.caffeine.cache.CaffeineSpec)");
+
     @Test
     void every_configuration_method_of_caffeine_has_its_counterpart() {
         Set<String> caffeine = signatures(Caffeine.class);
         Set<String> configurer = signatures(CaffeineConfigurer.class);
+        assertThat(configurer).containsAll(OWN);
+        configurer.removeAll(OWN);
 
         assertThat(configurer).containsExactlyInAnyOrderElementsOf(caffeine);
         assertThat(caffeine).hasSize(21);

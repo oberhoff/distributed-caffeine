@@ -21,6 +21,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.CacheLoader;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.CaffeineSpec;
+import io.github.oberhoff.distributedcaffeine.CaffeineConfigurer;
 import io.github.oberhoff.distributedcaffeine.DistributedAsyncCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
@@ -62,8 +63,10 @@ import static java.util.Objects.requireNonNull;
  * }</pre>
  * Differences to {@link CaffeineCacheManager}:
  * <ul>
- *     <li>Caches are configured on the builders: {@link #setCaffeine(Caffeine)}, {@link #setCaffeineSpec(CaffeineSpec)}
- *     and {@link #setCacheSpecification(String)} are not supported.</li>
+ *     <li>Caches are configured on the builders: {@link #setCaffeine(Caffeine)} is not supported. A spec
+ *     ({@link #setCaffeineSpec(CaffeineSpec)}, {@link #setCacheSpecification(String)}, Spring Boot's
+ *     {@code spring.cache.caffeine.spec}) applies to every builder after its own settings
+ *     ({@link CaffeineConfigurer#withSpec(String)}); a setting made by both fails.</li>
  *     <li>Keys of Spring's default key generator are hashed by default: a single argument as the cache hashes it, and
  *     a {@link SimpleKey} (several arguments, or none) by its parts, each a {@link String}, {@link Long},
  *     {@link Integer}, {@link UUID}, an {@link Enum enum}, a {@link Hashable} or {@code null}. For other types, set a
@@ -114,6 +117,8 @@ public class DistributedCaffeineCacheManager extends CaffeineCacheManager implem
     // what close the caches built, by name: Spring keeps its caches in a private map and drops them without closing
     private final Map<String, Runnable> built = new ConcurrentHashMap<>();
     private final AtomicReference<@Nullable AsyncCacheLoader<Object, Object>> loader = new AtomicReference<>();
+    // the spec every builder gets, if one was set
+    private final AtomicReference<@Nullable CaffeineSpec> spec = new AtomicReference<>();
     // one for every builder without a key serializer: thread-safe, and its Fory costly to build
     private final SimpleKeyForySerializer keySerializer = new SimpleKeyForySerializer();
 
@@ -133,34 +138,35 @@ public class DistributedCaffeineCacheManager extends CaffeineCacheManager implem
      */
     @Override
     public void setCaffeine(Caffeine<Object, Object> caffeine) {
-        throw unsupported("setCaffeine");
+        // a builder handed over could not be applied: refused, not ignored
+        throw new UnsupportedOperationException("setCaffeine is not supported by "
+                + DistributedCaffeineCacheManager.class.getSimpleName()
+                + ": configure the caches on the builders it is constructed with (withCaffeine)");
     }
 
     /**
-     * Not supported: configure the caches on the builders ({@link DistributedCaffeine#withCaffeine}).
-     *
-     * @throws UnsupportedOperationException always
+     * {@inheritDoc}
+     * <p>
+     * <b>Distributed Caffeine:</b> Applies to every builder after its own settings
+     * ({@link CaffeineConfigurer#withSpec(CaffeineSpec)}); a setting made by both fails when the cache is built.
      */
     @Override
     public void setCaffeineSpec(CaffeineSpec caffeineSpec) {
-        throw unsupported("setCaffeineSpec");
+        // remembered first: Spring's setter rebuilds the caches, through this manager's builders
+        spec.set(requireNonNull(caffeineSpec, "caffeineSpec cannot be null"));
+        super.setCaffeineSpec(caffeineSpec);
     }
 
     /**
-     * Not supported: configure the caches on the builders ({@link DistributedCaffeine#withCaffeine}).
-     *
-     * @throws UnsupportedOperationException always
+     * {@inheritDoc}
+     * <p>
+     * <b>Distributed Caffeine:</b> Applies to every builder after its own settings
+     * ({@link CaffeineConfigurer#withSpec(String)}); a setting made by both fails when the cache is built.
      */
     @Override
     public void setCacheSpecification(String cacheSpecification) {
-        throw unsupported("setCacheSpecification");
-    }
-
-    private static UnsupportedOperationException unsupported(String method) {
-        // a builder or spec handed over could not be applied: refused, not ignored
-        return new UnsupportedOperationException(("%s is not supported by %s: configure the caches on the builders it "
-                + "is constructed with (withCaffeine)").formatted(method,
-                DistributedCaffeineCacheManager.class.getSimpleName()));
+        spec.set(CaffeineSpec.parse(requireNonNull(cacheSpecification, "cacheSpecification cannot be null")));
+        super.setCacheSpecification(cacheSpecification);
     }
 
     // Spring keeps the loader in a private field: remembered here first, since the setter rebuilds the caches
@@ -223,6 +229,15 @@ public class DistributedCaffeineCacheManager extends CaffeineCacheManager implem
         }
         if (KEY_SERIALIZER.get((SerializersConfigurer<?, ?>) SERIALIZERS.get(builder)) == null) {
             builder.withSerializers(serializers -> serializers.withKeySerializer(keySerializer));
+        }
+        CaffeineSpec caffeineSpec = spec.get();
+        if (caffeineSpec != null) {
+            try {
+                builder.withCaffeine(caffeine -> caffeine.withSpec(caffeineSpec));
+            } catch (IllegalStateException e) {
+                throw new IllegalStateException(("The Caffeine spec '%s' sets what the builder of cache %s sets "
+                        + "already: %s").formatted(caffeineSpec.toParsableString(), name, e.getMessage()), e);
+            }
         }
         return builder;
     }
