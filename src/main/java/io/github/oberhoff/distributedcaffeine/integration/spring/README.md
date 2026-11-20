@@ -71,8 +71,10 @@ new DistributedCaffeineCacheManager(name -> DistributedCaffeine.newBuilder(adapt
         }));
 ```
 
-Keys are serialized too, for diagnostics only. For a `SimpleKey`, the default serializer (Fory) logs a harmless warning
-once ("uses custom JDK serialization"), as `SimpleKey` customizes Java serialization.
+Keys are serialized too, for diagnostics only. Where the builder sets no key serializer, the manager sets Fory's with a
+`SimpleKey`, a subclass included, written by its params. Fory would otherwise write it through its Java serialization
+path, as `SimpleKey` customizes Java serialization, and log a warning once ("uses custom JDK serialization"). A key
+serializer set on the builder is kept as it is.
 
 ## Values
 

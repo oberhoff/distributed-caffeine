@@ -61,10 +61,10 @@ Configure and build an adapter for the store, configure and build the cache with
 like any Caffeine cache:
 
 ```java
-MongoAdapter<String, Value> adapter = MongoAdapter.newBuilder(mongoClient, databaseName, collectionName)
+MongoAdapter<UUID, Value> adapter = MongoAdapter.newBuilder(mongoClient, databaseName, collectionName)
         .build();
 
-DistributedLoadingCache<String, Value> cache = DistributedCaffeine.newBuilder(adapter)
+DistributedLoadingCache<UUID, Value> cache = DistributedCaffeine.newBuilder(adapter)
         .withCaffeine(caffeine -> caffeine.maximumSize(10_000)) // the local cache of each instance
         .withStore(store -> store.withMaximumAge(Duration.ofHours(1))) // the shared store
         .build(key -> loadExpensiveValue(key)); // called on a miss in both
@@ -250,9 +250,8 @@ Note: No mode creates a copy on an instance that doesn't hold the key yet; `UPDA
 
 Keys are identified across instances by a hash. Keys of type `String`, `Long`, `Integer` or `UUID`, and enum constants,
 are hashed out of the box; other keys need one of the two ways below, or their first use fails with an
-`IllegalStateException`. An enum constant is hashed by the names of its enum class and of itself, so renaming or moving
-either changes its hash (reordering the constants does not); during a rolling update, instances on both sides of such a
-change do not share that key.
+`IllegalStateException`. The built-in hashes follow a format fixed for good (`Hasher.builtInHash`, recorded in each
+store as `xxh3-128/1`), so stored hashes stay the same across releases.
 
 If the key class cannot or should not be changed, a hash provider can be configured. The supplied hasher computes the
 hash from the values of the key.
@@ -262,7 +261,7 @@ DistributedCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
         .withHashProvider((key, hasher) -> hasher.get()
                 .putUUID(key.getId())
                 .putLong(key.getVersion())
-                .putString(key.getName())
+                ...
                 .getHash())
         .build();
 ```
@@ -273,11 +272,10 @@ Alternatively, the key class can implement the `Hashable` interface.
 public class Key implements Hashable {
     ...
     @Override
-    public String getHash(Supplier<Hasher> hasher) {
+    public Hash getHash(Supplier<Hasher> hasher) {
         return hasher.get()
                 .putUUID(this.id)
                 .putLong(this.version)
-                .putString(this.name)
                 .getHash();
     }
 }
@@ -285,8 +283,8 @@ public class Key implements Hashable {
 
 Note: Hashing must be equivalent to key equality (`equals()`-semantics) and stable across instances, so all values
 relevant for key equality (and only those) should be put into the hasher. A hash provider takes precedence over
-`Hashable` and the built-in types; `Hasher.putBuiltIn(value, hasher)` puts a value of a built-in type as the cache
-would, for example a key's part.
+`Hashable` and the built-in types; `hasher.putHash(Hasher.builtInHash(part))` puts a key's part of a built-in type as
+the cache hashes it.
 
 #### Serialization
 
@@ -556,6 +554,9 @@ distribution, on every instance, and the next read loads a fresh one.
   dependency like the drivers.
 * Only if `DistributedCaffeineCacheManager` is used: `org.springframework:spring-context-support` (6.2 or newer), an
   optional dependency like the drivers.
+* `com.dynatrace.hash4j:hash4j` as this release depends on it. If the application uses hash4j itself, keep a version
+  that hashes alike: building the first cache checks it with known answers and refuses to start otherwise, since
+  instances hashing differently would not share keys.
 
 ## Installation
 

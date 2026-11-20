@@ -25,8 +25,8 @@ The table and its index are created if missing; several caches can share a table
 table name consists of letters, digits and underscores and does not start with a digit; the discriminator is not blank
 and has up to 200 characters. A name outside these is rejected when the adapter is built. If the user lacks the right to
 create the table, building fails with the DDL to run instead, which also suits migration tools. A table without this
-version's schema marker (a table comment) is refused, naming the DDL; there is no `withSchemaReset()`, as there is no
-table of 0.x to migrate from.
+version's schema marker (a table comment, which also records the hash format of the keys) is refused, naming the DDL;
+there is no `withSchemaReset()`.
 
 Keys and values are stored as bytes whatever their format (bytes, text or JSON), so caches with different serializers
 can share a table.

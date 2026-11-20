@@ -48,6 +48,8 @@ The keyspace name has 1 to 100 letters, digits, `-`, `_`, `.` and `:` (no braces
 the discriminator has 1 to 100 letters, digits, `-`, `_` and `.` (no colon, so that one cache's keys never begin with
 another's). A name outside these is rejected when the adapter is built.
 
+A cache written by another version of this library is refused, naming its keys.
+
 ## Topologies
 
 A single server, a primary behind Sentinel, or a cluster through the library's cluster client. A plain client of one

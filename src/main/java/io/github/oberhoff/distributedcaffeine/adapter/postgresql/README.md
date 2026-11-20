@@ -16,10 +16,8 @@ keeps a connection open for listening. In short:
 
 The table, its index and a sequence for its versions are created when the first cache is built. If the user lacks the
 rights to create them, building fails with the DDL to run instead, which also suits migration tools. A table created by
-another version of this library is refused. `withSchemaReset()` is meant for the migration from 0.x: it drops and
-recreates a table of 0.x (or an empty one), never one of another layout version from 0.8 on or one holding other rows.
-Instances of 0.x still running fail on the new table, so stop them before the first new instance starts, or accept
-their errors until they are replaced. Remove `withSchemaReset()` once the migration is done.
+another version of this library is refused. `withSchemaReset()` drops and recreates one created by an earlier version,
+or an empty one; never one of a later version or one holding other rows.
 
 A table's `key` column holds one format and its `value` column one format (bytes, text or JSON, as `bytea`, `text` or
 `jsonb`), after what the key and value serializers of its first cache store; the two may differ. Caches sharing a table

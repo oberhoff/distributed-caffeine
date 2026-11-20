@@ -98,18 +98,18 @@ As the README shows it, with every optional part:
 
 ```java
 DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
-    .withCaffeine(caffeine -> caffeine                         // Caffeine's builder methods, one to one
-        .maximumSize(10_000)
-        .expireAfterWrite(Duration.ofMinutes(5)))
-    .withSerializers(serializers -> serializers                // optional, default Fory; per cache
-        .withKeySerializer(StringSerializer.ofString())
-        .withValueSerializer(new JacksonSerializer<>(Value.class, true)))
-    .withStore(store -> store
-        .withMaximumAge(Duration.ofHours(1))
-        .withMaximumSize(1_000_000))
-    .withDistributionMode(DistributionMode.UPDATE)             // optional: INVALIDATE by default
-    .withNegativeCaching(Duration.ofMinutes(1))                // optional: local set of recent misses
-    .build(key -> source.load(key));                           // a DistributedLoadingCache, AutoCloseable
+        .withCaffeine(caffeine -> caffeine              // Caffeine's builder methods, one to one
+                .maximumSize(10_000)
+                .expireAfterWrite(Duration.ofMinutes(5)))
+        .withSerializers(serializers -> serializers     // optional, default Fory; per cache
+                .withKeySerializer(StringSerializer.ofString())
+                .withValueSerializer(new JacksonSerializer<>(Value.class, true)))
+        .withStore(store -> store
+                .withMaximumAge(Duration.ofHours(1))
+                .withMaximumSize(1_000_000))
+        .withDistributionMode(DistributionMode.UPDATE)  // optional: INVALIDATE by default
+        .withNegativeCaching(Duration.ofMinutes(1))     // optional: local set of recent misses
+        .build(key -> source.load(key));                // a DistributedLoadingCache, AutoCloseable
 ```
 
 No validation between Caffeine's expiry and the maximum age is needed: the maximum age is enforced independently
@@ -146,72 +146,6 @@ reasons; *on demand*, only if a user asks for it or hits it. Done items move to 
 later work").
 
 ### Robustness
-
-*Next:*
-- **A stable hash format, specified once for good** (decided 2026-11-19, for 0.10.0, a breaking change; see
-  "Key identity: hashes"). Stored hashes must stay unchanged for years, so this break specifies every input of a
-  stored hash: the bytes that go into XXH3, not the code that produces them. XXH3 hashes the same bytes alike streamed
-  or in one shot, so any later implementation (one-shot, a lighter `Hasher`, a pool) changes no stored hash; a built-in
-  type added later was refused before, so it changes none either. Only another algorithm would break again, and
-  XXH3-128 is frozen.
-  - **Why:** today the built-in types are encoded with hash4j's stream conventions and no type marker, so values of
-    different types collide: `""` and `Integer` `0` hash alike (both the four zero bytes: a string is its chars, then
-    its length as an `int`), as do a 2-char `String` and some `Long`s from 2^33 up, or a 6-char `String` and some
-    `UUID`s; and a `Hashable` hashing `putString(id)` equals the built-in `String` key `id`. Two colliding keys in one
-    cache share a row: one gets the other's value, and a key from untrusted input could aim at another key's row.
-    It needs keys of several kinds in one cache, rare in typed caches, common under Spring (one cache for
-    `findById(Long)` and `findByName(String)`, `SimpleKey` params). Since 0.7.x. And those conventions are hash4j's,
-    with no stability promise (its README makes none) and no outside reference.
-  - **The specification** (to be written into `Hasher`'s Javadoc as the stored format, and kept here), one rule:
-    **every value's hash is XXH3-128, seeded by its kind, over its bytes;** a plain value's bytes are its natural
-    bytes, a composite's bytes are its elements' 16-byte hashes in order. One shot, the length is part of the input,
-    so no length or count is added; the seed separates the kinds, so bytes alike in two kinds never hash alike.
-    1. **Form:** the stored hash is the 32 lowercase hex characters of the 16 bytes, as `Hasher.getHash()` gives them
-       today. Hashes beginning with `#` stay reserved for the library's own rows.
-    2. **Kinds and their bytes** (each a fixed seed, listed in the Javadoc):
-       - `String`: its chars, UTF-16LE;
-       - `Long`, `Integer`: its 8 or 4 bytes, little-endian (the order the usual CPUs and XXH3's own reading use, so
-         nothing is swapped); `UUID`: its least significant `long`, then its most significant, each little-endian;
-       - enum constant: the name of its declaring class (a constant with a body of its own is an anonymous subclass),
-         the char U+0000 (which no class name contains), the constant's name, as chars;
-       - `null` (an element only): no bytes;
-       - custom hash (an element only: the string a `Hashable` or hash provider returns): its chars;
-       - `SimpleKey` (Spring), a composite: its params' 16-byte hashes in order, each param hashed by its kind. The
-         integration is not released yet, so this is its first format, not a change.
-    3. **`Hasher.putBuiltIn(part, hasher)`:** puts the part's 16-byte hash into the hasher, the same idea for a
-       provider combining built-in parts.
-    4. **Custom hashes of whole keys:** the string a `Hashable` or hash provider returns, as today. `Hasher`'s `put…`
-       methods keep hash4j's current encoding, pinned by golden values; should hash4j ever change one, methods of our
-       own reproducing the pinned bytes replace it in a normal release (no stored hash changes).
-  - **What hash4j provides:** XXH3, whose output is fixed by its specification (frozen since xxHash 0.8.0, seeded
-    variant included) and cross-checked by hash4j against the reference implementation, and the stream behind
-    `Hasher`'s `put…` methods. hash4j stays: pure Java, no `sun.misc.Unsafe` (byte-array `VarHandle`s), maintained;
-    Zero-Allocation-Hashing builds on `Unsafe`, Guava and Commons Codec lack XXH3-128. XXH3-128 stays the algorithm:
-    the fastest measured, as stable as Murmur3-128 (36.6 / 6.3 ns against 34.8 / 4.7 ns one-shot over an encoded
-    `String` / `Long`); SHA-256 took 92 / 47 ns and about 300 bytes, worth it only against deliberately crafted
-    collisions, which is not the goal.
-  - **Known answers in the build:** the official xxHash XXH3-128 sanity vectors (seeded and unseeded, every length
-    class: 0, 1–3, 4–8, 9–16, 17–128, 129–240 and longer, with the boundaries), an independent oracle for hash4j's
-    XXH3; golden values for every part of the specification (each kind and edge case: empty, BMP and surrogate chars,
-    long strings, extreme numbers, an enum constant with a body of its own, `SimpleKey`s with every element kind) and
-    for `Hasher`'s common `put…` methods. A change of stored hashes, ours or a hash4j upgrade's, fails the build.
-  - **A known-answer check at runtime:** an application's build may resolve another hash4j version than ours (Maven
-    takes the nearest declaration, Gradle the highest). The first cache build of a JVM hashes a few dozen known
-    answers (every length class and kind, a `put…` chain) and refuses to start on a mismatch, naming the hash4j
-    version this release accepts. Microseconds, once; the README's Requirements say so.
-  - **Migration by the schema marker:** a different hash format is a different layout, since rows are identified by
-    their hashes. Marker 2 on every store (MariaDB and MySQL get one, a table comment; their layout is checked by its
-    columns today): new instances refuse a schema-1 place, naming the remedies; `withSchemaReset()` may drop a
-    schema-1 place. Old and new instances never share a place, so no one serves a value the other changed (a silent
-    hash change would). Rows are not re-hashed in place: the stored key is for diagnostics, not read back, and a cache
-    may be emptied. The release notes: one cold start per cache (also for custom hashes, whose values do not change,
-    since the marker resets the whole place), a provider using `putBuiltIn` gets other hashes, the steps per store.
-  - **Built with it, as the specification's first implementation:** built-in values hashed one-shot (no stream, so no
-    thread-local, no `Thread.isVirtual()` check and no pool; virtual threads hash as fast as platform threads),
-    measured (`HashStreamBenchmarkTest`, JDK 25, a loaded laptop, 1 / 4 threads): a 19-char `String` 15.9 / 16.3 ns
-    against 23.0 / 21.5 ns with today's stream per thread, a `Long` 4.6 / 4.9 against 7.3 / 7.2 ns, a 100-char
-    `String` 66.2 / 70.1 against 62.0 / 62.1 ns (hash4j reads chars four at a time through `charAt`); today's way on a
-    virtual thread, a fresh stream, takes 31–42 ns and 416 bytes.
 
 *In a later release:*
 - **remove the cleanup of 0.7.x documents** on MongoDB (`MongoSchema#removeOldGeneration`, its test in
@@ -341,16 +275,6 @@ After the Linux baseline (see "Performance: the baseline"), each only if measure
   coalescing). It replaces the Docker Desktop numbers every item below was judged on.
 
 *Measure first:*
-- **Custom hashes without a fresh stream per hasher** (noted 2026-11-19, no stored hash changes, see "A stable hash
-  format, specified once for good"): the core hands user code `Hasher::new`, a fresh hash4j stream each (about 416 bytes; a `Hashable` putting
-  a 19-char id and a `long` took 37.6 / 40.1 ns and 520 bytes at 1 / 4 threads, hex formatting included). A stream
-  reused, the best a pool could do, took 19.4 / 20.5 ns and 32 bytes, 59.5 / 61.6 ns for a 100-char id; but a pool
-  needs a lifetime rule for user code (a hasher valid only during the call, unenforceable) and brings back the
-  question of threads (a free list per thread, or shared atomics). A lighter `Hasher`, its bytes in a small array
-  hashed one-shot (bit-identical, tested), took 19.5 / 23.6 ns and 112 bytes for the short id, but 88.4 / 93.9 ns and
-  744 bytes for the long one (it grows by copying, chars one at a time; to try: size from the first value, chars in
-  bulk). The same for `SimpleKey`s: built-in params hashed one-shot, the key over their hashes in a small array (a
-  two-param key takes three hashers today, about 1.2 KB). Decided on the Linux baseline.
 - MongoDB batches, two options (recorded 2026-10-31, for later; performance, so after the robustness work). A
   `putAll` is one unordered bulk write of `updateOne` upserts at the proposed versions, one round trip (step 5:
   45.9 ms for 100 keys with 16 concurrent single writes before, about 19 ms now, of which the constant ~16 ms
@@ -523,6 +447,16 @@ After the Linux baseline (see "Performance: the baseline"), each only if measure
   working);
 - **a Hibernate `RegionFactory`** in `...integration.hibernate`: thinner than JCache, but Hibernate only; only if
   Hibernate is wanted without the JCache provider;
+- **a Micrometer integration** (noted 2026-11-20) in `...integration.micrometer`, `micrometer-core` optional: a
+  `MeterBinder` exporting `distributedStats()` (store reads and writes, invalidations sent and received, interruptions)
+  and the synchronization state as a gauge, named after Micrometer's own `CaffeineCacheMetrics` (`cache.*`, a `cache`
+  tag) so that dashboards line up. The local statistics need nothing of ours: the caches are Caffeine caches, which
+  Micrometer's binder reports with `recordStats`. Micrometer serves Spring Boot, Quarkus, Micronaut and plain
+  applications alike; for Spring Boot a thin `CacheMeterBinderProvider<CaffeineCache>` beside the manager, so that
+  Boot's cache metrics include the distributed ones without wiring;
+- **an OpenTelemetry integration** in `...integration.opentelemetry`: the same metrics through OpenTelemetry's metrics
+  API, for applications without Micrometer (Micrometer reaches OpenTelemetry through its OTLP registry already); on
+  demand;
 - **CockroachDB** (planned 2026-11-02, see "CockroachDB adapter (planned, not built)"): the first distributed SQL
   database, chosen as the best fit (a native feed, versions assigned in one statement, no loss of committed writes on
   failover, PostgreSQL's wire protocol);
@@ -764,23 +698,150 @@ every instance:
   PostgreSQL primary key `(discriminator, id)`; see "Adapter setup"), held compactly in `InternalKey` (see "How a
   message finds the held key").
 - Out of the box for `String`, `Long`, `Integer`, `UUID` and enum constants; other keys implement `Hashable` or the
-  cache is given a `HashProvider`. The built-in types are listed once, in the public `Hasher.putBuiltIn(key, sink)`:
-  the core puts a key into its reused stream with it, and any hash provider can use it for a key's parts (the Spring
-  integration's `SimpleKeyHashProvider` does), so a type added there reaches all of them.
-- The built-in types' encoding (hash4j's stream conventions, no type marker) lets values of different types collide
-  (`""` and `0`); a format specified for good, XXH3-128 seeded per kind, replaces it once, in 0.10.0 (see "Open work",
-  "A stable hash format, specified once for good").
-- Enum constants (added 2026-11-19, so no stored hash changed): the name of the enum class (its declaring class, since
-  a constant with a body of its own is an anonymous subclass named by its position), then the constant's name. Not
-  the ordinal, which reordering the constants would shift; the class's name keeps `Status.ACTIVE` and `Role.ACTIVE`
-  apart. Renaming or moving the enum or a constant changes the hash, as renaming a key class's fields would; the
-  README says so. Other value types (dates and the like) stay the application's, by `Hashable` or a hash provider:
-  each has several plausible encodings, and every built-in type is a stored format to keep.
+  cache is given a `HashProvider`. Other value types (dates and the like) stay the application's: each has several
+  plausible encodings, and every built-in kind is a stored format to keep.
+- **The stored format, fixed for good** (`Hasher.builtInHash`, recorded in every store as `xxh3-128/1`; built
+  2026-11-19, see "The stored hash format" below): a value's hash is XXH3-128, seeded by its kind, over its bytes.
 - Messages identify keys by hash (all kinds except `INVALIDATED_ALL`), which also keeps PostgreSQL notification
   payloads small.
 - Collisions are treated as impossible (128 bits); this is stated in the docs rather than handled.
 - The serialized key is still stored in the row, for diagnostics and readability of the store; nothing in the
   library reads it back (keys are matched by hash).
+
+#### The stored hash format
+
+*Built 2026-11-19, for 0.10.0, a breaking change.*
+
+Stored hashes must stay unchanged for years, so the format specifies every input of a stored hash: the bytes that go
+into XXH3, not the code that produces them. XXH3 hashes the same bytes alike streamed or in one shot, so any later
+implementation (one-shot, a lighter `Hasher`, a pool) changes no stored hash; a built-in kind added later was refused
+before, so it changes none either. Only another algorithm would break again, and XXH3-128 is frozen.
+
+- **Why:** before, the built-in types were encoded with hash4j's stream conventions and no type marker, so values of
+  different types collided: `""` and `Integer` `0` hash alike (both the four zero bytes: a string is its chars, then
+  its length as an `int`), as do a 2-char `String` and some `Long`s from 2^33 up, or a 6-char `String` and some
+  `UUID`s; and a `Hashable` hashing `putString(id)` equals the built-in `String` key `id`. Two colliding keys in one
+  cache share a row: one gets the other's value, and a key from untrusted input could aim at another key's row.
+  It needs keys of several kinds in one cache, rare in typed caches, common under Spring (one cache for
+  `findById(Long)` and `findByName(String)`, `SimpleKey` params). Since 0.7.x. And those conventions are hash4j's,
+  with no stability promise (its README makes none) and no outside reference.
+- **The specification** (in `Hasher`'s Javadoc as the stored format, and here), one rule:
+  **every built-in value's hash is XXH3-128, seeded by its kind, over its natural bytes.** One shot, the length is
+  part of the input, so no length is added; the seed separates the kinds, so bytes alike in two kinds never hash
+  alike.
+  1. **Form:** the stored hash is the 32 lowercase hex characters of the 16 bytes, as `Hash.toHex()` gives them.
+     Ids beginning with `#` are the library's own rows; no key's hash can take that form.
+  2. **Kinds and their bytes** (each a fixed seed, listed in the Javadoc):
+     - `String`: its chars, UTF-16LE;
+     - `Long`, `Integer`: its 8 or 4 bytes, little-endian (the order the usual CPUs and XXH3's own reading use, so
+       nothing is swapped); `UUID`: its least significant `long`, then its most significant, each little-endian;
+     - enum constant: the name of its declaring class (a constant with a body of its own is an anonymous subclass),
+       the char U+0000 (which no class name contains), the constant's name, as chars;
+     - `SimpleKey` (Spring) is no kind here: `SimpleKeyHashProvider` is a hash provider, so its hash is a custom
+       one, built with a `Hasher` (see "Spring" under "Integrations"). It was a composite kind of this format first
+       (its params' 16-byte hashes under a seed of its own, `null` and custom hashes as element kinds), which made
+       the format class public API for one integration (decided 2026-11-20); the integration was not released, so no
+       stored hash changed.
+  3. **`hasher.putHash(Hasher.builtInHash(part))`:** puts the part's 16-byte hash into the hasher, the same idea for a
+     provider combining built-in parts; `putHash` puts any `Hash`, a part's own `Hashable` hash too, an instance
+     method like every `put…` (decided 2026-11-20).
+  4. **Custom hashes of whole keys:** the `Hash` a `Hashable` or hash provider returns, built with a `Hasher`
+     (`getHash()`), in the same 32-hex form, so every row id has one form (decided 2026-11-20; custom hashes were
+     strings of any form before, which kept a second key representation and a reserved-prefix check). `Hasher`'s
+     `put…` methods write hash4j's stream encoding themselves, pinned by golden values (see "Custom hashes: `Hasher`
+     encodes them itself" below).
+- **What hash4j provides:** XXH3, whose output is fixed by its specification (frozen since xxHash 0.8.0, seeded variant
+  included) and cross-checked by hash4j against the reference implementation; nothing else, since `Hasher` encodes
+  custom hashes itself. hash4j stays: pure Java, no `sun.misc.Unsafe` (byte-array `VarHandle`s), maintained;
+  Zero-Allocation-Hashing builds on `Unsafe`, Guava and Commons Codec lack XXH3-128. XXH3-128 stays the algorithm: the
+  fastest measured, as stable as Murmur3-128 (36.6 / 6.3 ns against 34.8 / 4.7 ns one-shot over an encoded `String` /
+  `Long`); SHA-256 took 92 / 47 ns and about 300 bytes, worth it only against deliberately crafted collisions, which is
+  not the goal.
+- **Known answers in the build:** the official xxHash XXH3-128 sanity vectors (seeded and unseeded, every length
+  class: 0, 1–3, 4–8, 9–16, 17–128, 129–240 and longer, with the boundaries), an independent oracle for hash4j's
+  XXH3; golden values for every part of the specification (each kind and edge case: empty, BMP and surrogate chars,
+  long strings, extreme numbers, an enum constant with a body of its own, `SimpleKey`s with every kind of param) and
+  for `Hasher`'s common `put…` methods. A change of stored hashes, ours or a hash4j upgrade's, fails the build.
+- **A known-answer check at runtime:** an application's build may resolve another hash4j version than ours (Maven
+  takes the nearest declaration, Gradle the highest). The first cache build of a JVM hashes its known answers
+  (every length class and kind, every common `put…` method, a chain) and refuses to start on a mismatch, naming the
+  hash4j version this release accepts. Microseconds, once; the README's Requirements say so.
+- **Migration by the hash format recorded in the schema marker** (decided 2026-11-19): the schema version stays 1
+  until 1.0, and every marker records the hash format of the row ids (`Store.HASH_FORMAT`, in the SPI, since the
+  adapters see nothing else): `distributed-caffeine schema=1 hash=xxh3-128/1` (see "Schema markers and the reset"). A
+  marker without it is a place of an earlier version, whose ids are hashed in the earlier format: refused with the
+  remedies named, or, on PostgreSQL and MongoDB, dropped and recreated with `withSchemaReset()` (Redis and
+  MariaDB/MySQL have no reset: stop the instances, delete the keys or drop the table). A later format stays refused
+  even with the reset: the newer version wins. Old and new instances never share a place (a silent hash change
+  would let each serve values the other changed), and a forgotten migration is a refused start, not stale values. Rows
+  are not re-hashed in place: the stored key is for diagnostics, not read back, and a cache may be emptied. The release
+  notes: one cold start per cache (also for custom hashes, whose values do not change, since the reset drops the whole
+  place), a provider putting built-in parts uses `putHash(Hasher.builtInHash(part))`, `Hashable` and
+  `HashProvider` return a `Hash` (a hash of another form, such as `"order-42"`, is built with a `Hasher` now), the
+  steps per store.
+  Tests: `PostgresAdapterTest` and `MongoAdapterTest` (`a_..._of_an_earlier_version_is_refused_unless_it_is_reset`,
+  `a_reset_never_drops_a_..._of_a_later_hash_format_revision`).
+- **The first implementation:** built-in values hashed one-shot (no stream, so no
+  thread-local, no `Thread.isVirtual()` check and no pool; virtual threads hash as fast as platform threads),
+  measured (`HashStreamBenchmarkTest`, JDK 25, a loaded laptop, 1 / 4 threads): a 19-char `String` 15.9 / 16.3 ns
+  against 23.0 / 21.5 ns with the stream per thread before, a `Long` 4.6 / 4.9 against 7.3 / 7.2 ns, a 100-char
+  `String` 66.2 / 70.1 against 62.0 / 62.1 ns (hash4j reads chars four at a time through `charAt`); the way before on a
+  virtual thread, a fresh stream, takes 31–42 ns and 416 bytes.
+
+- **Decided in the build:** the seeds are the 64-bit XXH3 hashes of the kinds' names (`"distributed-caffeine:String"`
+  and so on), computed once and written into the code and the Javadoc as literals: self-explaining, clash-free, never
+  computed at runtime (`HasherBuiltInTest` recomputes them). The runtime check accepts any hash4j version that gives the
+  known answers and names the version it resolved. The xxHash vectors come from xxHash v0.8.2's own sanity test data
+  (`Xxh3VectorsTest`: 63, every length class boundary with its three seeds; BSD license), checked into the tests with
+  attribution.
+- **Custom hashes: `Hasher` encodes them itself** (built 2026-11-19, no stored hash changes): the `put…` methods write
+  hash4j's stream encoding (every value little-endian, a string's chars then its length, UTF-8 with `?` for an unpaired
+  surrogate, and so on; an unordered iterable through a funnel is encoded our own way, see below) into a small array (64
+  bytes, doubling, sized to a string at once), hashed by `getHash()` in one shot; beyond 4 KB the array goes into a
+  hash4j stream as raw bytes, so memory stays bounded. hash4j then contributes XXH3 alone, so another hash4j version can
+  change no encoding. Before, every hasher was a fresh hash4j stream with a 264-byte buffer, which the core creates for
+  every access to a key with a custom hash.
+  - Bit for bit hash4j's: `HasherDifferentialTest` puts random sequences of every put method (sizes across
+    both buffers, every kind of char, every way hash4j takes for unordered iterables) into both and compares (3,000
+    sequences per build, 100,000 in the nightly); the known answers in the build and at runtime hold the common methods.
+  - A string's chars are copied in bulk (`String.getChars` into a scratch array of up to 256 chars, made on first
+    use), then written little-endian through the `VarHandle`, plain stores: char by char through `charAt` took about
+    1.5 ns per char, slower than the stream, and a little-endian `CharBuffer` view took two objects (about 100 bytes)
+    per string; the one-shot XXH3 itself took 6 / 17 / 117 ns for 19 / 100 / 1000 chars against the stream's
+    31 / 69 / 509.
+  - Measured (`HashStreamBenchmarkTest`, JDK 25, a loaded laptop, `putString(id)` then `putLong`, the `Hash` as the
+    result, 1 thread): a 19-char id 18.7 ns and 200 bytes against 37.5 ns and 520 bytes with a fresh hash4j stream; a
+    100-char id 44.0 ns and 664 bytes against 77.4 ns and 520 bytes; a 1000-char id 253 ns and 2736 bytes against
+    520 ns and 520 bytes (the bytes held at once, short-lived).
+  - Not taken: a pool of hashers (needs a lifetime rule for user code, a hasher valid only during the call, which
+    cannot be enforced, and brings back the question of threads: measured 19.4 / 20.5 ns for the short id with a
+    reused stream, but every key writing shared memory or a free list per thread).
+- **No hash4j type in the API** (decided 2026-11-20): hash4j computes XXH3 inside `Hasher`, and nothing of it shows, so
+  that a change of hash4j's API (or another XXH3 library) changes none of ours. `Hasher` returns `Hash`, a record of the
+  two `long`s with the stored form (`toHex`), and offers the put methods of hash4j's `HashSink` by the same names and
+  encodings without implementing it, with its own nested `Hasher.Funnel` in place of hash4j's `HashFunnel`. Left out:
+  bytes read through hash4j's `ByteAccess` (a `ByteBuffer`'s, a memory segment's), a type of their own for one method
+  (decided 2026-11-20). Public in the `hasher` package: `Hasher` (with `Funnel`), `Hashable` and `HashProvider` for
+  users, and `Hash`. All XXH3 logic is in `Hasher` (decided 2026-11-20): the custom hashes and the built-in kinds
+  (`builtInHash`), so the stored format is specified and computed in one place. The runtime check of the resolved hash4j
+  is the core's (`InternalHasher.verify`, run on the first cache build): its known answers go through `Hasher`'s public
+  methods, so it needs no API of its own.
+  - **Unordered iterables:** equal sets must hash alike whatever their iteration order, so each element is hashed on its
+    own and the element hashes are sorted. hash4j lets the element hash be a function (to 64 bits, sorted as signed
+    `long`s, then their number: kept here as hash4j encodes it, a JDK type), or a hasher or stream of its own over a
+    funnel, which could only be named with hash4j's types. That one is `putUnorderedIterable(Iterable, Funnel)` here, an
+    encoding of our own (decided 2026-11-20): each element's XXH3-128 over its encoding, as two `long`s (the least
+    significant first), sorted as signed `long`s by that one, then by the other (a private comparator, so `Hash` has no
+    `compareTo` that would be part of the format), then their number. 128 bits, so that a key that is a set keeps the
+    guarantee of every other key: with 64-bit element hashes a set of one element would be as unique as 64 bits (a
+    collision about every 2³² keys by the birthday bound). XXH3-128, so that every hash here uses one algorithm, and a
+    port of XXH3, should hash4j ever fall away, is of XXH3-128 alone (XXH3-64 differs in the short-input paths and the
+    final mix). `HasherDifferentialTest` writes the encoding out on hash4j's stream as the oracle; a known answer pins
+    it.
+  - **A hint on hash4j's API:** `HasherApiTest` compares `Hasher`'s put methods with `HashSink`'s, hash4j's types
+    mapped to ours, and fails when hash4j adds one (to be added here with its encoding, or listed as left out) or
+    drops one (kept here, its encoding being ours, and listed as own); it also checks that no public signature of the
+    `hasher` package names a hash4j type.
 
 ### Clocks: ages from the store, versions from the instances
 
@@ -1238,36 +1299,36 @@ key: a message builds a lookup key from the hash alone and finds the held entry 
 registry of minimum versions for loads in flight is keyed the same way. Whatever Caffeine holds is exactly what
 messages find, including during evictions, expirations and loads in flight.
 
-- **Identity is conceptually the hash string; `InternalKey` holds it compactly**
-  (decided after the benchmark below):
-  - A hash of 32 hex characters (built-in key types, and custom ones using the `Hasher`) is held as 128 bits (two
-    `long`s). Built-in key types (`String`, `Long`, `Integer`, `UUID`, enums) go through the same `Hasher` path but
-    read the bits directly (`Hasher.hashBuiltIn`), so no string is created on the hit path; the result is bit-for-bit the
-    hash `getHash()` would give. All of it lives in `Hasher`: the algorithm, the one list of built-in types
-    (`putBuiltIn(key, hasher)`, public, for hash providers) and the core's path (`hashBuiltIn(key)`, public, returning
-    hash4j's `HashValue128`), so `InternalHasher` holds no stream and no algorithm of its own (decided 2026-11-19).
-    `hashBuiltIn` reuses one stream per platform thread and takes a fresh one on a virtual thread (`Thread.isVirtual()`,
-    from Java 21, through a method handle looked up once; absent on 17, where every thread is a platform thread).
-    Measured 2026-11-19 (`HashStreamBenchmarkTest`, JDK 25, a loaded laptop: numbers to repeat on the Linux baseline):
-    - per platform thread: 20 ns per `String` key, 7 ns per `Long` key, 32 bytes (the result), at 1 and 4 threads;
-      the `isVirtual()` check costs nothing measurable;
-    - a fresh stream: 33–42 ns and 416 bytes (a 264-byte buffer inside), what a virtual thread pays per key;
-    - a stream per thread on virtual threads too (as built first): never reused, so a stream per request kept for the
-      thread's life, about 416 bytes per live virtual thread, which JEP 444 advises against;
+- **Identity is the `Hash`; `InternalKey` holds its two `long`s** (decided after the benchmark below):
+  - Every key's hash is a `Hash` of 128 bits (built-in key types, and custom ones from the `Hasher`), whose two `long`s
+    the `InternalKey` copies and compares; its hex is made once, on demand, from a `Hash` of them. Copied rather than
+    the `Hash` kept (measured 2026-11-20, `HitPathBenchmarkTest`, one session): the JIT allocates no `Hash` on a hit
+    then (escape analysis), 24 bytes less per hit (72 against 96 bytes per `String` key), and a held key is one object,
+    not two; the time per hit was the same, the cache of the benchmark fitting the CPU's caches. Built-in key types
+    (`String`, `Long`, `Integer`, `UUID`, enums) are hashed by `Hasher.builtInHash`, one shot, seeded per kind (see "The
+    stored hash format"), and the bits are read directly, so no string is created on the hit path; the hex the stores
+    see is the same `Hash`'s (`toHex()`). One shot needs no stream, so no thread-local, no `Thread.isVirtual()` check
+    and no pool. Measured 2026-11-19 (`HashStreamBenchmarkTest`, JDK 25, a loaded laptop: numbers to repeat on the Linux
+    baseline), the ways before and those considered:
+    - one shot, as built: 16 ns per 19-char `String` key, 5 ns per `Long` key, alike on platform and virtual threads;
+    - a stream per platform thread, as before: 20–23 ns per `String` key, 7 ns per `Long` key, 32 bytes (the result);
+    - a fresh stream: 33–42 ns and 416 bytes (a 264-byte buffer inside), what a virtual thread would pay per key;
+    - a stream per thread on virtual threads too: never reused, so a stream per request kept for the thread's life,
+      about 416 bytes per live virtual thread, which JEP 444 advises against;
     - a pool of streams striped by thread id: 10 to 18 times slower under 4 threads unpadded (slots sharing cache
-      lines), padded close for `Long` but twice the time for `String`; every key writes shared memory;
-    - one-shot hashing (`hashCharsTo128Bits` over a view of the stream's encoding, bit-identical): 7 ns for `Long`,
-      but 65 ns for `String`, read char by char; the cheap path for fixed-size keys, should their speed matter.
-    Custom keys return their string as today and the core reads it into two `long`s
-    without allocating (`HexFormat.fromHexDigitsToLong` per half).
-  - Any other string a custom `Hashable` / `HashProvider` returns (e.g. `"order-42"`) is kept and compared as the
-    string, exactly as today; that cost stays with those keys.
-  - Which representation a key uses follows from the hash string alone, so every instance decides it the same way,
-    and a 32-hex string never equals any other string, so the two never need to be compared with each other.
+      lines), padded close for `Long` but twice the time for `String`; every key writes shared memory.
+    Custom keys return their `Hash`, which the core holds alike; no hex is made or parsed on the hit path.
+  - A whole hit (`HitPathBenchmarkTest`, 2026-11-20, JDK 25, a laptop, 1 thread, `getIfPresent` on 10,000 keys): plain
+    Caffeine 22 / 22 ns per `String` / `Long` key; a `DistributedCache` with built-in hashing 72 / 48 ns and 72 / 96
+    bytes; with a hash provider 76 / 47 ns and 208 / 152 bytes; the hex string the way before, as a model, 118 / 91 ns
+    and 497 bytes. To repeat on the Linux baseline, where 4 threads can be measured too.
+  - A lookup by another string, one of the library's own rows (`#…`, such as the heartbeat's), is kept and compared
+    as the string. Which representation a lookup uses follows from the hash string alone, so every instance decides
+    it the same way, and a 32-hex string never equals any other string, so the two never need to be compared.
   - The hex string is produced only for the store and messages, and cached in the wrapper. Row ids and messages
-    carry it as today; a message lookup picks the representation the same way.
-- **The user API does not change:** `Hashable` and `HashProvider` keep returning a `String`; every implementation
-  that works today keeps working, with the same store id, including strings that are not hex.
+    carry it; a message lookup parses it back into the `Hash`.
+- **The user API:** `Hashable` and `HashProvider` return a `Hash`, computed with the supplied `Hasher`, so every row
+  id has one form (see "The stored hash format").
 - **Documented contract:** keys that are `equals` must produce the same hash (already required in practice).
 - **Cost:** hashing on every user call, since a new wrapper has no cached hash: 2–4 times a plain hit and 32 bytes
   per call (measured below), against 5–7 times and about 500 bytes for the hash string.
@@ -3873,9 +3934,19 @@ MongoDB database and collection, a Redis keyspace, a MariaDB or MySQL table); on
 So there are no default names that two layouts could collide on. What users do when moving from 0.x is in
 the adapters' READMEs.
 
-**A schema marker per place:** a table comment on PostgreSQL (`distributed-caffeine schema 1`), a metadata document on
-MongoDB (a string `_id`, which never equals the `{d, h}` subdocuments of rows, filtered out of reads and change streams;
-`distributed-caffeine schema 1`), `1` on Redis. MariaDB and MySQL have no marker: the layout is checked by its columns.
+**A schema marker per place,** one string on every store (`StoreMarker` in the SPI, decided 2026-11-20): a table comment
+on PostgreSQL, MariaDB and MySQL, the `schema` field of a metadata document on MongoDB (a string `_id`, which never
+equals the `{d, h}` subdocuments of rows, filtered out of reads and change streams), the marker key's value on Redis.
+Each store keeps it in the place's own metadata where it has some: a table comment, created with the table (one
+statement on MariaDB and MySQL, one transaction on PostgreSQL) and out of reach of row operations (`DELETE`, `TRUNCATE`,
+scans, counts); otherwise in a reserved entry, which reads and feeds filter out and which a race at creation and a
+user's delete must be handled for (MongoDB has no metadata of a collection to hold it, a Redis keyspace is no
+container). It is the library's name, then `key=value` pairs: `distributed-caffeine schema=1 hash=xxh3-128/1`, the
+layout and the hash format of the row ids (see "The stored hash format"), which change independently. One line, values
+of letters, digits and `-./`, written in a fixed order, parsed by a few lines of the SPI; a later version adds pairs and
+never changes the meaning of one. `java.util.Properties` was weighed and not taken: a pair per line, `store()` writes
+the date and no fixed order, an escaping language of its own, and the library's rules (the name, the order of versions)
+are ours anyway.
 The numbering starts at 1 (set back on 2026-11-05: the numbers 2 and 3 named layout changes during development, none
 released); a later layout change counts up from there.
 
@@ -3885,14 +3956,18 @@ released); a later layout change counts up from there.
 - **Opt-in `withSchemaReset()`** drops and recreates the place when no matching marker is found. Concurrent starts are
   serialized with an advisory lock on PostgreSQL; on MongoDB the drop is idempotent, and creating the collection plus
   inserting the marker is safe to race.
-- **What the reset drops (narrowed 2026-11-07):** only a collection or table of 0.x (MongoDB: a document with a
-  top-level `discriminator`, or one of the current layout whose marker was lost, `_id.d`; PostgreSQL: no comment, and
-  the columns `discriminator`, `hash`, `status`, `timestamp`) or an empty one. It always refuses another marker
-  (`distributed-caffeine schema N`), also with the option: two layouts both left with it on would otherwise drop each
-  other's place on every start, in turns, until one is gone. A later layout change decides itself which earlier
-  markers its reset accepts. It also refuses foreign data, with or without the option. So forgetting to remove the
-  option costs nothing; the READMEs still say to remove it. Tests: `MongoAdapterTest` and `PostgresAdapterTest`
-  (`a_reset_never_drops_...`).
+- **The newer version wins (decided 2026-11-20):** versions are ordered by the schema, then by the hash format's
+  revision (the number after its `/`); a marker this version cannot order or read (another algorithm of the same
+  revision, a pair it does not know) counts as later. The reset drops a place of an **earlier** version (a marker of a
+  lower order; the markers without pairs of the versions before the hash format, `distributed-caffeine schema 1` and
+  Redis's `1`; a table or collection without one but of the earliest layout: MongoDB a document with a top-level
+  `discriminator`, or one of the current layout whose marker was lost, `_id.d`; PostgreSQL no comment and the columns
+  `discriminator`, `hash`, `status`, `timestamp`) or an empty one. A place of a **later** version is never dropped,
+  also with the option, so that two versions left with it on cannot drop each other's place in turns; the older one
+  fails, naming the later marker, and going back means dropping the place by hand. Foreign data is refused, with or
+  without the option. Redis and MariaDB/MySQL have no reset: they refuse a place of another version, naming whether
+  it is earlier or later. Tests: `StoreMarkerTest` (the order), `MongoAdapterTest` and `PostgresAdapterTest`
+  (`a_..._of_an_earlier_version_is_refused_unless_it_is_reset`, `a_reset_never_drops_...`).
 - **Why not drop automatically:** instances of the other layout still running on the place fail (errors on
   PostgreSQL, an `invalidate` event ending their change streams on MongoDB) and may recreate it, so the two layouts
   would drop each other's place in turns; caches sharing the place through the discriminator would be hit too;
@@ -4014,9 +4089,9 @@ same writes and variants, each twice; 8.3 shown, 9.0 alike, 5.0 slower across th
 ```java
 // names checked against MongoDB's limits
 MongoAdapter<Key, Value> adapter = MongoAdapter.newBuilder(mongoClient, databaseName, collectionName)
-    .withDiscriminator("orders")                                     // optional, "default"
-    .withSchemaReset()                                               // optional
-    .build();
+        .withDiscriminator("orders")  // optional, "default"
+        .withSchemaReset()            // optional
+        .build();
 ```
 
 - **Documents:** `_id: {d: discriminator, h: hash}`, `key`, `value` (by format: `BinData`, string, BSON parsed from
@@ -4081,10 +4156,10 @@ MongoAdapter<Key, Value> adapter = MongoAdapter.newBuilder(mongoClient, database
 ```java
 // names mandatory, at most 63 bytes, quoted
 PostgresAdapter<Key, Value> adapter = PostgresAdapter.newBuilder(dataSource, schemaName, tableName)
-    .withDiscriminator("orders")                                // optional, "default"
-    .withListenerDataSource(listenerDataSource)                 // optional: behind a transaction-mode pooler
-    .withSchemaReset()                                          // optional
-    .build();                                                   // the timeout is the cache's (see Settings)
+        .withDiscriminator("orders")                 // optional, "default"
+        .withListenerDataSource(listenerDataSource)  // optional: behind a transaction-mode pooler
+        .withSchemaReset()                           // optional
+        .build();                                    // the timeout is the cache's (see Settings)
 ```
 
 - **A full NOTIFY queue** (a session listening in the database, any application's, left in a transaction) makes
@@ -5079,19 +5154,30 @@ Redis and none of the other gains.
   settings, so that Spring Boot's `spring.cache.caffeine.spec` works unchanged).
 - **Keys:** Spring's default key generator passes a single argument as it is and wraps several, or none, in a
   `SimpleKey`, which no built-in hasher takes (a key without a hasher fails on first use, checked by `SpringTypesTest`;
-  once hashed, a `SimpleKey` crosses the store, its serialized form included, though Fory logs a warning once per JVM
-  that `SimpleKey` uses custom JDK serialization). The key serializer stays Fory (decided 2026-11-19): the warning is
-  harmless and documented; rejected, a text serializer writing `toString()` (quiet and readable, but `toString()` is no
-  defined, faithful form of a key) and a Fory serializer of the integration's own for `SimpleKey` (code for a log line).
-  The manager sets `SimpleKeyHashProvider` on every builder, which hashes a key, and each part of a `SimpleKey`, in this
-  order: a `Hashable` by its own hash (a `SimpleKey` subclass of a key generator of the application's included); a
-  built-in type (`String`, `Long`, `Integer`, `UUID`, an enum) as the core hashes it, through `Hasher.putBuiltIn`, the
-  core's own list of them; a `SimpleKey` by the number of its parts and each part's hash (`null` as an empty string,
-  never a hash); anything else by its fallback, if constructed with one, or refused naming the type and the fixes
-  (`Hashable`, an explicit `@Cacheable(key = ...)`, a hash provider on the builder). So the provider changes no hash the
-  core computes itself, and needs no encoding of its own: a part's hash is the one it has as a key alone, so `1`, `1L`
-  and `"1"` differ as the core's hashes do. Its output is part of the stored hashes, pinned by a test, so it stays
-  stable across JVMs and releases.
+  once hashed, a `SimpleKey` crosses the store, its serialized form included). Where the builder sets no key serializer,
+  the manager sets `SimpleKeyForySerializer` (decided 2026-11-20): a `ForySerializer` (extending it, so its defaults
+  stay one place's) that registers a Fory serializer factory, asked for every class Fory meets, at the top or nested,
+  which gives a `SimpleKey` of any class (a subclass of a key generator of the application's included) a serializer
+  writing its params (an `Object[]`, as Fory writes any) and reading `new SimpleKey(params)` (a subclass is read back as
+  a `SimpleKey`, its own fields aside); every other type, the params included, as by the default `ForySerializer`. Fory
+  would write a `SimpleKey` through its Java serialization path (it customizes Java serialization), logging a warning
+  once per JVM that it does, in every application on the defaults. The key serializer is read from the builder by
+  reflection, as its hash provider; one set on the builder is kept. Keys are serialized for diagnostics only, so the
+  bytes are no stored format. Rejected: a serializer registered for the class `SimpleKey` alone (Fory registers by exact
+  class, so a subclass would still warn), a text serializer writing `toString()` (quiet and readable, but `toString()`
+  is no defined, faithful form of a key). `ForySerializer` gives a subclass its Fory (`fory()`, protected) to register
+  serializers of its own, and `JacksonSerializer` its JSON mapper (`jsonMapper()`), an accessor rather than a protected
+  field, so the classes keep how they hold them.
+  The manager sets `SimpleKeyHashProvider` on every builder, which hashes a key in this order: a `Hashable` by its own
+  hash (a `SimpleKey` subclass of a key generator of the application's included); a `SimpleKey` by its params, a custom
+  hash built with a `Hasher` as any provider's: `"distributed-caffeine:SimpleKey"` (so that no other provider's input
+  begins alike), the number of params, then per param a tag and its data (`0` for `null`; `1` and its 16-byte built-in
+  hash, as `putHash` puts it; `2` and a `Hashable`'s or the fallback's hash; `3` and a nested `SimpleKey`'s hash;
+  each hash as its 16 bytes), the tag keeping params of different kinds apart; a built-in kind as the core hashes it
+  (`Hasher.builtInHash`); anything else by its fallback, if constructed with one, or refused naming the type and the
+  fixes (`Hashable`, an explicit `@Cacheable(key = ...)`, a hash provider on the builder). So the provider changes no
+  hash the core computes itself. Its output is part of the stored hashes, pinned by a test against hash4j's stream fed
+  the same bytes, so it stays stable across JVMs and releases.
   - `SimpleKey` offers no access to its parts: they are read by reflection, a `VarHandle` on its private `params` looked
     up once, `static final` so that the JIT treats it as a constant on the hit path (Spring on the classpath, or as an
     automatic module, is open to it); a renamed field fails on first use, and the tests pin it. Rejected:
@@ -5101,7 +5187,7 @@ Redis and none of the other gains.
     setup step); reading the parts by a serialization round trip (a full serialization on every access); encodings of
     further part types in the integration (each a stored format to keep forever; enums are built in, in the core, and
     dates and the like are the application's, by `Hashable` or a fallback); reading `InternalHasher` by reflection for
-    the built-in types (a package-private class, a method and an internal key type, against `Hasher.putBuiltIn`, public
+    the built-in types (a package-private class, a method and an internal key type, against `Hasher.builtInHash`, public
     and shared).
   - Hashing is configured where users know it, on the builder, and only for what the integration cannot hash (decided
     2026-11-19): a key of a supported type, a `Hashable` or a `SimpleKey` of these needs no configuration; a hash

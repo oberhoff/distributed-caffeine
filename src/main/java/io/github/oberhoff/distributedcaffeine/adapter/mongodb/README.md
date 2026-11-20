@@ -27,12 +27,8 @@ periodic journal flush and arrive about a hundred times later.
 ## Collection and change streams
 
 The collection and its index are created when the first cache is built. A collection created by another version of this
-library is refused. `withSchemaReset()` is meant for the migration from 0.x: it drops and recreates a collection of 0.x
-(or an empty one), never one of another layout version from 0.8 on or one holding other documents. During a rolling
-update, the instances of 0.x still running go on among themselves, apart from the new ones, so their values can be
-outdated until the last of them is stopped. Documents they write after the drop are removed when a cache is built, with
-or without `withSchemaReset()`; this cleanup is temporary and goes away in a later release. Remove `withSchemaReset()`
-once the migration is done.
+library is refused. `withSchemaReset()` drops and recreates one created by an earlier version, or an empty one; never
+one of a later version or one holding other documents.
 
 The caches on one client share one change stream per database, whatever the number of caches and collections.
 
