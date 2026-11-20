@@ -30,8 +30,8 @@ import static java.util.Objects.requireNonNull;
  * table, told apart by their discriminator.
  * <pre>{@code
  * PostgresAdapter<Key, Value> adapter = PostgresAdapter.newBuilder(dataSource, schemaName, tableName)
- *     .withDiscriminator(discriminator)
- *     .build();
+ *         .withDiscriminator(discriminator)
+ *         .build();
  * }</pre>
  * An adapter serves one cache: building a second cache with the same adapter fails while the first is open.
  * <p>

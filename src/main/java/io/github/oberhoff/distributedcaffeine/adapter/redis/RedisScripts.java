@@ -73,17 +73,18 @@ final class RedisScripts {
             end
             """;
 
-    // Writes a batch, atomically, announcing each write applied, exactly once per request: KEYS[5] is the request's
-    // key ({dc:<name>}:request:<id>, an ID per call of RedisStore#write), under which the script keeps its result for
-    // ARGV[4] milliseconds, and a request found there is answered from it without writing. A client library sending
-    // the script again after a connection reset (Lettuce does, by default, what it sent and had no answer for) would
+    // Writes a batch, atomically, announcing each write applied, exactly once per request: KEYS[5] is the request's key
+    // ({dc:<name>}:request:<id>, an ID per call of RedisStore#write), under which the script keeps its result for
+    // ARGV[4] milliseconds, and a request found there is answered from it without writing. A client library sending the
+    // script again after a connection reset (Lettuce does, by default, what it sent and had no answer for) would
     // otherwise apply it twice: an advance at two versions, a conditional write refused by its own result. KEYS[5 + i]:
     // the row of write i. ARGV after ARGV[4], per write, 9 fields: hash, condition (A: advance, M: missing, V: on a
     // version), the expected version's high and low part, the proposed version's high and low part, T for a tombstone
     // or V for a value, the key and the value (both empty for a tombstone, which keeps the row's key, or has none where
     // no row existed). Per write the result is {0} (refused) or {1, high, low} (applied at that version). An advance is
-    // never refused: its version is assigned. Condition B is an advance backdated (the control row, Store#writeControl):
-    // its write time, in microseconds, in place of the expected version's high part, and the row's own if later
+    // never refused: its version is assigned. Condition B is an advance backdated (the control row,
+    // Store#writeControl): its write time, in microseconds, in place of the expected version's high part, and the row's
+    // own if later
     static final RedisScript WRITE = RedisScript.of("write", RedisScript.Reply.ARRAY, PRELUDE + """
             local kept = redis.call('GET', KEYS[5])
             if kept then

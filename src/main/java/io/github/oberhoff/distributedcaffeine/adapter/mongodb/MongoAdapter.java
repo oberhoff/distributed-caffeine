@@ -31,9 +31,9 @@ import static java.util.Objects.requireNonNull;
  * collection, told apart by their discriminator.
  * <pre>{@code
  * MongoAdapter<Key, Value> adapter = MongoAdapter
- *     .newBuilder(mongoClient, databaseName, collectionName)
- *     .withDiscriminator(discriminator)
- *     .build();
+ *         .newBuilder(mongoClient, databaseName, collectionName)
+ *         .withDiscriminator(discriminator)
+ *         .build();
  * }</pre>
  * An adapter serves one cache: building a second cache with the same adapter fails while the first is open.
  * <p>
@@ -130,14 +130,6 @@ public final class MongoAdapter<K, V> implements Adapter<K, V> {
         private boolean schemaReset;
 
         private Builder(MongoClient client, String databaseName, String collectionName) {
-            try {
-                // the library is an automatic module, which reads every module: the IDE's module check does not apply
-                //noinspection Java9ReflectionClassVisibility
-                Class.forName("com.mongodb.client.MongoClient", false, MongoAdapter.class.getClassLoader());
-            } catch (ClassNotFoundException e) {
-                throw new IllegalStateException("MongoAdapter requires org.mongodb:mongodb-driver-sync on the "
-                        + "classpath", e);
-            }
             this.client = requireNonNull(client, "client cannot be null");
             this.databaseName = checkedDatabaseName(databaseName);
             this.collectionName = checkedCollectionName(collectionName);

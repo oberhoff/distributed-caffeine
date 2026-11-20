@@ -30,9 +30,9 @@ import static java.util.Objects.requireNonNull;
  * the table is created if missing.
  * <pre>{@code
  * DistributedCache<Key, Value> cache = DistributedCaffeine.newBuilder(
- *         MariaDbAdapter.newBuilder(dataSource, tableName).build())
- *     .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(100_000))
- *     .build();
+ *                 MariaDbAdapter.newBuilder(dataSource, tableName).build())
+ *         .withStore(store -> store.withMaximumAge(Duration.ofHours(1)).withMaximumSize(100_000))
+ *         .build();
  * }</pre>
  * Changes made elsewhere arrive by polling, within about the poll interval ({@code StoreConfigurer.withPollInterval},
  * 1 second by default).

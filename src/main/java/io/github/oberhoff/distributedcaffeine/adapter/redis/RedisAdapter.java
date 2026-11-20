@@ -18,6 +18,7 @@ package io.github.oberhoff.distributedcaffeine.adapter.redis;
 import io.github.oberhoff.distributedcaffeine.spi.Adapter;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
+import io.github.oberhoff.distributedcaffeine.spi.StoreMarker;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings;
 
 import java.lang.System.Logger;
@@ -31,8 +32,8 @@ import static java.util.Objects.requireNonNull;
  * a keyspace, told apart by their discriminator.
  * <pre>{@code
  * RedisAdapter<Key, Value> adapter = RedisAdapter.newBuilder(LettuceRedis.of(redisClient), keyspaceName)
- *     .withDiscriminator(discriminator)
- *     .build();
+ *         .withDiscriminator(discriminator)
+ *         .build();
  * }</pre>
  * An adapter serves one cache: building a second cache with the same adapter fails while the first is open.
  * <p>
@@ -92,8 +93,9 @@ public final class RedisAdapter<K, V> implements Adapter<K, V> {
 
     // the library's one logger, as the core's: the message names the adapter (README, "Deployment")
     private static final Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine");
-    // the layout of this version (RedisKeys, RedisScripts); a cache written by another one is refused
-    private static final String MARKER = "1";
+    // this version's layout (RedisKeys, RedisScripts) and hash format (StoreMarker); a cache written by another one is
+    // refused
+    private static final String MARKER = StoreMarker.CURRENT;
 
     /**
      * The discriminator of a cache that names none.
@@ -158,9 +160,13 @@ public final class RedisAdapter<K, V> implements Adapter<K, V> {
                     List.of(MARKER.getBytes(StandardCharsets.UTF_8)));
             String found = new String((byte[]) requireNonNull(marker), StandardCharsets.UTF_8);
             if (!found.equals(MARKER)) {
-                throw new StoreException("The cache " + keys.name() + " was written by another version of "
-                        + "distributed-caffeine (layout " + found + "); delete its keys (" + keys.prefix()
-                        + "*) while no cache uses them, and they are created anew", false);
+                // no reset here: the keys of another version are deleted by hand, of an earlier one to go forward, of a
+                // later one to go back
+                String version = StoreMarker.relationOf(found) == StoreMarker.Relation.EARLIER ? "an earlier"
+                        : "a later";
+                throw new StoreException("The cache " + keys.name() + " was written by " + version + " version of "
+                        + "distributed-caffeine ('" + found + "'; this one writes '" + MARKER + "'); delete its keys ("
+                        + keys.prefix() + "*) while no cache uses them, and they are created anew", false);
             }
             return new RedisStore(driver, session, keys, server.product());
         } catch (RedisCommandException e) {

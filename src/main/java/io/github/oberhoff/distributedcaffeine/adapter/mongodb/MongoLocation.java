@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
 
+import io.github.oberhoff.distributedcaffeine.spi.StoreMarker;
 import io.github.oberhoff.distributedcaffeine.spi.StoreSettings.Format;
 import org.bson.BsonBinary;
 import org.bson.BsonDocument;
@@ -38,8 +39,8 @@ import static java.util.Objects.requireNonNull;
 final class MongoLocation {
 
     static final String MARKER_ID = "distributed-caffeine";
-    // the layout since 0.8; a later layout change gets a new number, refused by this one and the other way
-    static final String MARKER = "distributed-caffeine schema 1";
+    // the marker document's schema: this version's layout and hash format (StoreMarker)
+    static final String MARKER = StoreMarker.CURRENT;
     static final String START = "started";
     private static final JsonWriterSettings JSON = JsonWriterSettings.builder().outputMode(JsonMode.RELAXED).build();
 

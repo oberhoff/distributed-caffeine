@@ -514,10 +514,10 @@ final class PostgresStore implements Store, ChangeFeed {
     }
 
     // a connection inside a transaction of the caller, as a data source handing out the caller's connection does (a
-    // transaction-aware one, such as Spring's TransactionAwareDataSourceProxy): the commit after this store's work would
-    // commit the caller's transaction, and a rollback after a failure roll it back, so it is refused before anything
-    // runs on it (found 2026-11-17: a put inside a transaction rolled back afterwards committed the caller's rows
-    // written before it; VISION.md, "A deadline of the core's own"). pgjdbc knows from the protocol whether a
+    // transaction-aware one, such as Spring's TransactionAwareDataSourceProxy): the commit after this store's work
+    // would commit the caller's transaction, and a rollback after a failure roll it back, so it is refused before
+    // anything runs on it (found 2026-11-17: a put inside a transaction rolled back afterwards committed the caller's
+    // rows written before it; VISION.md, "A deadline of the core's own"). pgjdbc knows from the protocol whether a
     // transaction is open, at no cost; a connection that does not unwrap to pgjdbc's (a wrapping driver) is not checked
     static void requireNoTransaction(Connection connection, String table) throws SQLException {
         if (connection.isWrapperFor(BaseConnection.class)

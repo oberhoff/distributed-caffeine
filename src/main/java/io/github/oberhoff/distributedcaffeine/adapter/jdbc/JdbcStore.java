@@ -20,6 +20,7 @@ import io.github.oberhoff.distributedcaffeine.spi.Row;
 import io.github.oberhoff.distributedcaffeine.spi.State;
 import io.github.oberhoff.distributedcaffeine.spi.Store;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
+import io.github.oberhoff.distributedcaffeine.spi.StoreMarker;
 import org.jspecify.annotations.Nullable;
 
 import javax.sql.DataSource;
@@ -71,10 +72,8 @@ final class JdbcStore extends PrimitiveStore {
 
     // the library's one logger, as the core's: the message names the adapter (README, "Deployment")
     private static final System.Logger LOGGER = System.getLogger("io.github.oberhoff.distributedcaffeine");
-    // the schema marker, the table's comment: the version of the table's layout this version writes
-    // every version's marker begins so, telling a table of another version from one created by hand
-    static final String MARKER_PREFIX = "distributed-caffeine schema ";
-    static final String MARKER = MARKER_PREFIX + "1";
+    // the schema marker, the table's comment: this version's layout and hash format (StoreMarker)
+    static final String MARKER = StoreMarker.CURRENT;
 
     private static final int CHUNK = 1_000;
 
@@ -323,10 +322,14 @@ final class JdbcStore extends PrimitiveStore {
                 }
             }
         }
-        if (marker != null && !MARKER.equals(marker) && marker.startsWith(MARKER_PREFIX)) {
-            throw new StoreException("Table " + table + " was created by another version of distributed-caffeine ('"
-                    + marker + "'; this one uses '" + MARKER + "'). Stop all instances of that version, then drop it "
-                    + "or configure another name.", false);
+        // no reset here: a table of another version is dropped by hand, of an earlier one to go forward, of a later one
+        // to go back
+        StoreMarker.Relation relation = StoreMarker.relationOf(marker);
+        if (relation == StoreMarker.Relation.EARLIER || relation == StoreMarker.Relation.LATER) {
+            String version = relation == StoreMarker.Relation.EARLIER ? "an earlier" : "a later";
+            throw new StoreException("Table " + table + " was created by " + version + " version of "
+                    + "distributed-caffeine ('" + marker + "'; this one writes '" + MARKER + "'). Stop all instances "
+                    + "of that version, then drop it or configure another name.", false);
         }
         if (!MARKER.equals(marker)) {
             throw new StoreException("Table " + table + " exists without the schema marker '" + MARKER + "' (e.g. "

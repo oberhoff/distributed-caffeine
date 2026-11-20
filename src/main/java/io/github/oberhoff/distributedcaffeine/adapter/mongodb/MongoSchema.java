@@ -29,6 +29,7 @@ import com.mongodb.client.model.IndexOptions;
 import com.mongodb.client.model.UpdateOptions;
 import com.mongodb.client.model.Updates;
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
+import io.github.oberhoff.distributedcaffeine.spi.StoreMarker;
 import org.bson.BsonDocument;
 import org.bson.BsonInt32;
 import org.bson.BsonString;
@@ -102,8 +103,8 @@ final class MongoSchema {
                     .contains(location.collectionName);
             if (exists && !hasMarker(collection) && !markerArrives(collection)) {
                 requireResettable(collection, location, schemaReset);
-                LOGGER.log(Level.WARNING, "{0}: Dropping the collection of distributed-caffeine 0.x, or empty "
-                        + "(withSchemaReset)", location.name());
+                LOGGER.log(Level.WARNING, "{0}: Dropping the collection of an earlier version of distributed-caffeine, "
+                        + "or empty (withSchemaReset)", location.name());
                 collection.drop();
                 exists = false;
             }
@@ -210,20 +211,33 @@ final class MongoSchema {
         }
     }
 
-    // What withSchemaReset() may drop: a collection of distributed-caffeine 0.x (its documents have a top-level
-    // discriminator), one of this version whose marker was lost (a value's _id is {d, h}; a start dropping it while
-    // another one set it up recreates it so on the next write), or an empty one. Never one of another version of
-    // this library, even with the option: two versions left with it on would drop each other's collection on every
-    // start (a later version decides itself which earlier markers it resets). Never foreign documents either.
+    // What withSchemaReset() may drop: a collection of an earlier version of this library (by its marker,
+    // StoreMarker; or the earliest's, whose documents have a top-level discriminator), one of this version whose marker
+    // was lost (a value's _id is {d, h}; a start dropping it while another one set it up recreates it so on the next
+    // write), or an empty one. Never one of a later version, even with the option: the newer version wins, so that two
+    // versions left with it on cannot drop each other's collection in turns; going back means dropping it by hand.
+    // Never foreign documents either.
     private static void requireResettable(MongoCollection<BsonDocument> collection, MongoLocation location,
             boolean schemaReset) {
-        BsonDocument marker = collection.find(Filters.eq("_id", MongoLocation.MARKER_ID)).first();
-        if (marker != null) {
-            throw new StoreException("Collection " + location + " was created by another version of "
-                    + "distributed-caffeine (" + (marker.isString(MARKER_FIELD) ? "'" + marker.getString(MARKER_FIELD)
-                    .getValue() + "'" : "an unknown schema") + "; this one uses '" + MongoLocation.MARKER + "'). Stop "
-                    + "all instances of that version, then drop it or configure another name. withSchemaReset() "
-                    + "never drops it, so that two versions cannot drop each other's collection.", false);
+        BsonDocument document = collection.find(Filters.eq("_id", MongoLocation.MARKER_ID)).first();
+        if (document != null) {
+            // a marker document whose schema is no string was written by a version this one cannot read
+            String marker = document.isString(MARKER_FIELD) ? document.getString(MARKER_FIELD).getValue()
+                    : StoreMarker.LIBRARY + " ?";
+            if (StoreMarker.relationOf(marker) == StoreMarker.Relation.EARLIER) {
+                if (!schemaReset) {
+                    throw new StoreException("Collection " + location + " was created by an earlier version of "
+                            + "distributed-caffeine ('" + marker + "'; this one writes '" + MongoLocation.MARKER
+                            + "'). Stop all instances of that version, then drop it or configure another name, or "
+                            + "enable withSchemaReset().", false);
+                }
+                return;
+            }
+            throw new StoreException("Collection " + location + " was created by a later version of "
+                    + "distributed-caffeine ('" + marker + "'; this one writes '" + MongoLocation.MARKER + "'), which "
+                    + "this one never drops, also with withSchemaReset(), so that two versions cannot drop each "
+                    + "other's collection. To go back to this version, stop the instances of the later one and drop "
+                    + "the collection by hand.", false);
         }
         if (!schemaReset) {
             throw new StoreException("Collection " + location + " exists without the schema marker '"

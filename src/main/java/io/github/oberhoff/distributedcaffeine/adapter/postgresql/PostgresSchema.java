@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.adapter.postgresql;
 
 import io.github.oberhoff.distributedcaffeine.spi.StoreException;
+import io.github.oberhoff.distributedcaffeine.spi.StoreMarker;
 import org.jspecify.annotations.Nullable;
 
 import javax.sql.DataSource;
@@ -119,17 +120,31 @@ final class PostgresSchema {
         }
     }
 
-    // What withSchemaReset() may drop: a table of distributed-caffeine 0.x (no comment, and its columns discriminator,
-    // hash, status and timestamp), or an empty one. Never one of another version of this library, even with the
-    // option: two versions left with it on would drop each other's table on every start (a later version decides
-    // itself which earlier markers it resets). Never a foreign table with rows either.
+    // What withSchemaReset() may drop: a table of an earlier version of this library (by its marker, StoreMarker; or
+    // one without a comment, with the columns discriminator, hash, status and timestamp of the earliest), or an empty
+    // one. Never one of a later version, even with the option: the newer version wins, so that two versions left with
+    // it on cannot drop each other's table in turns; going back means dropping it by hand. Never a foreign table with
+    // rows.
     private static void requireResettable(Connection connection, PostgresTable table, @Nullable String marker,
             boolean schemaReset) throws SQLException {
-        if (marker != null && marker.startsWith(PostgresTable.MARKER_PREFIX)) {
-            throw new StoreException("Table " + table + " was created by another version of distributed-caffeine ('"
-                    + marker + "'; this one uses '" + PostgresTable.MARKER + "'). Stop all instances of that version, "
-                    + "then drop it or configure another name. withSchemaReset() never drops it, so that two versions "
-                    + "cannot drop each other's table.", false);
+        switch (StoreMarker.relationOf(marker)) {
+            case EARLIER -> {
+                if (!schemaReset) {
+                    throw new StoreException("Table " + table + " was created by an earlier version of "
+                            + "distributed-caffeine ('" + marker + "'; this one writes '" + PostgresTable.MARKER
+                            + "'). Stop all instances of that version, then drop it or configure another name, or "
+                            + "enable withSchemaReset().", false);
+                }
+                return;
+            }
+            case LATER -> throw new StoreException("Table " + table + " was created by a later version of "
+                    + "distributed-caffeine ('" + marker + "'; this one writes '" + PostgresTable.MARKER
+                    + "'), which this one never drops, also with withSchemaReset(), so that two versions cannot drop "
+                    + "each other's table. To go back to this version, stop the instances of the later one and drop "
+                    + "the table by hand.", false);
+            case SAME, FOREIGN -> {
+                // the rules below
+            }
         }
         if (!schemaReset) {
             throw new StoreException("Table " + table + " exists without the schema marker '" + PostgresTable.MARKER
@@ -209,8 +224,8 @@ final class PostgresSchema {
             try (Statement statement = connection.createStatement()) {
                 if (exists(connection, table)) {
                     requireResettable(connection, table, marker, schemaReset);
-                    LOGGER.log(Level.WARNING, "{0}: Dropping the table of distributed-caffeine 0.x, or empty "
-                            + "(withSchemaReset)", table.name());
+                    LOGGER.log(Level.WARNING, "{0}: Dropping the table of an earlier version of distributed-caffeine, "
+                            + "or empty (withSchemaReset)", table.name());
                     statement.execute("DROP TABLE " + table.qualified);
                 }
                 if (!schemaExists(connection, table)) {
