@@ -124,9 +124,11 @@ jobs:
           - name: Test model checking, linearizability, two instances 3/3
             tests: "InternalLinearizabilityTwoInstancesTest#model_checking"
             flags: -Dmodelchecking=true -Dlincheck.shard=3/3
-          # the in-memory suites on each store profile (the default is jdbc)
+          # the in-memory suites on each store profile (the default is jdbc); the default one also compares Hasher with
+          # hash4j on 100,000 random sequences instead of the 3,000 per build
           - name: Test in-memory
             tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
+            flags: -Dhasher.sequences=100000
           - name: Test in-memory, postgresql
             tests: "!%regex[.*(IntegrationTest|jmh_generated).*]"
             flags: -Dinmemory.profile=postgresql
