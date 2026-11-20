@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import io.github.oberhoff.distributedcaffeine.hasher.Hash;
 import org.jspecify.annotations.Nullable;
 
 import java.util.HexFormat;
@@ -25,59 +26,48 @@ import static java.util.Objects.requireNonNull;
  * A key in L1, compared by the hash of the user's key rather than by the key itself, so that a message, which carries
  * only the hash, finds the held entry directly.
  * <p>
- * Identity is conceptually the hash string, as in 0.7.x. A hash of 32 lowercase hex characters (what
- * {@code Hasher.getHash()} produces) is held compactly as 128 bits; any other string a custom {@code Hashable} or
- * {@code HashProvider} returns is held and compared as the string. Which form a key takes follows from the hash
- * string alone, so every instance decides it the same way, and a 32-hex string never equals any other string, so
- * the two forms are never compared with each other.
- * <p>
- * The 128 bits are the two halves of the hex string, each read as a big-endian number, which keeps a compact key
- * built from bits ({@link #ofBits}) equal to one parsed from the same hash's hex string ({@link #ofHash}).
+ * Every key's hash is a {@link Hash}, whose two longs the key holds and compares; its stored form, 32 lowercase hex
+ * characters ({@link Hash#toHex()}), is made once, on demand, for the store and messages. The longs are copied rather
+ * than the {@code Hash} kept: the JIT then allocates no {@code Hash} on a hit (escape analysis), and a held key is one
+ * object, not two. A lookup by such a string
+ * parses it back into the {@code Hash}; a lookup by another string (one of the library's own rows, {@code #...}) is
+ * held and compared as the string. Which form a lookup takes follows from the string alone, so every instance decides
+ * it the same way, and a 32-hex string never equals any other string, so the two forms are never compared with each
+ * other.
  *
  * @param <K> the key type
  * @author Andreas Oberhoff
  */
 final class InternalKey<K> {
 
-    private static final HexFormat HEX = HexFormat.of();
-
     private final @Nullable K key;
-    private final long first;
-    private final long second;
-    // the hash if it is not 32 lowercase hex characters, otherwise null
+    // the hash's bits, both 0 for a lookup by another string
+    private final long mostSignificantBits;
+    private final long leastSignificantBits;
+    // the string of a lookup by another string than a hash's stored form, otherwise null
     private final @Nullable String text;
-    // the hex string of a compact hash, produced on demand
+    // the stored form of the hash, made on demand
     private @Nullable String hexString;
 
-    private InternalKey(@Nullable K key, long first, long second, @Nullable String text, @Nullable String hexString) {
+    private InternalKey(@Nullable K key, long mostSignificantBits, long leastSignificantBits, @Nullable String text,
+            @Nullable String hexString) {
         this.key = key;
-        this.first = first;
-        this.second = second;
+        this.mostSignificantBits = mostSignificantBits;
+        this.leastSignificantBits = leastSignificantBits;
         this.text = text;
         this.hexString = hexString;
     }
 
     /**
-     * Wraps a key with its hash in compact form.
-     *
-     * @param key    the user's key
-     * @param first  the first half of the hash, as the first 16 hex characters read big-endian
-     * @param second the second half
-     * @return the internal key
-     */
-    static <K> InternalKey<K> ofBits(K key, long first, long second) {
-        return new InternalKey<>(requireNonNull(key), first, second, null, null);
-    }
-
-    /**
-     * Wraps a key with the hash a custom {@code Hashable} or {@code HashProvider} returned.
+     * Wraps a key with its hash.
      *
      * @param key  the user's key
      * @param hash the hash
      * @return the internal key
      */
-    static <K> InternalKey<K> ofHash(K key, String hash) {
-        return fromHash(requireNonNull(key), hash);
+    static <K> InternalKey<K> of(K key, Hash hash) {
+        return new InternalKey<>(requireNonNull(key), hash.mostSignificantBits(), hash.leastSignificantBits(), null,
+                null);
     }
 
     /**
@@ -87,23 +77,20 @@ final class InternalKey<K> {
      * @return the lookup key
      */
     static <K> InternalKey<K> lookup(String hash) {
-        return fromHash(null, hash);
-    }
-
-    private static <K> InternalKey<K> fromHash(@Nullable K key, String hash) {
         requireNonNull(hash, "hash cannot be null");
         if (hash.isEmpty()) {
             throw new IllegalArgumentException("hash cannot be empty");
         }
-        if (isCompact(hash)) {
-            return new InternalKey<>(key, HexFormat.fromHexDigitsToLong(hash, 0, 16),
-                    HexFormat.fromHexDigitsToLong(hash, 16, 32), null, hash);
+        if (isStoredForm(hash)) {
+            // the inverse of Hash.toHex: each half's 8 bytes little-endian, the least significant half first
+            return new InternalKey<>(null, Long.reverseBytes(HexFormat.fromHexDigitsToLong(hash, 16, 32)),
+                    Long.reverseBytes(HexFormat.fromHexDigitsToLong(hash, 0, 16)), null, hash);
         }
-        return new InternalKey<>(key, 0L, 0L, hash, null);
+        return new InternalKey<>(null, 0L, 0L, hash, null);
     }
 
-    // exactly what Hasher.getHash() produces: 32 lowercase hex characters
-    private static boolean isCompact(String hash) {
+    // exactly what Hash.toHex() produces: 32 lowercase hex characters
+    private static boolean isStoredForm(String hash) {
         if (hash.length() != 32) {
             return false;
         }
@@ -116,20 +103,20 @@ final class InternalKey<K> {
         return true;
     }
 
+    // false for a lookup key (from a message), which holds the hash only
+    boolean hasKey() {
+        return key != null;
+    }
+
     /**
      * Returns the user's key.
      *
      * @return the key
      * @throws IllegalStateException for a lookup key
      */
-    // false for a lookup key (from a message), which holds the hash only
-    boolean hasKey() {
-        return key != null;
-    }
-
     K key() {
         if (key == null) {
-            throw new IllegalStateException("a lookup key holds no user key");
+            throw new IllegalStateException("A lookup key holds no user key");
         }
         return key;
     }
@@ -145,12 +132,13 @@ final class InternalKey<K> {
         }
         String result = hexString;
         if (result == null) {
-            result = HEX.toHexDigits(first) + HEX.toHexDigits(second);
+            result = new Hash(mostSignificantBits, leastSignificantBits).toHex();
             hexString = result;
         }
         return result;
     }
 
+    // whether the key holds a hash's bits, rather than another string
     boolean isCompact() {
         return text == null;
     }
@@ -164,14 +152,16 @@ final class InternalKey<K> {
             return false;
         }
         if (text == null) {
-            return that.text == null && first == that.first && second == that.second;
+            return that.text == null && mostSignificantBits == that.mostSignificantBits
+                    && leastSignificantBits == that.leastSignificantBits;
         }
         return text.equals(that.text);
     }
 
     @Override
     public int hashCode() {
-        return text == null ? Long.hashCode(second) : text.hashCode();
+        // XXH3 spreads every bit, so the least significant half is as good as both
+        return text == null ? Long.hashCode(leastSignificantBits) : text.hashCode();
     }
 
     @Override

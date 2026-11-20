@@ -29,6 +29,7 @@ import org.jspecify.annotations.Nullable;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 
@@ -47,15 +48,15 @@ import static java.util.Objects.requireNonNullElseGet;
  *     their values' validity.</li>
  *     <li>When a copy goes, the instance asks the store, and only if the store has no valid value, the source.</li>
  * </ol>
- * <pre>
- * {@code DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
- *     .withCaffeine(caffeine -> caffeine
- *         .expireAfterWrite(Duration.ofMinutes(5))
- *         .maximumSize(10_000))
- *     .withStore(store -> store
- *         .withMaximumAge(Duration.ofHours(1))
- *         .withMaximumSize(1_000_000))
- *     .build(key -> loadExpensiveValue(key));
+ * <pre>{@code
+ * DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
+ *         .withCaffeine(caffeine -> caffeine
+ *                 .expireAfterWrite(Duration.ofMinutes(5))
+ *                 .maximumSize(10_000))
+ *         .withStore(store -> store
+ *                 .withMaximumAge(Duration.ofHours(1))
+ *                 .withMaximumSize(1_000_000))
+ *         .build(key -> loadExpensiveValue(key));
  * }</pre>
  *
  * @param <K> the key type, fixed by the adapter
@@ -133,7 +134,15 @@ public final class DistributedCaffeine<K, V> {
 
     /**
      * Configures how keys and values are serialized for the store; Fory for both by default (see
-     * {@link SerializersConfigurer}, also for hardening).
+     * {@link SerializersConfigurer}, also for hardening). For example, keys as text and values in the store's own JSON
+     * type, where it has one:
+     * <pre>{@code
+     * DistributedCache<UUID, Value> cache = DistributedCaffeine.newBuilder(adapter)
+     *         .withSerializers(serializers -> serializers
+     *                 .withKeySerializer(StringSerializer.ofUUID())
+     *                 .withValueSerializer(new JacksonSerializer<>(Value.class, true)))
+     *         .build();
+     * }</pre>
      *
      * @param configurer the configuration
      * @return this builder
@@ -144,9 +153,18 @@ public final class DistributedCaffeine<K, V> {
     }
 
     /**
-     * Sets how keys are hashed, for key types other than the built-in ones ({@code String}, {@code Long},
-     * {@code Integer}, {@code UUID} and enums, see {@link Hasher#putBuiltIn}) that do not implement {@code Hashable}.
-     * Keys that are equal must have the same hash.
+     * Sets how keys are hashed, for key types other than the built-in ones ({@link String}, {@link Long},
+     * {@link Integer}, {@link UUID} and {@link Enum enum}, see {@link Hasher#builtInHash}) that do not implement
+     * {@code Hashable}. Keys that are equal must have the same hash. For example, for a key class that cannot be
+     * changed, hashed by the values its {@code equals} compares:
+     * <pre>{@code
+     * DistributedCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
+     *         .withHashProvider((key, hasher) -> hasher.get()
+     *                 .putUUID(key.getId())
+     *                 .putLong(key.getVersion())
+     *                 .getHash())
+     *         .build();
+     * }</pre>
      *
      * @param hashProvider the hash provider
      * @return this builder
