@@ -43,8 +43,11 @@ The manager's settings work as on `CaffeineCacheManager`: `setCacheNames`, `setA
 (distributed asynchronous caches, for `CompletableFuture` and reactive return types), `setCacheLoader`,
 `setAsyncCacheLoader` and `registerCustomCache`.
 
-Caches are configured on the builders: `setCaffeine`, `setCaffeineSpec` and `setCacheSpecification` (Spring Boot's
-`spring.cache.caffeine.spec`) are not supported and throw, rather than being ignored.
+Caches are configured on the builders; `setCaffeine` is not supported and throws, rather than being ignored. A spec set
+with `setCaffeineSpec` or `setCacheSpecification` applies to every builder after its own settings, and a setting made by
+both fails when the cache is built. With a manager bean of its own, Spring Boot does not pass
+`spring.cache.caffeine.spec` on by itself: hand it over with
+`manager.setCacheSpecification(cacheProperties.getCaffeine().getSpec())`, given Boot's `CacheProperties`.
 
 ## Keys
 

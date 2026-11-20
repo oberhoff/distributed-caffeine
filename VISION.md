@@ -426,10 +426,6 @@ After the Linux baseline (see "Performance: the baseline"), each only if measure
 *In a later release:*
 - **the Spring integration, its rest** (built 2026-11-19, see "Integrations"): a nightly job on the oldest supported
   Spring version (6.2).
-- **Spring specs on the manager** (deferred 2026-11-19 from the Spring integration): `setCaffeineSpec` and
-  `setCacheSpecification` (Spring Boot's `spring.cache.caffeine.spec`) applied through spec parsing in the
-  configurer. Open: how spec parsing fits into `CaffeineConfigurer`. Until then the manager refuses both, as it does
-  `setCaffeine`, rather than ignore them.
 
 *On demand:*
 - **a JCache (JSR-107) provider**, first in line of the further integrations (see "Integrations", "Which framework
@@ -2692,17 +2688,22 @@ callbacks at the call.
 - **Parity enforced by a test:** it checks by reflection (in the test only) that the configurer has a counterpart
   with the same name and parameter types for every public configuration method of Caffeine's builder (21 in
   Caffeine 3.3.1); a method added by Caffeine fails the build until it is followed.
-- **Caffeine's spec strings, parsed (decided 2026-11-18, not built):**
-  `caffeine.spec("maximumSize=10000,expireAfterWrite=10m")` applies a spec as `Caffeine.from(String)` does. A spec carries no callbacks, so it can be read without reflection,
-  unlike a builder; Spring Boot configures Caffeine this way (`spring.cache.caffeine.spec`), which the Spring
-  integration needs (see "Integrations"). Parsed by the configurer itself, by Caffeine's documented grammar
-  (comma-separated keys, `key=value`, durations as an integer with `d`, `h`, `m` or `s`): `initialCapacity`,
-  `maximumSize`, `maximumWeight`, `expireAfterAccess`, `expireAfterWrite`, `refreshAfterWrite`, `recordStats`, each
-  applied through the configurer's own method, so that Caffeine's validation and a setting made twice behave as
-  there; `weakKeys`, `weakValues` and `softValues` rejected as their methods are; an unknown key or malformed value
-  refused with Caffeine's message style. Not chosen: building a throwaway cache from `Caffeine.from(spec)` and reading
-  its `policy()` (no parser, but `initialCapacity` lost and weak or soft references unseen) and Caffeine's
-  `CaffeineSpec` (no public getters). The parity test is extended to the spec's keys.
+- **Caffeine's spec strings, parsed (decided 2026-11-18, built 2026-11-20):**
+  `caffeine.withSpec("maximumSize=10000,expireAfterWrite=10m")`, or `withSpec(CaffeineSpec)`, applies a spec as
+  `Caffeine.from(String)` does (the configurer's own methods, beside the parity, which leaves Caffeine's static `from`
+  out). A spec carries no callbacks, so it can be read without reflection, unlike a builder; Spring Boot configures
+  Caffeine this way (`spring.cache.caffeine.spec`), which the Spring manager applies to every builder (see
+  "Integrations"). Checked by `CaffeineSpec.parse` first, so that a malformed spec fails with Caffeine's own message,
+  then read by the configurer, by the grammar Caffeine accepts (comma-separated options, empty ones ignored, `key=value`
+  trimmed; numbers with `_` and a sign; durations ISO-8601 or an integer with `d`, `h`, `m` or `s`, either case):
+  `initialCapacity`, `maximumSize`, `maximumWeight`, `expireAfterAccess`, `expireAfterWrite`, `refreshAfterWrite`,
+  `recordStats`, each applied through the configurer's own method, so that the core sees each setting and a setting made
+  twice fails as in Caffeine; `weakKeys`, `weakValues` and `softValues` rejected as their methods are; a key Caffeine
+  accepts that this release does not know refused as unsupported. `CaffeineConfigurerTest` compares the result with
+  `Caffeine.from(spec)` for specs over every key and form. Not chosen: building a throwaway cache from
+  `Caffeine.from(spec)` and reading its `policy()` (no parser, but `initialCapacity` lost and weak or soft references
+  unseen), reading `CaffeineSpec`'s package-private fields, and `toParsableString()` as a canonical form (it returns the
+  spec as given).
 - **Both optional since 2026-11-05 (the user's choice: a required age can be set to 100 years anyway), as Caffeine's
   bounds are:** without a maximum age the store keeps values until written again (internally the cap
   `Duration.ofNanos(Long.MAX_VALUE)`, about 292 years, the largest every path computes with: `Duration#toNanos` in
@@ -5147,11 +5148,15 @@ Redis and none of the other gains.
   The manager closes a cache it built once Spring has let go of it, else its connections and feed subscription would
   leak: it keeps the caches it built by name (Spring's map is private), closes the previous one when it builds a
   name again, and after `removeCache`, `resetCaches` and `registerCustomCache` those Spring no longer holds.
-- **The builder and specs refused:** `setCaffeine` throws: a builder handed over cannot be read without reflection
+- **The builder refused, specs applied:** `setCaffeine` throws: a builder handed over cannot be read without reflection
   (the reason the library takes a configurer, not a builder), so it would be ignored silently otherwise; its message
-  points to the function's builder (`withCaffeine`). `setCaffeineSpec` and `setCacheSpecification` throw as well
-  until specs are applied (see "Open work": through the configurer's spec parsing, after the function's own
-  settings, so that Spring Boot's `spring.cache.caffeine.spec` works unchanged).
+  points to the function's builder (`withCaffeine`). A spec (`setCaffeineSpec`, `setCacheSpecification`) applies to
+  every builder after the function's own settings, through `CaffeineConfigurer.withSpec` (built 2026-11-20, see "The
+  builder: Caffeine's methods, no reflection"); the manager remembers it and lets Spring's setter rebuild the caches,
+  which it closes as it does for any setter. A setting made by both fails when the cache is built, naming the cache, the
+  spec and Caffeine's message. Spring Boot backs off with a manager bean of the application's, so
+  `spring.cache.caffeine.spec` is handed over by the application
+  (`setCacheSpecification(cacheProperties.getCaffeine().getSpec())`), as the README says.
 - **Keys:** Spring's default key generator passes a single argument as it is and wraps several, or none, in a
   `SimpleKey`, which no built-in hasher takes (a key without a hasher fails on first use, checked by `SpringTypesTest`;
   once hashed, a `SimpleKey` crosses the store, its serialized form included). Where the builder sets no key serializer,

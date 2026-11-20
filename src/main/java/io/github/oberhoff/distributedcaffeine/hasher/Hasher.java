@@ -44,7 +44,7 @@ import static java.util.Objects.requireNonNull;
  * string ends, so that {@code ("ab", "c")} and {@code ("a", "bc")} hash differently. A hasher is meant for one hash at
  * a time and is not thread-safe.
  * <p>
- * Keys of the built-in kinds ({@link String}, {@link Long}, {@link Integer}, {@link UUID} and {@link Enum enums}) need
+ * Keys of the built-in kinds ({@link String}, {@link Long}, {@link Integer}, {@link UUID} and {@link Enum enum}) need
  * no hasher: the cache hashes them itself ({@link #builtInHash(Object)}). Both formats, the built-in one and that of
  * the put methods, are fixed: a hash once stored is computed alike by every later version.
  *

@@ -202,6 +202,9 @@ DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapt
         .build(key -> loadExpensiveValue(key));
 ```
 
+A Caffeine spec, as `Caffeine.from(...)` reads it, configures the same settings from a string, for example one read from
+the application's configuration: `caffeine.withSpec("maximumSize=10000,expireAfterWrite=10m,recordStats")`.
+
 #### Store
 
 Most caches bound the store (unbounded by default):
