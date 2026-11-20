@@ -80,6 +80,13 @@ public interface Store extends AutoCloseable {
      */
     String CONTROL_HASH = "#invalidated";
 
+    /**
+     * The format of the hashes that identify rows: the algorithm, then the revision of the encoding (the
+     * {@code Hasher}'s). A store records it with its schema marker and refuses a place recorded with another format,
+     * whose hashes identify the same keys differently: instances of both would serve values the other changed.
+     */
+    String HASH_FORMAT = "xxh3-128/1";
+
     // reads
 
     /**
