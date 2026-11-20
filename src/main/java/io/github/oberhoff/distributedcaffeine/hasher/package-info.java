@@ -16,7 +16,7 @@
 
 /**
  * Hashing of keys, by which the store finds them. {@link String}, {@link Long}, {@link Integer}, {@link UUID} and
- * {@link Enum enum} keys are hashed built in ({@link Hasher#putBuiltIn}); other keys implement {@link Hashable}, or
+ * {@link Enum enum} keys are hashed built in ({@link Hasher#builtInHash}); other keys implement {@link Hashable}, or
  * the cache gets a {@link HashProvider}. Both compute the hash with a {@link Hasher}.
  *
  * @author Andreas Oberhoff

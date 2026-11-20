@@ -20,8 +20,21 @@ import java.util.function.Supplier;
 
 /**
  * A key that computes its own hash; needed for key types other than the built-in ones ({@link String}, {@link Long},
- * {@link Integer}, {@link UUID} and {@link Enum enums}, see {@link Hasher#putBuiltIn}), unless a {@link HashProvider}
- * is set. Keys that are equal must have the same hash.
+ * {@link Integer}, {@link UUID} and {@link Enum enum}, see {@link Hasher#builtInHash}), unless a {@link HashProvider}
+ * is set. Keys that are equal must have the same hash. For example, a key whose {@code equals} compares an id and a
+ * version:
+ * <pre>{@code
+ * public class Key implements Hashable {
+ *     ...
+ *     @Override
+ *     public Hash getHash(Supplier<Hasher> hasher) {
+ *         return hasher.get()
+ *                 .putUUID(this.id)
+ *                 .putLong(this.version)
+ *                 .getHash();
+ *     }
+ * }
+ * }</pre>
  *
  * @author Andreas Oberhoff
  */
@@ -29,10 +42,11 @@ import java.util.function.Supplier;
 public interface Hashable {
 
     /**
-     * Returns the hash of this key, typically computed with a fresh hasher from the supplier.
+     * Returns the hash of this key, computed with a fresh hasher from the supplier: put the values that
+     * {@code equals} compares, then return {@link Hasher#getHash()}.
      *
      * @param hasher the supplier of a fresh hasher
      * @return the hash
      */
-    String getHash(Supplier<Hasher> hasher);
+    Hash getHash(Supplier<Hasher> hasher);
 }

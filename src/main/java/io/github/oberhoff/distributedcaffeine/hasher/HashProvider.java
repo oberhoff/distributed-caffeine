@@ -20,7 +20,7 @@ import java.util.function.Supplier;
 
 /**
  * Computes the hash of a key, for key types that are neither built in ({@link String}, {@link Long},
- * {@link Integer}, {@link UUID} and {@link Enum enums}, see {@link Hasher#putBuiltIn}) nor implement
+ * {@link Integer}, {@link UUID} and {@link Enum enum}, see {@link Hasher#builtInHash}) nor implement
  * {@link Hashable}. Keys that are equal must have the same hash.
  *
  * @param <K> the key type of the cache
@@ -30,11 +30,12 @@ import java.util.function.Supplier;
 public interface HashProvider<K> {
 
     /**
-     * Returns the hash of the key, typically computed with a fresh hasher from the supplier.
+     * Returns the hash of the key, computed with a fresh hasher from the supplier: put the values that
+     * {@code equals} compares, then return {@link Hasher#getHash()}.
      *
      * @param key    the key
      * @param hasher the supplier of a fresh hasher
      * @return the hash
      */
-    String getHash(K key, Supplier<Hasher> hasher);
+    Hash getHash(K key, Supplier<Hasher> hasher);
 }
