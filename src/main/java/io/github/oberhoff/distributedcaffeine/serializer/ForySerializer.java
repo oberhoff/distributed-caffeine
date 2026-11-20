@@ -98,4 +98,13 @@ public class ForySerializer<T> implements ByteArraySerializer<T> {
     public T deserialize(byte[] value) {
         return (T) fory.deserialize(value);
     }
+
+    /**
+     * Returns the Fory instance, for a subclass to use.
+     *
+     * @return the Fory instance
+     */
+    protected ThreadSafeFory fory() {
+        return fory;
+    }
 }

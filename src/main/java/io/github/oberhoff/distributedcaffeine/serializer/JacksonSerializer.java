@@ -106,4 +106,14 @@ public class JacksonSerializer<T> implements JsonSerializer<T> {
     public boolean storeAsNativeJson() {
         return storeAsNativeJson;
     }
+
+    /**
+     * Returns the JSON mapper, for a subclass to use.
+     *
+     * @return the JSON mapper
+     */
+    @SuppressWarnings("unused") // API for subclasses
+    protected JsonMapper jsonMapper() {
+        return jsonMapper;
+    }
 }
