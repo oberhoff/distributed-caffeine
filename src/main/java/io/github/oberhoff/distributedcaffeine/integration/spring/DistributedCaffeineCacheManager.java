@@ -24,6 +24,7 @@ import com.github.benmanes.caffeine.cache.CaffeineSpec;
 import io.github.oberhoff.distributedcaffeine.DistributedAsyncCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCaffeine;
+import io.github.oberhoff.distributedcaffeine.SerializersConfigurer;
 import io.github.oberhoff.distributedcaffeine.hasher.HashProvider;
 import io.github.oberhoff.distributedcaffeine.hasher.Hashable;
 import org.jspecify.annotations.Nullable;
@@ -51,12 +52,12 @@ import static java.util.Objects.requireNonNull;
  * @Bean
  * DistributedCaffeineCacheManager cacheManager(MongoClient mongoClient) {
  *     return new DistributedCaffeineCacheManager(name -> DistributedCaffeine.newBuilder(MongoAdapter
- *             .newBuilder(mongoClient, databaseName, name)
- *             // or all caches in one collection, told apart by name:
- *             // .newBuilder(mongoClient, databaseName, collectionName).withDiscriminator(name)
- *             .build())
- *         .withCaffeine(caffeine -> caffeine.maximumSize(10_000))
- *         .withStore(store -> store.withMaximumAge(Duration.ofHours(1))));
+ *                     .newBuilder(mongoClient, databaseName, name)
+ *                     // or all caches in one collection, told apart by name:
+ *                     // .newBuilder(mongoClient, databaseName, collectionName).withDiscriminator(name)
+ *                     .build())
+ *             .withCaffeine(caffeine -> caffeine.maximumSize(10_000))
+ *             .withStore(store -> store.withMaximumAge(Duration.ofHours(1))));
  * }
  * }</pre>
  * Differences to {@link CaffeineCacheManager}:
@@ -68,6 +69,8 @@ import static java.util.Objects.requireNonNull;
  *     {@link Integer}, {@link UUID}, an {@link Enum enum}, a {@link Hashable} or {@code null}. For other types, set a
  *     hash provider on the builder ({@link DistributedCaffeine#withHashProvider(HashProvider)}): it is asked only for
  *     keys, and parts, of other types.</li>
+ *     <li>Keys are serialized for diagnostics, by Fory where the builder sets no key serializer
+ *     ({@link DistributedCaffeine#withSerializers}), a {@link SimpleKey} by its parts.</li>
  *     <li>Values are serialized into the store, and {@code null} values ({@link #setAllowNullValues(boolean)}, on by
  *     default) as Spring's marker.</li>
  *     <li>The manager closes the caches it built: on shutdown, and once Spring drops one ({@link #removeCache(String)},
@@ -83,13 +86,27 @@ public class DistributedCaffeineCacheManager extends CaffeineCacheManager implem
     // first use of the manager
     private static final String HASH_PROVIDER_FIELD = "hashProvider";
     private static final VarHandle HASH_PROVIDER;
+    // the builder's key serializer, read alike to set SimpleKeyForySerializer where none was set: the builder's
+    // serializers, then their key serializer, whose type is package-private, so the field is looked up by name
+    private static final String SERIALIZERS_FIELD = "serializers";
+    private static final String KEY_SERIALIZER_FIELD = "keySerializer";
+    private static final VarHandle SERIALIZERS;
+    private static final VarHandle KEY_SERIALIZER;
 
     static {
+        String field = HASH_PROVIDER_FIELD;
         try {
             HASH_PROVIDER = MethodHandles.privateLookupIn(DistributedCaffeine.class, MethodHandles.lookup())
                     .findVarHandle(DistributedCaffeine.class, HASH_PROVIDER_FIELD, HashProvider.class);
-        } catch (ReflectiveOperationException e) {
-            throw new IllegalStateException("the builder's field " + HASH_PROVIDER_FIELD + " was not found", e);
+            field = SERIALIZERS_FIELD;
+            SERIALIZERS = MethodHandles.privateLookupIn(DistributedCaffeine.class, MethodHandles.lookup())
+                    .findVarHandle(DistributedCaffeine.class, SERIALIZERS_FIELD, SerializersConfigurer.class);
+            field = KEY_SERIALIZER_FIELD;
+            KEY_SERIALIZER = MethodHandles.privateLookupIn(SerializersConfigurer.class, MethodHandles.lookup())
+                    .unreflectVarHandle(SerializersConfigurer.class.getDeclaredField(KEY_SERIALIZER_FIELD));
+        } catch (ReflectiveOperationException | SecurityException e) {
+            throw new IllegalStateException("The builder's field " + field + " was not found or is not accessible",
+                    e);
         }
     }
 
@@ -97,6 +114,8 @@ public class DistributedCaffeineCacheManager extends CaffeineCacheManager implem
     // what close the caches built, by name: Spring keeps its caches in a private map and drops them without closing
     private final Map<String, Runnable> built = new ConcurrentHashMap<>();
     private final AtomicReference<@Nullable AsyncCacheLoader<Object, Object>> loader = new AtomicReference<>();
+    // one for every builder without a key serializer: thread-safe, and its Fory costly to build
+    private final SimpleKeyForySerializer keySerializer = new SimpleKeyForySerializer();
 
     /**
      * Constructs a manager that creates caches by name on first use.
@@ -171,8 +190,8 @@ public class DistributedCaffeineCacheManager extends CaffeineCacheManager implem
             DistributedCache<Object, Object> cache = builder.build(regularCacheLoader);
             return track(name, cache, cache::close);
         }
-        throw new IllegalStateException(
-                "Cannot create regular Caffeine Cache with async-only cache loader: " + cacheLoader);
+        throw new IllegalStateException(("A synchronous cache cannot be built with an asynchronous cache loader (%s): "
+                + "set a CacheLoader, or enable setAsyncCacheMode(true)").formatted(cacheLoader));
     }
 
     @Override
@@ -193,7 +212,7 @@ public class DistributedCaffeineCacheManager extends CaffeineCacheManager implem
 
     private DistributedCaffeine<Object, Object> builder(String name) {
         DistributedCaffeine<Object, Object> builder = requireNonNull(builders.apply(name),
-                () -> "the builder of cache " + name + " cannot be null");
+                () -> "The builder function returned no builder for cache " + name);
         @SuppressWarnings("unchecked")
         HashProvider<Object> own = (HashProvider<Object>) HASH_PROVIDER.get(builder);
         if (own == null) {
@@ -201,6 +220,9 @@ public class DistributedCaffeineCacheManager extends CaffeineCacheManager implem
         } else if (!(own instanceof SimpleKeyHashProvider)) {
             // the builder's own provider asked only for what the SimpleKey hashing cannot hash itself
             HASH_PROVIDER.set(builder, new SimpleKeyHashProvider(own));
+        }
+        if (KEY_SERIALIZER.get((SerializersConfigurer<?, ?>) SERIALIZERS.get(builder)) == null) {
+            builder.withSerializers(serializers -> serializers.withKeySerializer(keySerializer));
         }
         return builder;
     }
@@ -256,8 +278,22 @@ public class DistributedCaffeineCacheManager extends CaffeineCacheManager implem
      */
     @Override
     public void destroy() {
+        // every cache is closed, even if one fails to; the first failure is thrown for Spring to report, with the
+        // others suppressed in it
+        @Nullable RuntimeException failure = null;
         for (String name : Set.copyOf(built.keySet())) {
-            closeBuilt(name);
+            try {
+                closeBuilt(name);
+            } catch (RuntimeException e) {
+                if (failure == null) {
+                    failure = e;
+                } else {
+                    failure.addSuppressed(e);
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 }
