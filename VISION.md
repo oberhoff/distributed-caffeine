@@ -415,6 +415,19 @@ After the Linux baseline (see "Performance: the baseline"), each only if measure
   values of 1 KB are about 100 MB per instance, a second at 1 Gbit/s, still in the background. Both optimisations
   stay recorded, to revisit only with measurements from a real deployment.
 
+- **The write telling what it replaced** (noted 2026-11-20, from the JCache draft; for every user): an SPI extension of
+  the write in three parts. (1) The write result reports per write whether a value existed before (a tombstone or an
+  expired row counting as none), which every store can say in the same write: Redis (its scripts read the row's state),
+  PostgreSQL (`RETURNING` from the upsert), MongoDB (the bulk result's upserts), MariaDB and MySQL (affected rows, 1
+  inserted, 2 updated; their view of tombstones to check). (2) The old value in the result where a store gives it in the
+  same write: Redis, PostgreSQL 18 (`RETURNING OLD`; before it a CTE on the old row), MongoDB for single keys
+  (`findOneAndUpdate` returning the document before), not MongoDB's bulk write, MariaDB or MySQL. (3) A write condition
+  "only if a value exists" (any version), checked in the write by every store. Plain users gain on `asMap()`:
+  `put(k, v)` and `remove(k)`, which return the previous value and so read before they write, take one round trip where
+  the store returns the old value; `remove(k, v)` and `replace(k, old, new)` where it says the value existed;
+  `replace(k, v)` and `computeIfPresent` with the condition. Measure first: the share of `asMap()` atomic methods and
+  the read they save, with today's `asMap()` tests as the reference.
+
 *On demand:*
 - **MongoDB's reactive-streams driver** was not measured against the sync driver (PostgreSQL's R2DBC was, and lost
   for statements). If it is reconsidered, measure it like the removed `PostgresJdbcVersusR2dbcExperimentTest`
@@ -423,18 +436,30 @@ After the Linux baseline (see "Performance: the baseline"), each only if measure
 
 ### Features
 
-*In a later release:*
-- **the Spring integration, its rest** (built 2026-11-19, see "Integrations"): a nightly job on the oldest supported
-  Spring version (6.2).
+*Next:*
+- **the store's expiry like Caffeine's** (see "The store's expiry like Caffeine's", designing 2026-11-20; chosen as the
+  next feature without an integration): fixed (`withExpireAfterWrite`, renamed from `withMaximumAge`) or variable per
+  entry (`withExpiry(StoreExpiry)`, creation and update), one of the two, as Caffeine's; held and announced by the
+  store; access-based expiry stays the local copies'. An SPI and layout change, in 0.10.0 (decided 2026-11-21), which
+  resets the stored layout anyway: 0.10.0 waits for it;
+- **then the change listener** (see "Change listener", designed 2026-11-20; put before the JCache provider by the user's
+  choice, 2026-11-20, after the expiry per entry): every instance's changes for any application, from the messages
+  already sent, so no store mechanism: derived local state kept in step, other local layers invalidated, changes pushed
+  to clients, settings in the cache followed, auditing; today an application sees only its own copies leaving
+  (`removalListener`). At least once, coalesced on polled stores, gaps reported; also the later source of the JCache
+  provider's remote events;
+- **then a JCache (JSR-107) provider** (see "JCache provider", designed 2026-11-20): first of the further integrations,
+  serving Micronaut, Hibernate's second-level cache and Spring's `JCacheCacheManager` at once, a near cache over any
+  store kept consistent; events of this instance's changes in the first version, other instances' from the change
+  listener after; the TCK as its acceptance;
 
 *On demand:*
-- **a JCache (JSR-107) provider**, first in line of the further integrations (see "Integrations", "Which framework
-  through which integration"): in `...integration.jcache`, it serves several frameworks at once: Micronaut (which uses
-  JCache whenever a JSR-107 implementation is present), Hibernate's second-level cache (`hibernate-jcache`, the
-  standard way since Hibernate 6), and Spring applications on `JCacheCacheManager`. Hibernate's second-level cache
-  needs consistency across instances, which is this library's point: possibly the largest audience gain. Costs a
-  second API surface beside Caffeine's (JSR-107's semantics, entry listeners, statistics, configuration objects);
-  Caffeine offers `caffeine-jcache` for itself, a model to read first;
+- **A scan of all of a cache's rows** (noted 2026-11-20, from the JCache draft): a new SPI operation, paged, for every
+  adapter (a store reads rows by hash only today; the scan of polled stores covers a time window, and not every store
+  has one). For plain users an explicit operation beside the views, which stay local by decision (see "Conditional
+  `asMap()` methods": iterating L2 means millions of rows, not what a local view is for): the store's real size in the
+  inspection API, exporting a cache or warming up another, invalidating by a predicate, diagnostics. JCache's
+  `iterator()` and `removeAll()` would cover every entry with it, not only this instance's copies.
 - **a Quarkus extension** (see "Integrations"): an artifact of its own, the one exception to the package rule, since
   a Quarkus extension has a runtime and a deployment module with build-time processing, and is expected to run in a
   native image (a cost here: Fory generates code at runtime, and each driver has its own native configuration).
@@ -476,9 +501,6 @@ After the Linux baseline (see "Performance: the baseline"), each only if measure
 - loader timeouts, soft and hard: a slow loader answered with the last value after a soft timeout while it completes
   in the background, a hard timeout failing the call (FusionCache's factory timeouts with background completion,
   checked 2026-11-18). Close to `refreshAfterWrite`, which covers held keys; new for misses and expired values;
-- variable expiry per key in the store: a maximum age per entry (for example from an `Expiry`-like function or per
-  write), not only one per cache. Caffeine's own variable expiry already works in L1 and stays untouched (see
-  "Maximum age");
 - a fourth distribution mode, `UPSERT` (replicate): a write elsewhere puts the key into every instance's L1, not
   only into the holders'. This breaks invariant 8 knowingly and only in this mode.
   - Cost: N store reads per write with N instances, because messages carry no values. L1 is polluted by keys that
@@ -1623,34 +1645,40 @@ property test green on every profile at 600 phases over several batches of seeds
 
 ## Expiry and `invalidateAll`
 
-### Maximum age: expiry is distributed, Caffeine is untouched
+### Maximum age: expiry is distributed, the copies capped by it
 
-The library never touches Caffeine's expiry: no cap, no translation into an internal `Expiry`, `policy()`
-unchanged. The maximum age is enforced by the store instead:
+The store's maximum age (to be renamed the store's expiry after write, see "The store's expiry like Caffeine's") decides
+how long a value is valid, counted from its row's last write on the store's clock; Caffeine's settings decide how long
+this instance keeps its copies, within it. Enforced in three places:
+- **On read:** the store returns rows older than the maximum age as expired, so a store read never serves an expired
+  value, even before maintenance ran.
+- **On the copies:** every local copy is capped at what its row had left when read (`InternalExpiry`, from the row's
+  age, `InternalValue#age`): its install plus the remaining age, so a copy of a row read when already old expires
+  sooner, and a read never lengthens a copy beyond. Counted from the install alone, such a copy would live up to twice
+  the maximum age after the write, and with `DistributionMode.NONE`, or a message lost unnoticed, it would be served all
+  along.
+- **By maintenance:** rows past the maximum age are marked `EXPIRED` with a new version (a state update on every store;
+  a MongoDB TTL index could only delete, and deletes carry no meaning), which sends an `EXPIRED` message, so that
+  holders drop the key; expired rows are deleted later, silently. Several instances run it at once, so the update is
+  conditional (the row still a value and older than the maximum age). Maintenance is not needed for the bound: it
+  announces and cleans up.
 
-- **On read:** the query only returns rows younger than the maximum age, so L2 never serves an expired value, even
-  before pruning ran.
-- **By pruning:** the maintenance worker marks rows whose maximum age is exceeded as `EXPIRED` with a new version (a
-  state update on both stores; a MongoDB TTL index can only delete, and deletes carry no meaning), which sends an
-  `EXPIRED` message; holders drop the key. Expired rows are deleted later, silently. A hot value without any Caffeine
-  expiry is dropped as well.
-- **Idempotent across instances:** several instances prune concurrently, so the update is conditional
-  (`state = VALUE AND write_time < now() - max_age`).
-- **Dropping is always safe,** so an `EXPIRED` message needs no version to be correct; at worst it costs a reload.
+**Bound:** a value is served at most the maximum age after its write, on every instance, whatever the Caffeine
+configuration, late by the time between the store's read and the install, a round trip at most.
 
-Bound: a value is served at most **maximum age + pruning interval + delivery** after its write, independent of the
-Caffeine configuration. Users who need it tighter shorten the pruning interval (configurable, see Operations) or
-configure Caffeine's expiry shorter as well.
+**The user's Caffeine settings keep their meaning:** a fixed `expireAfterWrite` or `expireAfterAccess` is emulated by
+`InternalExpiry` (Caffeine cannot combine a fixed expiry with a variable one, and the cap is variable), and `policy()`
+shows it as set (`InternalPolicy`); a user's own `Expiry` runs inside the cap. A local expiry longer than the maximum
+age fails the build (it would never apply); a maximum age lowered at runtime below `expireAfterWrite` lowers it, as
+`policy()` shows; without a local expiry, `policy()` shows `expireAfterWrite` at the maximum age. The README's "Local
+cache" states it for users.
 
-Accepted: a load that read the row just before it expired can still put it into L1. It was valid when read and is
-dropped by the next `EXPIRED` message at the latest.
-
-Rejected alternatives: capping each L1 copy at the remaining age through an internal `Expiry` (as JetCache does
-with its absolute per-value expire time). That needs the user's expiry settings, translates fixed expiry into
-variable expiry and empties `policy().expireAfterWrite()` / `expireAfterAccess()`. JetCache can afford it because
-it configures Caffeine itself; this library keeps the user's Caffeine settings as given. Not caring at all was
-rejected too:
-a hot value would outlive its maximum age by one Caffeine period, or indefinitely without Caffeine expiry.
+**Chosen over leaving Caffeine untouched** (the first design, which counted on maintenance alone, with the bound the
+maximum age plus the maintenance interval plus delivery, and rejected the cap because it translates fixed expiry into
+variable expiry): without the cap, a hot copy outlived its maximum age by one Caffeine period, or indefinitely without a
+Caffeine expiry, and with `NONE` or a lost message nothing ended it; the emulation keeps the user's settings visible as
+set, so the cost the first design feared did not come (JetCache caps its copies the same way, at an absolute expiry time
+per value).
 
 ### Maximum age for the store only
 
@@ -1685,6 +1713,142 @@ the copies is what is new.
   those whose row has expired are dropped.
 - **Tests:** `InternalCoreTest` (on every store: sharing within the age, copies kept after it, atomic methods on
   expired and on pruned rows) and `DistributedCaffeineTest` (validation, prune grace). Not in the property test.
+
+### The store's expiry like Caffeine's: fixed or variable (designing 2026-11-20, not built; for 0.10.0)
+
+**What:** an expiry per entry, held by the store, beside the fixed one for all entries it has today, so that one key
+expires on every instance after its own duration: maintenance expires each row at its time, deletes it later and
+announces it (`EXPIRED`), reads filter expired rows in the store, and every local copy is capped at what its row has
+left, as it is at the fixed expiry today (`InternalExpiry`, `InternalValue#age`). The most asked-for expiry of
+distributed caches (a time to live per key, as Redis users set one with every write); today the store knows one duration
+per cache, and Caffeine's variable expiry acts on this instance's copies only. Chosen 2026-11-20 as the next feature
+without an integration (also the store field the JCache draft recommends for its per-entry policies).
+
+**Aligned with Caffeine (decided 2026-11-21):** the store's expiry mirrors Caffeine's write-based expiry, which users
+know: fixed or variable, one of the two, combining both refused, as Caffeine's builder refuses `expireAfterWrite` with
+`expireAfter(Expiry)`. One sentence explains it: the store's expiry works like Caffeine's, a fixed expiry after write or
+a variable expiry per entry; the local copies follow Caffeine's own settings within it. So there is no cap between two
+store settings to reason about.
+
+| | Caffeine (the local copies) | The store |
+|---|---|---|
+| fixed, every entry, from its last write | `expireAfterWrite(d)` | `withExpireAfterWrite(d)` (renamed from `withMaximumAge`) |
+| variable, per entry | `expireAfter(Expiry)` | `withExpiry(StoreExpiry)` |
+| ready-made forms | `Expiry.writing((k, v) -> d)`, `Expiry.creating((k, v) -> d)` | `StoreExpiry.writing((k, v) -> d)`, `StoreExpiry.creating((k, v) -> d)` |
+| general form | `Expiry`: create, update, read | `StoreExpiry`: create, update (`null` keeping), no read |
+| at runtime, fixed | `policy().expireAfterWrite()`: `getExpiresAfter`, `setExpiresAfter` | `distributedPolicy().store().expireAfterWrite()`, the same names |
+| at runtime, variable | `policy().expireVariably()`: `put(k, v, d)` and others | `distributedPolicy().store().expireVariably()`: a duration per write |
+| access-based | `expireAfterAccess(d)`, `Expiry.expireAfterRead` | none: the local copies' (below) |
+| fixed and variable together | refused | refused |
+
+**The vocabulary, Caffeine's (2026-11-21):** the callbacks are named after single events (`expireAfterCreate`,
+`expireAfterUpdate`; Caffeine adds `expireAfterRead`), the fixed setting and the factories after which events renew the
+expiry: write is creation and update (`withExpireAfterWrite`, `StoreExpiry.writing`, as Caffeine's `expireAfterWrite`
+and `Expiry.writing`: "after the entry's creation or replacement of its value"), creating is creation alone
+(`StoreExpiry.creating`, as `Expiry.creating`, with no fixed setting in Caffeine either). Caffeine's access, creation
+and update and reading (`expireAfterAccess`, `Expiry.accessing`), is not supported by the store, for the reason below:
+no `withExpireAfterAccess`, no `StoreExpiry.accessing`, no read callback.
+
+**Access stays local (decided 2026-11-21):** Caffeine's `expireAfterAccess` and `Expiry`'s `expireAfterRead` (JSR-107's
+`Accessed` and `Touched`, Hazelcast's maximum idle time) have no store counterpart: every read would become a write
+(Redis's `GETEX`, an `UPDATE`, a MongoDB write), and still be wrong, as reads served from the local copies never reach
+the store. They stay Caffeine's, on this instance's copies, within the store's expiry. The store mirrors Caffeine's
+write-based expiry; access-based expiry is the local copies', which the Javadoc and the README say, so that nobody looks
+for a store `withExpireAfterAccess`.
+
+**The rename (decided 2026-11-21, part of building this):** `withMaximumAge` becomes `withExpireAfterWrite`,
+`withMaximumAgeForStoreOnly` `withExpireAfterWriteForStoreOnly`, the policy's `maximumAge()` with `MaximumAge`
+(`getMaximumAge`, `setMaximumAge`) `expireAfterWrite()` with `getExpiresAfter` and `setExpiresAfter`, as Caffeine's
+`FixedExpiration`; the README and the Javadoc call it the store's expiry after write, VISION's current sections follow
+(its history keeps "maximum age", the name of the time). A breaking change of the API, within the release that brings
+the feature.
+
+**The variable expiry:** `StoreExpiry<K, V>` with `expireAfterCreate(key, value)` for a key without a value (a tombstone
+or an expired row counting as none) and `expireAfterUpdate(key, value)` for one with a value, returning a duration, or
+`null` to keep the row's expiry: separate durations for creation and update, as JSR-107's `ExpiryPolicy` allows (a
+custom policy may return different ones; its five shipped policies use one duration or keep). Factories after
+Caffeine's, taking functions as Caffeine's do: `StoreExpiry.writing(...)` (renewed on every write) and
+`StoreExpiry.creating(...)` (set when the key gets a value, kept across updates); a duration or an absolute point in
+time (an `Instant`, "expire at the end of the day", on the writing instance's clock, the one place its clock matters); a
+duration per write through the policy. Per entry, as Caffeine's `Expiry` (functions of key and value), unlike JSR-107,
+whose policy is per cache and gets no key (per operation only as a vendor extension: Hazelcast's
+`ICache.put(key, value, expiryPolicy)`).
+
+**Deciding in the write:** the writing instance computes both durations before the write, and the write carries both;
+the store applies the creation's where the key holds no value and the update's (or keeps its own) where it does, in the
+same statement: a Redis script, a `CASE` in the SQL upsert, a MongoDB pipeline update; every store the SPI admits
+evaluates the row's state in its writes already (the conditions), so this asks for nothing new of a future adapter but a
+branch (SQL Server and Oracle `MERGE`, CockroachDB and YugabyteDB the PostgreSQL upsert, etcd a transaction's else;
+DynamoDB has no branch in an update, only `if_not_exists`, so it would need two attempts where the durations differ). No
+read, no report back: a `put` stays an unconditional advancing write, and a batch stays alike for all its keys.
+
+**Guarantee (full, as for the fixed expiry):** a value is served at most its entry's duration after its write, on every
+instance, whatever the Caffeine configuration, late by the round trip between the store's read and the install at most
+(as `InternalExpiry` bounds the fixed expiry): reads never return a row past its time, and every copy is capped at what
+its row had left when read, computed from the row's age on the store's clock and counted down locally, so the instances'
+clocks do not matter. Maintenance is not part of the bound: it announces the expiry (`EXPIRED`, for the change listener
+and the statistics) and deletes the rows.
+
+**In the core:**
+- **The heartbeat** is derived from the fixed expiry (at most a fifth of it, at most a minute); with the variable expiry
+  there is none to derive from, so the minute applies, as for a cache without an expiry today.
+- **The store-only mode** (`withExpireAfterWriteForStoreOnly`) requires the fixed expiry, as its name says, and is
+  refused with the variable one: its trust rules rest on the store letting go of no row younger than the fixed expiry
+  since its last write, which an expiry per entry breaks.
+- **At runtime** the fixed expiry stays adjustable for every row at once (the store computes it from the write time on
+  every read and maintenance run); a variable duration is fixed when its row is written, so a changed function applies
+  to later writes, as in Caffeine.
+- **Copies** carry their row's duration beside its age, so that `InternalExpiry` caps them at the row's own time where
+  it has one.
+
+**Store side (an SPI change for every adapter, a layout change):**
+- `Write` carries the creation's and the update's duration (or keep, or none: the fixed expiry alone); the store keeps
+  an absolute expiry time on its own clock in a new column or field, indexed for maintenance: a column with an index in
+  PostgreSQL, MariaDB and MySQL, a field with an index in MongoDB, a second sorted set in Redis beside the one by write
+  time, scored by the expiry time and holding only rows with one (not the key's own TTL, which deletes silently, without
+  the version and the `EXPIRED` announcement maintenance gives, and would leave the write-time set holding a member
+  whose row is gone).
+- `Row` carries the entry's duration; `read` and `readVersions` return a row past its time as expired, as one past the
+  fixed expiry; `expire` marks rows past their time, with a version, announced as `EXPIRED`, in batches by the new
+  index; pruning, tombstones and the control row are unchanged.
+- Every adapter's contract tests gain the cases (a row past its time, a creation's and an update's duration, keep across
+  updates, maintenance's batches by the index), and the in-memory store's profiles model it; existing places are reset
+  through the schema marker.
+
+**`currentDuration`, deferred (decided 2026-11-21):** Caffeine's `expireAfterUpdate` gets the time left, for functions
+of it (extend by a tenth, the later of the current and another); the store's keep needs no value, but such a function
+does. Recorded as a step on demand: a copy held here knows its row's time left (its duration and age when read, counted
+down locally), so a variant would cost one round trip with a trusted copy held (the write conditional on the copy's
+version, a row changed elsewhere meanwhile conflicting and decided again on a fresh read) and a read first where the key
+is not held. Not in the first version, the one tricky part: it turns `put` into a conditional write (conflicts,
+decisions repeated, other rules for an unknown outcome: a second write path for the most common operation), rests on the
+copy being current, makes batches mixed, and its time left is late by a round trip; and little needs it (JSR-107's
+`getExpiryForUpdate()` has no time left, Redis's `KEEPTTL`, `EXPIREAT` and `PERSIST` neither, Caffeine's typical uses
+are `writing` and `creating`).
+
+**Measured against the others:** JSR-107's `Eternal` (no expiry), `Created` (`creating`) and `Modified` (`writing`) map
+onto it, `Accessed` and `Touched` stay the local copies'; Redis's `EXPIREAT` is the `Instant`, `PERSIST` an entry
+without a duration, `KEEPTTL` the update's `null`, its `GT` and `LT` (change the expiry only to a later or an earlier
+time) a candidate the store could apply in the write as it does keep; FusionCache's jittering (a small random extra per
+entry) belongs in the function; Ehcache 3's `ExpiryPolicy` (create, access, update, `null` keeping) has JSR-107's shape.
+
+**Where it costs:** no extra round trips (every write decides its expiry in the store, reads filter by the field in the
+same query); a field per row (eight bytes) and its index, or a member of Redis's second sorted set per row with a
+duration; maintaining that index on the writes setting or changing a duration; one more maintenance query per run by the
+new index, nothing where no row has a duration of its own; the user's functions called on every write in the caller's
+thread; eight bytes per copy for its row's duration. Once: a layout change resetting every existing place (a cold start
+per cache), the rename breaking the API, an SPI change across five adapters and the in-memory store with their contract
+tests and the property test.
+
+**The release: 0.10.0 (decided 2026-11-21).** 0.10.0 breaks the stored layout and the API already (the hash format), so
+the users go through one reset and one round of renames, and the marker stays `schema=1 hash=xxh3-128/1` (new in 0.10.0
+anyway, no second layout number). 0.10.0 waits for the whole feature: every adapter, the contract, the property test,
+the rename.
+
+**Tests:** the store contract on every store and profile; two instances on every store (a key expiring on both after its
+duration, a copy read late capped at its row's time left, a rewrite renewing it, `creating` keeping it, fixed and
+variable refused together, the store-only mode refused with the variable expiry); the property test with random
+durations, its oracle extended by the entries' expiry.
 
 ### Store bounds at runtime
 
@@ -2788,6 +2952,76 @@ the release notes. Considered: `store()` on the cache instead of the policy (the
 `distributedStats()` is on `DistributedCache` only: an asynchronous cache reaches it through `synchronous()`, as
 Caffeine's `AsyncCache` reaches `stats()`. The nested types lost their prefix (`Store`, `MaximumAge`, `MaximumSize`,
 `Mark`, as Caffeine's `Policy.Eviction`). Old to new: the release notes.
+
+### Change listener (designed 2026-11-20, not built)
+
+**What:** a listener of the changes every instance makes, on the builder, for an application to keep state of its own in
+step (a derived local index, an audit, metrics). A feature of its own, built first (the user's choice, 2026-11-20),
+before the JCache provider, which does not need it for its first version (the events of this instance's changes, see
+"JCache provider") but takes other instances' events from it after. The messages that carry changes to the other
+instances are there already; the listener exposes them, so it adds no store mechanism. Caffeine's `removalListener`
+stays what it is: this instance's local copies leaving, for any cause.
+
+**What an instance learns of a change elsewhere:** each change reaches every instance as a message: its kind (written,
+invalidated, expired; `invalidateAll` as the control row), the key's hash and the version. So the listener can promise
+every change from every instance, maintenance's expiry included, but not every write:
+- **Coalesced on polled stores:** a poll sees each row's latest state (MariaDB, MySQL; any store without a feed), so two
+  quick writes of one key may arrive as one.
+- **Gaps:** an interrupted feed is a gap; the core revalidates, but the changes within it are gone, so the listener is
+  told of the gap (`onGap`), to resynchronize as it needs.
+- **At least once, ordered per key:** duplicates possible, no order across keys, as the messages are.
+- **Not seen:** pruning to the store's maximum size deletes rows silently (store contract); local evictions are the
+  `removalListener`'s; with `DistributionMode.NONE` there are no messages, so a build with a listener and `NONE` is
+  refused.
+- **No created or updated (decided 2026-11-20):** a write message does not say whether the key existed, and "created" is
+  not reliably knowable: the writing instance knows it for conditional writes only (`putIfAbsent`, a load writing where
+  no row exists), not for a `put`, which writes without reading; the store knows it inside its write and could announce
+  it, but as an SPI change for every adapter, and a polled store never can (a create and an update between two polls
+  arrive as one write); a receiving instance knows only whether it held a copy, its own view. And in a cache the
+  distinction describes the cache's state, not the data's: a key expired, pruned or invalidated and loaded again is
+  created again. So the kinds are `WRITTEN` (a value written, the key holding one before or not), `REMOVED`, `EXPIRED`
+  and `ALL_REMOVED`; JCache, which needs created for its listener types, has it complete for its own changes from the
+  `compute` deciding each operation. If a need shows, stores that can tell could report creation through an optional SPI
+  flag later. No old value either.
+- **No origin:** messages do not carry which instance made a change, so the listener does not say whether a change is
+  this instance's own; that would need an instance id in every message, an SPI change.
+
+**The key and the value:** a message carries the hash only. The key comes from this instance's copy if it holds the key,
+otherwise from the row, read once per change (the row keeps the serialized key; a tombstone keeps the key of the row it
+replaced, and has none where no row existed: such a change arrives with its hash and no key). The value is read on
+demand and is the current one, not necessarily the one of the change. Not chosen for the start: keys in the messages, an
+SPI change for every adapter (MongoDB's change stream and Redis's stream entries could carry them, polled stores read
+rows holding them anyway, PostgreSQL's notification payload is limited to 8,000 bytes and would fall back to the read);
+an optimization once the reads are measured to matter.
+
+**API (proposed 2026-11-20):** one listener per cache, on the builder, as Caffeine's `removalListener`:
+`withChangeListener(DistributedChangeListener<K, V>)` (named after `DistributedCache` and `DistributedStats`,
+`ChangeListener` being the SPI's), with `onChange(DistributedChange<K, V>)` and `onGap()` (a default doing nothing). A
+`DistributedChange<K, V>` gives:
+- `kind()`: `WRITTEN`, `REMOVED`, `EXPIRED` or `ALL_REMOVED` (`invalidateAll` and the marked forms, from the control
+  row; no key, no hash).
+- `hash()`: the key's hash, always (but for `ALL_REMOVED`), so that a change without a known key is still identifiable.
+- `key()`: the key, or `null` where it is not known (a tombstone where no row existed, a row gone again).
+- `version()`: the version the store applied, increasing per key, for a listener to order or deduplicate what arrives.
+- `value()`: a `CompletableFuture` of the current value, read from the store on the store executor, `null` if the key
+  holds none; a future, so that a listener does not block the delivery thread, and reads only what it needs.
+
+**Delivery (proposed 2026-11-20):** what the cache's delivery processes (`InternalDelivery`, serially on the store
+executor) is handed to a queue of the listener's own, drained one change at a time on the cache's executor (Caffeine's,
+which runs the removal listener too), so that the changes arrive in the order the cache saw them, per key the store's,
+and a slow listener holds up neither the cache nor other caches. The queue is bounded as the delivery's is
+(`MAXIMUM_PENDING`): a listener too far behind gets what is pending dropped and `onGap()`, rather than a queue growing
+without bound or the cache waiting. A change without a held key waits for its row read in that queue, keeping the order.
+A listener's exception is logged at most once a minute per cache (as unreadable rows are) and the next change delivered;
+it changes nothing in the cache. The changes of this instance arrive through the same messages as everyone's, so every
+change takes one way, in the store's order per key. A build with a listener and `DistributionMode.NONE` (no messages) is
+refused; with polling stores the listener receives what the polls find.
+
+**Guarantee, stated in the Javadoc:** every change from every instance, at least once and eventually, possibly coalesced
+per key on polled stores; a gap reported when changes may have been lost, also when the listener falls behind. Partial
+by design; a listener needing every write keeps its own log. Tests: two instances on every store (writes, removals,
+expiry, `invalidateAll`, a key not held, a key whose row is gone, a gap, a slow and a failing listener), the property
+test extended by a listener whose view converges on the store's.
 
 ### Async variants
 
@@ -5124,7 +5358,7 @@ there, not only for Caffeine's API.
 
 **Spring: `DistributedCaffeineCacheManager`.**
 
-*Built 2026-11-19; specs deferred (see "Open work"). Tested on Spring 7.0 and 6.2, the oldest supported.*
+*Built 2026-11-19; specs applied 2026-11-20. Tested on Spring 7.0 and 6.2, the oldest supported.*
 
 A subclass of Spring's `CaffeineCacheManager`, which builds each cache
 in protected methods made for this (checked on Spring 6.2's and 7.0's source: `createNativeCaffeineCache(String name)`,
@@ -5218,8 +5452,9 @@ Redis and none of the other gains.
   `@Cacheable` fails on its write after a miss unless a `CacheErrorHandler` logs it, while `@Cacheable(sync = true)`
   loads through the cache and keeps working (tested in `DistributedCaffeineCacheManagerTest`).
 - **Spring versions:** 6.2 or newer (Spring Boot 3.4 on); the build compiles and tests against the latest (7.0),
-  and 6.2 passed the Spring tests by hand (`-Dspring.version=6.2.19`), since the overridden methods are protected
-  API, not a formal SPI. A nightly job on the oldest supported version is open (see "Open work").
+  and 6.2 passed the Spring tests by hand (`-Dspring.version=6.2.19`, 2026-11-20), since the overridden methods are
+  protected API, not a formal SPI. No nightly job on 6.2 (the user's choice, 2026-11-20): CI and the nightly use the
+  newest Spring; the oldest is checked by hand when the integration changes.
 
 **Rejected:** a separate `CacheManager` from scratch (it would redo what `CaffeineCacheManager` does, and differ from
 it); `SimpleCacheManager` with hand-built caches as the documented way (no caches by name, nobody closes them);
@@ -5238,6 +5473,211 @@ it); `SimpleCacheManager` with hand-built caches as the documented way (no cache
 So the JCache provider comes second: one integration for several frameworks, at the cost of JSR-107's API surface.
 A Micronaut integration of its own would add only configuration through `micronaut.caches.*`; whether Micronaut
 offers a hook to plug in a cache manager directly is unchecked, left until it is asked for.
+
+### JCache provider (designed 2026-11-20, not built)
+
+**What:** a JSR-107 provider in `...integration.jcache` (`javax.cache:cache-api` 1.1, optional), for the frameworks that
+plug in caches through JCache: Hibernate's second-level cache (`hibernate-jcache`), Micronaut, and Spring on
+`JCacheCacheManager` (see "Which framework through which integration").
+
+**Positioning: a near cache behind JCache, over any store (researched 2026-11-20).** Local copies in front of shared
+state behind the standard API are an established kind of JCache provider: Redisson's JCache with local caching, the near
+caches of Hazelcast's and Infinispan's clients (Ehcache 3's tiers are local storage tiers, not copies of shared state).
+JSR-107 defines no two-tier API, so the tiers are the provider's configuration, and applications see one flat
+`Cache<K, V>`, as they would here. In those providers the JCache semantics come from the central side (events, per-entry
+expiry and entry processors run in the grid or on the server); the near cache only speeds up reads, and a read served
+from it reaches the central side as little as one served from L1 here: access expiry, read statistics and read events
+stay local with any near cache. Their weak point is staleness: copies invalidated fire-and-forget (Hazelcast documents
+invalidations lost and a reconciliation task, 60 seconds by default, for copies that would otherwise stay stale
+indefinitely). Here the truth is any store (PostgreSQL, MongoDB, Redis, MariaDB, MySQL), and the copies are kept
+consistent by versions and conditional writes, messages delivered at least once with gaps detected and copies
+revalidated, the heartbeat, and the maximum age as the final bound: consistent near caching over any store is the
+distinguishing feature, not a cheaper copy of a grid.
+
+**How others deliver events:**
+
+- **Caffeine's adapter (one JVM):** each operation runs as a `compute` on its own map, whose remapping function sees the
+  entry before and stages the event that applies (created, updated with the old value, expired, removed); an
+  `EventDispatcher` publishes after the commit, a queue per listener and key (ordered per key, parallel across keys, on
+  a shared executor), synchronous listeners awaited before the operation returns; evictions through Caffeine's eviction
+  listener. Complete because data and changes are in one map.
+- **Redisson:** every operation's Lua script publishes its event on Redis pub/sub with key, value and old value (the
+  store producing the event with the change), expired events from a background eviction task over a per-entry timeout
+  set; pub/sub is fire-and-forget, so a disconnected subscriber misses events.
+- **Hazelcast:** listeners cluster-wide; its documentation warns that events may get lost on failover.
+- **Infinispan:** events raised only where they happen by default; cluster-wide listeners opt-in, at least once, long
+  without expiry events.
+- **Ehcache 3 clustered (Terracotta):** "clustering is not yet compatible with event listeners" (Ehcache 3.2, Terracotta
+  Ehcache 10.3); nothing found that this changed.
+
+So no provider promises cluster-wide events without loss; where they are complete with values, the store produces them
+with the change (Redisson). Sources: Hazelcast's manual ("Distributed Events", "Near Cache Consistency"), Red Hat Data
+Grid's developer guide (listeners, clustered listeners), Ehcache's "Cache Event Listeners" (3.2) and Terracotta Ehcache
+10.3's listener introduction, Redisson's `JCache.java` and its blog on JCache with Valkey or Redis, Caffeine's `jcache`
+sources (3.3.1).
+
+**Our own implementation, not Caffeine's adapter (decided 2026-11-20):** Caffeine's `jcache` artifact implements JSR-107
+in `CacheProxy` on a Caffeine `Cache<K, Expirable<V>>`, and a `DistributedCache` is one, but its expiry times come from
+the ticker (`System.nanoTime()`, meaningless in another JVM), access expiry changes the held object in place (never
+reaching the store or other instances), its events are this JVM's only, and it needs its internal classes
+(`CacheManagerImpl`, `CaffeineConfiguration`, a constructor changed within 3.x). So the provider is built on
+`DistributedCache`, with Caffeine's adapter the reference to read for each JSR-107 detail.
+
+**Registration:** no `META-INF/services/javax.cache.spi.CachingProvider` in the artifact: every application with the
+library on its classpath would register the provider, and one with another JCache provider (Ehcache, Hazelcast,
+Caffeine's) would then fail on `Caching.getCachingProvider()` (more than one provider). The provider is named
+explicitly, as the frameworks let it be: `Caching.getCachingProvider("...DistributedCaffeineCachingProvider")`,
+`hibernate.javax.cache.provider`, Spring Boot's `spring.cache.jcache.provider`. One artifact stays (the package rule),
+unlike Caffeine's separate `jcache` artifact, which can register itself.
+
+**Configuration, both ways (decided 2026-11-20), as Caffeine has both:** JSR-107's calls carry no store, while
+frameworks create caches by name with standard configurations (`createCache(region, new MutableConfiguration<>())`,
+`getCache(name)`). So, as in the Spring integration, a function gives each cache name its builder, and the JSR-107
+configuration is applied on top (read-through, write-through, expiry, statistics, listeners):
+- **Programmatic:**
+  `DistributedCaffeineCachingProvider.register(name -> DistributedCaffeine.newBuilder(adapter(name))...)`, per
+  `CacheManager` URI or as the default, at startup before the framework creates its caches: for applications with
+  dependency injection, whose clients are at hand (Caffeine's counterpart: `TypesafeConfigurator.setFactoryCreator` and
+  `setConfigSource`, static, the first `@Inject`).
+- **Declarative:** the `CacheManager`'s URI names a class giving the builders
+  (`distributed-caffeine:com.example.CacheBuilders`, a no-argument constructor), the channel every framework exposes
+  (`hibernate.javax.cache.uri`, Spring Boot's `spring.cache.jcache.config`): for setups without dependency injection,
+  the class building its own clients (Caffeine's counterpart: a Typesafe Config file found by the URI,
+  `caffeine.jcache.<name>`, with class names for loaders, writers and listeners).
+- A `DistributedCaffeineConfiguration` (a `MutableConfiguration` carrying one cache's builder) for programmatic use;
+  specs (`withSpec`) for settings read as strings. No Typesafe Config.
+
+**Mapping onto the core:**
+- `get`, `put`, `remove`, `getAll`, `putAll`, `containsKey`: the core's operations, distributed as they are.
+- `putIfAbsent`, `replace`, `getAndPut`, `getAndRemove`, `getAndReplace`, `remove(k, v)`, `invoke` and `invokeAll`
+  (entry processors): `asMap()`'s atomic methods, decided against the store by conditional writes.
+- Read-through (`CacheLoader`) and `loadAll`: the cache's loader. Write-through (`CacheWriter`): called by the instance
+  making the change, before its store write, as JSR-107 has it.
+- `ExpiryPolicy`: an `Expiry` of the local copies, bounded by the store's maximum age. Creation and update durations
+  count from the value's write time, kept with the row, so an entry expires alike on every instance, also one reading it
+  later (to verify: a value read past its duration counts as expired, not served once); access extends only the
+  accessing instance's copy (partial).
+- `clear()` and `removeAll()`: `invalidateAll`, on every instance; `removeAll()` also calls the writer and fires events
+  for the keys this instance holds.
+- Store-by-value (JSR-107's default): copies through the cache's value serializer; store-by-reference as configured.
+- Statistics and the management MXBeans: per instance, from `stats()` and `distributedStats()`.
+- Events, in the first version for the changes made through this instance only, complete as JSR-107 has them (created,
+  updated, removed, expired, with old values where asked), as Infinispan's listeners are by default; the TCK runs one
+  JVM and is passed so. Changes from other instances later through the change listener (see "Change listener"), with its
+  limits: a remote write cannot tell created from updated (taken as updated where this instance held the key, created
+  otherwise, documented as such), no old value, the value current on read, coalesced on polled stores.
+
+**Event flow, after Caffeine's adapter (2026-11-20):** there, `CacheFactory` registers the configuration's listeners and
+`CacheProxy.registerCacheEntryListener` later ones with an `EventDispatcher`, a registration each: the listener wrapped
+in an `EventTypeAwareListener` (calling `onCreated`, `onUpdated`, `onRemoved` or `onExpired` as the listener implements
+them), its filter, and whether it is synchronous and wants old values. Every operation runs as a `compute` whose
+remapping function sees the entry before and publishes the event that applies (`publishCreated` without,
+`publishUpdated` with the old value; created after an expired event where the entry before had expired); the events are
+staged until the computation commits, then chained per registration and key (each waiting for the key's previous one)
+and run on the executor; synchronous ones are awaited after the operation, a listener's exception thrown to the caller;
+evictions arrive through Caffeine's eviction listener as quiet events (nobody waiting). The dispatcher is a public
+class, but internal: the jar declares only `...jcache.configuration`, `.copy` and `.spi` as its exported packages (its
+manifest; no `module-info`, an automatic module). So the provider has a dispatcher of its own after that one (about 400
+lines), the seam where this instance's events and, later, other instances' (from the change listener, quiet, as updated,
+removed or expired) meet.
+
+**What an event costs here (decided 2026-11-20):** Caffeine's adapter decides every operation by a `compute` on memory;
+here the atomic methods decide against the store: a plain `put` is one round trip (an advancing write, no read), an
+atomic method on a trusted held copy one (a conditional write on its version), on a key not held two (a read, then the
+conditional write). Deciding every `put` by a `compute`, only to tell created from updated, would double the store time
+of many. So the entry before is decided only where something needs it: a registration for created or updated events or
+one wanting old values, an expiry policy treating creation and update apart (`CreatedExpiryPolicy` keeps an entry's
+expiry on update, so needs the entry before; `EternalExpiryPolicy`, the default, needs nothing), and the methods that
+return or compare it (`getAndPut`, `getAndRemove`, `getAndReplace`, `putIfAbsent`, `replace`, `remove(k, v)`, atomic in
+the core already). Per operation, as the registrations and the policy stand:
+- nothing needs it: the plain write, one round trip (Hibernate's, Spring's and Micronaut's usual case);
+- needed, the key held as a trusted copy: a conditional write on its version, one round trip, the copy giving updated
+  and the old value;
+- needed, the key not held: a read and a conditional write, two round trips, paid only by caches whose configuration
+  asks for it.
+
+**How others avoid the read:** they decide where the data is, in the write itself. Redisson's `put` script checks
+`hexists` on the server (created or updated in the one round trip) and fetches the old value only while a counter in
+Redis says a registered listener wants it (`oldValueRequired`), publishing on a channel per event type (its
+`JCache.java`); Hazelcast and Infinispan run each operation on the partition owner holding the entry, which sees it
+before the change and skips events and previous values nothing needs (from their designs, not checked again). None adds
+a read to a `put`.
+
+**Next, on demand (an SPI change):** the store reports per write whether a value existed before, which every store here
+can say in the same write: Redis (its scripts read the row's state), PostgreSQL (`RETURNING` from the upsert), MongoDB
+(the bulk result's upserts per write), MariaDB and MySQL (affected rows, 1 inserted, 2 updated). That makes the third
+case one round trip too. "Existed before" has to mean a value, a tombstone or an expired row counting as none: Redis and
+PostgreSQL see the row's state, MongoDB and MariaDB/MySQL to be checked. Old values only where a store gives them in the
+same write: Redis (the script returns it), PostgreSQL 18 (`RETURNING OLD`; before it a CTE on the old row), MongoDB for
+single-key writes (`findOneAndUpdate` returning the document before), not in its bulk write. MariaDB and MySQL return no
+old values from an update (MariaDB's `RETURNING` covers inserts and deletes): there, and for MongoDB's bulk writes, a
+read before the write remains, made on demand (only while a registration wants old values, or for a `getAnd...` method,
+as Redisson fetches them only when asked) but not lazily: once written, the old value is gone from the store, so it
+cannot wait until a listener asks for it. A trusted held copy needs no read at all.
+
+**What JSR-107 needs beyond the core (checked 2026-11-20, every method of `Cache`, `MutableEntry`, `CacheWriter` and the
+`CacheManager`'s switches):** besides the entry before for events and expiry (above), six places ask for what the core
+cannot answer cheaply, or at all:
+- **Whether a value existed:** `remove(k)` returns `true` only if a value was removed, an answer every caller gets, so
+  always decided: today a read and a conditional tombstone (two round trips, one with a trusted copy); with the write
+  result reporting "existed before" (above) one, on every store.
+- **Writing only if a value exists:** `replace(k, v)` and `getAndReplace` write only if the key is mapped: today a read
+  and a conditional write on its version; with a write condition "only if a value exists" (any version) one round trip,
+  a check every store can make in the write (Redis and PostgreSQL on the row's state, MongoDB by a filter on it, MariaDB
+  and MySQL by a `WHERE` on it), an SPI change in the same spirit.
+- **The old value:** `getAndPut`, `getAndRemove`, `getAndReplace` and listeners wanting it, as above: in the write on
+  Redis, PostgreSQL 18 and MongoDB for single keys, a read before it on MariaDB and MySQL.
+- **Every key of the cache:** `iterator()` over all entries, and `removeAll()` without keys, which calls
+  `CacheWriter.deleteAll(keys)` and fires a removed event per entry (unlike `clear()`, silent by definition), need the
+  cache's keys; the SPI reads rows by hash only (the scan of polled stores covers a time window, and not every store has
+  one), and `asMap()` iterates this instance's copies. Decided for the first version: both cover this instance's copies,
+  a partial guarantee stated in the Javadoc (the TCK runs one instance and does not see it; Hibernate, Spring and
+  Micronaut do not iterate caches). Recorded as a candidate: a scan of all of a cache's rows, paged, for every adapter,
+  which would also give a complete `asMap()` view.
+- **An expiry time per entry, kept across updates:** `CreatedExpiryPolicy` (an update does not extend it),
+  `Duration.ZERO` at creation (not stored at all, checked by the TCK), and every policy treating creation and update
+  apart; the store has one maximum age per cache, counted from the last write, so an instance reading a row later cannot
+  tell when the entry was created. Open, with a recommendation:
+  - **A field in the store (recommended):** a per-entry expiry time in every row, so that maintenance expires, deletes
+    and announces each row at its own time (`EXPIRED` reaching the other instances and the change listener when due,
+    rows not left until the maximum age) and reads filter expired rows in the store, as for the maximum age. Useful
+    beyond JCache: Caffeine's variable expiry (`expireAfter(Expiry)`) acts on the local copies only today, and could
+    hold on every instance. Costs an SPI change for every adapter (a column with an index in PostgreSQL, MariaDB and
+    MySQL, a field with an index in MongoDB, a sorted set or the key's own TTL in Redis) and a layout change of the
+    rows: existing places reset through the marker, as for the hash format, so best together with another break, one
+    cold start for the users.
+  - **An envelope around the value (the fallback):** the value stored with its expiry time (wall clock), as Caffeine's
+    adapter keeps an `Expirable` in memory: no store change and no reset, JCache caches only; but the store does not
+    know the time (rows live until the maximum age or pruning), no `EXPIRED` message at the entry's time, a stored
+    format of its own, a JSON value in the store's type becomes a wrapper object, and the instances' clock skew limits
+    it. Taken only if JCache comes before the field and no reset is wanted.
+- **Statistics switched at runtime:** `CacheManager.enableStatistics(name, flag)` (and `enableManagement`), while the
+  core records statistics as built (`recordStats`): the provider builds every cache recording and reports only while
+  enabled; no SPI change.
+
+Nothing to change for entry processors (`invoke`, `invokeAll`): arbitrary Java code cannot run in the store as
+Redisson's scripts do, so they read and write conditionally, two round trips (one with a trusted copy), as `compute`
+does; Hazelcast takes one, running them on the owner. Access expiry stays per instance: extending it everywhere would
+take a write per read.
+
+**So the extensions it would use are core features of their own** (see "Open work": "The write telling what it replaced"
+under Performance, "A scan of all of a cache's rows" under Features, and "The store's expiry like Caffeine's", the next
+feature), each judged and measured for every user, JCache becoming cheaper and more complete with them. Without any the
+provider still works: reads where the answers are needed, `iterator()` and `removeAll()` over this instance's copies,
+and expiry per entry where it differs from the store's maximum age (`CreatedExpiryPolicy`'s creation time kept across
+updates) held by this instance's copies only, as access expiry is; `Duration.ZERO` at creation needs nothing (the entry
+is not written at all).
+
+**Acceptance: the JSR-107 TCK (decided 2026-11-20), as in Caffeine's build** (its `tckTest` suite unpacks the TCK test
+jar and runs it against the provider, with `org.jsr107.tck.management.agentId` for the MBean server). Here a Surefire
+execution scanning the TCK test jar (`dependenciesToScan`), with system properties naming the provider and its classes,
+against the in-memory store. The TCK runs one JVM, so the partial guarantees across instances do not touch it;
+distribution is tested by two-instance tests of our own, as for Spring. The whole `Cache` API, no operation left
+unsupported.
+
+**Size:** about 1,500 to 2,500 lines and their tests, comparable to Caffeine's adapter without Typesafe Config; the
+largest integration so far, most of it the whole API, the TCK and the MXBeans. Self-contained: the first version needs
+no change listener, though built after it (the user's choice).
 
 ### Java baseline: 17
 
