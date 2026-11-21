@@ -23,6 +23,7 @@ import io.github.oberhoff.distributedcaffeine.testing.TestHashes;
 import org.jetbrains.lincheck.Lincheck;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
@@ -52,6 +53,13 @@ import java.util.function.Function;
 class InternalInterleavingTest {
 
     private static final int INVOCATIONS = 500;
+
+    // the runtime check of the hash library, once per JVM at the first build (InternalHasher#verify), hashes through
+    // hash4j's VarHandles on byte arrays, which model checking does not support: done before the scenarios build
+    @BeforeAll
+    static void checkTheHashLibraryBeforehand() {
+        InternalHasher.verify();
+    }
 
     // two instances on one store, on simulated time, everything direct: the scenario's threads are the only ones
     // the holder loading (its loader answers "loaded"), for refresh

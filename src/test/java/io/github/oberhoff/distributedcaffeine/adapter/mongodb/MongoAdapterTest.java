@@ -15,6 +15,8 @@
  */
 package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
 
+import com.mongodb.WriteConcern;
+import com.mongodb.client.MongoCollection;
 import io.github.oberhoff.distributedcaffeine.CaffeineConfigurer;
 import io.github.oberhoff.distributedcaffeine.DistributedAsyncLoadingCache;
 import io.github.oberhoff.distributedcaffeine.DistributedCache;
@@ -92,6 +94,14 @@ abstract class MongoAdapterTest {
 
     private MongoAdapter.Builder adapter() {
         return MongoAdapter.newBuilder(database.client, "adapter", collection);
+    }
+
+    // the cache's collection, for the test's own writes: with the majority's write concern, as the cache reads with the
+    // majority's read concern; MongoDB 4's default (w:1) returns before the write is the majority's, so a start right
+    // after it could still read the documents from before (MongoDB 5 made the majority the default)
+    private MongoCollection<Document> documents() {
+        return database.client.getDatabase("adapter").getCollection(collection)
+                .withWriteConcern(WriteConcern.MAJORITY);
     }
 
     private DistributedCaffeine<String, String> strings(MongoAdapter<String, String> adapter) {
@@ -317,7 +327,7 @@ abstract class MongoAdapterTest {
         writer.putAll(Map.of("a", "1", "b", "2"));
         assertThat(holder.getAllPresent(List.of("a", "b"))).hasSize(2);
 
-        database.client.getDatabase("adapter").getCollection(collection).drop();
+        documents().drop();
 
         // every document is gone, which no write announces: the revalidation after the gap drops what is held
         await(() -> holder.policy().getIfPresentQuietly("a") == null
@@ -372,7 +382,7 @@ abstract class MongoAdapterTest {
                     .append("key", "k" + index).append("value", value).append("state", "VALUE")
                     .append("version", (long) index + 1).append("writeTime", java.time.Instant.now()));
         }
-        database.client.getDatabase("adapter").getCollection(collection).insertMany(rows);
+        documents().insertMany(rows);
 
         // every round trip takes most of a second: the read as a whole takes longer than the timeout, each batch not
         proxy.delayRequests(Duration.ofMillis(1_200));
@@ -588,7 +598,7 @@ abstract class MongoAdapterTest {
         assertThat(holder.getIfPresent("k")).isEqualTo("old");
 
         // written by hand or by another program into the cache's collection
-        var documents = database.client.getDatabase("adapter").getCollection(collection);
+        var documents = documents();
         documents.insertOne(new Document("_id", new Document("d", MongoAdapter.DEFAULT_DISCRIMINATOR)
                 .append("h", "foreign")).append("state", "UNKNOWN").append("version", 5L));
         documents.insertOne(new Document("_id", new Document("d", 42).append("h", "foreign")).append("version", 5L));
@@ -630,7 +640,7 @@ abstract class MongoAdapterTest {
             store.write(List.of(Write.value("matching", bytes, bytes, 1), Write.value("other", bytes, bytes, 1),
                     Write.value("pruned", bytes, bytes, 1), Write.value("existing", bytes, bytes, 1)));
             // deleted under the write, as maintenance does after the read the write was decided on
-            database.client.getDatabase("adapter").getCollection(collection)
+            documents()
                     .deleteOne(new Document("_id.h", "pruned"));
 
             Set<String> conflicts = store.write(List.of(
@@ -665,7 +675,7 @@ abstract class MongoAdapterTest {
                     .containsPattern("MongoDB \\S+/\\S+: Created the collection");
         }
 
-        var created = database.client.getDatabase("adapter").getCollection(collection);
+        var created = documents();
         Document marker = requireNonNull(created.find(new Document("_id", MongoLocation.MARKER_ID)).first());
         assertThat(marker.getString("schema")).isEqualTo(MongoLocation.MARKER);
         assertThat(created.listIndexes().into(new ArrayList<>())).anyMatch(index ->
@@ -678,7 +688,7 @@ abstract class MongoAdapterTest {
     @Test
     void a_collection_without_its_index_is_used_and_warned_of_with_the_command() {
         cache(Function.identity()).close();
-        database.client.getDatabase("adapter").getCollection(collection).dropIndex("distributed-caffeine");
+        documents().dropIndex("distributed-caffeine");
 
         try (LogCapture log = new LogCapture()) {
             DistributedCache<String, String> cache = cache(Function.identity());
@@ -692,7 +702,7 @@ abstract class MongoAdapterTest {
     @Test
     void a_collection_without_the_marker_is_refused_unless_it_is_reset() {
         // as distributed-caffeine 0.x writes it
-        database.client.getDatabase("adapter").getCollection(collection)
+        documents()
                 .insertOne(new Document("discriminator", "").append("hash", 1L));
 
         Function<DistributedCaffeine<String, String>, DistributedCaffeine<String, String>> unchanged =
@@ -703,13 +713,13 @@ abstract class MongoAdapterTest {
         DistributedCache<String, String> reset = track(strings(adapter().withSchemaReset().build()).build());
         reset.put("k", "v");
         assertThat(reset.getIfPresent("k")).isEqualTo("v");
-        assertThat(database.client.getDatabase("adapter").getCollection(collection)
+        assertThat(documents()
                 .countDocuments(new Document("discriminator", new Document("$exists", true)))).isZero();
     }
 
     @Test
     void a_reset_never_drops_foreign_documents_or_a_collection_of_another_version() {
-        var documents = database.client.getDatabase("adapter").getCollection(collection);
+        var documents = documents();
         documents.insertOne(new Document("_id", "foreign"));
         DistributedCaffeine<String, String> resetting = strings(adapter().withSchemaReset().build());
         assertThatThrownBy(resetting::build)
@@ -734,7 +744,7 @@ abstract class MongoAdapterTest {
         DistributedCache<String, String> earlier = cache(Function.identity());
         earlier.put("k", "earlier");
         earlier.close();
-        var documents = database.client.getDatabase("adapter").getCollection(collection);
+        var documents = documents();
         documents.updateOne(new Document("_id", MongoLocation.MARKER_ID),
                 new Document("$set", new Document("schema", "distributed-caffeine schema 1")));
 
@@ -755,7 +765,7 @@ abstract class MongoAdapterTest {
     @Test
     void a_reset_never_drops_a_collection_of_a_later_hash_format_revision() {
         cache(Function.identity()).close();
-        var documents = database.client.getDatabase("adapter").getCollection(collection);
+        var documents = documents();
         documents.updateOne(new Document("_id", MongoLocation.MARKER_ID), new Document("$set",
                 new Document("schema", "distributed-caffeine schema=1 hash=xxh3-128/2")));
 
@@ -772,7 +782,7 @@ abstract class MongoAdapterTest {
     void a_start_removes_the_documents_of_the_previous_generation_and_nothing_else() {
         DistributedCache<String, String> first = cache(Function.identity());
         first.put("k", "v");
-        var documents = database.client.getDatabase("adapter").getCollection(collection);
+        var documents = documents();
         // as 0.7.x writes them after the reset dropped its collection: an upsert, so an ObjectId as _id
         documents.insertMany(List.of(new Document("discriminator", "").append("hash", 1L),
                 new Document("discriminator", "").append("hash", 2L)));

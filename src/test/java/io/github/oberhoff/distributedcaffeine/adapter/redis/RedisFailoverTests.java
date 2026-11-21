@@ -62,13 +62,15 @@ abstract class RedisFailoverTests {
 
     private static final Duration LONG = Duration.ofHours(1);
     private static final Duration CONVERGENCE = Duration.ofSeconds(60);
-    // the one key the tests write, its own hash
+    // the one key the tests write, and its hash as the caches' hash provider (TestHashes) gives it, for the test's own
+    // writes to the store
     private static final String KEY = "k";
+    private static final String HASH = TestHashes.of(KEY).toHex();
 
     private final RedisTopology topology = topology();
     private final String name = RedisTestServer.freshName();
     // the row of the key, whose primary fails over
-    private final String row = new RedisKeys(name, RedisAdapter.DEFAULT_DISCRIMINATOR).row(KEY);
+    private final String row = new RedisKeys(name, RedisAdapter.DEFAULT_DISCRIMINATOR).row(HASH);
     private final List<AutoCloseable> closeables = new ArrayList<>();
 
     // the topology of the enclosing image
@@ -287,7 +289,7 @@ abstract class RedisFailoverTests {
 
         // confirmed by the primary, never replicated
         byte[] lostValue = "lost".getBytes(StandardCharsets.UTF_8);
-        Write unreplicated = Write.value(KEY, lostValue, lostValue, 1);
+        Write unreplicated = Write.value(HASH, lostValue, lostValue, 1);
         store.write(List.of(unreplicated), "unreplicated", UNREPLICATED);
         converges(writer, "lost");
         converges(holder, "lost");
@@ -304,7 +306,7 @@ abstract class RedisFailoverTests {
         // taken by both caches, whatever its version: where the new primary's clock stands where the old one's stood (a
         // virtual machine resumed, found 2026-11-10) it is the lost write's very version
         byte[] bytes = "later".getBytes(StandardCharsets.UTF_8);
-        store.write(List.of(Write.value(KEY, bytes, bytes, 1)));
+        store.write(List.of(Write.value(HASH, bytes, bytes, 1)));
         converges(writer, "later");
         converges(holder, "later");
     }
@@ -324,7 +326,7 @@ abstract class RedisFailoverTests {
         topology.awaitInSync(row);
 
         byte[] lostValue = "lost".getBytes(StandardCharsets.UTF_8);
-        Write unreplicated = Write.value(KEY, lostValue, lostValue, 1);
+        Write unreplicated = Write.value(HASH, lostValue, lostValue, 1);
         long lost = store.write(List.of(unreplicated), "unreplicated-ahead", UNREPLICATED_AHEAD)
                 .version(unreplicated);
         converges(writer, "lost");
@@ -337,7 +339,7 @@ abstract class RedisFailoverTests {
         converges(holder, "later");
         converges(writer, "later");
         byte[] bytes = "latest".getBytes(StandardCharsets.UTF_8);
-        Write latest = Write.value(KEY, bytes, bytes, 1);
+        Write latest = Write.value(HASH, bytes, bytes, 1);
         assertThat(store.write(List.of(latest)).version(latest)).as("below the lost write's version")
                 .isLessThan(lost);
         converges(holder, "latest");

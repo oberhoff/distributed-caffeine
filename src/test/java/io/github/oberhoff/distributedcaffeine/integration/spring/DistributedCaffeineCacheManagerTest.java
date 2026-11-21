@@ -311,6 +311,9 @@ class DistributedCaffeineCacheManagerTest {
     void in_an_outage_a_logging_error_handler_keeps_cached_methods_working() {
         Source source = new Source();
         Service service = instance(source, LoggingErrors.class);
+        // the cache built before the outage: the store is down for its operations, and the error handler covers
+        // those, not the cache's creation (a build whose store call fails for good fails, before any handler)
+        service.evict("o1");
 
         database.setDown(true);
 
