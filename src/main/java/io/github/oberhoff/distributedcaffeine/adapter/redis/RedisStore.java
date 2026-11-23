@@ -103,7 +103,9 @@ final class RedisStore implements Store, ChangeFeed {
             long version = version((Long) fields.get(1), (Long) fields.get(2));
             byte[] key = (byte[]) fields.get(4);
             byte[] value = state == State.VALUE ? (byte[]) fields.get(5) : null;
-            rows.put(hash, new Row(hash, key, value, state, version, age(now, (Long) fields.get(3))));
+            Long expireTime = fields.size() > 6 ? (Long) fields.get(6) : null;
+            rows.put(hash, new Row(hash, key, value, state, version, age(now, (Long) fields.get(3)),
+                    expireTime == null ? null : Duration.ofNanos((expireTime - (Long) fields.get(3)) * 1_000)));
         });
         return rows;
     }
@@ -216,7 +218,7 @@ final class RedisStore implements Store, ChangeFeed {
     private void writeChunk(List<Write> chunk, String requestId, RedisScript script, Set<String> refused,
                             Map<String, Long> assigned, @Nullable Long backdated) {
         List<String> scriptKeys = new ArrayList<>(List.of(keys.values(), keys.dead(), keys.stream(), keys.sequence(),
-                keys.request(requestId)));
+                keys.request(requestId), keys.expiring()));
         List<byte[]> arguments = new ArrayList<>(prelude());
         arguments.add(number(REQUEST_RETENTION_MILLIS));
         for (Write write : chunk) {
@@ -251,6 +253,8 @@ final class RedisStore implements Store, ChangeFeed {
         arguments.add(text(write.isTombstone() ? "T" : "V"));
         arguments.add(write.key() != null ? write.key() : new byte[0]);
         arguments.add(write.value() != null ? write.value() : new byte[0]);
+        Duration expiresAfter = write.expiresAfter();
+        arguments.add(expiresAfter != null ? number(micros(expiresAfter)) : new byte[0]);
     }
 
     // the write's condition as RedisScripts#WRITE reads it: A advance, M missing, V on the version it expects
@@ -336,7 +340,7 @@ final class RedisStore implements Store, ChangeFeed {
     }
 
     private List<String> maintenanceKeys() {
-        return List.of(keys.values(), keys.dead(), keys.stream(), keys.sequence(), keys.control());
+        return List.of(keys.values(), keys.dead(), keys.stream(), keys.sequence(), keys.control(), keys.expiring());
     }
 
     private static List<byte[]> prelude() {

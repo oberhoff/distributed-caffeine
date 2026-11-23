@@ -69,6 +69,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 
@@ -428,6 +429,110 @@ public class InternalCoreTest {
 
         assertThatThrownBy(() -> cache.get("k")).isInstanceOf(IllegalStateException.class).hasMessage("source down");
         assertThat(cache.estimatedSize()).isZero();
+    }
+
+    // the maximum age per entry (StoreConfigurer#withMaximumAgePerEntry): without distribution, so that only the
+    // store's reads and the copies' caps end a value, no message
+    private DistributedCache<String, String> perEntry(BiFunction<String, String, Duration> maximumAge) {
+        DistributedCache<String, String> cache = DistributedCaffeine.newBuilder(adapter())
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(StringSerializer.ofString()))
+                .withDistributionMode(DistributionMode.NONE)
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10)).withMaximumAgePerEntry(maximumAge)
+                        .withMaximumSize(1_000))
+                .build();
+        closeables.add(cache);
+        return cache;
+    }
+
+    private static final Duration SHORT = Duration.ofSeconds(2);
+
+    // durations by key: "short..." the short one, any other an hour
+    private static Duration byKey(String key) {
+        return key.startsWith("short") ? SHORT : LONG;
+    }
+
+    @Test
+    void a_value_with_its_own_maximum_age_expires_at_it_on_every_instance_also_a_copy_read_late() {
+        DistributedCache<String, String> writer = perEntry((key, value) -> byKey(key));
+        DistributedCache<String, String> reader = perEntry((key, value) -> byKey(key));
+        long written = System.nanoTime();
+        writer.put("short", "s");
+        writer.put("long", "l");
+        pause(1_000);
+        assertThat(reader.get("short", key -> "loaded")).as("from the store").isEqualTo("s");
+        assertThat(reader.get("long", key -> "loaded")).isEqualTo("l");
+
+        // the row's time: two seconds after the write, not after the read (which would be three)
+        pause(Math.max(0, Duration.ofMillis(2_500).toMillis() - (System.nanoTime() - written) / 1_000_000));
+        assertThat(writer.policy().getIfPresentQuietly("short")).as("the writer's copy, capped").isNull();
+        assertThat(reader.policy().getIfPresentQuietly("short")).as("the copy read late, capped at the row's time")
+                .isNull();
+        assertThat(reader.distributedPolicy().store().get("short")).as("not returned by the store").isNull();
+        assertThat(writer.policy().getIfPresentQuietly("long")).isEqualTo("l");
+        assertThat(reader.policy().getIfPresentQuietly("long")).isEqualTo("l");
+        assertThat(reader.get("short", key -> "loaded")).as("a miss calls the source").isEqualTo("loaded");
+    }
+
+    @Test
+    void a_rewrite_renews_the_maximum_age_and_a_creation_time_in_the_value_keeps_it() {
+        DistributedCache<String, String> renewed = perEntry((key, value) -> SHORT);
+        renewed.put("w", "1");
+        // a lifetime from the first write (README, "Store"): the creation time in the value, carried over by compute
+        long start = System.currentTimeMillis();
+        DistributedCache<String, String> created = perEntry((key, value) -> Duration.ofMillis(
+                Long.parseLong(value.substring(0, value.indexOf('|'))) + SHORT.toMillis() - System.currentTimeMillis()));
+        created.asMap().compute("c", (key, old) -> (old == null ? start : Long.parseLong(old.substring(0,
+                old.indexOf('|')))) + "|1");
+        assertThat(created.policy().getIfPresentQuietly("c")).as("held after the write").isEqualTo(start + "|1");
+        pause(1_200);
+        renewed.put("w", "2");
+        created.asMap().compute("c", (key, old) -> (old == null ? System.currentTimeMillis() : Long.parseLong(
+                old.substring(0, old.indexOf('|')))) + "|2");
+        assertThat(created.policy().getIfPresentQuietly("c")).as("its creation time carried over")
+                .isEqualTo(start + "|2");
+        pause(1_200);
+
+        assertThat(renewed.distributedPolicy().store().get("w")).as("renewed by the rewrite").isNotNull();
+        assertThat(renewed.policy().getIfPresentQuietly("w")).isEqualTo("2");
+        assertThat(created.distributedPolicy().store().get("c")).as("at its creation time").isNull();
+        assertThat(created.policy().getIfPresentQuietly("c")).as("the copy too").isNull();
+    }
+
+    @Test
+    void a_write_through_the_policy_has_its_own_duration() {
+        DistributedCache<String, String> cache = perEntry((key, value) -> LONG);
+        assertThat(cache.distributedPolicy().store().maximumAge()).as("no maximum age for all").isEmpty();
+        cache.distributedPolicy().store().maximumAgePerEntry().orElseThrow().put("k", "v", SHORT);
+        cache.put("other", "v");
+        assertThat(cache.policy().getIfPresentQuietly("k")).isEqualTo("v");
+        pause(SHORT.plusMillis(500).toMillis());
+
+        assertThat(cache.policy().getIfPresentQuietly("k")).isNull();
+        assertThat(cache.distributedPolicy().store().get("k")).isNull();
+        assertThat(cache.distributedPolicy().store().get("other")).isNotNull();
+        assertThat(plain().distributedPolicy().store().maximumAgePerEntry()).as("not with a maximum age for all")
+                .isEmpty();
+    }
+
+    @Test
+    void maintenance_expires_the_rows_past_their_own_time_and_announces_it() {
+        DistributedCache<String, String> writer = DistributedCaffeine.newBuilder(adapter())
+                .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
+                        .withValueSerializer(StringSerializer.ofString()))
+                .withCaffeine(CaffeineConfigurer::recordStats)
+                .withStore(store -> store.withPollInterval(Duration.ofMillis(10))
+                        .withMaximumAgePerEntry((key, value) -> byKey(key))
+                        .withMaintenanceInterval(Duration.ofMillis(200)))
+                .build();
+        closeables.add(writer);
+        writer.put("short", "s");
+        writer.put("long", "l");
+
+        await(() -> writer.distributedStats().maintenanceExpiredCount() >= 1);
+        assertThat(writer.distributedStats().maintenanceExpiredCount()).isEqualTo(1);
+        await(() -> writer.policy().getIfPresentQuietly("short") == null);
+        assertThat(writer.distributedPolicy().store().get("long")).isNotNull();
     }
 
     @Test

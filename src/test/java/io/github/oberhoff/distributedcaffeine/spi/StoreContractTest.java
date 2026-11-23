@@ -241,6 +241,21 @@ public abstract class StoreContractTest extends AbstractContractTest {
     }
 
     @Test
+    void contract5_concurrent_expiry_expires_every_row_past_its_own_expiry_once() throws Exception {
+        Store writer = open();
+        Set<String> all = IntStream.range(0, 50).mapToObj(i -> "h" + i).collect(Collectors.toSet());
+        for (String hash : all) {
+            writer.write(List.of(entry(hash, "v").expiring(Duration.ofMillis(50))));
+        }
+        pause(100);
+
+        int expired = race(4, store -> store.expire(LONG, nextVersion(), ALL));
+
+        assertThat(expired).isEqualTo(50);
+        assertThat(writer.read(all, LONG).values()).hasSize(50).allMatch(row -> row.state() == State.EXPIRED);
+    }
+
+    @Test
     void contract5_concurrent_size_pruning_keeps_exactly_the_maximum() throws Exception {
         Store writer = open();
         for (int i = 0; i < 40; i++) {
@@ -345,6 +360,83 @@ public abstract class StoreContractTest extends AbstractContractTest {
         assertThat(writer.read(List.of("old", "young"), LONG).values()).hasSize(2)
                 .allMatch(row -> row.state() == State.VALUE);
         assertThat(applied(writer, ifVersion(entry("old", "n"), old))).as("replaced at its version").isTrue();
+    }
+
+    // a row's own expiry as written, from its write time: exact up to the store clock's resolution (milliseconds on
+    // Redis and MongoDB)
+    private static void assertExpiresAfter(Row row, Duration expected) {
+        assertThat(row.expiresAfter()).as(row.hash() + ": its own expiry").isNotNull();
+        assertThat(row.expiresAfter()).as(row.hash() + ": its own expiry")
+                .isBetween(expected.minusMillis(2), expected.plusMillis(2));
+    }
+
+    @Test
+    void contract7_read_returns_value_rows_past_their_own_expiry_as_expired_with_their_version() {
+        Store writer = open();
+        long soon = written(writer, entry("soon", "s").expiring(Duration.ofSeconds(1)));
+        written(writer, entry("later", "l").expiring(Duration.ofHours(1)));
+        written(writer, entry("none", "n"));
+
+        Map<String, Row> fresh = writer.read(List.of("soon", "later", "none"), LONG);
+        assertThat(fresh.values()).allMatch(row -> row.state() == State.VALUE);
+        assertExpiresAfter(fresh.get("soon"), Duration.ofSeconds(1));
+        assertExpiresAfter(fresh.get("later"), Duration.ofHours(1));
+        assertThat(fresh.get("none").expiresAfter()).as("none of its own").isNull();
+        pause(1_500);
+
+        // wide margins, as for the maximum age above
+        Map<String, Row> rows = writer.read(List.of("soon", "later", "none"), LONG);
+        assertThat(rows.get("soon").state()).isEqualTo(State.EXPIRED);
+        assertThat(rows.get("soon").value()).isNull();
+        assertThat(rows.get("soon").version()).as("so that a write can be conditioned on it").isEqualTo(soon);
+        assertThat(rows.get("later").state()).isEqualTo(State.VALUE);
+        assertThat(rows.get("none").state()).isEqualTo(State.VALUE);
+        assertThat(writer.readVersions(List.of("soon", "later", "none"), LONG).versions().keySet())
+                .containsExactlyInAnyOrder("later", "none");
+        assertThat(applied(writer, ifVersion(entry("soon", "n"), soon))).as("replaced at its version").isTrue();
+    }
+
+    @Test
+    void contract7_every_write_sets_the_rows_own_maximum_age_anew_or_clears_it() {
+        Store writer = open();
+        written(writer, entry("k", "1").expiring(Duration.ofHours(1)));
+        assertExpiresAfter(writer.read(List.of("k"), LONG).get("k"), Duration.ofHours(1));
+
+        long second = written(writer, entry("k", "2").expiring(Duration.ofMinutes(3)));
+        assertExpiresAfter(writer.read(List.of("k"), LONG).get("k"), Duration.ofMinutes(3));
+
+        written(writer, ifVersion(entry("k", "3"), second).expiring(Duration.ofHours(2)));
+        assertExpiresAfter(writer.read(List.of("k"), LONG).get("k"), Duration.ofHours(2));
+
+        written(writer, tombstone("k"));
+        assertThat(writer.read(List.of("k"), LONG).get("k").expiresAfter()).as("a tombstone has none").isNull();
+        written(writer, entry("k", "4").expiring(Duration.ofMinutes(30)));
+        assertExpiresAfter(writer.read(List.of("k"), LONG).get("k"), Duration.ofMinutes(30));
+
+        written(writer, entry("k", "5"));
+        assertThat(writer.read(List.of("k"), LONG).get("k").expiresAfter()).as("a write without one clears it")
+                .isNull();
+
+        written(writer, ifMissing(entry("new", "n")).expiring(Duration.ofMinutes(7)));
+        assertExpiresAfter(writer.read(List.of("new"), LONG).get("new"), Duration.ofMinutes(7));
+    }
+
+    @Test
+    void contract7_expire_marks_value_rows_past_their_own_expiry() {
+        Store writer = open();
+        written(writer, entry("soon", "s").expiring(Duration.ofSeconds(1)));
+        written(writer, entry("later", "l").expiring(Duration.ofHours(1)));
+        written(writer, entry("none", "n"));
+        pause(1_500);
+
+        assertThat(writer.expire(LONG, nextVersion(), ALL)).isEqualTo(1);
+
+        Map<String, Row> rows = writer.read(List.of("soon", "later", "none"), LONG);
+        assertThat(rows.get("soon").state()).isEqualTo(State.EXPIRED);
+        assertThat(rows.get("soon").expiresAfter()).as("an expired row has none").isNull();
+        assertThat(rows.get("later").state()).isEqualTo(State.VALUE);
+        assertThat(rows.get("none").state()).isEqualTo(State.VALUE);
+        assertThat(writer.expire(LONG, nextVersion(), ALL)).as("once").isZero();
     }
 
     @Test

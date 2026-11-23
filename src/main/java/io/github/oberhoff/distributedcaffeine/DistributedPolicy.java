@@ -87,6 +87,15 @@ public interface DistributedPolicy<K, V> {
         Optional<MaximumAge> maximumAge();
 
         /**
+         * Returns access to the store's maximum age per entry, if the cache was built with it
+         * ({@link StoreConfigurer#withMaximumAgePerEntry(java.util.function.BiFunction)}), as Caffeine's
+         * {@code policy().expireVariably()} gives access to the local variable expiry.
+         *
+         * @return the maximum age per entry, or empty if the cache was built without it
+         */
+        Optional<MaximumAgePerEntry<K, V>> maximumAgePerEntry();
+
+        /**
          * Returns access to the store's maximum size as this instance applies it, if the cache was built with one
          * ({@link StoreConfigurer#withMaximumSize(long)}), as Caffeine's {@code policy().eviction()} gives access to
          * the local maximum size.
@@ -167,6 +176,27 @@ public interface DistributedPolicy<K, V> {
          *                                  heartbeat intervals
          */
         void setMaximumAge(Duration maximumAge);
+    }
+
+    /**
+     * The store's maximum age per entry, for writes with a maximum age of their own.
+     *
+     * @param <K> the key type
+     * @param <V> the value type
+     * @author Andreas Oberhoff
+     */
+    interface MaximumAgePerEntry<K, V> {
+
+        /**
+         * Writes the value as {@code put} does, with the given maximum age instead of the one the function computes.
+         *
+         * @param key        the key
+         * @param value      the value
+         * @param maximumAge how long the value is valid after this write (taken as at least zero, at most
+         *                   {@code ChronoUnit.FOREVER.getDuration()}, which never expires)
+         * @throws StoreException if the store cannot be written
+         */
+        void put(K key, V value, Duration maximumAge);
     }
 
     /**

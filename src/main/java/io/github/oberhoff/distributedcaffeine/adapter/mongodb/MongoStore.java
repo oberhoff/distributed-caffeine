@@ -62,6 +62,7 @@ import org.bson.BsonDocument;
 import org.bson.BsonInt64;
 import org.bson.BsonString;
 import org.bson.BsonTimestamp;
+import org.bson.BsonType;
 import org.bson.BsonValue;
 import org.bson.Document;
 import org.bson.conversions.Bson;
@@ -112,6 +113,18 @@ final class MongoStore implements Store, ChangeFeed {
     private static final String FIELD_VERSION = "version";
     private static final String FIELD_VALUE = "value";
     private static final String FIELD_WRITE_TIME = "writeTime";
+    // a value's own expiry time (Write#expiresAfter), a BSON date by the server's clock; missing for none
+    private static final String FIELD_EXPIRE_TIME = "expireTime";
+    private static final String EXPIRE_TIME = "$expireTime";
+    // a field set to it in a $set stage is removed
+    private static final BsonString REMOVE = new BsonString("$$REMOVE");
+    // a document without an expiry time of its own, or one not passed yet: BSON orders a missing field before every
+    // date, so the field's absence is tested first
+    private static final BsonDocument NOT_PAST = Document.parse("{$or: [{$eq: [{$ifNull: ['$expireTime', null]}, "
+            + "null]}, {$gt: ['$expireTime', '$$NOW']}]}").toBsonDocument();
+    // its expiry from its write time, in milliseconds; null without one
+    private static final BsonDocument EXPIRES_AFTER = Document.parse("{$subtract: ['$expireTime', '$writeTime']}")
+            .toBsonDocument();
     // the start document's field of the time read for a mark (time)
     private static final String FIELD_MARKED = "marked";
     private static final String FIELD_HASH = "_id.h";
@@ -188,7 +201,8 @@ final class MongoStore implements Store, ChangeFeed {
             Map<String, Long> versions = new LinkedHashMap<>();
             Map<String, Duration> ages = new LinkedHashMap<>();
             for (BsonDocument document : find(session, Filters.and(Filters.in("_id", ids),
-                            Filters.eq(FIELD_STATE, State.VALUE.name()), younger(maxAge)), ids.size())
+                            Filters.eq(FIELD_STATE, State.VALUE.name()), younger(maxAge), Filters.expr(NOT_PAST)),
+                            ids.size())
                     .projection(new BsonDocument(FIELD_VERSION, new BsonInt64(1)).append("age", AGE))) {
                 String hash = document.getDocument("_id").getString("h").getValue();
                 versions.put(hash, document.getInt64(FIELD_VERSION).getValue());
@@ -435,27 +449,41 @@ final class MongoStore implements Store, ChangeFeed {
     // same filter, so that a document written meanwhile is left as it is; in chunks, as a million ids in one filter
     // exceed the 16 MB of a command (measured), each by the ids' index: the planner took the maintenance index for the
     // filter's other conditions and read every due document per chunk (a million in 565 s instead of 13)
+    // First the documents past their own expiry time, by its partial index, then, within what is left of the limit,
+    // those at least as old as the maximum age
     @Override
     public int expire(Duration maxAge, long version, int limit) {
         return run(Kind.WRITE, session -> {
-            Bson due = Filters.and(maintained(session), Filters.eq(FIELD_STATE, State.VALUE.name()),
+            Bson pastOwn = Filters.and(maintained(session), Filters.type(FIELD_EXPIRE_TIME, BsonType.DATE_TIME),
+                    Filters.eq(FIELD_STATE, State.VALUE.name()),
+                    Filters.expr(new Document("$lte", List.of(EXPIRE_TIME, NOW))));
+            int own = expire(session, pastOwn, version, limit);
+            if (own >= limit) {
+                return own;
+            }
+            Bson aged = Filters.and(maintained(session), Filters.eq(FIELD_STATE, State.VALUE.name()),
                     Filters.expr(new Document("$lte", List.of(WRITE_TIME,
                             new Document(SUBTRACT, List.of(NOW, maxAge.toMillis()))))));
-            List<BsonValue> ids = new ArrayList<>();
-            find(session, due).limit(limit).projection(Projections.include("_id"))
-                    .forEach(document -> ids.add(document.get("_id")));
-            List<Bson> expiry = List.of(
-                    new BsonDocument("$set", new BsonDocument(FIELD_STATE, new BsonString(State.EXPIRED.name()))
-                            .append(FIELD_VERSION, assigned(version))
-                            .append(FIELD_WRITE_TIME, new BsonString(NOW))),
-                    new BsonDocument("$unset", new BsonString(FIELD_VALUE)));
-            int expired = 0;
-            for (int from = 0; from < ids.size(); from += CHUNK) {
-                expired += (int) collection.updateMany(session, Filters.and(Filters.in("_id",
-                        ids.subList(from, Math.min(ids.size(), from + CHUNK))), due), expiry, BY_ID).getModifiedCount();
-            }
-            return expired;
+            return own + expire(session, aged, version, limit - own);
         });
+    }
+
+    private int expire(ClientSession session, Bson due, long version, int limit) {
+        List<BsonValue> ids = new ArrayList<>();
+        find(session, due).limit(limit).projection(Projections.include("_id"))
+                .forEach(document -> ids.add(document.get("_id")));
+        List<Bson> expiry = List.of(
+                new BsonDocument("$set", new BsonDocument(FIELD_STATE, new BsonString(State.EXPIRED.name()))
+                        .append(FIELD_VERSION, assigned(version))
+                        .append(FIELD_WRITE_TIME, new BsonString(NOW))),
+                new BsonDocument("$unset", new BsonArray(List.of(new BsonString(FIELD_VALUE),
+                        new BsonString(FIELD_EXPIRE_TIME)))));
+        int expired = 0;
+        for (int from = 0; from < ids.size(); from += CHUNK) {
+            expired += (int) collection.updateMany(session, Filters.and(Filters.in("_id",
+                    ids.subList(from, Math.min(ids.size(), from + CHUNK))), due), expiry, BY_ID).getModifiedCount();
+        }
+        return expired;
     }
 
     // keeps the newest maxSize values (ties by hash, the highest kept: the maintenance index read backwards); the
@@ -612,22 +640,39 @@ final class MongoStore implements Store, ChangeFeed {
         return valuePipeline(write, version, onVersion, new BsonString(NOW));
     }
 
+    // the expressions are BSON documents (maps to the IDE), complete as constructed
+    @SuppressWarnings("MismatchedQueryAndUpdateOfCollection")
     private List<Bson> valuePipeline(Write write, BsonValue version, boolean onVersion, BsonValue writeTime) {
         BsonValue value = literal(MongoLocation.toBson(requireNonNull(write.value()), location.valueFormat));
         BsonValue state = new BsonString(State.VALUE.name());
+        BsonValue expireTime = expireTime(write);
         if (onVersion) {
             BsonDocument isNew = new BsonDocument("$eq", new BsonArray(List.of(
                     new BsonDocument("$type", new BsonString(WRITE_TIME)), new BsonString("missing"))));
-            value = new BsonDocument(COND, new BsonArray(List.of(isNew, new BsonString("$$REMOVE"), value)));
+            value = new BsonDocument(COND, new BsonArray(List.of(isNew, REMOVE, value)));
             state = new BsonDocument(COND, new BsonArray(List.of(isNew,
                     new BsonString(State.TOMBSTONE.name()), state)));
+            expireTime = new BsonDocument(COND, new BsonArray(List.of(isNew, REMOVE, expireTime)));
         }
         return List.of(new BsonDocument("$set", new BsonDocument()
                 .append("key", literal(MongoLocation.toBson(requireNonNull(write.key()), location.keyFormat)))
                 .append(FIELD_VALUE, value)
                 .append(FIELD_STATE, state)
                 .append(FIELD_VERSION, version)
-                .append(FIELD_WRITE_TIME, writeTime)));
+                .append(FIELD_WRITE_TIME, writeTime)
+                .append(FIELD_EXPIRE_TIME, expireTime)));
+    }
+
+    // the value's own expiry time (Write#expiresAfter): $$NOW plus its maximum age, removed without one
+    private static BsonValue expireTime(Write write) {
+        Duration expiresAfter = write.expiresAfter();
+        return expiresAfter == null ? REMOVE : fromNow(expiresAfter);
+    }
+
+    // $$NOW plus a duration, in the milliseconds of a BSON date
+    private static BsonDocument fromNow(Duration duration) {
+        return new BsonDocument("$add", new BsonArray(List.of(new BsonString(NOW),
+                new BsonInt64(duration.toMillis()))));
     }
 
     // keeps the document's key; a new tombstone has none. The version a literal or an expression (writeOne)
@@ -636,7 +681,8 @@ final class MongoStore implements Store, ChangeFeed {
                         .append(FIELD_STATE, new BsonString(State.TOMBSTONE.name()))
                         .append(FIELD_VERSION, version)
                         .append(FIELD_WRITE_TIME, new BsonString(NOW))),
-                new BsonDocument("$unset", new BsonString(FIELD_VALUE)));
+                new BsonDocument("$unset", new BsonArray(List.of(new BsonString(FIELD_VALUE),
+                        new BsonString(FIELD_EXPIRE_TIME)))));
     }
 
     // a value as it is, never a field path or an operator
@@ -646,12 +692,14 @@ final class MongoStore implements Store, ChangeFeed {
 
     // a value only if younger than the maximum age (row() reads a value document without one as expired)
     private static BsonDocument projection(Duration maxAge) {
+        BsonDocument young = new Document("$gt", List.of(WRITE_TIME, new Document(SUBTRACT,
+                List.of(NOW, maxAge.toMillis())))).toBsonDocument();
         BsonDocument youngValue = new BsonDocument(COND, new BsonArray(List.of(
-                new Document("$gt", List.of(WRITE_TIME, new Document(SUBTRACT, List.of(NOW, maxAge.toMillis()))))
-                        .toBsonDocument(), new BsonString("$" + FIELD_VALUE), new BsonString("$$REMOVE"))));
+                new BsonDocument("$and", new BsonArray(List.of(young, NOT_PAST))), new BsonString("$" + FIELD_VALUE),
+                REMOVE)));
         return new BsonDocument("key", new BsonInt64(1)).append(FIELD_VALUE, youngValue)
                 .append(FIELD_STATE, new BsonInt64(1)).append(FIELD_VERSION, new BsonInt64(1))
-                .append("age", AGE);
+                .append("age", AGE).append("expiresAfter", EXPIRES_AFTER);
     }
 
     private static Duration age(BsonDocument document) {
@@ -676,8 +724,11 @@ final class MongoStore implements Store, ChangeFeed {
                 ? MongoLocation.fromBson(value, location.valueFormat) : null;
         // a value projected away as too old: expired, at its version
         State state = stored == State.VALUE && bytes == null ? State.EXPIRED : stored;
+        BsonValue expiresAfter = document.get("expiresAfter");
         return new Row(hash, key == null || key.isNull() ? new byte[0] : MongoLocation.fromBson(key,
-                location.keyFormat), bytes, state, document.getInt64(FIELD_VERSION).getValue(), age(document));
+                location.keyFormat), bytes, state, document.getInt64(FIELD_VERSION).getValue(), age(document),
+                expiresAfter != null && expiresAfter.isNumber() ? Duration.ofMillis(expiresAfter.asNumber().longValue())
+                        : null);
     }
 
     private List<BsonValue> ids(Collection<String> hashes) {

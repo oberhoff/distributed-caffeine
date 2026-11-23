@@ -15,6 +15,7 @@
  */
 package io.github.oberhoff.distributedcaffeine;
 
+import io.github.oberhoff.distributedcaffeine.spi.Write;
 import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
@@ -52,12 +53,26 @@ final class InternalValue<V> {
     // when this copy was installed and last read, by Caffeine's ticker: the fixed expiry InternalExpiry emulates
     private volatile long installedAt;
     private volatile long accessedAt;
+    // the row's own maximum age (Row#expiresAfter, in nanoseconds), counted from its write like the age: the copy goes
+    // when the age reaches it, as the store's maximum age caps every copy (InternalExpiry); NONE for a row without
+    // one. For a copy of this instance's own write, the one the write carried (Write#expiresAfter), which the store
+    // applies whatever the row held
+    private final long lifetime;
 
     InternalValue(V value, long version, int epoch) {
         this(value, version, epoch, Duration.ZERO);
     }
 
     InternalValue(V value, long version, int epoch, Duration age) {
+        this(value, version, epoch, age, null);
+    }
+
+    // a copy of a row read, with the row's own expiry (Row#expiresAfter)
+    InternalValue(V value, long version, int epoch, Duration age, @Nullable Duration expiresAfter) {
+        this(value, version, epoch, age, expiresAfter == null ? NONE : InternalExpiry.nanos(expiresAfter));
+    }
+
+    private InternalValue(V value, long version, int epoch, Duration age, long lifetime) {
         this.value = requireNonNull(value, "value cannot be null");
         if (version < 0) {
             throw new IllegalArgumentException("version cannot be negative (0: unconfirmed)");
@@ -66,6 +81,20 @@ final class InternalValue<V> {
         this.epoch = epoch;
         // a row written after the read's instant has a negative age (Store#read): as young as can be
         this.age = age.isNegative() ? 0 : InternalExpiry.nanos(age);
+        this.lifetime = lifetime;
+    }
+
+    // no expiry of the row's own: only the store's maximum age caps the copy
+    static final long NONE = -1;
+
+    // a copy of this instance's write of the value, with the maximum age of its own the write carried (see lifetime)
+    static <V> InternalValue<V> written(V value, long version, int epoch, Write write) {
+        return new InternalValue<>(value, version, epoch, Duration.ZERO, write.expiresAfter());
+    }
+
+    // the same value with another version and epoch, its expiry kept (a refresh confirming the copy held)
+    InternalValue<V> as(long version, int epoch) {
+        return new InternalValue<>(value, version, epoch, Duration.ofNanos(age), lifetime);
     }
 
     // the user's value of a value that may be absent
@@ -106,6 +135,10 @@ final class InternalValue<V> {
 
     long age() {
         return age;
+    }
+
+    long lifetime() {
+        return lifetime;
     }
 
     long installedAt() {

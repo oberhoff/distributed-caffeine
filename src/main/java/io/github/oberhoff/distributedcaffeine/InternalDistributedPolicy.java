@@ -21,6 +21,8 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
 
+import static java.util.Objects.requireNonNull;
+
 /**
  * @author Andreas Oberhoff
  */
@@ -48,6 +50,9 @@ final class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V> {
 
         // present if the cache was built with the bound
         private final @Nullable MaximumAge maximumAge = core.hasMaximumAge() ? new MaximumAgeView() : null;
+        private final @Nullable MaximumAgePerEntry<K, V> perEntry = core.hasMaximumAgePerEntry()
+                ? (key, value, age) -> core.put(key, value, requireNonNull(age, "maximumAge cannot be null"))
+                : null;
         private final @Nullable MaximumSize maximumSize = core.hasMaximumSize() ? new MaximumSizeView() : null;
 
         @Override
@@ -63,6 +68,11 @@ final class InternalDistributedPolicy<K, V> implements DistributedPolicy<K, V> {
         @Override
         public Optional<MaximumAge> maximumAge() {
             return Optional.ofNullable(maximumAge);
+        }
+
+        @Override
+        public Optional<MaximumAgePerEntry<K, V>> maximumAgePerEntry() {
+            return Optional.ofNullable(perEntry);
         }
 
         @Override

@@ -31,6 +31,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiFunction;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -144,6 +145,28 @@ class DistributedCaffeineTest {
         cache.put("k", "v");
         assertThat(cache.getIfPresent("k")).isEqualTo("v");
         cache.close();
+    }
+
+    @Test
+    void the_maximum_age_for_all_and_per_entry_are_refused_together_in_either_order() {
+        BiFunction<String, String, Duration> perEntry = (key, value) -> Duration.ofMinutes(1);
+        DistributedCaffeine<String, String> first = DistributedCaffeine.newBuilder(adapter);
+        assertThatThrownBy(() -> first.withStore(store -> store.withMaximumAge(Duration.ofHours(1))
+                .withMaximumAgePerEntry(perEntry)))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("may not be used with maximumAge");
+        DistributedCaffeine<String, String> second = DistributedCaffeine.newBuilder(adapter);
+        assertThatThrownBy(() -> second.withStore(store -> store.withMaximumAgePerEntry(perEntry)
+                .withMaximumAge(Duration.ofHours(1))))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("may not be used with maximumAgePerEntry");
+        DistributedCaffeine<String, String> twice = DistributedCaffeine.newBuilder(adapter);
+        assertThatThrownBy(() -> twice.withStore(store -> store.withMaximumAgePerEntry(perEntry)
+                .withMaximumAgePerEntry(perEntry)))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("already set");
+        DistributedCaffeine<String, String> storeOnly = DistributedCaffeine.newBuilder(adapter);
+        storeOnly.withStore(store -> store.withMaximumAgePerEntry(perEntry).withMaximumAgeForStoreOnly());
+        assertThatThrownBy(storeOnly::build).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not withMaximumAgePerEntry");
     }
 
     @Test

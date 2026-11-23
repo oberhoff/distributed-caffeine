@@ -285,7 +285,8 @@ public final class CaffeineConfigurer<K, V> {
      * <p>
      * <b>Distributed Caffeine:</b> Governs this instance's copies only, so it decides how long a copy is kept, not how
      * long its value is valid: an expired copy is read from the store again, where the value stays until the store's
-     * maximum age. For a value with a validity of its own, treat an invalid value read as missing and invalidate it.
+     * maximum age. For a validity of each value's own on every instance, use the store's maximum age per entry
+     * ({@link StoreConfigurer#withMaximumAgePerEntry(java.util.function.BiFunction)}).
      * The methods are called on each instance's own install, update and read of a copy: {@code expireAfterCreate} also
      * for a value read from the store, written long before. A duration longer than what is left of the store's maximum
      * age since the value's write is lowered to it, also one set through {@code policy().expireVariably()}, so no copy
@@ -507,14 +508,17 @@ public final class CaffeineConfigurer<K, V> {
     // be, as its duration is one for all copies. Without a bound (no maximum age, or one for the store only),
     // Caffeine's own fixed expiry, as configured. Applied once, so that the builder can build again
     Caffeine<InternalKey<K>, InternalValue<V>> caffeine(Duration maximumAge) {
-        return caffeine(maximumAge, maximumAge);
+        return caffeine(maximumAge, maximumAge, false);
     }
 
     // as above, with the maximum age for copies no store confirmed (InternalExpiry#unconfirmedMaximumAge): the store's
-    // also where the other copies are unbounded by it (the maximum age for the store only)
-    Caffeine<InternalKey<K>, InternalValue<V>> caffeine(Duration maximumAge, Duration unconfirmedMaximumAge) {
+    // also where the other copies are unbounded by it (the maximum age for the store only); perEntry: the maximum age
+    // per entry, which caps every copy at its row's own (InternalValue#lifetime), so this library's expiry also
+    // without a maximum age for all values
+    Caffeine<InternalKey<K>, InternalValue<V>> caffeine(Duration maximumAge, Duration unconfirmedMaximumAge,
+                                                        boolean perEntry) {
         if (!expiryApplied) {
-            applyExpiry(maximumAge, unconfirmedMaximumAge);
+            applyExpiry(maximumAge, unconfirmedMaximumAge, perEntry);
             expiryApplied = true;
         } else if (internalExpiry != null) {
             internalExpiry.reset();
@@ -523,11 +527,11 @@ public final class CaffeineConfigurer<K, V> {
     }
 
     // the user's Expiry, the fixed durations emulated under a maximum age, or else Caffeine's own fixed expiry
-    private void applyExpiry(Duration maximumAge, Duration unconfirmedMaximumAge) {
+    private void applyExpiry(Duration maximumAge, Duration unconfirmedMaximumAge, boolean perEntry) {
         if (expiry != null) {
             internalExpiry = new InternalExpiry<>(expiry, maximumAge, unconfirmedMaximumAge, ticker);
             caffeine.expireAfter(internalExpiry);
-        } else if (!maximumAge.equals(StoreConfigurer.UNBOUNDED_AGE)
+        } else if (perEntry || !maximumAge.equals(StoreConfigurer.UNBOUNDED_AGE)
                 || !unconfirmedMaximumAge.equals(StoreConfigurer.UNBOUNDED_AGE)) {
             // expireAfterWrite at the maximum age without one set, as the policy shows it, also after the maximum age
             // changed (lowered to it otherwise)

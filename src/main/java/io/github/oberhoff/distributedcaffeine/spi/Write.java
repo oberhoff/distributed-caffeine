@@ -17,6 +17,7 @@ package io.github.oberhoff.distributedcaffeine.spi;
 
 import org.jspecify.annotations.Nullable;
 
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.Objects;
 
@@ -36,10 +37,15 @@ import static java.util.Objects.requireNonNull;
  * @param expected the condition: {@link #ADVANCE} (only if no row exists or its version is smaller than this write's),
  *                 {@link #MISSING} (no row may exist, not even a tombstone), or the version the row must still have,
  *                 whatever its state
+ * @param expiresAfter the value's own maximum age, counted from this write by the store's clock, whatever the row
+ *                 held before: the store keeps the write's time plus it as the row's expiry time
+ *                 ({@link Row#expiresAfter()}); {@code null} for none (only the maximum age the core reads and
+ *                 expires with applies)
  * @author Andreas Oberhoff
  */
 @SuppressWarnings("ArrayRecordComponent") // equals, hashCode and toString below compare and show the contents
-public record Write(String hash, byte @Nullable [] key, byte @Nullable [] value, long version, long expected) {
+public record Write(String hash, byte @Nullable [] key, byte @Nullable [] value, long version, long expected,
+                    @Nullable Duration expiresAfter) {
 
     /**
      * The condition of a write not decided on a read (a {@code put}, a tombstone, the control row): it applies only if
@@ -54,6 +60,12 @@ public record Write(String hash, byte @Nullable [] key, byte @Nullable [] value,
     public static final long MISSING = -1L;
 
     /**
+     * The longest maximum age of its own a write carries: the largest duration in nanoseconds a long holds, about 292 years, so that a
+     * store adds it to its clock without overflow; the core takes it for an entry that never expires on its own.
+     */
+    public static final Duration MAX_EXPIRY = Duration.ofNanos(Long.MAX_VALUE);
+
+    /**
      * Constructs a Write, checking its components.
      *
      * @param hash     the hash of the key
@@ -64,6 +76,7 @@ public record Write(String hash, byte @Nullable [] key, byte @Nullable [] value,
      * @param expected the condition: {@link #ADVANCE} (only if no row exists or its version is smaller than this
      *                 write's), {@link #MISSING} (no row may exist, not even a tombstone), or the version the row must
      *                 still have, whatever its state
+     * @param expiresAfter the value's own maximum age from this write; {@code null} for none
      */
     public Write {
         requireNonNull(hash, "hash cannot be null");
@@ -77,6 +90,27 @@ public record Write(String hash, byte @Nullable [] key, byte @Nullable [] value,
         if (expected < MISSING) {
             throw new IllegalArgumentException("expected must be a version, ADVANCE or MISSING");
         }
+        if (expiresAfter != null) {
+            if (value == null) {
+                throw new IllegalArgumentException("only a value has a maximum age of its own");
+            }
+            if (expiresAfter.isNegative() || expiresAfter.compareTo(MAX_EXPIRY) > 0) {
+                throw new IllegalArgumentException("expiresAfter must lie between zero and MAX_EXPIRY");
+            }
+        }
+    }
+
+    /**
+     * Constructs a Write without an expiry of its own.
+     *
+     * @param hash     the hash of the key
+     * @param key      the serialized key, or {@code null} for a tombstone
+     * @param value    the serialized value, or {@code null} for a tombstone
+     * @param version  the version proposed for the row
+     * @param expected the condition
+     */
+    public Write(String hash, byte @Nullable [] key, byte @Nullable [] value, long version, long expected) {
+        this(hash, key, value, version, expected, null);
     }
 
     /**
@@ -115,7 +149,7 @@ public record Write(String hash, byte @Nullable [] key, byte @Nullable [] value,
         if (expectedVersion <= 0) {
             throw new IllegalArgumentException("expectedVersion must be positive");
         }
-        return new Write(hash, key, value, version, expectedVersion);
+        return new Write(hash, key, value, version, expectedVersion, expiresAfter);
     }
 
     /**
@@ -124,7 +158,7 @@ public record Write(String hash, byte @Nullable [] key, byte @Nullable [] value,
      * @return the conditional write
      */
     public Write ifMissing() {
-        return new Write(hash, key, value, version, MISSING);
+        return new Write(hash, key, value, version, MISSING, expiresAfter);
     }
 
     /**
@@ -135,7 +169,17 @@ public record Write(String hash, byte @Nullable [] key, byte @Nullable [] value,
      * @return the write at that version
      */
     public Write at(long version) {
-        return new Write(hash, key, value, version, expected);
+        return new Write(hash, key, value, version, expected, expiresAfter);
+    }
+
+    /**
+     * Returns this write of a value with a maximum age of its own ({@link #expiresAfter()}).
+     *
+     * @param maximumAge the maximum age from this write
+     * @return the write with it
+     */
+    public Write expiring(Duration maximumAge) {
+        return new Write(hash, key, value, version, expected, requireNonNull(maximumAge, "maximumAge cannot be null"));
     }
 
     /**
@@ -172,18 +216,20 @@ public record Write(String hash, byte @Nullable [] key, byte @Nullable [] value,
                 && Arrays.equals(key, that.key)
                 && Arrays.equals(value, that.value)
                 && version == that.version
-                && expected == that.expected;
+                && expected == that.expected
+                && Objects.equals(expiresAfter, that.expiresAfter);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(hash, Arrays.hashCode(key), Arrays.hashCode(value), version, expected);
+        return Objects.hash(hash, Arrays.hashCode(key), Arrays.hashCode(value), version, expected, expiresAfter);
     }
 
     @Override
     public String toString() {
         return "Write[hash=" + hash + ", " + (value == null ? "tombstone" : "value of " + value.length + " bytes")
-                + ", version=" + version + ", expected=" + expectedText() + "]";
+                + ", version=" + version + ", expected=" + expectedText()
+                + (expiresAfter == null ? "" : ", expiresAfter=" + expiresAfter) + "]";
     }
 
     private String expectedText() {

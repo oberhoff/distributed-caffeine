@@ -77,11 +77,13 @@ final class RedisScripts {
     // ({dc:<name>}:request:<id>, an ID per call of RedisStore#write), under which the script keeps its result for
     // ARGV[4] milliseconds, and a request found there is answered from it without writing. A client library sending the
     // script again after a connection reset (Lettuce does, by default, what it sent and had no answer for) would
-    // otherwise apply it twice: an advance at two versions, a conditional write refused by its own result. KEYS[5 + i]:
-    // the row of write i. ARGV after ARGV[4], per write, 9 fields: hash, condition (A: advance, M: missing, V: on a
-    // version), the expected version's high and low part, the proposed version's high and low part, T for a tombstone
-    // or V for a value, the key and the value (both empty for a tombstone, which keeps the row's key, or has none where
-    // no row existed). Per write the result is {0} (refused) or {1, high, low} (applied at that version). An advance is
+    // otherwise apply it twice: an advance at two versions, a conditional write refused by its own result. KEYS[6]: the
+    // rows with an expiry time of their own, scored by it; KEYS[6 + i]: the row of write i. ARGV after ARGV[4], per
+    // write, 10 fields: hash, condition (A: advance, M: missing, V: on a version), the expected version's high and low
+    // part, the proposed version's high and low part, T for a tombstone or V for a value, the key and the value (both
+    // empty for a tombstone, which keeps the row's key, or has none where no row existed), and the value's
+    // maximum age of its own in microseconds (Write#expiresAfter; empty for none), kept as the row's expiry time, field
+    // x, the server's now plus it; a row without one leaves the sorted set alone unless it had one. Per write the result is {0} (refused) or {1, high, low} (applied at that version). An advance is
     // never refused: its version is assigned. Condition B is an advance backdated (the control row,
     // Store#writeControl): its write time, in microseconds, in place of the expected version's high part, and the row's
     // own if later
@@ -100,12 +102,12 @@ final class RedisScripts {
               return out
             end
             local out, result = {}, {}
-            local n = (#ARGV - 4) / 9
+            local n = (#ARGV - 4) / 10
             for i = 1, n do
-              local a = 4 + (i - 1) * 9
+              local a = 4 + (i - 1) * 10
               local hash, condition, tombstone = ARGV[a + 1], ARGV[a + 2], ARGV[a + 7] == 'T'
-              local row = KEYS[5 + i]
-              local stored = redis.call('HMGET', row, 'vh', 'vl', 'k', 'w')
+              local row = KEYS[6 + i]
+              local stored = redis.call('HMGET', row, 'vh', 'vl', 'k', 'w', 'x')
               local exists = stored[1] ~= false
               local w = now
               if condition == 'B' then
@@ -129,7 +131,8 @@ final class RedisScripts {
                 local reserved = string.sub(hash, 1, 1) == '#'
                 if tombstone then
                   redis.call('HSET', row, 's', 'T', 'vh', num(h), 'vl', num(l), 'w', num(now), 'k', stored[3] or '')
-                  redis.call('HDEL', row, 'v')
+                  redis.call('HDEL', row, 'v', 'x')
+                  if stored[5] then redis.call('ZREM', KEYS[6], hash) end
                   if not reserved then
                     redis.call('ZREM', KEYS[1], hash)
                     redis.call('ZADD', KEYS[2], num(now), hash)
@@ -138,6 +141,14 @@ final class RedisScripts {
                 else
                   redis.call('HSET', row, 's', 'V', 'vh', num(h), 'vl', num(l), 'w', num(w), 'k', ARGV[a + 8],
                       'v', ARGV[a + 9])
+                  if ARGV[a + 10] ~= '' then
+                    local x = now + tonumber(ARGV[a + 10])
+                    redis.call('HSET', row, 'x', num(x))
+                    redis.call('ZADD', KEYS[6], num(x), hash)
+                  elseif stored[5] then
+                    redis.call('HDEL', row, 'x')
+                    redis.call('ZREM', KEYS[6], hash)
+                  end
                   if not reserved then
                     redis.call('ZREM', KEYS[2], hash)
                     redis.call('ZADD', KEYS[1], num(w), hash)
@@ -155,9 +166,9 @@ final class RedisScripts {
     // Reads rows, every age from one reading of the clock: the server's now, or ARGV[3] where given (the instant of a
     // read's first chunk, for the chunks after it). KEYS: the rows. ARGV[1]: the maximum age in microseconds, ARGV[2]:
     // R for whole rows, else versions only. Returns {now, row 1, row 2, ...}, a row false where missing; a
-    // whole row is {state, high, low, write time, key, value or false}, a value row at least the maximum age old as E
-    // without its value; versions only are {high, low, write time} of value rows younger than the maximum age, false
-    // for any other
+    // whole row is {state, high, low, write time, key, value or false, expiry time or false}, a value row at least the
+    // maximum age old or past its own expiry time as E without its value; versions only are the high and low part
+    // and the write time of value rows younger than both, false for any other
     static final RedisScript READ = RedisScript.of("read", RedisScript.Reply.ARRAY, """
             local now
             if ARGV[3] ~= '' then
@@ -170,14 +181,14 @@ final class RedisScripts {
             local whole = ARGV[2] == 'R'
             local out = {now}
             for i = 1, #KEYS do
-              local f = redis.call('HMGET', KEYS[i], 's', 'vh', 'vl', 'w', 'k', 'v')
+              local f = redis.call('HMGET', KEYS[i], 's', 'vh', 'vl', 'w', 'k', 'v', 'x')
               if f[1] == false then
                 out[i + 1] = false
               else
-                local s, w, v = f[1], tonumber(f[4]), f[6]
-                if s == 'V' and now - w >= maxAge then s, v = 'E', false end
+                local s, w, v, x = f[1], tonumber(f[4]), f[6], f[7] and tonumber(f[7])
+                if s == 'V' and (now - w >= maxAge or (x and x <= now)) then s, v = 'E', false end
                 if whole then
-                  out[i + 1] = {s, tonumber(f[2]), tonumber(f[3]), w, f[5], v}
+                  out[i + 1] = {s, tonumber(f[2]), tonumber(f[3]), w, f[5], v, x or false}
                 elseif s == 'V' then
                   out[i + 1] = {tonumber(f[2]), tonumber(f[3]), w}
                 else
@@ -201,16 +212,26 @@ final class RedisScripts {
     // up to the limit; a script per operation then gets those rows declared, checks each again and acts on those
     // still due, so that a row changed meanwhile, or handled by another instance's run, is left alone (every row is
     // expired or deleted once however many instances run maintenance). KEYS of every maintenance script: values,
-    // dead, the stream, its counter, the control row, then (the acting ones) the rows. ARGV: the prelude's three.
+    // dead, the stream, its counter, the control row, the rows by expiry time, then (the acting ones) the rows. ARGV:
+    // the prelude's three.
 
     // The candidates of one operation. ARGV[4]: E (expiry: ARGV[5] the maximum age in microseconds, ARGV[6] the
-    // limit), S (pruning to size: ARGV[5] the maximum size, ARGV[6] the minimum age, ARGV[7] the limit) or T (pruning
+    // limit; first the rows past their own expiry time, then the oldest values), S (pruning to size: ARGV[5] the maximum size, ARGV[6] the minimum age, ARGV[7] the limit) or T (pruning
     // tombstones: ARGV[5] the retention, ARGV[6] the limit). Returns the hashes
     static final RedisScript CANDIDATES = RedisScript.of("candidates", RedisScript.Reply.ARRAY, PRELUDE + HIDDEN + """
             local operation = ARGV[4]
             if operation == 'E' then
-              return redis.call('ZRANGEBYSCORE', KEYS[1], visible, num(now - tonumber(ARGV[5])), 'LIMIT', 0,
-                  tonumber(ARGV[6]))
+              local due = redis.call('ZRANGEBYSCORE', KEYS[6], '-inf', num(now), 'LIMIT', 0, tonumber(ARGV[6]))
+              local left = tonumber(ARGV[6]) - #due
+              if left > 0 then
+                local seen = {}
+                for _, hash in ipairs(due) do seen[hash] = true end
+                for _, hash in ipairs(redis.call('ZRANGEBYSCORE', KEYS[1], visible, num(now - tonumber(ARGV[5])),
+                    'LIMIT', 0, left)) do
+                  if not seen[hash] then due[#due + 1] = hash end
+                end
+              end
+              return due
             end
             if operation == 'S' then
               local excess = redis.call('ZCOUNT', KEYS[1], visible, '+inf') - tonumber(ARGV[5])
@@ -236,20 +257,22 @@ final class RedisScripts {
             return found
             """);
 
-    // Expires the given rows still due: a value at least the maximum age old, not hidden, each at an assigned version
-    // (the proposal), its write time now, each announced. ARGV[4]: the maximum age in microseconds, ARGV[5] and
-    // ARGV[6]: the proposed version's high and low part, ARGV[6 + i]: the hash of KEYS[5 + i]. Returns the number
-    // expired
+    // Expires the given rows still due: a value at least the maximum age old or past its own expiry time, not hidden,
+    // each at an assigned version (the proposal), its write time now, each announced. ARGV[4]: the maximum age in
+    // microseconds, ARGV[5] and ARGV[6]: the proposed version's high and low part, ARGV[6 + i]: the hash of
+    // KEYS[6 + i]. Returns the number expired
     static final RedisScript EXPIRE = RedisScript.of("expire", RedisScript.Reply.INTEGER, PRELUDE + HIDDEN + """
             local maxAge, ph, pl, expired = tonumber(ARGV[4]), tonumber(ARGV[5]), tonumber(ARGV[6]), 0
-            for i = 1, #KEYS - 5 do
-              local row, hash = KEYS[5 + i], ARGV[6 + i]
-              local f = redis.call('HMGET', row, 's', 'w', 'vh', 'vl')
+            for i = 1, #KEYS - 6 do
+              local row, hash = KEYS[6 + i], ARGV[6 + i]
+              local f = redis.call('HMGET', row, 's', 'w', 'vh', 'vl', 'x')
               local w = tonumber(f[2])
-              if f[1] == 'V' and string.sub(hash, 1, 1) ~= '#' and w <= now - maxAge and not hidden(w) then
+              local due = w and (w <= now - maxAge or (f[5] and tonumber(f[5]) <= now))
+              if f[1] == 'V' and string.sub(hash, 1, 1) ~= '#' and due and not hidden(w) then
                 local h, l = assign(tonumber(f[3]), tonumber(f[4]), ph, pl)
                 redis.call('HSET', row, 's', 'E', 'vh', num(h), 'vl', num(l), 'w', num(now))
-                redis.call('HDEL', row, 'v')
+                redis.call('HDEL', row, 'v', 'x')
+                redis.call('ZREM', KEYS[6], hash)
                 redis.call('ZREM', KEYS[1], hash)
                 redis.call('ZADD', KEYS[2], num(now), hash)
                 announce(hash, h, l, 'E')
@@ -261,19 +284,20 @@ final class RedisScripts {
 
     // Deletes the given rows still due, silently: values beyond the maximum size (counting those not hidden), none
     // younger than the minimum age. ARGV[4]: the maximum size, ARGV[5]: the minimum age in microseconds, ARGV[5 + i]:
-    // the hash of KEYS[5 + i]. Returns the number deleted
+    // the hash of KEYS[6 + i]. Returns the number deleted
     static final RedisScript PRUNE_TO_SIZE = RedisScript.of("pruneToSize", RedisScript.Reply.INTEGER,
             PRELUDE + HIDDEN + """
             local minAge, deleted = tonumber(ARGV[5]), 0
             local excess = redis.call('ZCOUNT', KEYS[1], visible, '+inf') - tonumber(ARGV[4])
-            for i = 1, #KEYS - 5 do
+            for i = 1, #KEYS - 6 do
               if excess <= 0 then break end
-              local row, hash = KEYS[5 + i], ARGV[5 + i]
+              local row, hash = KEYS[6 + i], ARGV[5 + i]
               local f = redis.call('HMGET', row, 's', 'w')
               local w = tonumber(f[2])
               if f[1] == 'V' and string.sub(hash, 1, 1) ~= '#' and w <= now - minAge and not hidden(w) then
                 redis.call('DEL', row)
                 redis.call('ZREM', KEYS[1], hash)
+                redis.call('ZREM', KEYS[6], hash)
                 excess = excess - 1
                 deleted = deleted + 1
               end
@@ -283,18 +307,19 @@ final class RedisScripts {
 
     // Deletes the given rows still due, silently: any the control row hides (no grace period), and tombstones and
     // expired rows at least the retention old. ARGV[4]: the retention in microseconds, ARGV[4 + i]: the hash of
-    // KEYS[5 + i]. Returns the number deleted
+    // KEYS[6 + i]. Returns the number deleted
     static final RedisScript PRUNE_TOMBSTONES = RedisScript.of("pruneTombstones", RedisScript.Reply.INTEGER,
             PRELUDE + HIDDEN + """
             local retention, deleted = tonumber(ARGV[4]), 0
-            for i = 1, #KEYS - 5 do
-              local row, hash = KEYS[5 + i], ARGV[4 + i]
+            for i = 1, #KEYS - 6 do
+              local row, hash = KEYS[6 + i], ARGV[4 + i]
               local f = redis.call('HMGET', row, 's', 'w')
               local w = tonumber(f[2])
               if f[1] and string.sub(hash, 1, 1) ~= '#' and (hidden(w) or (f[1] ~= 'V' and w <= now - retention)) then
                 redis.call('DEL', row)
                 redis.call('ZREM', KEYS[1], hash)
                 redis.call('ZREM', KEYS[2], hash)
+                redis.call('ZREM', KEYS[6], hash)
                 deleted = deleted + 1
               end
             end

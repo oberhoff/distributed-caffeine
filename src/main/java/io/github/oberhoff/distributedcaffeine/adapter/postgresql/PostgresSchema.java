@@ -283,6 +283,7 @@ final class PostgresSchema {
         expected.put("state", "text");
         expected.put("version", "bigint");
         expected.put("write_time", "timestamp with time zone");
+        expected.put("expire_time", "timestamp with time zone");
         Map<String, String> actual = new LinkedHashMap<>();
         try (PreparedStatement statement = connection.prepareStatement("""
                 SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute

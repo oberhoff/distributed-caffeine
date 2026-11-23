@@ -78,7 +78,23 @@ final class InMemoryTable {
     }
 
     @SuppressWarnings("ArrayRecordComponent") // never compared or hashed, only held by hash
-    private record StoredRow(byte[] key, byte @Nullable [] value, State state, long version, long writeTimeMicros) {
+    // expiresAtMicros: the value's own expiry time (Write#expiresAfter), on the store's clock; null for none
+    private record StoredRow(byte[] key, byte @Nullable [] value, State state, long version, long writeTimeMicros,
+                             @Nullable Long expiresAtMicros) {
+
+        StoredRow(byte[] key, byte @Nullable [] value, State state, long version, long writeTimeMicros) {
+            this(key, value, state, version, writeTimeMicros, null);
+        }
+
+        // a value that counts at the given time: younger than the maximum age and its own expiry time
+        boolean live(Duration maxAge, long nowMicros) {
+            return state == State.VALUE && younger(this, maxAge, nowMicros)
+                    && (expiresAtMicros == null || nowMicros < expiresAtMicros);
+        }
+
+        @Nullable Duration expiresAfter() {
+            return expiresAtMicros == null ? null : Duration.ofNanos((expiresAtMicros - writeTimeMicros) * 1_000);
+        }
     }
 
     // a row as it was before a change (null: missing), and when the change happened
@@ -104,7 +120,7 @@ final class InMemoryTable {
         Map<String, Long> versions = new LinkedHashMap<>();
         Map<String, Duration> ages = new LinkedHashMap<>();
         reading(hashes, (hash, row, now) -> {
-            if (row != null && row.state == State.VALUE && younger(row, maxAge, now)) {
+            if (row != null && row.live(maxAge, now)) {
                 versions.put(hash, row.version);
                 ages.put(hash, age(row, now));
             }
@@ -224,12 +240,20 @@ final class InMemoryTable {
                             write.value(), State.VALUE, version, writeTime)));
                     messages.add(new Change(Change.Kind.WRITTEN, write.hash(), version));
                 } else {
-                    store(write.hash(), requireNonNull(write.key()), write.value(), State.VALUE, version);
+                    long writeTime = database.nextWriteTime();
+                    journal(write.hash(), rows.put(write.hash(), new StoredRow(requireNonNull(write.key()),
+                            write.value(), State.VALUE, version, writeTime, expiresAt(write, writeTime))));
                     messages.add(new Change(Change.Kind.WRITTEN, write.hash(), version));
                 }
             }
             return new Outcome<>(new WriteResult(conflicts, assigned), messages, null);
         });
+    }
+
+    // the value's own expiry time (Write#expiresAfter): its write time plus its own maximum age, none without one
+    private static @Nullable Long expiresAt(Write write, long writeTime) {
+        Duration expiresAfter = write.expiresAfter();
+        return expiresAfter == null ? null : writeTime + expiresAfter.toNanos() / 1_000;
     }
 
     // the version an assigning store chooses: its own domain (a new row at the sequence, which every write draws, an
@@ -262,7 +286,7 @@ final class InMemoryTable {
                 // of the store's own); a conditional one expires only below it
                 boolean assigning = database.profile().versioning() != StoreProfile.Versioning.CONDITIONAL;
                 if (maintained(hash) && current.state == State.VALUE && !hidden(current)
-                        && !younger(current, maxAge, now) && (assigning || current.version < version)) {
+                        && !current.live(maxAge, now) && (assigning || current.version < version)) {
                     long expired = assigning ? assign(current, version) : version;
                     // the write time of the expiry: its grace period before pruning counts from now
                     store(hash, current.key, null, State.EXPIRED, expired);
@@ -474,10 +498,10 @@ final class InMemoryTable {
             return null;
         }
         Duration age = age(row, nowMicros);
-        if (row.state == State.VALUE && !younger(row, maxAge, nowMicros)) {
+        if (row.state == State.VALUE && !row.live(maxAge, nowMicros)) {
             return new Row(hash, row.key, null, State.EXPIRED, row.version, age);
         }
-        return new Row(hash, row.key, row.value, row.state, row.version, age);
+        return new Row(hash, row.key, row.value, row.state, row.version, age, row.expiresAfter());
     }
 
     private void checkRead() {

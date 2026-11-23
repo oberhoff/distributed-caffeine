@@ -50,6 +50,9 @@ import static java.util.Objects.requireNonNull;
  *     <li><b>Write time by the store:</b> every write sets the row's write time on the store's clock; a read or a
  *     scan returns every row's age measured at one instant, so that the ages of one read or scan compare like the
  *     times of the writes.</li>
+ *     <li><b>Own maximum age by the store:</b> a write of a value with a maximum age of its own keeps an expiry time
+ *     on the store's clock, its write time plus it; every other write clears it. A read or a scan returns it as the
+ *     duration from the row's write time ({@link Row#expiresAfter()}).</li>
  *     <li><b>Atomic per row:</b> a conditional write or delete decides and writes in one step: of concurrent ones on
  *     one version, one wins; of concurrent inserts of one id, one wins. A write that is not applied changes
  *     nothing.</li>
@@ -94,10 +97,11 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
      * @param value   the value, {@code null} unless the state is {@link State#VALUE}
      * @param state   the state
      * @param version the version the row gets
+     * @param expiresAfter the value's own maximum age, {@code null} for none
      * @return whether it was written; {@code false} if the row has a version at least as large
      */
     protected abstract boolean advanceRow(String hash, byte @Nullable [] key, byte @Nullable [] value, State state,
-                                          long version);
+                                          long version, @Nullable Duration expiresAfter);
 
     /**
      * Writes the {@link Store#CONTROL_HASH control row} as {@link #advanceRow} writes a value, but backdated: with the
@@ -121,10 +125,11 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
      * @param key      the key, as written; {@code null} keeps the row's key
      * @param value    the value, {@code null} unless the state is {@link State#VALUE}
      * @param state    the state
+     * @param expiresAfter the value's own maximum age, {@code null} for none
      * @return whether it was written: {@code false} if the row has another version or none
      */
     protected abstract boolean replaceRow(String hash, long expected, long version, byte @Nullable [] key,
-                                          byte @Nullable [] value, State state);
+                                          byte @Nullable [] value, State state, @Nullable Duration expiresAfter);
 
     /**
      * Writes a row only if none exists for the hash.
@@ -134,10 +139,11 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
      * @param key     the key, as written; {@code null} stores none (a tombstone)
      * @param value   the value, {@code null} unless the state is {@link State#VALUE}
      * @param state   the state
+     * @param expiresAfter the value's own maximum age, {@code null} for none
      * @return whether it was written: {@code false} if a row exists
      */
     protected abstract boolean insertRow(String hash, long version, byte @Nullable [] key, byte @Nullable [] value,
-                                         State state);
+                                         State state, @Nullable Duration expiresAfter);
 
     /**
      * Deletes a row only if it still has the given version.
@@ -149,8 +155,8 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
     protected abstract boolean deleteRow(String hash, long version);
 
     /**
-     * Returns every row of the cache, without key and value, with their ages measured at one instant of the scan
-     * (maintenance).
+     * Returns every row of the cache, without key and value, with their ages and own expiries measured at one instant
+     * of the scan (maintenance).
      *
      * @return the rows
      */
@@ -179,7 +185,7 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
                 continue;
             }
             // a value too old to count: reported as expired, at its version, so that a write can be conditioned on it
-            result.put(hash, row.state() != State.VALUE || younger(row.age(), maxAge) ? row
+            result.put(hash, row.state() != State.VALUE || live(row.age(), row.expiresAfter(), maxAge) ? row
                     : new Row(hash, row.key(), null, State.EXPIRED, row.version(), row.age()));
         }
         return result;
@@ -192,7 +198,7 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
         Map<String, Duration> ages = new LinkedHashMap<>();
         for (String hash : hashes) {
             Row row = found.get(hash);
-            if (row != null && row.state() == State.VALUE && younger(row.age(), maxAge)) {
+            if (row != null && row.state() == State.VALUE && live(row.age(), row.expiresAfter(), maxAge)) {
                 versions.put(hash, row.version());
                 ages.put(hash, row.age());
             }
@@ -235,12 +241,13 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
     private boolean applied(Write write) {
         State state = write.isTombstone() ? State.TOMBSTONE : State.VALUE;
         if (write.isAdvance()) {
-            return advanceRow(write.hash(), write.key(), write.value(), state, write.version());
+            return advanceRow(write.hash(), write.key(), write.value(), state, write.version(), write.expiresAfter());
         }
         if (write.expectsMissing()) {
-            return insertRow(write.hash(), write.version(), write.key(), write.value(), state);
+            return insertRow(write.hash(), write.version(), write.key(), write.value(), state, write.expiresAfter());
         }
-        return replaceRow(write.hash(), write.expected(), write.version(), write.key(), write.value(), state);
+        return replaceRow(write.hash(), write.expected(), write.version(), write.key(), write.value(), state,
+                write.expiresAfter());
     }
 
     // maintenance: one scan each, so that every age compares with the control row's; every change conditional on the
@@ -255,8 +262,8 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
         int expired = 0;
         for (Head head : heads) {
             if (head.state() == State.VALUE && maintained(head) && !hidden(head, cutoff)
-                    && !younger(head.age(), maxAge) && head.version() < version
-                    && replaceRow(head.hash(), head.version(), version, null, null, State.EXPIRED)) {
+                    && !live(head.age(), head.expiresAfter(), maxAge) && head.version() < version
+                    && replaceRow(head.hash(), head.version(), version, null, null, State.EXPIRED, null)) {
                 expired++;
             }
         }
@@ -336,6 +343,11 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
         return age.compareTo(maxAge) < 0;
     }
 
+    // a value that counts: younger than the maximum age and its own expiry, if it has one
+    private static boolean live(Duration age, @Nullable Duration expiresAfter, Duration maxAge) {
+        return younger(age, maxAge) && (expiresAfter == null || younger(age, expiresAfter));
+    }
+
     /**
      * A row as a scan of {@link PrimitiveStore} returns it: without key and value.
      *
@@ -343,8 +355,9 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
      * @param state   the state of the row
      * @param version the version of the row's last write
      * @param age     how long ago the row was written, by the store's clock at the scan
+     * @param expiresAfter the row's own maximum age, counted from its write like the age; {@code null} for none
      */
-    public record Head(String hash, State state, long version, Duration age) {
+    public record Head(String hash, State state, long version, Duration age, @Nullable Duration expiresAfter) {
 
         /**
          * Constructs a Head, checking its components.
@@ -353,6 +366,7 @@ public abstract class PrimitiveStore implements Store, ChangeScan {
          * @param state   the state of the row
          * @param version the version of the row's last write
          * @param age     how long ago the row was written, by the store's clock at the scan
+         * @param expiresAfter the row's own maximum age, counted from its write like the age; {@code null} for none
          */
         public Head {
             requireNonNull(hash, "hash cannot be null");

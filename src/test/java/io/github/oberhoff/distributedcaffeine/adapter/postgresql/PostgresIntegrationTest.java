@@ -484,6 +484,7 @@ class PostgresIntegrationTest {
     @Nested
     @DisplayName("PostgreSQL 18 latest (Single Server)")
     @Setup(image = "postgres:18", topology = SINGLE_SERVER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
     class Postgres_18_latest__Single_Server extends PostgresTopologyTests {
     }
 
@@ -504,12 +505,60 @@ class PostgresIntegrationTest {
     @Nested
     @DisplayName("PostgreSQL 18 latest (Single Server with Small Notify Queue)")
     @Setup(image = "postgres:18", topology = SINGLE_SERVER_WITH_SMALL_NOTIFY_QUEUE)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
     class Postgres_18_latest__Single_Server_with_Small_Notify_Queue extends PostgresTopologyTests {
     }
 
     @Nested
-    @DisplayName("PostgreSQL 18 latest (Single Server behind Transaction Pooler)")
-    @Setup(image = "postgres:18", topology = SINGLE_SERVER_BEHIND_TRANSACTION_POOLER)
-    class Postgres_18_latest__Single_Server_behind_Transaction_Pooler extends PostgresTopologyTests {
+    @DisplayName("PostgreSQL 19.0 (Single Server)")
+    @Setup(image = "postgres:19.0", topology = SINGLE_SERVER)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    class Postgres_19_0__Single_Server extends PostgresTopologyTests {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 19.0 (Primary with Asynchronous Standby)")
+    @Setup(image = "postgres:19.0", topology = PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    class Postgres_19_0__Primary_with_Asynchronous_Standby extends PostgresTopologyTests {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 19.0 (Primary with Synchronous Standby)")
+    @Setup(image = "postgres:19.0", topology = PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    class Postgres_19_0__Primary_with_Synchronous_Standby extends PostgresTopologyTests {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 19 latest (Single Server)")
+    @Setup(image = "postgres:19", topology = SINGLE_SERVER)
+    class Postgres_19_latest__Single_Server extends PostgresTopologyTests {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 19 latest (Primary with Asynchronous Standby)")
+    @Setup(image = "postgres:19", topology = PRIMARY_WITH_ASYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    class Postgres_19_latest__Primary_with_Asynchronous_Standby extends PostgresTopologyTests {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 19 latest (Primary with Synchronous Standby)")
+    @Setup(image = "postgres:19", topology = PRIMARY_WITH_SYNCHRONOUS_STANDBY)
+    @DisabledIfSystemProperty(named = RUNS_ON_GITHUB, matches = "true")
+    class Postgres_19_latest__Primary_with_Synchronous_Standby extends PostgresTopologyTests {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 19 latest (Single Server with Small Notify Queue)")
+    @Setup(image = "postgres:19", topology = SINGLE_SERVER_WITH_SMALL_NOTIFY_QUEUE)
+    class Postgres_19_latest__Single_Server_with_Small_Notify_Queue extends PostgresTopologyTests {
+    }
+
+    @Nested
+    @DisplayName("PostgreSQL 19 latest (Single Server behind Transaction Pooler)")
+    @Setup(image = "postgres:19", topology = SINGLE_SERVER_BEHIND_TRANSACTION_POOLER)
+    class Postgres_19_latest__Single_Server_behind_Transaction_Pooler extends PostgresTopologyTests {
     }
 }

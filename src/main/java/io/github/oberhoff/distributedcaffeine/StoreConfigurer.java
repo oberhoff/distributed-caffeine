@@ -20,6 +20,7 @@ import org.jspecify.annotations.Nullable;
 
 import java.time.Duration;
 import java.util.concurrent.Executor;
+import java.util.function.BiFunction;
 
 import static java.util.Objects.requireNonNull;
 
@@ -28,9 +29,11 @@ import static java.util.Objects.requireNonNull;
  * a maximum size the store is unbounded in that respect, as a Caffeine cache is without its bounds; every other setting
  * has a default that suits most uses.
  *
+ * @param <K> the key type
+ * @param <V> the value type
  * @author Andreas Oberhoff
  */
-public final class StoreConfigurer {
+public final class StoreConfigurer<K, V> {
 
     static final Duration DEFAULT_MAINTENANCE_INTERVAL = Duration.ofMinutes(1);
     static final Duration DEFAULT_HEARTBEAT_INTERVAL = Duration.ofSeconds(10);
@@ -42,6 +45,7 @@ public final class StoreConfigurer {
     static final long UNBOUNDED_SIZE = -1;
 
     private @Nullable Duration maximumAge;
+    private @Nullable BiFunction<K, V, Duration> maximumAgePerEntry;
     private long maximumSize = UNBOUNDED_SIZE;
     private boolean maximumAgeForStoreOnly;
     private Duration operationTimeout = StoreSettings.DEFAULT_OPERATION_TIMEOUT;
@@ -64,12 +68,13 @@ public final class StoreConfigurer {
      * ({@code expireAfterWrite} or {@code expireAfter}), the local copies expire at the maximum age, and
      * {@code policy().expireAfterWrite()} shows it. Adjustable at runtime through
      * {@link DistributedPolicy.Store#maximumAge()}.
+     * May not be combined with {@link #withMaximumAgePerEntry(BiFunction)}.
      * Optional: unbounded by default, as with {@code ChronoUnit.FOREVER.getDuration()}.
      *
      * @param maximumAge the maximum age (positive)
      * @return this configurer
      */
-    public StoreConfigurer withMaximumAge(Duration maximumAge) {
+    public StoreConfigurer<K, V> withMaximumAge(Duration maximumAge) {
         requireNonNull(maximumAge, "maximumAge cannot be null");
         if (maximumAge.isNegative() || maximumAge.isZero()) {
             throw new IllegalArgumentException("maximumAge must be positive");
@@ -77,7 +82,41 @@ public final class StoreConfigurer {
         if (this.maximumAge != null) {
             throw new IllegalStateException("maximumAge was already set to " + this.maximumAge);
         }
+        if (maximumAgePerEntry != null) {
+            throw new IllegalStateException("maximumAge may not be used with maximumAgePerEntry");
+        }
         this.maximumAge = maximumAge.compareTo(UNBOUNDED_AGE) > 0 ? UNBOUNDED_AGE : maximumAge;
+        return this;
+    }
+
+    /**
+     * Sets how long each value is valid, computed from its key and value on every write and counted from that write by
+     * the store's clock, as Caffeine's {@code expireAfter(Expiry.writing(...))} is for the local copies. As with
+     * {@link #withMaximumAge(Duration)}, the store never returns an older value, and every instance drops its copy at
+     * the value's maximum age after its write at the latest, whatever the distribution mode; maintenance removes it from
+     * the store within about one maintenance interval after. Every write sets the age anew, whatever the key held
+     * before; a function changed later applies to later writes. A duration is taken as at least zero (expired at once)
+     * and at most {@code ChronoUnit.FOREVER.getDuration()}, which never expires. The function runs in the writing
+     * thread on every write of a value ({@code put}, a load, the atomic {@code asMap()} methods, a refresh) and should
+     * be fast. A lifetime counted from a value's first write rather than its last is kept in the value: its creation
+     * time, carried over by {@code asMap().compute(...)}, and the function returning what is left of it. May not be
+     * combined with {@link #withMaximumAge(Duration)} or {@link #withMaximumAgeForStoreOnly()}.
+     * Optional: none by default.
+     *
+     * @param maximumAge the maximum age of a key's value
+     * @return this configurer
+     * @throws IllegalStateException if it or a maximum age for all values was set already
+     */
+    public StoreConfigurer<K, V> withMaximumAgePerEntry(
+            BiFunction<? super K, ? super V, Duration> maximumAge) {
+        requireNonNull(maximumAge, "maximumAge cannot be null");
+        if (maximumAgePerEntry != null) {
+            throw new IllegalStateException("maximumAgePerEntry was already set");
+        }
+        if (this.maximumAge != null) {
+            throw new IllegalStateException("maximumAgePerEntry may not be used with maximumAge");
+        }
+        maximumAgePerEntry = maximumAge::apply;
         return this;
     }
 
@@ -90,7 +129,7 @@ public final class StoreConfigurer {
      * @param maximumSize the maximum number of values (positive)
      * @return this configurer
      */
-    public StoreConfigurer withMaximumSize(long maximumSize) {
+    public StoreConfigurer<K, V> withMaximumSize(long maximumSize) {
         if (maximumSize <= 0) {
             throw new IllegalArgumentException("maximumSize must be positive");
         }
@@ -109,12 +148,13 @@ public final class StoreConfigurer {
      * copy is served if a change never reaches its instance and the loss goes unnoticed; once a loss is noticed, copies
      * whose values expired in the store are dropped. The atomic {@code asMap()} methods stay atomic across instances,
      * at one read more. Requires distribution (not {@link DistributionMode#NONE}) and a maximum age ({@link
-     * #withMaximumAge(Duration)}) of at least five heartbeat intervals: 50 seconds with the default interval, shorter
-     * with a shorter one. Values written in the last three heartbeat intervals are kept beyond the maximum size.
+     * #withMaximumAge(Duration)}, not one per entry) of at least five heartbeat intervals: 50 seconds with the default
+     * interval, shorter with a shorter one. Values written in the last three heartbeat intervals are kept beyond the
+     * maximum size.
      *
      * @return this configurer
      */
-    public StoreConfigurer withMaximumAgeForStoreOnly() {
+    public StoreConfigurer<K, V> withMaximumAgeForStoreOnly() {
         maximumAgeForStoreOnly = true;
         return this;
     }
@@ -135,7 +175,7 @@ public final class StoreConfigurer {
      * @param operationTimeout the timeout (positive)
      * @return this configurer
      */
-    public StoreConfigurer withOperationTimeout(Duration operationTimeout) {
+    public StoreConfigurer<K, V> withOperationTimeout(Duration operationTimeout) {
         requireNonNull(operationTimeout, "operationTimeout cannot be null");
         if (operationTimeout.isNegative() || operationTimeout.isZero()) {
             throw new IllegalArgumentException("operationTimeout must be positive");
@@ -156,7 +196,7 @@ public final class StoreConfigurer {
      *
      * @return this configurer
      */
-    public StoreConfigurer withFailFast() {
+    public StoreConfigurer<K, V> withFailFast() {
         failFast = true;
         return this;
     }
@@ -169,7 +209,7 @@ public final class StoreConfigurer {
      * @param executor the executor
      * @return this configurer
      */
-    public StoreConfigurer withExecutor(Executor executor) {
+    public StoreConfigurer<K, V> withExecutor(Executor executor) {
         this.executor = requireNonNull(executor, "executor cannot be null");
         return this;
     }
@@ -181,7 +221,7 @@ public final class StoreConfigurer {
      * @param maintenanceInterval the interval (positive)
      * @return this configurer
      */
-    public StoreConfigurer withMaintenanceInterval(Duration maintenanceInterval) {
+    public StoreConfigurer<K, V> withMaintenanceInterval(Duration maintenanceInterval) {
         requireNonNull(maintenanceInterval, "maintenanceInterval cannot be null");
         if (maintenanceInterval.isNegative() || maintenanceInterval.isZero()) {
             throw new IllegalArgumentException("maintenanceInterval must be positive");
@@ -199,7 +239,7 @@ public final class StoreConfigurer {
      * @param heartbeatInterval the interval (positive)
      * @return this configurer
      */
-    public StoreConfigurer withHeartbeatInterval(Duration heartbeatInterval) {
+    public StoreConfigurer<K, V> withHeartbeatInterval(Duration heartbeatInterval) {
         requireNonNull(heartbeatInterval, "heartbeatInterval cannot be null");
         if (heartbeatInterval.isNegative() || heartbeatInterval.isZero()) {
             throw new IllegalArgumentException("heartbeatInterval must be positive");
@@ -216,7 +256,7 @@ public final class StoreConfigurer {
      * @param pollInterval the interval (positive)
      * @return this configurer
      */
-    public StoreConfigurer withPollInterval(Duration pollInterval) {
+    public StoreConfigurer<K, V> withPollInterval(Duration pollInterval) {
         requireNonNull(pollInterval, "pollInterval cannot be null");
         if (pollInterval.isNegative() || pollInterval.isZero()) {
             throw new IllegalArgumentException("pollInterval must be positive");
@@ -227,6 +267,10 @@ public final class StoreConfigurer {
 
     Duration maximumAge() {
         return maximumAge != null ? maximumAge : UNBOUNDED_AGE;
+    }
+
+    @Nullable BiFunction<K, V, Duration> maximumAgePerEntry() {
+        return maximumAgePerEntry;
     }
 
     boolean maximumAgeForStoreOnly() {

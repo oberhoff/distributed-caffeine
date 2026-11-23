@@ -146,6 +146,14 @@ public class InternalPropertyTest {
     // An expired confirmed write is gone, so presence cannot be asked for
     private boolean ageing;
     private static final Duration[] AGES = {Duration.ofMillis(50), Duration.ofMillis(200), Duration.ofSeconds(1), LONG};
+    // the expiring variant: the maximum age per entry, a duration per value (most short, so that values expire in the
+    // store and their copies are capped while the instances work), set anew by every write; maintenance every few
+    // milliseconds. Before the check, the short durations have
+    // passed: what is left lives an hour, so that nothing expires while the check reads. An expired confirmed write is
+    // gone, so presence cannot be asked for
+    private boolean expiring;
+    private static final Duration[] DURATIONS = {Duration.ofMillis(30), Duration.ofMillis(100), LONG};
+    private static final Duration SHORTEST_PASSED = Duration.ofMillis(150);
     // the restarting variant (VISION.md, "Starting without the store"): in some phases the plain instance is closed and
     // built again while it cannot reach the store (a pod restarted during a partial partition), so it starts without
     // it, loading from the source, while the others write; it reaches the store again within the phase or before the
@@ -247,6 +255,14 @@ public class InternalPropertyTest {
         assertThat(trace).as("values expired while the instances worked").anyMatch(event -> event.contains("EXPIRED"));
     }
 
+    @ParameterizedTest
+    @ValueSource(longs = {1, 2, 3, 4})
+    void with_a_maximum_age_per_entry_while_the_instances_work_too(long seed) throws Exception {
+        expiring = true;
+        assertThat(run(seed, new InMemoryBackend(seed), PHASES)).as("phases checked").isEqualTo(PHASES);
+        assertThat(trace).as("values expired while the instances worked").anyMatch(event -> event.contains("EXPIRED"));
+    }
+
     // the deterministic mode: the same operations, faults and oracles on one thread and simulated time, every choice
     // from the seed, so that a failure replays from its seed alone; fast enough for many seeds. What happens within an
     // operation, between its threads, is InternalInterleavingTest's
@@ -272,6 +288,15 @@ public class InternalPropertyTest {
     void deterministically_with_the_maximum_age_changing_while_the_instances_work_too(String profile, long seed)
             throws Exception {
         ageing = true;
+        assertThat(runDeterministically(seed, StoreProfile.of(profile))).as("phases checked").isEqualTo(PHASES);
+        assertThat(trace).as("values expired while the instances worked").anyMatch(event -> event.contains("EXPIRED"));
+    }
+
+    @ParameterizedTest(name = "{0}, seed {1}")
+    @MethodSource("profilesAndSeeds")
+    void deterministically_with_a_maximum_age_per_entry_while_the_instances_work_too(String profile, long seed)
+            throws Exception {
+        expiring = true;
         assertThat(runDeterministically(seed, StoreProfile.of(profile))).as("phases checked").isEqualTo(PHASES);
         assertThat(trace).as("values expired while the instances worked").anyMatch(event -> event.contains("EXPIRED"));
     }
@@ -367,6 +392,10 @@ public class InternalPropertyTest {
                     reachAgain();
                     backend.heal();
                     awaitQuiescence(backend, instances, simulated);
+                    if (expiring) {
+                        idle(SHORTEST_PASSED);
+                        awaitQuiescence(backend, instances, simulated);
+                    }
                     check(seed, phase, instances);
                     checked++;
                     continue;
@@ -400,6 +429,10 @@ public class InternalPropertyTest {
                 reachAgain();
                 backend.heal();
                 awaitQuiescence(backend, instances);
+                if (expiring) {
+                    idle(SHORTEST_PASSED);
+                    awaitQuiescence(backend, instances);
+                }
                 check(seed, phase, instances);
                 checked++;
             }
@@ -463,9 +496,16 @@ public class InternalPropertyTest {
         return builder
                 .withSerializers(serializers -> serializers.withKeySerializer(StringSerializer.ofString())
                         .withValueSerializer(StringSerializer.ofString()))
-                .withStore(store -> store.withMaximumAge(LONG).withMaximumSize(pruning ? KEYS / 2 : 1_000)
-                        .withMaintenanceInterval(pruning || ageing ? Duration.ofMillis(5) : Duration.ofMinutes(1))
+                .withStore(store -> (expiring ? store.withMaximumAgePerEntry((key, value) -> ageOf(value)) : store.withMaximumAge(LONG))
+                        .withMaximumSize(pruning ? KEYS / 2 : 1_000)
+                        .withMaintenanceInterval(pruning || ageing || expiring ? Duration.ofMillis(5)
+                                : Duration.ofMinutes(1))
                         .withPollInterval(Duration.ofMillis(10)));
+    }
+
+    // the expiring variant's maximum age per entry: a duration per value, from its token
+    private static Duration ageOf(String value) {
+        return DURATIONS[Math.floorMod(value.hashCode(), DURATIONS.length)];
     }
 
     // the ageing variant's changes in the threaded mode, between the operations
@@ -767,7 +807,7 @@ public class InternalPropertyTest {
                 violations.add("freshness: the store holds " + inStore + " for " + k + ", the source " + inSource);
             }
             String written = confirmed.get(k);
-            if (!pruning && !ageing && written != null && !written.equals(inStore)) {
+            if (!pruning && !ageing && !expiring && written != null && !written.equals(inStore)) {
                 violations.add("presence: the store holds " + inStore + " for " + k + ", the last confirmed write "
                         + written);
             }

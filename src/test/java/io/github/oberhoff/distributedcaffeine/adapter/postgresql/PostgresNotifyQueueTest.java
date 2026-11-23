@@ -64,9 +64,11 @@ abstract class PostgresNotifyQueueTest {
                     PostgresTestDatabase.PASSWORD);
             cache.put("k", "before");
 
-            // a listening session left idle in a transaction: the queue cannot drain past it
+            // a listening session left idle in a transaction: the queue cannot drain past it. It listens to the channel
+            // flooded below: PostgreSQL 19 queues no notification of a channel no session listens to (measured
+            // 2026-11-23: 18 filled the queue with an unlistened channel, 19 left it empty)
             try (Statement statement = stuck.createStatement()) {
-                statement.execute("LISTEN elsewhere");
+                statement.execute("LISTEN flood");
             }
             stuck.setAutoCommit(false);
             try (Statement statement = stuck.createStatement()) {

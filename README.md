@@ -213,6 +213,9 @@ Most caches bound the store (unbounded by default):
   go then too (default: unbounded).
 * `withMaximumSize(...)`: how many values the store keeps: trimmed each maintenance run to the most recently written
   ones (default: unbounded).
+* `withMaximumAgePerEntry((key, value) -> age)`: how long each value is valid after its write, computed per key and
+  value on every write, instead of one maximum age for all (default: none). As with `withMaximumAge(...)`, the store
+  serves a value no longer after it, and every instance drops its copy then. Every write sets it anew.
 * `withMaximumAgeForStoreOnly()`: the maximum age bounds the store's values but not the local copies, for which only the
   local expiry counts; a miss after the maximum age calls the source (default: off). For local copies meant to live
   longer than the store should keep values. Requires distribution and a maximum age of at least five heartbeat intervals
@@ -358,8 +361,9 @@ duration, at the time of the call.
 #### Store bounds
 
 `store().maximumAge()` and `store().maximumSize()` adjust the store's bounds at runtime, as Caffeine's
-`policy().expireAfterWrite()` and `policy().eviction()` adjust the local ones. Each is present only if the cache was
-built with that bound, and each applies to the instance it is called on, so a change is made on every instance, for
+`policy().expireAfterWrite()` and `policy().eviction()` adjust the local ones; `store().maximumAgePerEntry()` writes a
+value with a maximum age of its own, as Caffeine's `policy().expireVariably()` does. Each is present only if the cache
+was built with that bound, and each applies to the instance it is called on, so a change is made on every instance, for
 example from a configuration service.
 
 ### Distributed stats
@@ -385,8 +389,9 @@ Which setting serves which goal; the rest can stay at their defaults:
 | Goal                                                                                            | Setting                                                                         |
 |-------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------|
 | Every value loaded from the source again at the latest a given time after its write             | the store's `withMaximumAge(...)`                                               |
+| A value valid for a time of its own, such as a token or a session                               | the store's `withMaximumAgePerEntry(...)`                                       |
+| Local copies kept longer than the store keeps values                                            | the store's `withMaximumAgeForStoreOnly()`                                      |
 | Read values reloaded in the background, the old value served meanwhile                          | Caffeine's `refreshAfterWrite(...)` (a loading cache)                           |
-| A value with a validity of its own, such as a token's expiry                                    | a check on read and `invalidate(key)` (see below)                               |
 | Other instances' copies dropped on a write, read again on their next access (the default)       | `withDistributionMode(DistributionMode.INVALIDATE)`                             |
 | Other instances' copies replaced on a write, not dropped                                        | `withDistributionMode(DistributionMode.UPDATE)`                                 |
 | Other instances' copies kept on a write, until they expire or are evicted                       | `withDistributionMode(DistributionMode.NONE)`                                   |
@@ -394,14 +399,13 @@ Which setting serves which goal; the rest can stay at their defaults:
 | Missing keys not looked up in the store and the source again and again                          | `withNegativeCaching(...)`                                                      |
 | Less memory per instance                                                                        | Caffeine's `maximumSize(...)`, `maximumWeight(...)` or `expireAfterAccess(...)` |
 | A smaller store                                                                                 | the store's `withMaximumSize(...)`                                              |
-| Local copies kept longer than the store keeps values                                            | the store's `withMaximumAgeForStoreOnly()`                                      |
-| The maximum age or size changed at runtime                                                      | `distributedPolicy().store().maximumAge()` or `maximumSize()`                   |
+| The maximum age for all values or the maximum size changed at runtime                           | `distributedPolicy().store().maximumAge()` or `maximumSize()`                   |
+| A value written with a maximum age of its own, other than the function's                        | `distributedPolicy().store().maximumAgePerEntry().put(...)`                     |
 | Values written before a point in time dropped at once, e.g. after a refill while serving        | `store().invalidateAllBeforeMark(...)` or `invalidateAllOlderThan(...)`         |
 
 Caffeine's `expireAfter(...)` can't expire a value with a validity of its own, such as a token: it drops only the local
-copy, and the next read finds the value in the store again, since the store keeps every value for the same maximum age.
-Check the validity on read instead: when a value has expired, `invalidate(key)` removes it in the store and, with
-distribution, on every instance, and the next read loads a fresh one.
+copy, and the next read finds the value in the store again. The store's `withMaximumAgePerEntry(...)` does: the store
+serves the value no longer after its maximum age, and every instance drops its copy then.
 
 ## Remarks
 

@@ -63,8 +63,12 @@ final class MongoSchema {
     private static final int MINIMUM_WIRE_VERSION = 9;
     // the hash last, so that pruning to size ranks by the index alone (write time, ties by hash): without it, every
     // batch sorted all the cache's values in memory (a million in 194 s, measured)
-    private static final BsonDocument INDEX = new BsonDocument("_id.d", new BsonInt32(1))
+    private static final String DISCRIMINATOR = "_id.d";
+    private static final BsonDocument INDEX = new BsonDocument(DISCRIMINATOR, new BsonInt32(1))
             .append("state", new BsonInt32(1)).append("writeTime", new BsonInt32(1)).append("_id.h", new BsonInt32(1));
+    // the documents with an expiry time of their own (Write#expireAfterCreate), for expiry by it (MongoStore#expire)
+    private static final BsonDocument EXPIRY_INDEX = new BsonDocument(DISCRIMINATOR, new BsonInt32(1))
+            .append("expireTime", new BsonInt32(1));
 
     private MongoSchema() {
     }
@@ -112,6 +116,8 @@ final class MongoSchema {
                 collection.updateOne(Filters.eq("_id", MongoLocation.MARKER_ID),
                         Updates.setOnInsert(MARKER_FIELD, MongoLocation.MARKER), new UpdateOptions().upsert(true));
                 collection.createIndex(INDEX, new IndexOptions().name("distributed-caffeine"));
+                collection.createIndex(EXPIRY_INDEX, new IndexOptions().name("distributed-caffeine-expiry")
+                        .partialFilterExpression(Filters.exists("expireTime")));
                 LOGGER.log(Level.INFO, "{0}: Created the collection with its schema marker and index", location.name());
             }
             checkIndex(collection, location);
@@ -246,7 +252,7 @@ final class MongoSchema {
                     false);
         }
         boolean empty = collection.find().limit(1).first() == null;
-        if (!empty && collection.find(Filters.or(Filters.exists("discriminator"), Filters.exists("_id.d")))
+        if (!empty && collection.find(Filters.or(Filters.exists("discriminator"), Filters.exists(DISCRIMINATOR)))
                 .limit(1).first() == null) {
             throw new StoreException("Collection " + location + " holds documents that are not distributed-"
                     + "caffeine's; withSchemaReset() drops only collections of distributed-caffeine. Configure "

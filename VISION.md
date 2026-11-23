@@ -437,12 +437,7 @@ After the Linux baseline (see "Performance: the baseline"), each only if measure
 ### Features
 
 *Next:*
-- **the store's expiry like Caffeine's** (see "The store's expiry like Caffeine's", designing 2026-11-20; chosen as the
-  next feature without an integration): fixed (`withExpireAfterWrite`, renamed from `withMaximumAge`) or variable per
-  entry (`withExpiry(StoreExpiry)`, creation and update), one of the two, as Caffeine's; held and announced by the
-  store; access-based expiry stays the local copies'. An SPI and layout change, in 0.10.0 (decided 2026-11-21), which
-  resets the stored layout anyway: 0.10.0 waits for it;
-- **then the change listener** (see "Change listener", designed 2026-11-20; put before the JCache provider by the user's
+- **the change listener** (see "Change listener", designed 2026-11-20; put before the JCache provider by the user's
   choice, 2026-11-20, after the expiry per entry): every instance's changes for any application, from the messages
   already sent, so no store mechanism: derived local state kept in step, other local layers invalidated, changes pushed
   to clients, settings in the cache followed, auditing; today an application sees only its own copies leaving
@@ -454,6 +449,11 @@ After the Linux baseline (see "Performance: the baseline"), each only if measure
   listener after; the TCK as its acceptance;
 
 *On demand:*
+- **creation, update and keep for the maximum age per entry** (noted 2026-11-21, see "Maximum age per entry", levels
+  2 and 3): an expiry set at a key's creation and kept across its updates (Caffeine's `Expiry.creating`, JSR-107's
+  `CreatedExpiryPolicy`), separate creation and update ages; the likely trigger is a JCache provider meant to pass the
+  TCK. Built once and removed (the scratchpad patch `level3-store-expiry.patch`, to be kept outside the scratchpad);
+  additive to the API as it is. Until then the creation time in the value, carried by `compute`, covers it;
 - **A scan of all of a cache's rows** (noted 2026-11-20, from the JCache draft): a new SPI operation, paged, for every
   adapter (a store reads rows by hash only today; the scan of polled stores covers a time window, and not every store
   has one). For plain users an explicit operation beside the views, which stay local by decision (see "Conditional
@@ -1647,7 +1647,7 @@ property test green on every profile at 600 phases over several batches of seeds
 
 ### Maximum age: expiry is distributed, the copies capped by it
 
-The store's maximum age (to be renamed the store's expiry after write, see "The store's expiry like Caffeine's") decides
+The store's maximum age (for all values; per entry, see "Maximum age per entry") decides
 how long a value is valid, counted from its row's last write on the store's clock; Caffeine's settings decide how long
 this instance keeps its copies, within it. Enforced in three places:
 - **On read:** the store returns rows older than the maximum age as expired, so a store read never serves an expired
@@ -1714,141 +1714,66 @@ the copies is what is new.
 - **Tests:** `InternalCoreTest` (on every store: sharing within the age, copies kept after it, atomic methods on
   expired and on pruned rows) and `DistributedCaffeineTest` (validation, prune grace). Not in the property test.
 
-### The store's expiry like Caffeine's: fixed or variable (designing 2026-11-20, not built; for 0.10.0)
+### Maximum age per entry
 
-**What:** an expiry per entry, held by the store, beside the fixed one for all entries it has today, so that one key
-expires on every instance after its own duration: maintenance expires each row at its time, deletes it later and
-announces it (`EXPIRED`), reads filter expired rows in the store, and every local copy is capped at what its row has
-left, as it is at the fixed expiry today (`InternalExpiry`, `InternalValue#age`). The most asked-for expiry of
-distributed caches (a time to live per key, as Redis users set one with every write); today the store knows one duration
-per cache, and Caffeine's variable expiry acts on this instance's copies only. Chosen 2026-11-20 as the next feature
-without an integration (also the store field the JCache draft recommends for its per-entry policies).
+*Designed 2026-11-20 as the store's expiry like Caffeine's (fixed or variable, creation and update), built 2026-11-21 in
+its slimmest form for 0.10.0, decided with the user the same day.*
 
-**Aligned with Caffeine (decided 2026-11-21):** the store's expiry mirrors Caffeine's write-based expiry, which users
-know: fixed or variable, one of the two, combining both refused, as Caffeine's builder refuses `expireAfterWrite` with
-`expireAfter(Expiry)`. One sentence explains it: the store's expiry works like Caffeine's, a fixed expiry after write or
-a variable expiry per entry; the local copies follow Caffeine's own settings within it. So there is no cap between two
-store settings to reason about.
+**What:** `withStore(store -> store.withMaximumAgePerEntry((key, value) -> age))`: each value's own maximum age,
+computed per key and value on every write, instead of one for all (`withMaximumAge`, one of the two: refused together,
+and with `withMaximumAgeForStoreOnly()`, whose trust rules rest on one age for all). The store keeps it as the row's
+expiry time; reads count a row past it as expired; maintenance expires it, announced (`EXPIRED`); every copy is capped
+at it, as at the maximum age (`InternalExpiry`), whatever the distribution mode. `distributedPolicy().store()
+.maximumAgePerEntry()` writes a value with an age of its own (`MaximumAgePerEntry#put`), as Caffeine's
+`policy().expireVariably()`.
 
-| | Caffeine (the local copies) | The store |
-|---|---|---|
-| fixed, every entry, from its last write | `expireAfterWrite(d)` | `withExpireAfterWrite(d)` (renamed from `withMaximumAge`) |
-| variable, per entry | `expireAfter(Expiry)` | `withExpiry(StoreExpiry)` |
-| ready-made forms | `Expiry.writing((k, v) -> d)`, `Expiry.creating((k, v) -> d)` | `StoreExpiry.writing((k, v) -> d)`, `StoreExpiry.creating((k, v) -> d)` |
-| general form | `Expiry`: create, update, read | `StoreExpiry`: create, update (`null` keeping), no read |
-| at runtime, fixed | `policy().expireAfterWrite()`: `getExpiresAfter`, `setExpiresAfter` | `distributedPolicy().store().expireAfterWrite()`, the same names |
-| at runtime, variable | `policy().expireVariably()`: `put(k, v, d)` and others | `distributedPolicy().store().expireVariably()`: a duration per write |
-| access-based | `expireAfterAccess(d)`, `Expiry.expireAfterRead` | none: the local copies' (below) |
-| fixed and variable together | refused | refused |
+**Every write sets it anew, whatever the row held:** the one rule that makes it cheap. The writing instance knows the
+age before the write, so its copy gets exactly the row's time; no write branches on the row's state, no write reads.
 
-**The vocabulary, Caffeine's (2026-11-21):** the callbacks are named after single events (`expireAfterCreate`,
-`expireAfterUpdate`; Caffeine adds `expireAfterRead`), the fixed setting and the factories after which events renew the
-expiry: write is creation and update (`withExpireAfterWrite`, `StoreExpiry.writing`, as Caffeine's `expireAfterWrite`
-and `Expiry.writing`: "after the entry's creation or replacement of its value"), creating is creation alone
-(`StoreExpiry.creating`, as `Expiry.creating`, with no fixed setting in Caffeine either). Caffeine's access, creation
-and update and reading (`expireAfterAccess`, `Expiry.accessing`), is not supported by the store, for the reason below:
-no `withExpireAfterAccess`, no `StoreExpiry.accessing`, no read callback.
+**A lifetime from the first write is kept in the value,** not in the store: a creation time in the value, carried over
+by `asMap().compute(...)`, the function returning what is left of it (README, "Store"). `compute` sees a key an
+`invalidateAll` hid as absent, so it starts anew there, as it should, and is atomic across instances. The read moves to
+the application, visible and chosen; the clocks of the writing instance and the store differ by their skew.
 
-**Access stays local (decided 2026-11-21):** Caffeine's `expireAfterAccess` and `Expiry`'s `expireAfterRead` (JSR-107's
-`Accessed` and `Touched`, Hazelcast's maximum idle time) have no store counterpart: every read would become a write
-(Redis's `GETEX`, an `UPDATE`, a MongoDB write), and still be wrong, as reads served from the local copies never reach
-the store. They stay Caffeine's, on this instance's copies, within the store's expiry. The store mirrors Caffeine's
-write-based expiry; access-based expiry is the local copies', which the Javadoc and the README say, so that nobody looks
-for a store `withExpireAfterAccess`.
+**Three levels weighed (2026-11-21):**
+1. *This one,* one age per write. Accepted: no expiry from creation kept by the store (the pattern above instead), no
+   separate creation and update durations.
+2. *Creation, update and keep in the SPI, the public API as 1:* the store branch built and tested for a later JCache
+   provider. Not taken: built ahead of a JCache decision no one has made; SPI changes are welcome in 0.x.
+3. *Creation, update and keep public* (`StoreExpiry` with `writing` and `creating`, as Caffeine's `Expiry`): built
+   first and green on every store, then removed. Keep (an update leaving the row's time) made a write of a key not held
+   here unable to know its copy's time (fixed by a read after the write, the same on every store; a report of the time
+   with the write's result was rejected as a mix by store: MariaDB/MySQL and MongoDB's bulk write cannot give it), and
+   a row an `invalidateAll` hid still held a value for the store, so an update kept its earlier time (no uniform fix:
+   MongoDB's update pipeline cannot read the control row). `currentDuration` would make `put` a conditional write.
+   Adding 3 later breaks no one; removing it would. Saved as a patch (the scratchpad's
+   `level3-store-expiry.patch`, to be kept with the JCache work).
 
-**The rename (decided 2026-11-21, part of building this):** `withMaximumAge` becomes `withExpireAfterWrite`,
-`withMaximumAgeForStoreOnly` `withExpireAfterWriteForStoreOnly`, the policy's `maximumAge()` with `MaximumAge`
-(`getMaximumAge`, `setMaximumAge`) `expireAfterWrite()` with `getExpiresAfter` and `setExpiresAfter`, as Caffeine's
-`FixedExpiration`; the README and the Javadoc call it the store's expiry after write, VISION's current sections follow
-(its history keeps "maximum age", the name of the time). A breaking change of the API, within the release that brings
-the feature.
+**Names:** the maximum age stays (the rename to `withExpireAfterWrite` decided earlier that day reversed): distinct
+names for the store's values and the copies, Caffeine's `expireAfterWrite`, keep the central point visible (the maximum
+age is the lifetime of a value, not of a copy), and match `StoredValue.age` and `invalidateAllOlderThan`.
 
-**The variable expiry:** `StoreExpiry<K, V>` with `expireAfterCreate(key, value)` for a key without a value (a tombstone
-or an expired row counting as none) and `expireAfterUpdate(key, value)` for one with a value, returning a duration, or
-`null` to keep the row's expiry: separate durations for creation and update, as JSR-107's `ExpiryPolicy` allows (a
-custom policy may return different ones; its five shipped policies use one duration or keep). Factories after
-Caffeine's, taking functions as Caffeine's do: `StoreExpiry.writing(...)` (renewed on every write) and
-`StoreExpiry.creating(...)` (set when the key gets a value, kept across updates); a duration or an absolute point in
-time (an `Instant`, "expire at the end of the day", on the writing instance's clock, the one place its clock matters); a
-duration per write through the policy. Per entry, as Caffeine's `Expiry` (functions of key and value), unlike JSR-107,
-whose policy is per cache and gets no key (per operation only as a vendor extension: Hazelcast's
-`ICache.put(key, value, expiryPolicy)`).
-
-**Deciding in the write:** the writing instance computes both durations before the write, and the write carries both;
-the store applies the creation's where the key holds no value and the update's (or keeps its own) where it does, in the
-same statement: a Redis script, a `CASE` in the SQL upsert, a MongoDB pipeline update; every store the SPI admits
-evaluates the row's state in its writes already (the conditions), so this asks for nothing new of a future adapter but a
-branch (SQL Server and Oracle `MERGE`, CockroachDB and YugabyteDB the PostgreSQL upsert, etcd a transaction's else;
-DynamoDB has no branch in an update, only `if_not_exists`, so it would need two attempts where the durations differ). No
-read, no report back: a `put` stays an unconditional advancing write, and a batch stays alike for all its keys.
-
-**Guarantee (full, as for the fixed expiry):** a value is served at most its entry's duration after its write, on every
-instance, whatever the Caffeine configuration, late by the round trip between the store's read and the install at most
-(as `InternalExpiry` bounds the fixed expiry): reads never return a row past its time, and every copy is capped at what
-its row had left when read, computed from the row's age on the store's clock and counted down locally, so the instances'
-clocks do not matter. Maintenance is not part of the bound: it announces the expiry (`EXPIRED`, for the change listener
-and the statistics) and deletes the rows.
-
-**In the core:**
-- **The heartbeat** is derived from the fixed expiry (at most a fifth of it, at most a minute); with the variable expiry
-  there is none to derive from, so the minute applies, as for a cache without an expiry today.
-- **The store-only mode** (`withExpireAfterWriteForStoreOnly`) requires the fixed expiry, as its name says, and is
-  refused with the variable one: its trust rules rest on the store letting go of no row younger than the fixed expiry
-  since its last write, which an expiry per entry breaks.
-- **At runtime** the fixed expiry stays adjustable for every row at once (the store computes it from the write time on
-  every read and maintenance run); a variable duration is fixed when its row is written, so a changed function applies
-  to later writes, as in Caffeine.
-- **Copies** carry their row's duration beside its age, so that `InternalExpiry` caps them at the row's own time where
-  it has one.
-
-**Store side (an SPI change for every adapter, a layout change):**
-- `Write` carries the creation's and the update's duration (or keep, or none: the fixed expiry alone); the store keeps
-  an absolute expiry time on its own clock in a new column or field, indexed for maintenance: a column with an index in
-  PostgreSQL, MariaDB and MySQL, a field with an index in MongoDB, a second sorted set in Redis beside the one by write
-  time, scored by the expiry time and holding only rows with one (not the key's own TTL, which deletes silently, without
-  the version and the `EXPIRED` announcement maintenance gives, and would leave the write-time set holding a member
-  whose row is gone).
-- `Row` carries the entry's duration; `read` and `readVersions` return a row past its time as expired, as one past the
-  fixed expiry; `expire` marks rows past their time, with a version, announced as `EXPIRED`, in batches by the new
-  index; pruning, tombstones and the control row are unchanged.
-- Every adapter's contract tests gain the cases (a row past its time, a creation's and an update's duration, keep across
-  updates, maintenance's batches by the index), and the in-memory store's profiles model it; existing places are reset
-  through the schema marker.
-
-**`currentDuration`, deferred (decided 2026-11-21):** Caffeine's `expireAfterUpdate` gets the time left, for functions
-of it (extend by a tenth, the later of the current and another); the store's keep needs no value, but such a function
-does. Recorded as a step on demand: a copy held here knows its row's time left (its duration and age when read, counted
-down locally), so a variant would cost one round trip with a trusted copy held (the write conditional on the copy's
-version, a row changed elsewhere meanwhile conflicting and decided again on a fresh read) and a read first where the key
-is not held. Not in the first version, the one tricky part: it turns `put` into a conditional write (conflicts,
-decisions repeated, other rules for an unknown outcome: a second write path for the most common operation), rests on the
-copy being current, makes batches mixed, and its time left is late by a round trip; and little needs it (JSR-107's
-`getExpiryForUpdate()` has no time left, Redis's `KEEPTTL`, `EXPIREAT` and `PERSIST` neither, Caffeine's typical uses
-are `writing` and `creating`).
-
-**Measured against the others:** JSR-107's `Eternal` (no expiry), `Created` (`creating`) and `Modified` (`writing`) map
-onto it, `Accessed` and `Touched` stay the local copies'; Redis's `EXPIREAT` is the `Instant`, `PERSIST` an entry
-without a duration, `KEEPTTL` the update's `null`, its `GT` and `LT` (change the expiry only to a later or an earlier
-time) a candidate the store could apply in the write as it does keep; FusionCache's jittering (a small random extra per
-entry) belongs in the function; Ehcache 3's `ExpiryPolicy` (create, access, update, `null` keeping) has JSR-107's shape.
-
-**Where it costs:** no extra round trips (every write decides its expiry in the store, reads filter by the field in the
-same query); a field per row (eight bytes) and its index, or a member of Redis's second sorted set per row with a
-duration; maintaining that index on the writes setting or changing a duration; one more maintenance query per run by the
-new index, nothing where no row has a duration of its own; the user's functions called on every write in the caller's
-thread; eight bytes per copy for its row's duration. Once: a layout change resetting every existing place (a cold start
-per cache), the rename breaking the API, an SPI change across five adapters and the in-memory store with their contract
-tests and the property test.
-
-**The release: 0.10.0 (decided 2026-11-21).** 0.10.0 breaks the stored layout and the API already (the hash format), so
-the users go through one reset and one round of renames, and the marker stays `schema=1 hash=xxh3-128/1` (new in 0.10.0
-anyway, no second layout number). 0.10.0 waits for the whole feature: every adapter, the contract, the property test,
-the rename.
-
-**Tests:** the store contract on every store and profile; two instances on every store (a key expiring on both after its
-duration, a copy read late capped at its row's time left, a rewrite renewing it, `creating` keeping it, fixed and
-variable refused together, the store-only mode refused with the variable expiry); the property test with random
-durations, its oracle extended by the entries' expiry.
+**As built:**
+- **SPI:** `Write#expiresAfter` (`expiring(age)`; values only, at most `Write.MAX_EXPIRY`, the 292 years of a long in
+  nanoseconds the core takes for "never"); `Row#expiresAfter` and `PrimitiveStore.Head#expiresAfter`, from the row's
+  write time like the age; `read`, `readVersions` and `expire` keep their signatures and take a row past either age as
+  expired. `PrimitiveStore`'s primitives take the age.
+- **Adapters:** the store's time plus the age, cleared by tombstones, expiries and writes without one. PostgreSQL:
+  `expire_time` (`checkShape` requires it), a partial index on `(discriminator, expire_time)`, `expire` first by it.
+  MariaDB/MySQL: `expire_time`, no index (maintenance scans the cache's rows). MongoDB: `expireTime` with a partial
+  index, `expire` first by it; a missing field is tested with `$ifNull`, as BSON orders it before every date. Redis:
+  hash field `x` and a sorted set `expiring` (`KEYS[6]` of the writing and maintenance scripts, the rows after it),
+  touched only by rows with an age of their own. The marker stays `schema=1 hash=xxh3-128/1`, new in 0.10.0.
+- **Core:** `valueWrite` calls the function (negative ages taken as zero, longer ones as `MAX_EXPIRY`); every copy
+  carries its row's lifetime (`InternalValue#lifetime`; `InternalExpiry#latestExpiry` caps at the shorter of it and the
+  maximum age), a copy of its own write the write's age. Maintenance calls `expire` also without a maximum age for all.
+  The polling store's touch carries what is left of a row's age.
+- **Tests:** the store contract (`contract7_read_returns_value_rows_past_their_own_expiry_...`,
+  `contract7_every_write_sets_the_rows_own_maximum_age_anew_or_clears_it`, `contract7_expire_marks_...`,
+  `contract5_concurrent_expiry_expires_every_row_past_its_own_expiry_once`) on every store; `InternalCoreTest` on every
+  store (a copy read late capped at its row's time, a rewrite renewing it and the creation time in the value, the
+  policy's write, maintenance); `DistributedCaffeineTest` (the refused combinations); the property test's variant with
+  ages of 30 ms, 100 ms and an hour per value, threaded and deterministic on every profile.
 
 ### Store bounds at runtime
 
@@ -4197,12 +4122,14 @@ released); a later layout change counts up from there.
   lower order; the markers without pairs of the versions before the hash format, `distributed-caffeine schema 1` and
   Redis's `1`; a table or collection without one but of the earliest layout: MongoDB a document with a top-level
   `discriminator`, or one of the current layout whose marker was lost, `_id.d`; PostgreSQL no comment and the columns
-  `discriminator`, `hash`, `status`, `timestamp`) or an empty one. A place of a **later** version is never dropped,
-  also with the option, so that two versions left with it on cannot drop each other's place in turns; the older one
-  fails, naming the later marker, and going back means dropping the place by hand. Foreign data is refused, with or
-  without the option. Redis and MariaDB/MySQL have no reset: they refuse a place of another version, naming whether
-  it is earlier or later. Tests: `StoreMarkerTest` (the order), `MongoAdapterTest` and `PostgresAdapterTest`
-  (`a_..._of_an_earlier_version_is_refused_unless_it_is_reset`, `a_reset_never_drops_...`).
+  `discriminator`, `hash`, `status`, `timestamp`; MongoDB's top-level `discriminator` came with 0.3.0, so collections of
+  0.1.0 and 0.2.0 count as foreign, which the user decided on 2026-11-21: no rollout from them is expected) or an empty
+  one. A place of a **later** version is never dropped, also with the option, so that two versions left with it on
+  cannot drop each other's place in turns; the older one fails, naming the later marker, and going back means dropping
+  the place by hand. Foreign data is refused, with or without the option. Redis and MariaDB/MySQL have no reset: they
+  refuse a place of another version, naming whether it is earlier or later. Tests: `StoreMarkerTest` (the order),
+  `MongoAdapterTest` and `PostgresAdapterTest` (`a_..._of_an_earlier_version_is_refused_unless_it_is_reset`,
+  `a_reset_never_drops_...`).
 - **Why not drop automatically:** instances of the other layout still running on the place fail (errors on
   PostgreSQL, an `invalidate` event ending their change streams on MongoDB) and may recreate it, so the two layouts
   would drop each other's place in turns; caches sharing the place through the discriminator would be hit too;
@@ -4226,12 +4153,44 @@ cache, with or without `withSchemaReset()`, deletes the documents with an Object
 layout's are the marker's string and `{d, h}` documents). The built-in `_id` index bounds `$type: "objectId"` to the
 ObjectId range: `explain` on MongoDB 4.4 and 9 with 100,000 new and 1,000 old documents examined the 1,000 old ones
 only, and no key once they were gone, so a start costs one index probe. Considered first: the cleanup in the reset
-(finds nothing: the drop has just removed everything, the leftovers come later) and in maintenance (a run forever for
+(finds nothing: the drop has just removed everything, the leftovers come later), with `withSchemaReset()` only (a
+one-time switch users remove after the upgrade, so the starts after the rollout, which find the last leftovers, would
+not clean) and in maintenance (a run forever for
 a one-time migration). Running old instances lose their store copies, as with the drop, so no grace period; a start
 after the rollout removes what the last old instances wrote. Best effort: a failure (a timeout after a long rollout)
 only warns, the next start goes on. Deletes are outside the change stream's filter, so no new cache hears of them;
 0.7.0 instances keep their local copies (`MigrationExperimentTest`, and `MongoAdapterTest` without the release). To be
 removed once no rollout from 0.x is expected (listed under "Open work").
+
+**Upgrading from 0.8 and 0.9 to 0.10.0 (the hash format; decided 2026-11-21, not yet tested against the published
+0.9.0):** every place of an earlier version needs the reset, as the row ids changed: 0.10.0 refuses to start on one. The
+reset is complete (the place dropped and recreated with the new marker); only a rolling update's window, old instances
+still writing after the first new start dropped the place, leaves something behind, and only on the stores with a reset.
+0.8 and 0.9 share the layout, so their rows land in the recreated place under their old ids: never read (an id no key
+has under the new hash), but value rows like any other for maintenance, which works on every row of the discriminator
+whatever its id: expired at the maximum age and deleted after the tombstone retention, ranked by write time for the
+maximum size; one `invalidateAll()` after the rollout removes them at the next maintenance run (the control row hides
+them, no grace period). Without a maximum age or size they stay until that or the place's drop. 0.9 instances, running
+maintenance with their own settings, expire and prune the new rows the same way; 0.9 never drops a collection with
+another marker, also with `withSchemaReset()` (its `requireResettable`), so the versions cannot drop each other's place.
+During the window neither version sees the other's single-key writes: copies can be stale across versions until they
+expire or the rollout ends. From 0.7 on PostgreSQL the old instances' writes fail in the recreated table (other
+columns), so they leave nothing but fail during the window; on MongoDB the cleanup above removes what they write.
+
+**The upgrade paths, for the release notes and the READMEs:** stop all instances of the earlier version, then start with
+`withSchemaReset()` or drop the place by hand (nothing old, no staleness, a pause); a rolling update with
+`withSchemaReset()` on the same place (the leftovers age out, or go with one `invalidateAll()` afterwards; stale copies
+across versions during the window, bounded by the maximum age; not from 0.7 on PostgreSQL); or a rolling update onto a
+new place, the old one dropped by hand afterwards (nothing old in the new place, the same staleness, on every store;
+Redis and MariaDB/MySQL have no reset anyway).
+
+**Weighed and not taken:** both versions coexisting in one place without the reset (a "compatible" relation of markers
+differing only in the hash format, in every adapter; no way to tell when to switch the marker, as 0.10.0 cannot see the
+last 0.9 instance go; pruning shared between the versions; the leftovers removable only by a scan recomputing each row's
+id from its stored key), and a bridge removing the staleness across versions (0.9's hash algorithm kept to tombstone the
+old id, a second feed matching the old ids by hashing the held keys the old way). Both are code in every adapter for a
+one-time upgrade, returning with every later hash format, while a pause or a new place covers the need (complexity
+budget).
 
 ### Supported store versions
 
@@ -5661,8 +5620,8 @@ does; Hazelcast takes one, running them on the owner. Access expiry stays per in
 take a write per read.
 
 **So the extensions it would use are core features of their own** (see "Open work": "The write telling what it replaced"
-under Performance, "A scan of all of a cache's rows" under Features, and "The store's expiry like Caffeine's", the next
-feature), each judged and measured for every user, JCache becoming cheaper and more complete with them. Without any the
+under Performance, "A scan of all of a cache's rows" under Features, and "Maximum age per entry", built in 0.10.0 with
+one age per write; its creation and update with keep are level 3 there), each judged and measured for every user, JCache becoming cheaper and more complete with them. Without any the
 provider still works: reads where the answers are needed, `iterator()` and `removeAll()` over this instance's copies,
 and expiry per entry where it differs from the store's maximum age (`CreatedExpiryPolicy`'s creation time kept across
 updates) held by this instance's copies only, as access expiry is; `Duration.ZERO` at creation needs nothing (the entry
@@ -7074,3 +7033,5 @@ and the client notes, costs entry, README and release notes. Found and fixed on 
   age, and the local copies are no longer bounded by it. Not taken from the proposal: misses skipping the store (a
   second load path with its own version and trust rules, for one round trip per miss), and values not written
   with `INVALIDATE` (`UPDATE`, the atomic methods and the misses within the age read them);
+- **built 2026-11-21** (see "Maximum age per entry"): the store's expiry per entry, in its slimmest form (one age per
+  write, `withMaximumAgePerEntry`); an SPI and layout change in 0.10.0;

@@ -44,6 +44,8 @@ final class PostgresTable {
     // "schema"."table", quoted, so case is kept
     final String qualified;
     final String indexName;
+    // the index of the rows with an expiry of their own, for maintenance (PostgresStore#expire)
+    final String expiryIndexName;
     // "schema"."table_versions", quoted: the floor of every version the store assigns (PostgresStore#write)
     final String sequence;
     final String channel;
@@ -56,6 +58,7 @@ final class PostgresTable {
         this.valueFormat = valueFormat;
         this.qualified = quote(schemaName) + "." + quote(tableName);
         this.indexName = derivedName(tableName + "_maintenance");
+        this.expiryIndexName = derivedName(tableName + "_expiry");
         this.sequence = quote(schemaName) + "." + quote(derivedName(tableName + "_versions"));
         this.channel = derivedName("dc_" + schemaName + "." + tableName + "." + discriminator);
     }
@@ -116,11 +119,13 @@ final class PostgresTable {
                     state text NOT NULL,
                     version bigint NOT NULL,
                     write_time timestamptz NOT NULL,
+                    expire_time timestamptz,
                     PRIMARY KEY (discriminator, id));
                 ALTER SEQUENCE %6$s OWNED BY %1$s.version;
                 CREATE INDEX %4$s ON %1$s (discriminator, state, write_time);
+                CREATE INDEX %7$s ON %1$s (discriminator, expire_time) WHERE expire_time IS NOT NULL;
                 COMMENT ON TABLE %1$s IS '%5$s';""".formatted(qualified, columnType(keyFormat),
-                columnType(valueFormat), quote(indexName), MARKER, sequence);
+                columnType(valueFormat), quote(indexName), MARKER, sequence, quote(expiryIndexName));
     }
 
     // the cache's name, as its log messages begin with it (the adapter's toString)

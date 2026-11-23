@@ -35,10 +35,13 @@ import static java.util.Objects.requireNonNull;
  * @param age     how long ago the row was written, by the store's clock; the ages of one read are measured at the
  *                same instant, so they compare like the times of the writes; negative for a row written after that
  *                instant, as it is
+ * @param expiresAfter the row's own maximum age ({@link Write#expiresAfter()}), counted from its last write like the
+ *                age: the row counts as expired once its age reaches it; {@code null} for a row without one
  * @author Andreas Oberhoff
  */
 @SuppressWarnings("ArrayRecordComponent") // equals, hashCode and toString below compare and show the contents
-public record Row(String hash, byte[] key, byte @Nullable [] value, State state, long version, Duration age) {
+public record Row(String hash, byte[] key, byte @Nullable [] value, State state, long version, Duration age,
+                  @Nullable Duration expiresAfter) {
 
     /**
      * Constructs a Row, checking its components.
@@ -52,6 +55,7 @@ public record Row(String hash, byte[] key, byte @Nullable [] value, State state,
      * @param age     how long ago the row was written, by the store's clock; the ages of one read are measured at the
      *                same instant, so they compare like the times of the writes; negative for a row written after that
      *                instant, as it is
+     * @param expiresAfter the row's own maximum age, counted from its last write; {@code null} for none
      */
     public Row {
         requireNonNull(hash, "hash cannot be null");
@@ -63,6 +67,20 @@ public record Row(String hash, byte[] key, byte @Nullable [] value, State state,
         }
     }
 
+    /**
+     * Constructs a Row without an expiry of its own.
+     *
+     * @param hash    the hash of the key
+     * @param key     the serialized key
+     * @param value   the serialized value, {@code null} unless the state is {@link State#VALUE}
+     * @param state   the state of the row
+     * @param version the version the row's last write carried
+     * @param age     how long ago the row was written, by the store's clock
+     */
+    public Row(String hash, byte[] key, byte @Nullable [] value, State state, long version, Duration age) {
+        this(hash, key, value, state, version, age, null);
+    }
+
     @Override
     public boolean equals(@Nullable Object object) {
         return object instanceof Row that
@@ -71,17 +89,19 @@ public record Row(String hash, byte[] key, byte @Nullable [] value, State state,
                 && Arrays.equals(value, that.value)
                 && state == that.state
                 && version == that.version
-                && age.equals(that.age);
+                && age.equals(that.age)
+                && Objects.equals(expiresAfter, that.expiresAfter);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(hash, Arrays.hashCode(key), Arrays.hashCode(value), state, version, age);
+        return Objects.hash(hash, Arrays.hashCode(key), Arrays.hashCode(value), state, version, age, expiresAfter);
     }
 
     @Override
     public String toString() {
-        return "Row[hash=" + hash + ", state=" + state + ", version=" + version + ", age=" + age + ", key="
+        return "Row[hash=" + hash + ", state=" + state + ", version=" + version + ", age=" + age
+                + (expiresAfter == null ? "" : ", expiresAfter=" + expiresAfter) + ", key="
                 + key.length + " bytes, value=" + (value == null ? "none" : value.length + " bytes") + "]";
     }
 }

@@ -90,9 +90,9 @@ public interface Store extends AutoCloseable {
     // reads
 
     /**
-     * Reads rows. Returns value rows younger than the maximum age, tombstones and expired rows, and value rows at
-     * least as old as the maximum age as {@link State#EXPIRED} (without value, with their version, so that a write
-     * can be conditioned on it); missing rows are omitted. Every row as it is, with its age, also rows the control
+     * Reads rows. Returns value rows younger than the maximum age and their own maximum age ({@link Row#expiresAfter()}),
+     * tombstones and expired rows, and value rows at least as old as either as {@link State#EXPIRED} (without value,
+     * with their version, so that a write can be conditioned on it); missing rows are omitted. Every row as it is, with its age, also rows the control
      * row hides (the core decides, comparing ages within the read).
      *
      * @param hashes the hashes to read
@@ -102,8 +102,8 @@ public interface Store extends AutoCloseable {
     Map<String, Row> read(Collection<String> hashes, Duration maxAge);
 
     /**
-     * Reads only the versions and ages of value rows younger than the maximum age ({@code containsKey}), also of
-     * rows the control row hides (the core decides).
+     * Reads only the versions and ages of value rows younger than the maximum age and their own expiry
+     * ({@code containsKey}), also of rows the control row hides (the core decides).
      *
      * @param hashes the hashes to read
      * @param maxAge the maximum age of a value row
@@ -139,7 +139,10 @@ public interface Store extends AutoCloseable {
      * Writes values and tombstones, each at its version and under its condition ({@link Write#expected()}),
      * atomically per key: advancing (only if no row exists or its version is smaller than the write's), only if the row
      * still has the expected version (whatever its state), or only if no row exists. A tombstone keeps the row's key,
-     * or has none where no row existed. Announces
+     * or has none where no row existed. A value's own maximum age ({@link Write#expiresAfter()}) is kept as an expiry
+     * time on the store's clock, the write's time plus it, whatever the row held before, and returned as
+     * {@link Row#expiresAfter()}; every other write clears it.
+     * Announces
      * {@link Change.Kind#WRITTEN} per value written and {@link Change.Kind#INVALIDATED} per tombstone written, at the
      * version it was applied at. A conflict writes nothing and announces nothing, with one allowance: a write on a
      * version that finds no row at all (deleted by maintenance since it was read) may leave a tombstone at the
@@ -174,7 +177,8 @@ public interface Store extends AutoCloseable {
     // every change is a step of its own anyway may change more in one call
 
     /**
-     * Marks value rows at least as old as the maximum age as expired, with the store's time as the new write time, so
+     * Marks value rows at least as old as the maximum age, or past their own expiry time, as expired, with the store's
+     * time as the new write time, so
      * that their grace period before {@link #pruneTombstones} counts from the expiry. Each expiry advances the row's
      * version, as a write does: conditionally, at the given version and only for rows whose version is smaller (the
      * others are left for a later run), or by assigning, at a version above the row's that the store chooses (the

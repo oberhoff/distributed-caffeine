@@ -245,13 +245,21 @@ final class InternalPollingStore implements Store, ChangeFeed {
     }
 
     // a row written again as it is, at a version above its own and only if it still has that version: a newer write
-    // announces itself, a deleted row has nothing to announce
+    // announces itself, a deleted row has nothing to announce. A value's own maximum age goes with it, what was left
+    // of it when read (StoreConfigurer#withMaximumAgePerEntry)
     private Write rewrite(String hash, Row row) {
         long version = clock.next(row.version());
         byte[] value = row.value();
-        return row.state() == State.VALUE && value != null
-                ? Write.value(hash, row.key(), value, version).ifVersion(row.version())
-                : Write.tombstone(hash, version).ifVersion(row.version());
+        if (row.state() != State.VALUE || value == null) {
+            return Write.tombstone(hash, version).ifVersion(row.version());
+        }
+        Write write = Write.value(hash, row.key(), value, version).ifVersion(row.version());
+        Duration expiresAfter = row.expiresAfter();
+        if (expiresAfter == null) {
+            return write;
+        }
+        Duration left = expiresAfter.minus(row.age());
+        return write.expiring(left.isNegative() ? Duration.ZERO : left);
     }
 
     // a closed executor ends the polling with the cache

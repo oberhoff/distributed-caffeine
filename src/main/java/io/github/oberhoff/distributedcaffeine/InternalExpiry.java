@@ -34,7 +34,8 @@ import java.util.concurrent.TimeUnit;
  * plus what was left of that age then (InternalValue#age). Counted from the install alone, a copy of a row read when
  * already old would live up to twice the maximum age after the write, and with DistributionMode.NONE, or a message lost
  * unnoticed, that copy is served all along. A read never lengthens a copy beyond. The bound is late by the time between
- * the store's read and the install, a round trip at most.
+ * the store's read and the install, a round trip at most. A row with a maximum age of its own
+ * (StoreConfigurer#withMaximumAgePerEntry) caps its copies the same way at it (InternalValue#lifetime).
  *
  * @author Andreas Oberhoff
  */
@@ -207,13 +208,15 @@ final class InternalExpiry<K, V> implements Expiry<InternalKey<K>, InternalValue
         return from(currentTime, until);
     }
 
-    // when a copy must go at the latest: the store's maximum age after its row's write, that is its install plus what
-    // was left of the age then. Computed from the age as it is now, not kept from the install, so that a maximum age
-    // set later applies to the copies held too
+    // when a copy must go at the latest: the store's maximum age after its row's write, or the row's own if shorter,
+    // that is its install plus what was left of it then. Computed from the age as it is now, not kept from the
+    // install, so that a maximum age set later applies to the copies held too
     private long latestExpiry(InternalValue<V> value) {
         long age = value.version() == InternalVersion.UNCONFIRMED ? Math.min(maximumAge, unconfirmedMaximumAge)
                 : maximumAge;
-        return plus(value.installedAt(), Math.max(0, age - value.age()));
+        long lifetime = value.lifetime();
+        long limit = lifetime == InternalValue.NONE ? age : Math.min(age, lifetime);
+        return plus(value.installedAt(), Math.max(0, limit - value.age()));
     }
 
     // the nanoseconds from now until then (none if passed); a saturated time stays unbounded, as Caffeine's ticker may

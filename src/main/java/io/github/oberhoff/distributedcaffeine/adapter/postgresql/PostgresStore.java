@@ -89,6 +89,13 @@ final class PostgresStore implements Store, ChangeFeed {
     // the same two on the row of a lookup, aliased r
     private static final String ROW_AGE_MICROS = AGE_MICROS.replace("write_time", "r.write_time");
     private static final String ROW_YOUNGER = YOUNGER.replace("write_time", "r.write_time");
+    // a value row r not past its own expiry time (Write#expiresAfter), and that maximum age from its write time
+    private static final String ROW_NOT_PAST = "(r.expire_time IS NULL OR r.expire_time > now())";
+    private static final String ROW_EXPIRES_AFTER_MICROS =
+            "(extract(epoch from (r.expire_time - r.write_time)) * 1000000)::bigint";
+    // the value's own expiry time a write sets (Write#expiresAfter): now() plus its maximum age in microseconds (the
+    // VALUES' exp), NULL without one
+    private static final String EXPIRY_TIME = "now() + i.exp * interval '1 microsecond'";
     // the core's reserved rows (Store#CONTROL_HASH, the heartbeat's): never touched by maintenance
     private static final String NOT_RESERVED = "left(r.id, 1) <> '#'";
     // physical connections checked for not being a standby, once each (weakly held, as the pool's connections come
@@ -150,11 +157,12 @@ final class PostgresStore implements Store, ChangeFeed {
     public Map<String, Row> read(Collection<String> hashes, Duration maxAge) {
         String sql = """
                 SELECT r.id, r.key, r.value,
-                    CASE WHEN r.state = 'VALUE' AND NOT (%s) THEN 'EXPIRED' ELSE r.state END,
-                    r.version, %s
+                    CASE WHEN r.state = 'VALUE' AND NOT (%s AND %s) THEN 'EXPIRED' ELSE r.state END,
+                    r.version, %s, %s
                 FROM unnest(?::text[]) AS i (id)
                     CROSS JOIN LATERAL (SELECT * FROM %s AS r WHERE r.discriminator = ? AND r.id = i.id
-                        LIMIT 1) AS r""".formatted(ROW_YOUNGER, ROW_AGE_MICROS, t);
+                        LIMIT 1) AS r""".formatted(ROW_YOUNGER, ROW_NOT_PAST, ROW_AGE_MICROS,
+                ROW_EXPIRES_AFTER_MICROS, t);
         return run(Kind.READ, connection -> {
             Map<String, Row> rows = new LinkedHashMap<>();
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -185,7 +193,8 @@ final class PostgresStore implements Store, ChangeFeed {
                 SELECT r.id, r.version, %s
                 FROM unnest(?::text[]) AS i (id)
                     CROSS JOIN LATERAL (SELECT * FROM %s AS r WHERE r.discriminator = ? AND r.id = i.id
-                        AND r.state = 'VALUE' AND %s LIMIT 1) AS r""".formatted(ROW_AGE_MICROS, t, ROW_YOUNGER);
+                        AND r.state = 'VALUE' AND %s AND %s LIMIT 1) AS r""".formatted(ROW_AGE_MICROS, t, ROW_YOUNGER,
+                ROW_NOT_PAST);
         return run(Kind.READ, connection -> {
             Map<String, Long> versions = new LinkedHashMap<>();
             Map<String, Duration> ages = new LinkedHashMap<>();
@@ -239,25 +248,28 @@ final class PostgresStore implements Store, ChangeFeed {
         try {
             for (List<Write> chunk : chunks(new ArrayList<>(byHash.values()))) {
                 String sql = """
-                        WITH i (id, key, value, expected) AS (VALUES %1$s),
+                        WITH i (id, key, value, expected, exp) AS (VALUES %1$s),
                         a AS (
-                            INSERT INTO %2$s AS r (discriminator, id, key, value, state, version, write_time)
-                            SELECT ?, i.id, i.key, i.value, %3$s, %6$s, now() FROM i
+                            INSERT INTO %2$s AS r (discriminator, id, key, value, state, version, write_time,
+                                expire_time)
+                            SELECT ?, i.id, i.key, i.value, %3$s, %6$s, now(), %7$s FROM i
                             WHERE i.expected = %4$d
                             ORDER BY i.id
                             ON CONFLICT (discriminator, id) DO UPDATE SET key = coalesce(excluded.key, r.key),
                                 value = excluded.value, state = excluded.state,
-                                version = GREATEST(r.version + 1, %6$s), write_time = excluded.write_time
+                                version = GREATEST(r.version + 1, %6$s), write_time = excluded.write_time,
+                                expire_time = excluded.expire_time
                             RETURNING r.id, r.version, r.state),
                         u AS (
                             UPDATE %2$s AS r SET key = coalesce(i.key, r.key), value = i.value, state = %3$s,
-                                version = GREATEST(r.version + 1, %6$s), write_time = now()
+                                version = GREATEST(r.version + 1, %6$s), write_time = now(), expire_time = %7$s
                             FROM i WHERE r.discriminator = ? AND r.id = i.id AND i.expected > %4$d
                                 AND r.version = i.expected
                             RETURNING r.id, r.version, r.state),
                         n AS (
-                            INSERT INTO %2$s AS r (discriminator, id, key, value, state, version, write_time)
-                            SELECT ?, i.id, i.key, i.value, %3$s, %6$s, now() FROM i
+                            INSERT INTO %2$s AS r (discriminator, id, key, value, state, version, write_time,
+                                expire_time)
+                            SELECT ?, i.id, i.key, i.value, %3$s, %6$s, now(), %7$s FROM i
                             WHERE i.expected = %5$d
                             ORDER BY i.id
                             ON CONFLICT (discriminator, id) DO NOTHING
@@ -267,7 +279,7 @@ final class PostgresStore implements Store, ChangeFeed {
                             ELSE 'INVALIDATED|' END || w.id || '|' || w.version) FROM w"""
                         .formatted(rows(chunk.size()), t,
                                 "CASE WHEN i.value IS NULL THEN 'TOMBSTONE' ELSE 'VALUE' END", Write.ADVANCE,
-                                Write.MISSING, table.nextVersion());
+                                Write.MISSING, table.nextVersion(), EXPIRY_TIME);
                 Map<String, Long> written = run(Kind.WRITE, connection -> {
                     try (PreparedStatement statement = connection.prepareStatement(sql)) {
                         int index = bindWrites(statement, chunk);
@@ -341,8 +353,41 @@ final class PostgresStore implements Store, ChangeFeed {
     // them); each expiry assigned a version as a write is, the given one ignored. At most the limit, by the maintenance
     // index; rows another instance expires (or a write changes) at the same moment are skipped, not waited for: they
     // are expired by it, or by the next batch
+    // first the rows past their own expiry time (Write#expireAfterCreate), by their partial index, the earliest
+    // first; then, within what is left of the limit, those at least as old as the maximum age
     @Override
     public int expire(Duration maxAge, long version, int limit) {
+        int own = expireOwn(limit);
+        return own >= limit ? own : own + expireAged(maxAge, limit - own);
+    }
+
+    // a row leaves the index's range once expired (its expiry time cleared), so no cursor is needed
+    private int expireOwn(int limit) {
+        String sql = """
+                WITH d AS (
+                    SELECT r.id FROM %1$s AS r
+                    WHERE r.discriminator = ? AND r.expire_time <= now() AND r.state = 'VALUE' AND %3$s AND %4$s
+                    ORDER BY r.expire_time LIMIT ? FOR UPDATE OF r SKIP LOCKED),
+                w AS (
+                    UPDATE %1$s AS r SET value = NULL, state = 'EXPIRED', version = GREATEST(r.version + 1, %2$s),
+                        write_time = now(), expire_time = NULL
+                    FROM d WHERE r.discriminator = ? AND r.id = d.id
+                    RETURNING r.id, r.version)
+                SELECT w.id, w.version, pg_notify(?, 'EXPIRED|' || w.id || '|' || w.version) FROM w"""
+                .formatted(t, table.nextVersion(), NOT_RESERVED, notHidden());
+        return run(Kind.WRITE, connection -> {
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, table.discriminator);
+                statement.setString(2, table.discriminator);
+                statement.setInt(3, limit);
+                statement.setString(4, table.discriminator);
+                statement.setString(5, table.channel);
+                return versions(statement).size();
+            }
+        });
+    }
+
+    private int expireAged(Duration maxAge, int limit) {
         String sql = """
                 WITH d AS (
                     SELECT r.id, (extract(epoch from r.write_time) * 1000000)::bigint AS micros FROM %1$s AS r
@@ -353,7 +398,7 @@ final class PostgresStore implements Store, ChangeFeed {
                     ORDER BY r.write_time LIMIT ? FOR UPDATE OF r SKIP LOCKED),
                 w AS (
                     UPDATE %1$s AS r SET value = NULL, state = 'EXPIRED', version = GREATEST(r.version + 1, %2$s),
-                        write_time = now()
+                        write_time = now(), expire_time = NULL
                     FROM d WHERE r.discriminator = ? AND r.id = d.id
                     RETURNING r.id, r.version)
                 SELECT w.id, w.version, pg_notify(?, 'EXPIRED|' || w.id || '|' || w.version), max(d.micros) OVER ()
@@ -680,8 +725,11 @@ final class PostgresStore implements Store, ChangeFeed {
         byte[] key = bytes(resultSet, 2, table.keyFormat);
         State state = State.valueOf(resultSet.getString(4));
         byte[] value = state == State.VALUE ? bytes(resultSet, 3, table.valueFormat) : null;
-        return new Row(hash, key == null ? new byte[0] : key, value, state, resultSet.getLong(5),
-                age(resultSet.getLong(6)));
+        long version = resultSet.getLong(5);
+        Duration age = age(resultSet.getLong(6));
+        long expiresAfter = resultSet.getLong(7);
+        Duration own = resultSet.wasNull() ? null : age(expiresAfter);
+        return new Row(hash, key == null ? new byte[0] : key, value, state, version, age, own);
     }
 
     // an age in microseconds; negative for a write time after the statement's now() (a clock stepped back), as it is,
@@ -715,6 +763,7 @@ final class PostgresStore implements Store, ChangeFeed {
             bindNullable(statement, index++, write.key(), table.keyFormat);
             bindNullable(statement, index++, write.value(), table.valueFormat);
             statement.setLong(index++, write.expected());
+            setNullableLong(statement, index++, microsOrNull(write.expiresAfter()));
         }
         return index;
     }
@@ -739,7 +788,7 @@ final class PostgresStore implements Store, ChangeFeed {
 
     // VALUES (...), (...) for n writes (id, key, value, expected), the key and value casts filled in
     private String rows(int count) {
-        String row = "(?::text, ?::%s, ?::%s, ?::bigint)".formatted(
+        String row = "(?::text, ?::%s, ?::%s, ?::bigint, ?::bigint)".formatted(
                 PostgresTable.columnType(table.keyFormat), PostgresTable.columnType(table.valueFormat));
         return String.join(", ", Collections.nCopies(count, row));
     }
@@ -765,5 +814,9 @@ final class PostgresStore implements Store, ChangeFeed {
 
     private static long micros(Duration duration) {
         return duration.toNanos() / 1_000;
+    }
+
+    private static @Nullable Long microsOrNull(@Nullable Duration duration) {
+        return duration == null ? null : micros(duration);
     }
 }

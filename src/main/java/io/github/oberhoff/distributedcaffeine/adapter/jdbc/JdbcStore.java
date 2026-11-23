@@ -38,6 +38,7 @@ import java.sql.SQLTimeoutException;
 import java.sql.SQLTransactionRollbackException;
 import java.sql.SQLTransientConnectionException;
 import java.sql.Statement;
+import java.sql.Types;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -303,6 +304,7 @@ final class JdbcStore extends PrimitiveStore {
                     state VARCHAR(16) NOT NULL,
                     version BIGINT NOT NULL,
                     write_time %3$s NOT NULL,
+                    expire_time %3$s NULL,
                     PRIMARY KEY (discriminator, id),
                     INDEX %1$s_written (discriminator, write_time)) COMMENT='%4$s'"""
                 .formatted(table, dialect.bytes, dialect.timestamp, MARKER);
@@ -396,7 +398,7 @@ final class JdbcStore extends PrimitiveStore {
         List<String> all = new ArrayList<>(hashes);
         for (int from = 0; from < all.size(); from += CHUNK) {
             List<String> chunk = all.subList(from, Math.min(all.size(), from + CHUNK));
-            String sql = "SELECT id, k, v, state, version, write_time, %s FROM %s WHERE "
+            String sql = "SELECT id, k, v, state, version, write_time, %s, expire_time FROM %s WHERE "
                     .formatted(dialect.now, table) + "discriminator = ? AND id IN (" + String.join(", ",
                     Collections.nCopies(chunk.size(), "?")) + ")";
             rows.putAll(run(Kind.READ, connection -> {
@@ -413,7 +415,7 @@ final class JdbcStore extends PrimitiveStore {
                             byte[] value = state == State.VALUE ? resultSet.getBytes(3) : null;
                             String hash = resultSet.getString(1);
                             found.put(hash, new Row(hash, key == null ? new byte[0] : key, value, state,
-                                    resultSet.getLong(5), age(resultSet, 6, 7)));
+                                    resultSet.getLong(5), age(resultSet, 6, 7), expiresAfter(resultSet, 6, 8)));
                         }
                     }
                 }
@@ -425,7 +427,7 @@ final class JdbcStore extends PrimitiveStore {
 
     @Override
     protected List<PrimitiveStore.Head> scanRows() {
-        String sql = "SELECT id, state, version, write_time, %s FROM %s WHERE discriminator = ?"
+        String sql = "SELECT id, state, version, write_time, %s, expire_time FROM %s WHERE discriminator = ?"
                 .formatted(dialect.now, table);
         return run(Kind.READ, connection -> {
             try (PreparedStatement statement = prepare(connection, sql)) {
@@ -458,7 +460,7 @@ final class JdbcStore extends PrimitiveStore {
             }
             // the control row whatever its write time (ChangeScan: a backdated one is stamped before every window),
             // by its primary key in a second part rather than an OR, which would leave both indexes unused
-            String select = "SELECT id, state, version, write_time, %s FROM %s WHERE discriminator = ? AND "
+            String select = "SELECT id, state, version, write_time, %s, expire_time FROM %s WHERE discriminator = ? AND "
                     .formatted(dialect.now, table);
             String sql = select + "write_time > ? UNION ALL " + select + "id = ? AND write_time <= ?";
             Object from = dialect.parameter(now.minus(within.toNanos() / 1_000, ChronoUnit.MICROS));
@@ -478,7 +480,7 @@ final class JdbcStore extends PrimitiveStore {
         try (ResultSet resultSet = statement.executeQuery()) {
             while (resultSet.next()) {
                 heads.add(new PrimitiveStore.Head(resultSet.getString(1), State.valueOf(resultSet.getString(2)),
-                        resultSet.getLong(3), age(resultSet, 4, 5)));
+                        resultSet.getLong(3), age(resultSet, 4, 5), expiresAfter(resultSet, 4, 6)));
             }
         }
         return heads;
@@ -490,6 +492,27 @@ final class JdbcStore extends PrimitiveStore {
         return Duration.between(dialect.time(resultSet, writeTime), dialect.time(resultSet, now));
     }
 
+    // the row's own expiry, from its write time to its expiry time; null for a row without one
+    private @Nullable Duration expiresAfter(ResultSet resultSet, int writeTime, int expireTime) throws SQLException {
+        return resultSet.getObject(expireTime) == null ? null
+                : Duration.between(dialect.time(resultSet, writeTime), dialect.time(resultSet, expireTime));
+    }
+
+    // the value's own expiry time (Write#expiresAfter): the statement's time plus its own maximum age, bound in
+    // microseconds; NULL without one (DATE_ADD of NULL)
+    private String expiryTime() {
+        return "DATE_ADD(%s, INTERVAL ? MICROSECOND)".formatted(dialect.now);
+    }
+
+    private static void bindMicros(PreparedStatement statement, int index, @Nullable Duration duration)
+            throws SQLException {
+        if (duration == null) {
+            statement.setNull(index, Types.BIGINT);
+        } else {
+            statement.setLong(index, duration.toNanos() / 1_000);
+        }
+    }
+
     // writes: each statement conditional by itself, committed as it runs (run); whether a conditional one applied is
     // its update count
 
@@ -499,26 +522,27 @@ final class JdbcStore extends PrimitiveStore {
     // keeps the row's key (a tombstone)
     @Override
     protected boolean advanceRow(String hash, byte @Nullable [] key, byte @Nullable [] value, State state,
-                                 long version) {
-        return advance(hash, key, value, state, version, null);
+                                 long version, @Nullable Duration expiresAfter) {
+        return advance(hash, key, value, state, version, null, expiresAfter);
     }
 
     // backdated: the last microsecond (DATETIME(6)) before the given time, never earlier than the row's write time
     @Override
     protected boolean advanceControl(byte[] key, byte[] value, long version, Instant before) {
         return advance(Store.CONTROL_HASH, key, value, State.VALUE, version,
-                before.minusNanos(1).truncatedTo(ChronoUnit.MICROS));
+                before.minusNanos(1).truncatedTo(ChronoUnit.MICROS), null);
     }
 
     // the write time the server's clock, or the given one (and the row's if later)
     private boolean advance(String hash, byte @Nullable [] key, byte @Nullable [] value, State state, long version,
-                            @Nullable Instant writeTime) {
-        String update = ("UPDATE %s SET k = COALESCE(?, k), v = ?, state = ?, version = ?, write_time = %s "
-                + "WHERE discriminator = ? AND id = ? AND version < ?")
-                .formatted(table, writeTime == null ? dialect.now : "GREATEST(write_time, ?)");
-        String insert = ("INSERT INTO %s (discriminator, id, k, v, state, version, write_time) VALUES "
-                + "(?, ?, ?, ?, ?, ?, %s)").formatted(table, writeTime == null ? dialect.now : "?");
-        Advance row = new Advance(hash, key, value, state, version, writeTime);
+                            @Nullable Instant writeTime, @Nullable Duration expiresAfter) {
+        String update = ("UPDATE %s SET k = COALESCE(?, k), v = ?, state = ?, version = ?, write_time = %s, "
+                + "expire_time = %s WHERE discriminator = ? AND id = ? AND version < ?")
+                .formatted(table, writeTime == null ? dialect.now : "GREATEST(write_time, ?)", expiryTime());
+        String insert = ("INSERT INTO %s (discriminator, id, k, v, state, version, write_time, expire_time) VALUES "
+                + "(?, ?, ?, ?, ?, ?, %s, %s)")
+                .formatted(table, writeTime == null ? dialect.now : "?", expiryTime());
+        Advance row = new Advance(hash, key, value, state, version, writeTime, expiresAfter);
         return run(Kind.WRITE, connection -> {
             if (updated(connection, update, row)) {
                 return true;
@@ -528,9 +552,11 @@ final class JdbcStore extends PrimitiveStore {
                 statement.setString(2, hash);
                 bind(statement, 3, key, value, state);
                 statement.setLong(6, version);
+                int next = 7;
                 if (writeTime != null) {
-                    statement.setObject(7, dialect.parameter(writeTime));
+                    statement.setObject(next++, dialect.parameter(writeTime));
                 }
+                bindMicros(statement, next, expiresAfter);
                 statement.executeUpdate();
                 return true;
             } catch (SQLException e) {
@@ -545,7 +571,7 @@ final class JdbcStore extends PrimitiveStore {
     // an advancing write of one row, its write time null for the server's clock
     @SuppressWarnings({"ArrayRecordComponent", "java:S6218"}) // never compared or shown, only bound to statements
     private record Advance(String hash, byte @Nullable [] key, byte @Nullable [] value, State state, long version,
-                           @Nullable Instant writeTime) {
+                           @Nullable Instant writeTime, @Nullable Duration expiresAfter) {
     }
 
     private boolean updated(Connection connection, String update, Advance row) throws SQLException {
@@ -557,6 +583,7 @@ final class JdbcStore extends PrimitiveStore {
             if (writeTime != null) {
                 statement.setObject(next++, dialect.parameter(writeTime));
             }
+            bindMicros(statement, next++, row.expiresAfter());
             statement.setString(next++, discriminator);
             statement.setString(next++, row.hash());
             statement.setLong(next, row.version());
@@ -570,16 +597,18 @@ final class JdbcStore extends PrimitiveStore {
 
     @Override
     protected boolean replaceRow(String hash, long expected, long version, byte @Nullable [] key,
-                                 byte @Nullable [] value, State state) {
-        String sql = ("UPDATE %s SET k = COALESCE(?, k), v = ?, state = ?, version = ?, write_time = %s "
-                + "WHERE discriminator = ? AND id = ? AND version = ?").formatted(table, dialect.now);
+                                 byte @Nullable [] value, State state, @Nullable Duration expiresAfter) {
+        String sql = ("UPDATE %s SET k = COALESCE(?, k), v = ?, state = ?, version = ?, write_time = %s, "
+                + "expire_time = %s WHERE discriminator = ? AND id = ? AND version = ?")
+                .formatted(table, dialect.now, expiryTime());
         return run(Kind.WRITE, connection -> {
             try (PreparedStatement statement = prepare(connection, sql)) {
                 bind(statement, 1, key, value, state);
                 statement.setLong(4, version);
-                statement.setString(5, discriminator);
-                statement.setString(6, hash);
-                statement.setLong(7, expected);
+                bindMicros(statement, 5, expiresAfter);
+                statement.setString(6, discriminator);
+                statement.setString(7, hash);
+                statement.setLong(8, expected);
                 return statement.executeUpdate() > 0;
             }
         });
@@ -588,9 +617,9 @@ final class JdbcStore extends PrimitiveStore {
     // a plain INSERT: the primary key refuses a second row of the id, which is the answer
     @Override
     protected boolean insertRow(String hash, long version, byte @Nullable [] key, byte @Nullable [] value,
-                                State state) {
-        String sql = ("INSERT INTO %s (discriminator, id, k, v, state, version, write_time) VALUES "
-                + "(?, ?, ?, ?, ?, ?, %s)").formatted(table, dialect.now);
+                                State state, @Nullable Duration expiresAfter) {
+        String sql = ("INSERT INTO %s (discriminator, id, k, v, state, version, write_time, expire_time) VALUES "
+                + "(?, ?, ?, ?, ?, ?, %s, %s)").formatted(table, dialect.now, expiryTime());
         try {
             return run(Kind.INSERT, connection -> {
                 try (PreparedStatement statement = prepare(connection, sql)) {
@@ -598,6 +627,7 @@ final class JdbcStore extends PrimitiveStore {
                     statement.setString(2, hash);
                     bind(statement, 3, key, value, state);
                     statement.setLong(6, version);
+                    bindMicros(statement, 7, expiresAfter);
                     return statement.executeUpdate() > 0;
                 }
             });

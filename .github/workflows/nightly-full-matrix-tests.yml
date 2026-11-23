@@ -242,6 +242,8 @@ jobs:
             tests: "PostgresIntegrationTest$Postgres_17_*"
           - name: Test PostgreSQL 18
             tests: "PostgresIntegrationTest$Postgres_18_*"
+          - name: Test PostgreSQL 19
+            tests: "PostgresIntegrationTest$Postgres_19_*"
           - name: Test MariaDB 10
             tests: "JdbcIntegrationTest$MariaDB_10_*"
           - name: Test MariaDB 11

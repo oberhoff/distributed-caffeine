@@ -416,7 +416,7 @@ abstract class PostgresAdapterTest {
     void a_table_without_its_index_is_used_and_warned_of_with_the_ddl() throws SQLException {
         cache(Function.identity()).close();
         String index = query("SELECT indexname FROM pg_indexes WHERE schemaname = 'adapter' AND tablename = '" + table
-                + "' AND indexdef NOT LIKE '%UNIQUE%'");
+                + "' AND indexdef LIKE '%write_time%'"); // the maintenance index, not the expiry one
         database.execute("DROP INDEX adapter.\"" + requireNonNull(index) + "\"");
 
         try (LogCapture log = new LogCapture()) {

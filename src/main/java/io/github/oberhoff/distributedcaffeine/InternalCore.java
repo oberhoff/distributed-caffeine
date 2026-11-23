@@ -231,6 +231,9 @@ final class InternalCore<K, V> {
     // the maximum age for the store only (StoreConfigurer#withMaximumAgeForStoreOnly): a value expires in the store,
     // but its copies stay here
     private final boolean maximumAgeForStoreOnly;
+    // the store's maximum age per entry (StoreConfigurer#withMaximumAgePerEntry), computed on every write of a value
+    // (valueWrite); null with the one for all values
+    private final @Nullable BiFunction<? super K, ? super V, Duration> maximumAgePerEntry;
     // L1's expiry, if it is this library's (CaffeineConfigurer#caffeine): the policy shows its fixed durations
     private final @Nullable InternalExpiry<K, V> expiry;
     private final Executor storeExecutor;
@@ -319,7 +322,9 @@ final class InternalCore<K, V> {
                  @Nullable InternalExpiry<K, V> expiry, InternalHasher<K> hasher, InternalSerializer<K> keySerializer,
                  InternalSerializer<V> valueSerializer,
                  Duration maximumAge,
-                 boolean maximumAgeForStoreOnly, Executor storeExecutor, @Nullable Duration refreshAfterWrite,
+                 boolean maximumAgeForStoreOnly,
+                 @Nullable BiFunction<? super K, ? super V, Duration> maximumAgePerEntry,
+                 Executor storeExecutor, @Nullable Duration refreshAfterWrite,
                  @Nullable Loaders<K, V> loaders,
                  DistributionMode distributionMode,
                  @Nullable Duration negativeCachingExpiry, long maximumSize, Duration maintenanceInterval,
@@ -345,6 +350,7 @@ final class InternalCore<K, V> {
         this.maximumAge = requireNonNull(maximumAge);
         this.ageBounded = !maximumAge.equals(StoreConfigurer.UNBOUNDED_AGE);
         this.maximumAgeForStoreOnly = maximumAgeForStoreOnly;
+        this.maximumAgePerEntry = maximumAgePerEntry;
         this.expiry = expiry;
         this.storeExecutor = requireNonNull(storeExecutor);
         this.loader = loaders == null ? null : loaders.single();
@@ -548,7 +554,8 @@ final class InternalCore<K, V> {
                     if (remembered(internalKey.hash())) {
                         forgetAbsence(internalKey.hash()); // written elsewhere while no message could tell
                     }
-                    hold(internalKey, new InternalValue<>(value, row.version(), readEpoch, row.age()));
+                    hold(internalKey, new InternalValue<>(value, row.version(), readEpoch, row.age(),
+                            row.expiresAfter()));
                     found.put(internalKey, value);
                     if (needsRefresh(row.age())) {
                         refreshLater(internalKey);
@@ -736,14 +743,19 @@ final class InternalCore<K, V> {
     // a put reads nothing, by requirement: one round trip, a write that applies above whatever version is stored
     // (ordering rule 6), so that a racing write is ordered by the store rather than by a read first
     void put(K key, V value) {
+        put(key, value, null);
+    }
+
+    // with a maximum age of its own (DistributedPolicy.MaximumAgePerEntry#put), else the one per entry
+    void put(K key, V value, @Nullable Duration duration) {
         InternalKey<K> internalKey = wrap(key);
         requireNonNull(value, "value cannot be null");
         // taken before the write: an invalidateAll() landing in between leaves the value untrusted
         int writeEpoch = epoch.get();
         reserve(internalKey);
         try {
-            long version = requireNonNull(putValues(Map.of(internalKey, value)).get(internalKey.hash()));
-            commit(internalKey, new InternalValue<>(value, version, writeEpoch));
+            Write written = requireNonNull(putValues(Map.of(internalKey, value), duration).get(internalKey.hash()));
+            commit(internalKey, InternalValue.written(value, written.version(), writeEpoch, written));
         } finally {
             release(internalKey);
         }
@@ -777,10 +789,11 @@ final class InternalCore<K, V> {
         int writeEpoch = epoch.get();
         values.keySet().forEach(this::reserve);
         try {
-            Map<String, Long> versions = putValues(values);
-            values.forEach((internalKey, value) ->
-                    commit(internalKey, new InternalValue<>(value, requireNonNull(versions.get(internalKey.hash())),
-                            writeEpoch)));
+            Map<String, Write> written = putValues(values);
+            values.forEach((internalKey, value) -> {
+                Write write = requireNonNull(written.get(internalKey.hash()));
+                commit(internalKey, InternalValue.written(value, write.version(), writeEpoch, write));
+            });
         } finally {
             values.keySet().forEach(this::release);
         }
@@ -879,7 +892,8 @@ final class InternalCore<K, V> {
                         current = read;
                         continue;
                     }
-                    current = new Current<>(current.value(), read.version(), read.epoch(), false, read.age());
+                    current = new Current<>(current.value(), read.version(), read.epoch(), false, read.age(),
+                            read.expiresAfter());
                 }
                 if (newValue == current.value() && !alwaysWrite) {
                     // nothing to write, but L1 may be behind what the read found (a write in flight here): brought up
@@ -906,7 +920,7 @@ final class InternalCore<K, V> {
                         if (applied != REFUSED) {
                             // at the epoch of the read: after an invalidateAll here since, the value is checked on
                             // its next read
-                            commit(internalKey, new InternalValue<>(newValue, applied, current.epoch()));
+                            commit(internalKey, InternalValue.written(newValue, applied, current.epoch(), write));
                             return new Update<>(current.value(), newValue);
                         }
                     }
@@ -971,13 +985,14 @@ final class InternalCore<K, V> {
         if (row == null) {
             return new Current<>(null, 0, readEpoch, false);
         }
-        return new Current<>(valueOf(row), row.version(), readEpoch, false, row.age());
+        return new Current<>(valueOf(row), row.version(), readEpoch, false, row.age(), row.expiresAfter());
     }
 
     private void catchUp(InternalKey<K> internalKey, Current<V> current) {
         V value = current.value();
         if (value != null) {
-            hold(internalKey, new InternalValue<>(value, current.version(), current.epoch(), current.age()));
+            hold(internalKey, new InternalValue<>(value, current.version(), current.epoch(), current.age(),
+                    current.expiresAfter()));
         } else if (current.version() > 0) {
             // no value at that version (a hidden row reads as a tombstone at its value's version): held at it is stale
             dropOlder(internalKey, current.version() + 1);
@@ -986,12 +1001,13 @@ final class InternalCore<K, V> {
 
     // what an update decides on, held or read from the store (version 0: no row; a version without a value: a
     // tombstone, an expired row or a value too old to count, a row hidden by an invalidateAll, or an unreadable
-    // value), the epoch before it was looked at (the written value's in L1), whether it is held, and the age of its row
-    // as read (none for a held value, which keeps its own expiry)
-    private record Current<V>(@Nullable V value, long version, int epoch, boolean held, Duration age) {
+    // value), the epoch before it was looked at (the written value's in L1), whether it is held, and the age and own
+    // expiry of its row as read (none for a held value, which keeps its own expiry)
+    private record Current<V>(@Nullable V value, long version, int epoch, boolean held, Duration age,
+                              @Nullable Duration expiresAfter) {
 
         Current(@Nullable V value, long version, int epoch, boolean held) {
-            this(value, version, epoch, held, Duration.ZERO);
+            this(value, version, epoch, held, Duration.ZERO, null);
         }
     }
 
@@ -1296,12 +1312,21 @@ final class InternalCore<K, V> {
     // the store step of put and putAll (VISION.md, "Monotonic versions"): every key advances, at a
     // version larger than every one this instance has seen, so that one write is enough unless a larger version is
     // stored already (see advance). With an unknown outcome the keys are dropped from L1 (ordering rule 5). Returns
-    // the version written per hash
-    private Map<String, Long> putValues(Map<InternalKey<K>, V> values) {
+    // the write applied per hash, at the version written
+    private Map<String, Write> putValues(Map<InternalKey<K>, V> values) {
+        return putValues(values, null);
+    }
+
+    // duration: the maximum age of these writes, instead of the one per entry
+    private Map<String, Write> putValues(Map<InternalKey<K>, V> values, @Nullable Duration duration) {
         Map<String, Write> writes = new LinkedHashMap<>();
         values.forEach((internalKey, value) -> {
             forgetAbsence(internalKey.hash());
-            writes.put(internalKey.hash(), valueWrite(internalKey, value, clock.fresh()));
+            Write write = valueWrite(internalKey, value, clock.fresh());
+            if (duration != null) {
+                write = write.expiring(storeDuration(requireNonNull(duration)));
+            }
+            writes.put(internalKey.hash(), write);
         });
         try {
             advance(writes, true);
@@ -1313,9 +1338,7 @@ final class InternalCore<K, V> {
             }
             throw e;
         }
-        Map<String, Long> versions = new LinkedHashMap<>();
-        writes.forEach((hash, write) -> versions.put(hash, write.version()));
-        return versions;
+        return writes;
     }
 
     /**
@@ -1377,8 +1400,7 @@ final class InternalCore<K, V> {
                 }
                 // above the row read, in the millisecond after it (see InternalVersion#beyond), also where it lies too
                 // far ahead for the clock to follow it
-                Write above = new Write(hash, write.key(), write.value(),
-                        row == null ? clock.fresh() : clock.beyond(row.version()), Write.ADVANCE);
+                Write above = write.at(row == null ? clock.fresh() : clock.beyond(row.version()));
                 writes.put(hash, above);
                 again.add(above);
             }
@@ -1700,12 +1722,13 @@ final class InternalCore<K, V> {
                     reserve(internalKey);
                     int writeEpoch = epoch.get();
                     try {
-                        long version = requireNonNull(putValues(Map.of(internalKey, value))
+                        Write written = requireNonNull(putValues(Map.of(internalKey, value))
                                 .get(internalKey.hash()));
                         if (completedWhenPut) {
                             caffeineStats.skipLoadSuccess();
                         }
-                        owned.complete(new InternalValue<>(value, version, writeEpoch).bind(internalKey));
+                        owned.complete(InternalValue.written(value, written.version(), writeEpoch, written)
+                                .bind(internalKey));
                     } catch (StoreException e) {
                         // a write that failed, which the caller of put cannot be told: the key is absent here, as on
                         // the other instances (or as written, if the outcome is unknown: read from the store), so
@@ -1789,8 +1812,8 @@ final class InternalCore<K, V> {
                 }
                 stats.increment(Counter.STORE_HIT);
                 return CompletableFuture.completedFuture(
-                        LoadResult.cached(new InternalValue<>(found, row.version(), loadEpoch, row.age()),
-                                row.age()));
+                        LoadResult.cached(new InternalValue<>(found, row.version(), loadEpoch, row.age(),
+                                row.expiresAfter()), row.age()));
             }
             if (checked) {
                 // the store holds no value either: the absence stands
@@ -1859,8 +1882,8 @@ final class InternalCore<K, V> {
             if (current != null && found != null) {
                 // a newer value landed meanwhile: it wins
                 return CompletableFuture.completedFuture(
-                        LoadResult.cached(new InternalValue<>(found, current.version(), againEpoch, current.age()),
-                                current.age()));
+                        LoadResult.cached(new InternalValue<>(found, current.version(), againEpoch, current.age(),
+                                current.expiresAfter()), current.age()));
             }
             return attempt(internalKey, singleLoader, owned, steps, againEpoch, current, attempt + 1, loaded,
                     written.version(), fromSource);
@@ -1881,11 +1904,11 @@ final class InternalCore<K, V> {
         try {
             applied = writeConditionally(seen == 0 ? write.ifMissing() : write.ifVersion(seen));
         } catch (StoreException e) {
-            return new Written<>(LoadResult.cached(new InternalValue<>(loaded, InternalVersion.UNCONFIRMED,
-                    UNCONFIRMED), Duration.ZERO), version);
+            return new Written<>(LoadResult.cached(InternalValue.written(loaded, InternalVersion.UNCONFIRMED,
+                    UNCONFIRMED, write), Duration.ZERO), version);
         }
         if (applied != REFUSED) {
-            return new Written<>(LoadResult.cached(new InternalValue<>(loaded, applied, loadEpoch),
+            return new Written<>(LoadResult.cached(InternalValue.written(loaded, applied, loadEpoch, write),
                     Duration.ZERO), applied);
         }
         return new Written<>(null, version);
@@ -2230,7 +2253,8 @@ final class InternalCore<K, V> {
                 if (checked.contains(internalKey)) {
                     forgetAbsence(internalKey.hash()); // written elsewhere while no message could tell
                 }
-                result.put(internalKey, new InternalValue<>(value, row.version(), readEpoch, row.age()));
+                result.put(internalKey, new InternalValue<>(value, row.version(), readEpoch, row.age(),
+                        row.expiresAfter()));
                 if (needsRefresh(row.age())) {
                     outcome.stale().add(internalKey);
                 }
@@ -2256,6 +2280,7 @@ final class InternalCore<K, V> {
         Map<String, InternalKey<K>> written = new LinkedHashMap<>();
         Map<String, V> values = new LinkedHashMap<>();
         Map<String, Long> versions = new LinkedHashMap<>();
+        Map<String, Write> byHash = new LinkedHashMap<>();
         // the user's map: a null key or value in it is skipped
         loaded.forEach((key, value) -> {
             if (key == null || value == null) {
@@ -2271,7 +2296,9 @@ final class InternalCore<K, V> {
             }
             long version = seen == null || seen == 0 ? clock.fresh() : clock.next(seen);
             Write write = valueWrite(internalKey, value, version);
-            writes.add(seen == null || seen == 0 ? write.ifMissing() : write.ifVersion(seen));
+            write = seen == null || seen == 0 ? write.ifMissing() : write.ifVersion(seen);
+            writes.add(write);
+            byHash.put(internalKey.hash(), write);
             written.put(internalKey.hash(), internalKey);
             values.put(internalKey.hash(), value);
             versions.put(internalKey.hash(), version);
@@ -2291,7 +2318,8 @@ final class InternalCore<K, V> {
                 values.forEach((hash, value) -> {
                     InternalKey<K> internalKey = written.get(hash);
                     if (toLoad.containsKey(internalKey)) {
-                        result.put(internalKey, new InternalValue<>(value, InternalVersion.UNCONFIRMED, UNCONFIRMED));
+                        result.put(internalKey, InternalValue.written(value, InternalVersion.UNCONFIRMED, UNCONFIRMED,
+                                requireNonNull(byHash.get(hash))));
                     }
                 });
                 return List.of();
@@ -2300,8 +2328,8 @@ final class InternalCore<K, V> {
             stats.add(Counter.CONFLICT, conflicts.size());
             written.forEach((hash, internalKey) -> {
                 if (!conflicts.contains(hash) && !toLoad.containsKey(internalKey)) {
-                    hold(internalKey, new InternalValue<>(requireNonNull(values.get(hash)),
-                            requireNonNull(versions.get(hash)), writeEpoch));
+                    hold(internalKey, InternalValue.written(requireNonNull(values.get(hash)),
+                            requireNonNull(versions.get(hash)), writeEpoch, requireNonNull(byHash.get(hash))));
                 }
             });
         } finally {
@@ -2317,8 +2345,8 @@ final class InternalCore<K, V> {
             if (conflicts.contains(hash)) {
                 conflicting.add(internalKey);
             } else {
-                result.put(internalKey, new InternalValue<>(requireNonNull(values.get(hash)),
-                        requireNonNull(versions.get(hash)), writeEpoch));
+                result.put(internalKey, InternalValue.written(requireNonNull(values.get(hash)),
+                        requireNonNull(versions.get(hash)), writeEpoch, requireNonNull(byHash.get(hash))));
             }
         });
         return conflicting;
@@ -2457,7 +2485,8 @@ final class InternalCore<K, V> {
             if (row == null || value == null) {
                 removeIfOlder(lookup, row == null ? InternalVersion.ANYTHING : row.version());
             } else {
-                install(lookup, new InternalValue<>(value, row.version(), readEpoch, row.age()), false, false);
+                install(lookup, new InternalValue<>(value, row.version(), readEpoch, row.age(), row.expiresAfter()),
+                        false, false);
             }
         }
     }
@@ -2824,6 +2853,11 @@ final class InternalCore<K, V> {
         return maximumAge;
     }
 
+    // whether the cache was built with the maximum age per entry (StoreConfigurer#withMaximumAgePerEntry)
+    boolean hasMaximumAgePerEntry() {
+        return maximumAgePerEntry != null;
+    }
+
     // the store's maximum age for this instance from now on: its reads (a row at least as old counts as missing), its
     // maintenance (which expires such rows in the store, announced) and, unless the age is for the store only, the
     // copies it holds (InternalExpiry#reapply). Instances may disagree while a change reaches them all: every atomic
@@ -2912,11 +2946,12 @@ final class InternalCore<K, V> {
                 int current = next;
                 int limit = current == 0 ? InternalMaintenance.EXPIRY_BATCH : InternalMaintenance.PRUNE_BATCH;
                 long start = environment.nanoTime();
-                // a bound not set has nothing to remove; each batch with the bound as set now
+                // a bound not set has nothing to remove; each batch with the bound as set now. With the maximum age per
+                // entry the rows carry their own times, which the store expires with the maximum age's call
                 Duration age = maximumAge;
                 long size = maximumSize;
                 int changed = guard.retrying(() -> switch (current) {
-                    case 0 -> age.equals(StoreConfigurer.UNBOUNDED_AGE) ? 0
+                    case 0 -> age.equals(StoreConfigurer.UNBOUNDED_AGE) && maximumAgePerEntry == null ? 0
                             : store.expire(age, expiredVersion, limit);
                     case 1 -> size == StoreConfigurer.UNBOUNDED_SIZE ? 0
                             : store.pruneToSize(size, pruneGrace, limit);
@@ -3230,13 +3265,15 @@ final class InternalCore<K, V> {
                     long version = clock.next(oldValue.version());
                     InternalValue<V> value;
                     long applied;
+                    Write write = basedOn(valueWrite(key, reloaded, version), oldValue.version());
                     try {
-                        applied = writeConditionally(basedOn(valueWrite(key, reloaded, version), oldValue.version()));
+                        applied = writeConditionally(write);
                     } catch (StoreException e) {
-                        return valueAt(reloaded, InternalVersion.UNCONFIRMED, UNCONFIRMED).bind(key);
+                        return InternalValue.written(reloaded, InternalVersion.UNCONFIRMED, UNCONFIRMED, write)
+                                .bind(key);
                     }
                     if (applied != REFUSED) {
-                        value = valueAt(reloaded, applied, reloadEpoch);
+                        value = InternalValue.written(reloaded, applied, reloadEpoch, write);
                     } else {
                         // written or invalidated elsewhere since: the refresh answers what the store holds now, the
                         // newer value or none (none as well when the store stops answering here: the value held is
@@ -3251,7 +3288,8 @@ final class InternalCore<K, V> {
                         if (found == null) {
                             return null;
                         }
-                        value = new InternalValue<>(found, current.version(), current.epoch(), current.age());
+                        value = new InternalValue<>(found, current.version(), current.epoch(), current.age(),
+                                current.expiresAfter());
                     }
                     commit(key, value);
                     // Caffeine gets a copy: the instance committed may be replaced in L1 before this line (a put
@@ -3259,8 +3297,7 @@ final class InternalCore<K, V> {
                     // by the parity test). Still holding the value the refresh started from (the commit did not
                     // replace it), Caffeine installs the copy, unmarked; otherwise it discards the copy as overtaken,
                     // with a REPLACED event for the copy alone, silenced
-                    InternalValue<V> result = new InternalValue<>(value.value(), value.version(), value.epoch(),
-                            Duration.ofNanos(value.age())).bind(key);
+                    InternalValue<V> result = value.as(value.version(), value.epoch()).bind(key);
                     CompletableFuture<InternalValue<V>> held = l1.asMap().get(key);
                     if (held == null || !held.isDone() || held.isCompletedExceptionally()
                             || held.join() != oldValue) {
@@ -3360,10 +3397,24 @@ final class InternalCore<K, V> {
 
     // helpers
 
-    // an unconditional write of a value at the given version; conditioned by the caller where it is decided on a read
+    // an unconditional write of a value at the given version; conditioned by the caller where it is decided on a read.
+    // With the store's maximum age per entry, the value's own, computed here and set by the store from the write
+    // (VISION.md, "Maximum age per entry")
     private Write valueWrite(InternalKey<K> internalKey, V value, long version) {
-        return Write.value(internalKey.hash(), keySerializer.serialize(internalKey.key()),
+        Write write = Write.value(internalKey.hash(), keySerializer.serialize(internalKey.key()),
                 valueSerializer.serialize(value), version);
+        BiFunction<? super K, ? super V, Duration> perEntry = maximumAgePerEntry;
+        return perEntry == null ? write : write.expiring(storeDuration(requireNonNull(
+                perEntry.apply(internalKey.key(), value), "the maximum age per entry cannot be null")));
+    }
+
+    // a duration of the user's taken as at least zero (expired at once) and at most the longest a write carries,
+    // which never expires in practice (Write#MAX_EXPIRY)
+    private static Duration storeDuration(Duration duration) {
+        if (duration.isNegative()) {
+            return Duration.ZERO;
+        }
+        return duration.compareTo(Write.MAX_EXPIRY) > 0 ? Write.MAX_EXPIRY : duration;
     }
 
     // the value a row holds for this instance: none for a tombstone, an expired row, or an unreadable value
@@ -3467,6 +3518,7 @@ final class InternalCore<K, V> {
     private InternalValue<V> valueAt(V value, long version, int epoch) {
         return new InternalValue<>(value, version, epoch);
     }
+
 
     // join for a future of L1, which completes with null where nothing was found
     @SuppressWarnings("DataFlowIssue") // the null Caffeine's types cannot express, see above

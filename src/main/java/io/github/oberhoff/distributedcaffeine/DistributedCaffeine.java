@@ -42,8 +42,8 @@ import static java.util.Objects.requireNonNullElseGet;
  * Configured with Caffeine's builder methods and the store's settings, built as any of Caffeine's cache variants. The
  * two levels split the work:
  * <ol>
- *     <li>The store holds the values: its maximum age decides how long a value is valid, on every instance; its
- *     maximum size, how many values it keeps.</li>
+ *     <li>The store holds the values: its maximum age, for all values or per entry, decides how long a value is
+ *     valid, on every instance; its maximum size, how many values it keeps.</li>
  *     <li>Each instance holds copies: Caffeine's settings decide which copies it keeps and for how long, never beyond
  *     their values' validity.</li>
  *     <li>When a copy goes, the instance asks the store, and only if the store has no valid value, the source.</li>
@@ -69,7 +69,7 @@ public final class DistributedCaffeine<K, V> {
 
     private final Adapter<K, V> adapter;
     private final CaffeineConfigurer<K, V> caffeine = new CaffeineConfigurer<>();
-    private final StoreConfigurer store = new StoreConfigurer();
+    private final StoreConfigurer<K, V> store = new StoreConfigurer<>();
     private final SerializersConfigurer<K, V> serializers = new SerializersConfigurer<>();
     private @Nullable HashProvider<K> hashProvider;
     private @Nullable DistributionMode distributionMode;
@@ -112,7 +112,7 @@ public final class DistributedCaffeine<K, V> {
      * @param configurer the configuration
      * @return this builder
      */
-    public DistributedCaffeine<K, V> withStore(Configurer<StoreConfigurer> configurer) {
+    public DistributedCaffeine<K, V> withStore(Configurer<StoreConfigurer<K, V>> configurer) {
         configure(configurer, store);
         return this;
     }
@@ -358,6 +358,12 @@ public final class DistributedCaffeine<K, V> {
 
     // the maximum age for the store only (StoreConfigurer#withMaximumAgeForStoreOnly)
     private void validateStoreOnly() {
+        // its trust rules rest on the store letting go of no row younger than one age for all since its write, which
+        // a maximum age per entry breaks
+        if (store().maximumAgePerEntry() != null) {
+            throw new IllegalStateException("withMaximumAgeForStoreOnly() requires withMaximumAge(...), not "
+                    + "withMaximumAgePerEntry(...)");
+        }
         if (store().unboundedAge()) {
             throw new IllegalStateException("withMaximumAgeForStoreOnly() requires withMaximumAge(...)");
         }
@@ -438,9 +444,10 @@ public final class DistributedCaffeine<K, V> {
             boolean forStoreOnly = store().maximumAgeForStoreOnly();
             return new InternalCore<>(name, created,
                     caffeine.caffeine(forStoreOnly ? StoreConfigurer.UNBOUNDED_AGE : store().maximumAge(),
-                            store().maximumAge()),
+                            store().maximumAge(), store().maximumAgePerEntry() != null),
                     caffeine.internalExpiry(), new InternalHasher<>(hashProvider), keySerializer,
-                    valueSerializer, store().maximumAge(), forStoreOnly, executor, caffeine.refreshAfterWrite(),
+                    valueSerializer, store().maximumAge(), forStoreOnly, store().maximumAgePerEntry(), executor,
+                    caffeine.refreshAfterWrite(),
                     loaders, distributionMode(), negativeCachingExpiry, store().maximumSize(),
                     store().maintenanceInterval(), pruneGrace(created instanceof InternalPollingStore),
                     store().heartbeatInterval(), loadAttempts,
@@ -515,7 +522,7 @@ public final class DistributedCaffeine<K, V> {
         return caffeine;
     }
 
-    StoreConfigurer store() {
+    StoreConfigurer<K, V> store() {
         return store;
     }
 

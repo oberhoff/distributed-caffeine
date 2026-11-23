@@ -62,6 +62,11 @@ record RedisKeys(String keyspace, String discriminator) {
         return prefix() + "dead";
     }
 
+    // the rows with an expiry time of their own (Write#expireAfterCreate), scored by it, for expiry by it
+    String expiring() {
+        return prefix() + "expiring";
+    }
+
     String control() {
         return row(Store.CONTROL_HASH);
     }
