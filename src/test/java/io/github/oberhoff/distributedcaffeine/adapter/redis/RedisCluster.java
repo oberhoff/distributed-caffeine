@@ -48,6 +48,7 @@ import org.redisson.config.Config;
 import org.testcontainers.containers.Container.ExecResult;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
+import org.testcontainers.containers.startupcheck.OneShotStartupCheckStrategy;
 import org.testcontainers.containers.wait.strategy.Wait;
 import redis.clients.jedis.DefaultJedisClientConfig;
 import redis.clients.jedis.RedisClusterClient;
@@ -62,11 +63,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static io.github.oberhoff.distributedcaffeine.testing.Awaiting.awaitUpTo;
 
@@ -102,6 +106,9 @@ final class RedisCluster implements RedisTopology, AutoCloseable {
     }
 
     private static final Duration SETTLING = Duration.ofSeconds(60);
+
+    // per image: whether its server needs the cluster bus port declared trusted (protectsBusPort)
+    private static final Map<String, Boolean> BUS_PORT_PROTECTED = new ConcurrentHashMap<>();
 
     final String image;
     private final Kind kind;
@@ -180,14 +187,50 @@ final class RedisCluster implements RedisTopology, AutoCloseable {
         return image.startsWith("valkey") ? "valkey-cli" : "redis-cli";
     }
 
+    // a Redis or Valkey node's command line
+    private String[] replicated(int port) {
+        List<String> command = new ArrayList<>(List.of(server(), "--port", String.valueOf(port), "--cluster-enabled",
+                "yes", "--cluster-node-timeout", "1000"));
+        if (protectsBusPort()) {
+            // the bus port is reachable only on the test's own network, never published: trusted hosts only
+            command.addAll(List.of("--cluster-bus-port-protected-mode", "no"));
+        }
+        return command.toArray(new String[0]);
+    }
+
+    // whether the server refuses cluster mode with a cluster bus unauthenticated (no tls-cluster) unless told that its
+    // port is reachable by trusted hosts only: Redis from 8.12 on (found 2026-11-24, when redis:8 became 8.12.0 and
+    // the nightly's cluster failed to start). Earlier servers and Valkey refuse the option as unknown, so it is given
+    // only where needed; the version is read once per image
+    private boolean protectsBusPort() {
+        if (image.startsWith("valkey")) {
+            return false;
+        }
+        return BUS_PORT_PROTECTED.computeIfAbsent(image, RedisCluster::readsAtLeast812);
+    }
+
+    @SuppressWarnings("resource") // closed by try-with-resources
+    private static boolean readsAtLeast812(String image) {
+        try (GenericContainer<?> probe = new GenericContainer<>(image).withCommand("redis-server", "--version")
+                .withStartupCheckStrategy(new OneShotStartupCheckStrategy())) {
+            probe.start();
+            Matcher version = Pattern.compile("v=(\\d+)\\.(\\d+)").matcher(probe.getLogs());
+            if (!version.find()) {
+                throw new IllegalStateException("no version in: " + probe.getLogs());
+            }
+            int major = Integer.parseInt(version.group(1));
+            int minor = Integer.parseInt(version.group(2));
+            return major > 8 || (major == 8 && minor >= 12);
+        }
+    }
+
     // every node in cluster mode, not yet joined; on failure, what was started is stopped again
     private void start(List<Integer> chosen) {
         nodes.clear();
         for (int node = 0; node < count; node++) {
             int port = chosen.get(node);
             nodes.add(switch (kind) {
-                case REPLICATED -> node("node" + node, port, server(), "--port", String.valueOf(port),
-                        "--cluster-enabled", "yes", "--cluster-node-timeout", "1000");
+                case REPLICATED -> node("node" + node, port, replicated(port));
                 case DRAGONFLY, DRAGONFLY_REPLICATED -> node("node" + node, port, "--port", String.valueOf(port),
                         "--cluster_mode=yes");
                 case DRAGONFLY_EMULATED -> node("node" + node, port, "--port", String.valueOf(port),

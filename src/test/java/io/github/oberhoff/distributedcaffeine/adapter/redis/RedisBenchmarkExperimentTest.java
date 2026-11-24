@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.adapter.redis;
 
 import io.github.oberhoff.distributedcaffeine.EndToEndBenchmark;
+import io.github.oberhoff.distributedcaffeine.GapBenchmark;
 import io.github.oberhoff.distributedcaffeine.MissBenchmark;
 import io.github.oberhoff.distributedcaffeine.RefillBenchmark;
 import io.github.oberhoff.distributedcaffeine.StoreDeadlineBenchmark;
@@ -68,6 +69,15 @@ class RedisBenchmarkExperimentTest {
             RefillBenchmark.run("Redis 8 through Lettuce (single server, local container)", backend, 3, 10_000,
                     100_000);
             RefillBenchmark.run("Redis 8 through Lettuce (single server, local container)", backend, 1_024, 10_000,
+                    100_000);
+        }
+    }
+
+    @Test
+    void measures_catching_up_after_a_gap() {
+        try (RedisTestServer server = new RedisTestServer("redis:8");
+             RedisCacheBackend backend = new RedisCacheBackend(LettuceRedis.of(server.client))) {
+            GapBenchmark.run("Redis 8 through Lettuce (single server, local container)", backend, 1_024, 10_000,
                     100_000);
         }
     }

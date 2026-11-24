@@ -314,6 +314,60 @@ public class InternalRecoveryTest {
         assertThat(cache.estimatedSize()).isEqualTo(25);
     }
 
+    @Test
+    void after_a_gap_the_background_pass_in_update_mode_replaces_what_changed_by_what_it_read() {
+        InMemoryDatabase faults = backend.faults();
+        DistributedCache<String, String> cache = track(counted(LONG, 1_000, LONG)
+                .withDistributionMode(DistributionMode.UPDATE).build());
+        DistributedCache<String, String> other = other();
+        for (int i = 0; i < 50; i++) {
+            other.put("k" + i, "old");
+        }
+        for (int i = 0; i < 50; i++) {
+            assertThat(cache.getIfPresent("k" + i)).isEqualTo("old");
+        }
+        faults.pauseDelivery();
+        for (int i = 0; i < 25; i++) {
+            other.put("k" + i, "new");
+        }
+        other.invalidate("k49");
+
+        faults.gap();
+        faults.resumeDelivery();
+
+        // as the messages missed would have: the changed copies replaced, the removed one dropped, nothing inserted
+        await(() -> IntStream.range(0, 25).allMatch(i -> "new".equals(held(cache, "k" + i)))
+                && held(cache, "k49") == null && core(cache).isQuiescent());
+        for (int i = 25; i < 49; i++) {
+            assertThat(held(cache, "k" + i)).isEqualTo("old");
+        }
+        assertThat(cache.estimatedSize()).isEqualTo(49);
+        int before = storeCalls.get();
+        for (int i = 0; i < 25; i++) {
+            assertThat(cache.getIfPresent("k" + i)).isEqualTo("new");
+        }
+        assertThat(storeCalls.get()).as("the replaced copies are trusted: no read").isEqualTo(before);
+    }
+
+    @Test
+    void while_the_subscription_is_down_a_batched_check_replaces_changed_copies_in_one_store_read() {
+        backend.requireFeed();
+        InMemoryDatabase faults = backend.faults();
+        DistributedCache<String, String> cache = holder();
+        DistributedCache<String, String> other = other();
+        other.putAll(Map.of("kept", "old", "changed", "old"));
+        assertThat(cache.getAllPresent(List.of("kept", "changed"))).hasSize(2);
+
+        faults.interruptSubscriptions();
+        await(() -> cache.distributedPolicy().synchronizationState() == SynchronizationState.DEGRADED);
+        other.put("changed", "new");
+
+        int before = storeCalls.get();
+        assertThat(cache.getAllPresent(List.of("kept", "changed")))
+                .isEqualTo(Map.of("kept", "old", "changed", "new"));
+        assertThat(storeCalls.get() - before).as("the check's read answers both keys").isEqualTo(1);
+    }
+
     // the subscription interrupted, the store answering
 
     @Test
@@ -343,6 +397,29 @@ public class InternalRecoveryTest {
         assertThat(cache.getIfPresent("k")).isEqualTo("new");
         assertThat(storeCalls.get()).as("trusted again after the gap's check, no further check")
                 .isEqualTo(afterResume);
+    }
+
+    @Test
+    void while_the_subscription_is_down_a_changed_copy_is_replaced_by_its_check_in_one_store_read() {
+        backend.requireFeed();
+        InMemoryDatabase faults = backend.faults();
+        DistributedCache<String, String> cache = holder();
+        DistributedCache<String, String> other = other();
+        other.putAll(Map.of("changed", "old", "removed", "old"));
+        assertThat(cache.getAllPresent(List.of("changed", "removed"))).hasSize(2);
+
+        faults.interruptSubscriptions();
+        await(() -> cache.distributedPolicy().synchronizationState() == SynchronizationState.DEGRADED);
+        other.put("changed", "new");
+        other.invalidate("removed");
+
+        int before = storeCalls.get();
+        assertThat(cache.getIfPresent("changed")).isEqualTo("new");
+        assertThat(storeCalls.get() - before).as("the check's read answers the access, no second read").isEqualTo(1);
+        assertThat(held(cache, "changed")).as("what the check read is held").isEqualTo("new");
+        assertThat(cache.distributedStats().revalidationDroppedCount()).isEqualTo(1);
+        assertThat(cache.getIfPresent("removed")).as("no value in the store: a miss").isNull();
+        assertThat(held(cache, "removed")).isNull();
     }
 
     @Test
@@ -522,7 +599,7 @@ public class InternalRecoveryTest {
         Store store = track(backend.open());
         await(() -> {
             Row row = store.read(List.of(new InternalHasher<String>(null).wrap("k").hash()), LONG)
-                    .get(new InternalHasher<String>(null).wrap("k").hash());
+                    .get(new InternalHasher<>(null).wrap("k").hash());
             return row == null || row.state() == State.EXPIRED;
         });
     }

@@ -16,6 +16,7 @@
 package io.github.oberhoff.distributedcaffeine.adapter.mongodb;
 
 import io.github.oberhoff.distributedcaffeine.EndToEndBenchmark;
+import io.github.oberhoff.distributedcaffeine.GapBenchmark;
 import io.github.oberhoff.distributedcaffeine.MissBenchmark;
 import io.github.oberhoff.distributedcaffeine.RefillBenchmark;
 import io.github.oberhoff.distributedcaffeine.StoreDeadlineBenchmark;
@@ -58,6 +59,15 @@ class MongoBenchmarkExperimentTest {
             RefillBenchmark.run("MongoDB 9 (single-node replica set, local container)", backend, 3, 10_000,
                     100_000);
             RefillBenchmark.run("MongoDB 9 (single-node replica set, local container)", backend, 1_024, 10_000,
+                    100_000);
+        }
+    }
+
+    @Test
+    void measures_catching_up_after_a_gap() {
+        try (MongoTestDatabase ignored = MongoTestDatabase.start("mongo:9", MongoTopology.SINGLE_NODE_REPLICA_SET);
+             MongoCacheBackend backend = new MongoCacheBackend()) {
+            GapBenchmark.run("MongoDB 9 (single-node replica set, local container)", backend, 1_024, 10_000,
                     100_000);
         }
     }
