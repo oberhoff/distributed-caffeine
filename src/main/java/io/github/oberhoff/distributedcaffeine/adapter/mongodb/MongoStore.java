@@ -641,7 +641,6 @@ final class MongoStore implements Store, ChangeFeed {
     }
 
     // the expressions are BSON documents (maps to the IDE), complete as constructed
-    @SuppressWarnings("MismatchedQueryAndUpdateOfCollection")
     private List<Bson> valuePipeline(Write write, BsonValue version, boolean onVersion, BsonValue writeTime) {
         BsonValue value = literal(MongoLocation.toBson(requireNonNull(write.value()), location.valueFormat));
         BsonValue state = new BsonString(State.VALUE.name());
