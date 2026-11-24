@@ -550,16 +550,8 @@ final class InternalCore<K, V> {
                         }
                         continue;
                     }
-                    stats.increment(Counter.STORE_HIT);
-                    if (remembered(internalKey.hash())) {
-                        forgetAbsence(internalKey.hash()); // written elsewhere while no message could tell
-                    }
-                    hold(internalKey, new InternalValue<>(value, row.version(), readEpoch, row.age(),
-                            row.expiresAfter()));
+                    holdRead(internalKey, row, value, readEpoch);
                     found.put(internalKey, value);
-                    if (needsRefresh(row.age())) {
-                        refreshLater(internalKey);
-                    }
                 }
             } catch (StoreException e) {
                 // a miss, as Caffeine's getIfPresent answers without loading
@@ -571,6 +563,22 @@ final class InternalCore<K, V> {
             countLookups(internalKeys);
         }
         return found;
+    }
+
+    // a value found in the store, held under the version rule (hold): an absence remembered is forgotten, a refresh due
+    // is started. Returns what was read, held or not (a newer value held or announced meanwhile keeps its place). The
+    // caller reserved the key before the read, so that a removal or message arriving meanwhile wins
+    private InternalValue<V> holdRead(InternalKey<K> internalKey, Row row, V value, int readEpoch) {
+        stats.increment(Counter.STORE_HIT);
+        if (remembered(internalKey.hash())) {
+            forgetAbsence(internalKey.hash()); // written elsewhere while no message could tell
+        }
+        InternalValue<V> read = new InternalValue<>(value, row.version(), readEpoch, row.age(), row.expiresAfter());
+        hold(internalKey, read);
+        if (needsRefresh(row.age())) {
+            refreshLater(internalKey);
+        }
+        return read;
     }
 
     // counts each key once in Caffeine's stats: a hit if held now, a miss otherwise
@@ -2462,7 +2470,7 @@ final class InternalCore<K, V> {
         }
         // while the store does not answer, a check would fail: the value stays, as any held one does then
         if (!toCheck.isEmpty() && !guard.isOpen()) {
-            check(toCheck, epoch.get());
+            check(toCheck, epoch.get(), KEEP_ALL, distributionMode == DistributionMode.UPDATE);
         }
     }
 
@@ -2676,8 +2684,8 @@ final class InternalCore<K, V> {
     }
 
     // revalidation on read: a held value not trusted is checked against the store; kept and confirmed if the store
-    // still has it (stillStored), dropped otherwise (null: the caller treats it as a miss). While the store does not
-    // answer, it is served unconfirmed
+    // still has it (stillStored), replaced by what the store has otherwise, or dropped where it has no value (null:
+    // the caller treats it as a miss). While the store does not answer, it is served unconfirmed
     @SuppressWarnings("java:S2589") // a future of L1 completes with null where nothing was found (see joinHeld)
     private @Nullable InternalValue<V> confirmOrDrop(InternalKey<K> internalKey,
                                                      CompletableFuture<InternalValue<V>> held) {
@@ -2689,20 +2697,32 @@ final class InternalCore<K, V> {
         // a read notices the store is back (otherwise only maintenance did, up to its interval later, serving a value
         // the store no longer had meanwhile: found by the failover test that loses a write)
         int current = epoch.get();
-        Map<String, Row> rows;
+        reserve(internalKey);
         try {
-            rows = readRows(List.of(internalKey.hash()));
-        } catch (StoreException e) {
-            return value;
+            Map<String, Row> rows;
+            try {
+                rows = readRows(List.of(internalKey.hash()));
+            } catch (StoreException e) {
+                return value;
+            }
+            Row row = rows.get(internalKey.hash());
+            if (stillStored(row, value)) {
+                stats.increment(Counter.REVALIDATION_KEPT);
+                value.confirm(current);
+                return value;
+            }
+            stats.increment(Counter.REVALIDATION_DROPPED);
+            l1.asMap().remove(internalKey, held);
+            // the row just read answers the read: held as readThrough holds it, so that the caller does not read it
+            // again (it did, a second round trip for every copy changed while delivery was interrupted). Removed first
+            // rather than replaced by the version rule: after a failover that lost a write, the store may hold other
+            // bytes at the held version, which that rule would keep (see stillStored). Where the store has no value,
+            // the caller reads through as before
+            V read = valueOf(row);
+            return row == null || read == null ? null : holdRead(internalKey, row, read, current);
+        } finally {
+            release(internalKey);
         }
-        if (stillStored(rows.get(internalKey.hash()), value)) {
-            stats.increment(Counter.REVALIDATION_KEPT);
-            value.confirm(current);
-            return value;
-        }
-        stats.increment(Counter.REVALIDATION_DROPPED);
-        l1.asMap().remove(internalKey, held);
-        return null;
     }
 
     // whether the store still has the held value: a value row at its version, holding the same bytes. The version alone
@@ -2739,7 +2759,8 @@ final class InternalCore<K, V> {
         }
     }
 
-    // the same for several keys, in one query; afterwards the dropped ones are missing from L1
+    // the same for several keys, in one query; a copy the store has a newer value for is replaced by it, as the
+    // caller reads it next anyway; afterwards the dropped ones are missing from L1
     private void confirmOrDropAll(List<InternalKey<K>> internalKeys) {
         Map<InternalKey<K>, CompletableFuture<InternalValue<V>>> toCheck = new LinkedHashMap<>();
         for (InternalKey<K> internalKey : internalKeys) {
@@ -2753,11 +2774,7 @@ final class InternalCore<K, V> {
         if (toCheck.isEmpty()) {
             return;
         }
-        check(toCheck, epoch.get());
-    }
-
-    private void check(Map<InternalKey<K>, CompletableFuture<InternalValue<V>>> toCheck, int confirmingEpoch) {
-        check(toCheck, confirmingEpoch, KEEP_ALL);
+        check(toCheck, epoch.get(), KEEP_ALL, true);
     }
 
     // what a check came to: the store did not answer, or the copies were checked
@@ -2765,9 +2782,12 @@ final class InternalCore<K, V> {
 
     // dropBelow (not KEEP_ALL): the control row read with the copies tells the kind of an announced invalidateAll, and
     // a full one's drops every copy from before its message without a check, as clearing L1 then would have (a
-    // backdated one keeps L1, VISION.md "Refill while serving"); the copies installed since are checked as any
+    // backdated one keeps L1, VISION.md "Refill while serving"); the copies installed since are checked as any.
+    // replace: a copy the store has a newer value for is replaced by the row read instead of dropped (replaceWithRead),
+    // on a read, whose caller would read it next, and in UPDATE mode, whose messages replace copies the same way: a
+    // check after a gap catches up on the messages missed, to the same effect as they would have had
     private Checked check(Map<InternalKey<K>, CompletableFuture<InternalValue<V>>> toCheck, int confirmingEpoch,
-                          int dropBelow) {
+                          int dropBelow, boolean replace) {
         Map<String, Row> read;
         try {
             read = readWithControl(hashes(toCheck.keySet()));
@@ -2784,15 +2804,33 @@ final class InternalCore<K, V> {
         Map<String, Row> rows = visible(read);
         toCheck.forEach((internalKey, held) -> {
             InternalValue<V> value = held.join();
-            if (stillStored(rows.get(internalKey.hash()), value)) {
+            Row row = rows.get(internalKey.hash());
+            if (stillStored(row, value)) {
                 stats.increment(Counter.REVALIDATION_KEPT);
                 value.confirm(confirmingEpoch);
             } else {
                 stats.increment(Counter.REVALIDATION_DROPPED);
+                if (replace) {
+                    replaceWithRead(internalKey, row, confirmingEpoch);
+                }
+                // dropped, unless just replaced: then the key holds another future, which this leaves alone
                 l1.asMap().remove(internalKey, held);
             }
         });
         return Checked.CHECKED;
+    }
+
+    // a copy the store holds a newer value for, replaced by the row read, as populate replaces a copy in UPDATE mode:
+    // under the version rule, never inserted (the key may have gone meanwhile), so that a message or removal racing
+    // the read wins without a reservation. The rule keeps a copy at least as new, so a row at the copy's own version
+    // holding other bytes (a failover that lost a write, see stillStored) replaces nothing; the caller drops the copy
+    // then, as where the store has no value
+    private void replaceWithRead(InternalKey<K> internalKey, @Nullable Row row, int readEpoch) {
+        V read = valueOf(row);
+        if (row != null && read != null) {
+            install(internalKey, new InternalValue<>(read, row.version(), readEpoch, row.age(), row.expiresAfter()),
+                    false, false);
+        }
     }
 
     // the copies installed before the epoch given (an announced full invalidateAll's message), each removed unless
@@ -2832,7 +2870,8 @@ final class InternalCore<K, V> {
                     batch.put(internalKey, future);
                 }
             }
-            if (!batch.isEmpty() && check(batch, revalidating, dropping) == Checked.CHECKED) {
+            if (!batch.isEmpty() && check(batch, revalidating, dropping, distributionMode == DistributionMode.UPDATE)
+                    == Checked.CHECKED) {
                 dropping = KEEP_ALL;
             }
             try {
