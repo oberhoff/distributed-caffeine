@@ -30,15 +30,25 @@ Each instance has its own local Caffeine cache (first level, L1), which answers 
 level, L2). Behind both is the source, where values come from: the loader or mapping function, if the cache has one;
 otherwise values enter only through writes such as `put`. The two levels split the work:
 
-1. **The store holds the values.** Its maximum age decides how long a value is valid, on every instance; its maximum
-   size, how many values it keeps.
-2. **Each instance holds copies.** Caffeine's settings decide which copies it keeps and for how long, never beyond
-   their values' validity.
-3. **When a copy goes, the instance asks the store,** and only if the store has no valid value, the source.
+* **The store holds the values.** Its maximum age decides how long a value is valid, on every instance; its maximum
+  size, how many values it keeps.
+* **Each instance holds copies.** Caffeine's expiry and eviction decide which copies it keeps and for how long, never
+  beyond their values' validity.
+* **When a copy goes, the instance asks the store,** and only if the store has no valid value, the source.
 
-**Important:** the maximum age, if set, is the lifetime of a value, not of a copy. It counts from the value's write to
-the store, so every instance drops its copy at the same moment, no matter when it got the copy and in every distribution
-mode, and the next read then calls the source.
+**IMPORTANT:** Expiry and eviction work differently than in a plain Caffeine cache:
+
+* **The store's maximum age decides how long a value is valid.** It counts from the value's write to the store, so
+  every instance drops its copy at the same moment, no matter when it got the copy and in every distribution mode, and
+  the next read goes to the source. The same holds for a maximum age per entry; only `withMaximumAgeForStoreOnly()`
+  leaves the copies to their local expiry (see [Store](#store)). Without a maximum age (the default), a value stays
+  valid until it is written or removed, or the store prunes it to its maximum size.
+* **Caffeine's expiry and eviction decide only how long an instance keeps its copy.** `expireAfterWrite`,
+  `expireAfterAccess`, `expireAfter`, `maximumSize` and `maximumWeight` act on this instance's copies alone: a copy that
+  goes leaves the store's value and the other instances' copies untouched, and the next read on this instance finds the
+  value in the store again, not in the source.
+
+How the operations use the two levels:
 
 * **Reads:** the local cache first, then the store, then the source. A value loaded from the source is written to the
   store for the other instances.
@@ -65,12 +75,14 @@ MongoAdapter<UUID, Value> adapter = MongoAdapter.newBuilder(mongoClient, databas
         .build();
 
 DistributedLoadingCache<UUID, Value> cache = DistributedCaffeine.newBuilder(adapter)
-        .withCaffeine(caffeine -> caffeine.maximumSize(10_000)) // the local cache of each instance
-        .withStore(store -> store.withMaximumAge(Duration.ofHours(1))) // the shared store
+        .withCaffeine(caffeine -> caffeine // each instance's copies
+                .maximumSize(10_000)) // at most 10,000 copies
+        .withStore(store -> store // the shared values
+                .withMaximumAge(Duration.ofHours(1))) // valid an hour after each write, on every instance
         .build(key -> loadExpensiveValue(key)); // called on a miss in both
 
 Value value = cache.get(key); // local cache, then the store, then the loader
-cache.invalidate(key); // gone on every instance
+cache.invalidate(key); // gone on every instance (with distribution, the default)
 ```
 
 The other stores differ only in the adapter (see [Adapters](#adapters)). Keys of type `String`, `Long`, `Integer` or
@@ -150,14 +162,23 @@ threads. That is optional for a cache that lives as long as the application, but
 #### Differences from Caffeine
 
 A distributed cache can be used wherever an application or a framework expects a Caffeine cache. It behaves as
-Caffeine's except where it has to reach the store:
+Caffeine's, with these differences:
 
 * Local lookups in Caffeine, such as `getIfPresent`, `getAllPresent`, `asMap().get(key)` or `asMap().containsKey(key)`,
   read the store on a local miss; only `policy().getIfPresentQuietly(key)` looks at the local copy alone.
 * The asynchronous `getIfPresent` never returns `null`, as Caffeine's does when nothing is held: it returns a future,
   which completes with `null` if there is no value.
 * Writes and removals, `invalidate` and `invalidateAll()` included, go to the store and, with distribution, to every
-  instance; only eviction and expiry by the local bounds stay local.
+  instance.
+* Values are held as objects locally but stored serialized: a change made to a value object after it was put or read
+  reaches neither the store nor the other instances, and is lost when the copy goes. Treat values as immutable and
+  write a change with `put`, `compute` or `merge`.
+* Expiry and eviction by Caffeine's settings drop only this instance's copy, and the next read finds the value in the
+  store again instead of loading it from the source. A copy also expires at the store's maximum age, even without an
+  expiry configured (`policy()` then shows `expireAfterWrite` at the maximum age), and an `expireAfterWrite` or
+  `expireAfterAccess` longer than the maximum age fails the build (see [Local cache](#local-cache)).
+* `refreshAfterWrite` counts from when this instance got the value, so a value is refreshed at an age of up to twice
+  the duration.
 * With distribution, the removal listener also reports copies dropped or replaced by changes made on other instances.
 * Sizes, iteration and stats cover only the copies of the instance they are called on. In Caffeine's stats, a value
   found in the store counts as a miss and a load (see [Distributed stats](#distributed-stats)).
@@ -561,9 +582,6 @@ serves the value no longer after its maximum age, and every instance drops its c
   dependency like the drivers.
 * Only if `DistributedCaffeineCacheManager` is used: `org.springframework:spring-context-support` (6.2 or newer), an
   optional dependency like the drivers.
-* `com.dynatrace.hash4j:hash4j` as this release depends on it. If the application uses hash4j itself, keep a version
-  that hashes alike: building the first cache checks it with known answers and refuses to start otherwise, since
-  instances hashing differently would not share keys.
 
 ## Installation
 

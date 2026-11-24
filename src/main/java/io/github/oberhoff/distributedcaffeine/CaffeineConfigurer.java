@@ -117,7 +117,8 @@ public final class CaffeineConfigurer<K, V> {
     /**
      * See {@link Caffeine#maximumSize(long)}.
      * <p>
-     * <b>Distributed Caffeine:</b> Bounds this instance's copies; the store has its own maximum size.
+     * <b>Distributed Caffeine:</b> Bounds this instance's copies: an evicted copy is read from the store again. The
+     * store has its own maximum size.
      *
      * @param maximumSize the maximum number of entries this instance holds
      * @return this configurer
@@ -130,7 +131,8 @@ public final class CaffeineConfigurer<K, V> {
     /**
      * See {@link Caffeine#maximumWeight(long)}.
      * <p>
-     * <b>Distributed Caffeine:</b> Bounds the weight of this instance's copies; the store has its own maximum size.
+     * <b>Distributed Caffeine:</b> Bounds the weight of this instance's copies: an evicted copy is read from the store
+     * again. The store has its own maximum size.
      *
      * @param maximumWeight the maximum total weight of the entries this instance holds
      * @return this configurer
@@ -306,8 +308,8 @@ public final class CaffeineConfigurer<K, V> {
      * <p>
      * <b>Distributed Caffeine:</b> Requires a loading cache, as in Caffeine. The duration counts from when this
      * instance got the value; a value read from the store that is already older is refreshed at once. So a value is
-     * refreshed by an age of at most twice the duration. A refresh always calls the loader, and when several instances
-     * refresh a key at once, the first result written wins.
+     * refreshed by an age of at most twice the duration. A refresh always calls the loader and writes the new value to
+     * the store for the other instances.
      *
      * @param duration the duration
      * @return this configurer
@@ -323,8 +325,8 @@ public final class CaffeineConfigurer<K, V> {
      * <p>
      * <b>Distributed Caffeine:</b> Requires a loading cache, as in Caffeine. The duration counts from when this
      * instance got the value; a value read from the store that is already older is refreshed at once. So a value is
-     * refreshed by an age of at most twice the duration. A refresh always calls the loader, and when several instances
-     * refresh a key at once, the first result written wins.
+     * refreshed by an age of at most twice the duration. A refresh always calls the loader and writes the new value to
+     * the store for the other instances.
      *
      * @param duration the duration
      * @param unit     its unit

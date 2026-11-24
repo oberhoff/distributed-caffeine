@@ -47,7 +47,10 @@ Caches are configured on the builders; `setCaffeine` is not supported and throws
 with `setCaffeineSpec` or `setCacheSpecification` applies to every builder after its own settings, and a setting made by
 both fails when the cache is built. With a manager bean of its own, Spring Boot does not pass
 `spring.cache.caffeine.spec` on by itself: hand it over with
-`manager.setCacheSpecification(cacheProperties.getCaffeine().getSpec())`, given Boot's `CacheProperties`.
+`manager.setCacheSpecification(cacheProperties.getCaffeine().getSpec())`, given Boot's `CacheProperties`. A spec's
+expiry and size apply to each instance's copies only: an expired copy is read from the store again, not loaded from the
+source. How long a value is valid is the store's maximum age (`withMaximumAge`), so a spec carried over from a plain
+Caffeine cache that relies on `expireAfterWrite` to load values again needs it.
 
 ## Keys
 

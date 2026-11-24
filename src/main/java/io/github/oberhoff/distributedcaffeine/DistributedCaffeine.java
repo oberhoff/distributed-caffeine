@@ -37,25 +37,52 @@ import static java.util.Objects.requireNonNull;
 import static java.util.Objects.requireNonNullElseGet;
 
 /**
- * The builder of a distributed cache. Each instance keeps a local Caffeine cache; a miss reads the shared store before
- * the source (the loader or mapping function, if any), and a change reaches the copies of the other instances.
- * Configured with Caffeine's builder methods and the store's settings, built as any of Caffeine's cache variants. The
- * two levels split the work:
- * <ol>
- *     <li>The store holds the values: its maximum age, for all values or per entry, decides how long a value is
- *     valid, on every instance; its maximum size, how many values it keeps.</li>
- *     <li>Each instance holds copies: Caffeine's settings decide which copies it keeps and for how long, never beyond
- *     their values' validity.</li>
- *     <li>When a copy goes, the instance asks the store, and only if the store has no valid value, the source.</li>
- * </ol>
+ * The builder of a distributed cache, configured with Caffeine's builder methods and the store's settings, and built as
+ * any of Caffeine's cache variants. Each instance has its own local Caffeine cache (first level, L1); all instances
+ * share a store (second level, L2). Behind both is the source, where values come from: the loader or mapping function,
+ * if the cache has one; otherwise values enter only through writes such as {@code put}. The two levels split the work:
+ * <ul>
+ *     <li><b>The store holds the values.</b> Its maximum age decides how long a value is valid, on every instance;
+ *     its maximum size, how many values it keeps.</li>
+ *     <li><b>Each instance holds copies.</b> Caffeine's expiry and eviction decide which copies it keeps and for how
+ *     long, never beyond their values' validity.</li>
+ *     <li><b>When a copy goes, the instance asks the store,</b> and only if the store has no valid value, the
+ *     source.</li>
+ * </ul>
+ * <b>IMPORTANT:</b> Expiry and eviction work differently than in a plain Caffeine cache:
+ * <ul>
+ *     <li><b>The store's maximum age decides how long a value is valid.</b> It counts from the value's write to the
+ *     store, so every instance drops its copy at the same moment, no matter when it got the copy and in every
+ *     distribution mode, and the next read goes to the source. The same holds for a maximum age per entry; only
+ *     {@link StoreConfigurer#withMaximumAgeForStoreOnly()} leaves the copies to their local expiry. Without a maximum
+ *     age (the default), a value stays valid until it is written or removed, or the store prunes it to its maximum
+ *     size.</li>
+ *     <li><b>Caffeine's expiry and eviction decide only how long an instance keeps its copy.</b>
+ *     {@code expireAfterWrite}, {@code expireAfterAccess}, {@code expireAfter}, {@code maximumSize} and
+ *     {@code maximumWeight} act on this instance's copies alone: a copy that goes leaves the store's value and the
+ *     other instances' copies untouched, and the next read on this instance finds the value in the store again, not
+ *     in the source.</li>
+ * </ul>
+ * How the operations use the two levels:
+ * <ul>
+ *     <li><b>Reads:</b> the local cache first, then the store, then the source. A value loaded from the source is
+ *     written to the store for the other instances.</li>
+ *     <li><b>Writes:</b> the store first, then the local cache, removals included. A written value the store did not
+ *     take is never cached.</li>
+ *     <li><b>Changes:</b> a write or invalidation on one instance makes the other instances drop, replace or keep
+ *     their copy, depending on the {@linkplain DistributionMode distribution mode}. Local expiry and eviction affect
+ *     only that instance.</li>
+ *     <li><b>Storage:</b> keys and values are serialized for the store, and keys identified by a hash; the store
+ *     keeps them until its maximum age or size, if set (both unbounded by default).</li>
+ * </ul>
  * <pre>{@code
  * DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)
- *         .withCaffeine(caffeine -> caffeine
- *                 .expireAfterWrite(Duration.ofMinutes(5))
- *                 .maximumSize(10_000))
- *         .withStore(store -> store
- *                 .withMaximumAge(Duration.ofHours(1))
- *                 .withMaximumSize(1_000_000))
+ *         .withCaffeine(caffeine -> caffeine // each instance's copies
+ *                 .expireAfterWrite(Duration.ofMinutes(5)) // kept 5 minutes, then read from the store again
+ *                 .maximumSize(10_000)) // at most 10,000 copies
+ *         .withStore(store -> store // the shared values
+ *                 .withMaximumAge(Duration.ofHours(1)) // valid an hour after each write, on every instance
+ *                 .withMaximumSize(1_000_000)) // at most 1,000,000 values
  *         .build(key -> loadExpensiveValue(key));
  * }</pre>
  *

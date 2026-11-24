@@ -348,16 +348,6 @@ After the Linux baseline (see "Performance: the baseline"), each only if measure
   the case occurs in practice (MongoDB's majority reads and writes rule it out; PostgreSQL's sequence repeats only if
   its own log record is lost too, unverified). Nothing in the store today breaks the tie (write time, stream counter,
   `xmin` and request keys are lost or repeat with the write). Measure the transfer after gaps first.
-- **Installing what the background pass read** (noted 2026-11-12). After a gap the pass reads each held key's row
-  (`InternalCore#stillStored` compares versions and values) and drops a copy that does not match; the next access
-  then reads the same row again. Installing the row read instead would save that second read, after every gap and
-  after a start without the store (where every copy is `UNCONFIRMED` and so mismatches). It installs under the
-  reservations as `readThrough` does. Performance, so after robustness.
-- **A scan next to a feed, for catching up after a gap** (noted 2026-11-12). A store offering both could answer
-  `changedWithin(gap)` after a gap, so only the keys changed meanwhile are dropped, instead of revalidating all held
-  keys. Only within what the store still remembers: a gap longer than the tombstone retention, size pruning (silent)
-  or a failover that lost writes still needs the full revalidation, so an optimisation with a fallback. A new
-  mechanism: only with a measured revalidation cost (as the tie-breaker above). No shipped store is both today.
 
 *Waits for upstream releases:*
 - MongoDB 8's client-level bulk write with verbose results (recorded 2026-10-28): it reports per write whether it
@@ -366,6 +356,18 @@ After the Linux baseline (see "Performance: the baseline"), each only if measure
   than as a second path beside the classic bulk write;
 
 *Parked:*
+- **A scan next to a feed, for catching up after a gap** (noted 2026-11-12; measured and parked 2026-11-24, see
+  "Catching up after a gap"). A store offering both could answer `changedWithin(gap)` after a gap, so only the keys
+  changed meanwhile are dropped (or, in `UPDATE` mode, read and replaced), instead of revalidating all held keys.
+  Only within what the store still remembers: a gap longer than the tombstone retention, a start without the store or
+  a failover that lost writes still needs the full revalidation, so an optimisation with a fallback; candidates
+  PostgreSQL and MongoDB (write times, no repeated versions), not Redis. What it would save, the full check, measured
+  as background work of 2.4 to 3.7 s at 100,000 held keys of 1 KB (100 store calls, 1 s of it pacing; about 100 MB,
+  a second at 1 Gbit/s over a real network), on every gap only: not worth a new mechanism. It would even cost more
+  where the window holds far more changes than the instance holds keys (a small L1 on a busy store after a long gap:
+  the scan reads every change, not only the held keys), so it would need a limit falling back to the full check; and
+  it trusts the store's write times to be complete for the window where the full check compares every copy. Revisit
+  only with a deployment whose gaps cost measurably;
 - write-behind for load results (proposed 2026-10-27): a loaded value is returned to the caller, and to the
   callers waiting on the same future, before its conditional write to the store has returned. The write follows
   in the background.
@@ -437,18 +439,34 @@ After the Linux baseline (see "Performance: the baseline"), each only if measure
 ### Features
 
 *Next:*
-- **the change listener** (see "Change listener", designed 2026-11-20; put before the JCache provider by the user's
-  choice, 2026-11-20, after the expiry per entry): every instance's changes for any application, from the messages
-  already sent, so no store mechanism: derived local state kept in step, other local layers invalidated, changes pushed
-  to clients, settings in the cache followed, auditing; today an application sees only its own copies leaving
-  (`removalListener`). At least once, coalesced on polled stores, gaps reported; also the later source of the JCache
-  provider's remote events;
-- **then a JCache (JSR-107) provider** (see "JCache provider", designed 2026-11-20): first of the further integrations,
-  serving Micronaut, Hibernate's second-level cache and Spring's `JCacheCacheManager` at once, a near cache over any
-  store kept consistent; events of this instance's changes in the first version, other instances' from the change
-  listener after; the TCK as its acceptance;
+- **a Micrometer integration** (noted 2026-11-20; one combined binder and moved to next, decided 2026-11-23) in
+  `...integration.micrometer`, `micrometer-core` optional: one call binding all of a cache's metrics,
+  `DistributedCaffeineMetrics.monitor(registry, cache, "products", tags)`, under one name and the same tags. The local
+  ones delegated to Micrometer's own `CaffeineCacheMetrics`, which works on the caches as they are (`DistributedCache`
+  is a Caffeine `Cache`, `DistributedAsyncCache` an `AsyncCache`): `cache.gets` (hit, miss), `cache.puts`,
+  `cache.evictions`, `cache.size`, the load timings, as plain Caffeine reports them with `recordStats`, so dashboards
+  built for Caffeine work unchanged and stay aligned with Micrometer. Beside them, with the same `cache` tag,
+  `distributedStats()` (store reads and writes, invalidations sent and received, interruptions) and the synchronization
+  state as a gauge (`cache.store.reads`, `cache.store.writes`, `cache.invalidations`, `cache.interruptions`,
+  `cache.synchronization.state`; names to be settled when built). Combined rather than a binder of the distributed
+  metrics only: one registration, which cannot be half forgotten, tags guaranteed to match, one concept (the cache's
+  metrics, whatever the level), and no code of ours for the local part. Micrometer serves Spring Boot, Quarkus,
+  Micronaut and plain applications alike: a runtime plug-in point, without build-time work or framework internals, so
+  the integration that reaches most users for the least code. For Spring Boot a thin `CacheMeterBinderProvider` beside
+  the manager: `DistributedCaffeineCacheManager` extends `CaffeineCacheManager`, so Boot's actuator binds the local
+  Caffeine metrics of its `CaffeineCache`s by itself; our provider hands out the combined binder for our caches and
+  comes before Boot's own (an `@Order`), so that each meter is bound once, from one place (a second binding of the
+  same meters is harmless in Micrometer, which returns the existing meter, but untidy). How Boot chooses among
+  providers is to be checked when built;
+
+The change listener is parked, and the integrations per framework are built each when asked for (see "Integrations":
+documentation first, runtime plug-in points; Hibernate's `RegionFactory` the first candidate), listed below.
 
 *On demand:*
+- **the change listener** (see "Change listener", parked 2026-11-23 by the user's decision): every instance's changes
+  for an application to keep something of its own in step. Designed as far as the messages allow; parked because the
+  key a listener wants is not in the messages (they identify a key by its hash), and every way to get it adds a
+  mechanism or a caveat. A real use case decides between hashes and keys when it comes;
 - **creation, update and keep for the maximum age per entry** (noted 2026-11-21, see "Maximum age per entry", levels
   2 and 3): an expiry set at a key's creation and kept across its updates (Caffeine's `Expiry.creating`, JSR-107's
   `CreatedExpiryPolicy`), separate creation and update ages; the likely trigger is a JCache provider meant to pass the
@@ -460,21 +478,20 @@ After the Linux baseline (see "Performance: the baseline"), each only if measure
   `asMap()` methods": iterating L2 means millions of rows, not what a local view is for): the store's real size in the
   inspection API, exporting a cache or warming up another, invalidating by a predicate, diagnostics. JCache's
   `iterator()` and `removeAll()` would cover every entry with it, not only this instance's copies.
-- **a Quarkus extension** (see "Integrations"): an artifact of its own, the one exception to the package rule, since
-  a Quarkus extension has a runtime and a deployment module with build-time processing, and is expected to run in a
-  native image (a cost here: Fory generates code at runtime, and each driver has its own native configuration).
-  Before designing it, read `quarkus-cache`'s source for the interface a backend implements (the Quarkiverse
-  Infinispan Embedded extension implements Quarkus's cache, keeping `@CacheResult` and the other annotations
-  working);
-- **a Hibernate `RegionFactory`** in `...integration.hibernate`: thinner than JCache, but Hibernate only; only if
-  Hibernate is wanted without the JCache provider;
-- **a Micrometer integration** (noted 2026-11-20) in `...integration.micrometer`, `micrometer-core` optional: a
-  `MeterBinder` exporting `distributedStats()` (store reads and writes, invalidations sent and received, interruptions)
-  and the synchronization state as a gauge, named after Micrometer's own `CaffeineCacheMetrics` (`cache.*`, a `cache`
-  tag) so that dashboards line up. The local statistics need nothing of ours: the caches are Caffeine caches, which
-  Micrometer's binder reports with `recordStats`. Micrometer serves Spring Boot, Quarkus, Micronaut and plain
-  applications alike; for Spring Boot a thin `CacheMeterBinderProvider<CaffeineCache>` beside the manager, so that
-  Boot's cache metrics include the distributed ones without wiring;
+- **a Quarkus extension** (see "Integrations", "Quarkus"): an artifact of its own, the one exception to the package
+  rule, since a Quarkus extension has a runtime and a deployment module with build-time processing. First as a thin
+  extension in JVM mode only, against Quarkus 4's build-time services (`CacheManagerInfo`); native images later, if at
+  all (Fory generates code at runtime, and each driver has its own native configuration). Before designing it, read how
+  `quarkus-redis-cache` and Redisson's extension implement the backend;
+- **a Hibernate `RegionFactory`** in `...integration.hibernate`: Hibernate's own plug-in point for its second-level
+  cache, which calls `get`, `put`, `remove` and `clear` with eternal or fixed expiry, all of which the library keeps
+  across instances; the first of the integrations per framework once asked for;
+- **a Micronaut integration** in `...integration.micronaut`, once asked for (see "Integrations", "Micronaut"): a
+  `SyncCache` per configured cache, built through Micronaut's compile-time annotation processor in this library's
+  build, Micronaut optional;
+- **a JCache (JSR-107) provider** (see "JCache provider", designed 2026-11-20; moved from next to on demand on
+  2026-11-23, the user's decision): only if a user asks for JCache itself, with its per-instance parts documented.
+  Jakarta EE, without a cache standard of its own, is the one framework left without an integration until then;
 - **an OpenTelemetry integration** in `...integration.opentelemetry`: the same metrics through OpenTelemetry's metrics
   API, for applications without Micrometer (Micrometer reaches OpenTelemetry through its OTLP registry already); on
   demand;
@@ -1303,10 +1320,11 @@ if there is ever demand; not built in advance.
 - **`NONE` is JetCache without `syncLocal`:** for short-lived local copies or data that rarely changes, saving the
   listening connection and its cost on the store (on PostgreSQL about 33 µs of CPU per write and listening session).
   Nothing bounds how long a copy changed elsewhere is served except Caffeine's expiry, so if neither
-  `expireAfterWrite` nor `expireAfter` is configured, L1 gets `expireAfterWrite` of the store's maximum age (as
-  JetCache's local expiry defaults to the cache's); `policy()` shows it. `expireAfterAccess` alone does not bound
-  the age, so the default is added next to it. Without a subscription there are no gaps, no revalidation and no
-  messages for negative caching; held values count as trusted. `invalidateAll()` and `invalidate` reach only the store and this instance's L1.
+  `expireAfterWrite` nor `expireAfter` is configured, L1 gets `expireAfterWrite` of the store's maximum age (JetCache
+  goes further: a copy filled from Redis gets the value's remaining time, its local expiry ignored unless
+  `useExpireOfSubCache`, checked in `MultiLevelCache` 2026-11-23); `policy()` shows it. `expireAfterAccess` alone
+  does not bound the age, so the default is added next to it. Without a subscription there are no gaps, no
+  revalidation and no messages for negative caching; held values count as trusted. `invalidateAll()` and `invalidate` reach only the store and this instance's L1.
 - The property test covers `INVALIDATE` and `UPDATE`; its convergence oracle does not
   apply to `NONE` by design, which has unit tests of its own.
 
@@ -1677,8 +1695,8 @@ cache" states it for users.
 maximum age plus the maintenance interval plus delivery, and rejected the cap because it translates fixed expiry into
 variable expiry): without the cap, a hot copy outlived its maximum age by one Caffeine period, or indefinitely without a
 Caffeine expiry, and with `NONE` or a lost message nothing ended it; the emulation keeps the user's settings visible as
-set, so the cost the first design feared did not come (JetCache caps its copies the same way, at an absolute expiry time
-per value).
+set, so the cost the first design feared did not come (JetCache sets a copy filled from Redis to the value's remaining
+time, overriding its local expiry by default instead of taking the shorter of both, checked 2026-11-23).
 
 ### Maximum age for the store only
 
@@ -1804,9 +1822,9 @@ maximum age is the actual bound of staleness.
   lifts it again up to what was set; without one set it follows the age. Under the user's `Expiry`, whose durations
   cannot be computed again, a copy keeps what is left of it, lowered to its new latest expiry: a longer age lengthens
   none. With the age for the store only, L1 is not touched.
-- **Stays in `withStore`, for now (decided 2026-11-11):** moving the maximum age to the top-level builder would show
-  its cache-wide scope (it is the cluster's bound of staleness and caps the copies too), but changes the API; the
-  compromise accepted is documentation: `withMaximumAge`, `expireAfterWrite` and the README say that
+- **Stays in `withStore` (decided 2026-11-11, confirmed 2026-11-23, see "The configuration kept" below):** moving the
+  maximum age to the top-level builder would show its cache-wide scope (it is the cluster's bound of staleness and caps
+  the copies too), but changes the API; the compromise accepted is documentation: `withMaximumAge`, `expireAfterWrite` and the README say that
   without a local expiry the copies expire at the maximum age (`policy().expireAfterWrite()` shows it and follows it),
   and that a duration set through the policy is lowered to it. Counting `expireAfterWrite` from the store's write was
   rejected: a row older than it would install already expired unless the reads filtered by it too, which merges it
@@ -1830,6 +1848,26 @@ maximum age is the actual bound of staleness.
     methods' atomicity across instances and warm starts, and needs rows for the feeds anyway; invalidation buses exist
     elsewhere. Per-entry validity, the one gap it closes, is a check on read plus `invalidate`; an `Expiry`'s time
     written into the row is the targeted fix, if ever needed.
+- **The configuration kept, the README extended (decided 2026-11-23):** asked how to move a Caffeine cache with
+  `expireAfterAccess` over, the answer needed four caveats: Caffeine's names mean the local copies here, the validity
+  is configured in `withStore` but caps every copy, and rules span both levels. The fix is documentation: the README's
+  "Important" in the introduction contrasts the two (the store's maximum age decides how long a value is valid,
+  Caffeine's expiry and eviction only how long an instance keeps its copy, each Caffeine setting named), "Settings by
+  goal" maps the goals, and the setters' Javadoc uses the same wording; a section mapping each Caffeine setting would
+  only repeat these. Rejected:
+  - The configuration of up to 0.7.0 (Caffeine's settings unchanged, evictions distributed): aligned in name only, as
+    one instance's idle or size eviction dropped the copies of instances still reading them; and its persistence
+    options (cached and evicted entries, residency, cold start, loading strategies) were more to learn than two levels.
+  - The maximum age on the top-level builder alone: configured there, adjusted through `distributedPolicy().store()`,
+    which breaks the policy's alignment with Caffeine.
+  - The store configured in Caffeine's vocabulary (`store.expireAfterWrite`, `store.maximumSize`, the policy as
+    Caffeine's `FixedExpiration`/`Eviction`): only two methods map, `Expiry` has a read hook the store cannot honour,
+    Caffeine's policy interfaces bring methods that would throw, and `expireAfterWrite` capping every copy would mean
+    more than in Caffeine, the 0.7.0 mistake again.
+  - `withCaffeine` renamed `withLocalCache`, and three scopes each with a place of its own (the validity and
+    `distributedPolicy().maximumAge()` at the top, `withLocalCache` for the copies, `withStore` for the store's own
+    running): consistent, but a breaking change to builder and policy for what the README section already explains.
+  - A cluster-wide idle expiry, as JetCache has none either: every read would become a store write.
 - **Not adjustable:** `withMaximumAgeForStoreOnly()` (a mode: the trust rule of the atomic methods), the heartbeat and
   poll intervals (`pruneGrace` and the five-heartbeat rule are computed from them by the instance that prunes, for every
   instance), the operation timeout (fixed into the drivers when the adapter is built) and the executor; the
@@ -2878,76 +2916,157 @@ the release notes. Considered: `store()` on the cache instead of the policy (the
 Caffeine's `AsyncCache` reaches `stats()`. The nested types lost their prefix (`Store`, `MaximumAge`, `MaximumSize`,
 `Mark`, as Caffeine's `Policy.Eviction`). Old to new: the release notes.
 
-### Change listener (designed 2026-11-20, not built)
+### Change listener (parked 2026-11-23, on demand)
 
-**What:** a listener of the changes every instance makes, on the builder, for an application to keep state of its own in
-step (a derived local index, an audit, metrics). A feature of its own, built first (the user's choice, 2026-11-20),
-before the JCache provider, which does not need it for its first version (the events of this instance's changes, see
-"JCache provider") but takes other instances' events from it after. The messages that carry changes to the other
-instances are there already; the listener exposes them, so it adds no store mechanism. Caffeine's `removalListener`
-stays what it is: this instance's local copies leaving, for any cause.
+*First designed 2026-11-20 (kinds with created-free semantics, a value future, a gap callback); reworked with the user
+on 2026-11-23 to fewer concepts, each with one meaning; then parked the same day, the user's decision: the key it
+should hand out is not in the messages, and no way to get it was clean (see "Parked: the key" at the end of this
+section). What is below is the state reached, kept for the decision when a user asks.*
 
-**What an instance learns of a change elsewhere:** each change reaches every instance as a message: its kind (written,
-invalidated, expired; `invalidateAll` as the control row), the key's hash and the version. So the listener can promise
-every change from every instance, maintenance's expiry included, but not every write:
-- **Coalesced on polled stores:** a poll sees each row's latest state (MariaDB, MySQL; any store without a feed), so two
-  quick writes of one key may arrive as one.
-- **Gaps:** an interrupted feed is a gap; the core revalidates, but the changes within it are gone, so the listener is
-  told of the gap (`onGap`), to resynchronize as it needs.
-- **At least once, ordered per key:** duplicates possible, no order across keys, as the messages are.
-- **Not seen:** pruning to the store's maximum size deletes rows silently (store contract); local evictions are the
-  `removalListener`'s; with `DistributionMode.NONE` there are no messages, so a build with a listener and `NONE` is
-  refused.
-- **No created or updated (decided 2026-11-20):** a write message does not say whether the key existed, and "created" is
-  not reliably knowable: the writing instance knows it for conditional writes only (`putIfAbsent`, a load writing where
-  no row exists), not for a `put`, which writes without reading; the store knows it inside its write and could announce
-  it, but as an SPI change for every adapter, and a polled store never can (a create and an update between two polls
-  arrive as one write); a receiving instance knows only whether it held a copy, its own view. And in a cache the
-  distinction describes the cache's state, not the data's: a key expired, pruned or invalidated and loaded again is
-  created again. So the kinds are `WRITTEN` (a value written, the key holding one before or not), `REMOVED`, `EXPIRED`
-  and `ALL_REMOVED`; JCache, which needs created for its listener types, has it complete for its own changes from the
-  `compute` deciding each operation. If a need shows, stores that can tell could report creation through an optional SPI
-  flag later. No old value either.
-- **No origin:** messages do not carry which instance made a change, so the listener does not say whether a change is
-  this instance's own; that would need an instance id in every message, an SPI change.
+**What:** a listener of the changes every instance makes, on the builder, for an application to keep something of its
+own in step with the cache: a derived local index or view, another cache layer (an HTTP cache, a CDN, a search index),
+clients told of changes, metrics. It exposes the messages the instances exchange already, so it adds no store mechanism.
+Caffeine's `removalListener` stays what it is: this instance's local copies leaving, for any cause. **Not for** an
+audit or a replication log: it reports changes as the messages carry them, not every write (below), and says so.
 
-**The key and the value:** a message carries the hash only. The key comes from this instance's copy if it holds the key,
-otherwise from the row, read once per change (the row keeps the serialized key; a tombstone keeps the key of the row it
-replaced, and has none where no row existed: such a change arrives with its hash and no key). The value is read on
-demand and is the current one, not necessarily the one of the change. Not chosen for the start: keys in the messages, an
-SPI change for every adapter (MongoDB's change stream and Redis's stream entries could carry them, polled stores read
-rows holding them anyway, PostgreSQL's notification payload is limited to 8,000 bytes and would fall back to the read);
-an optimization once the reads are measured to matter.
+**API (agreed 2026-11-23):**
 
-**API (proposed 2026-11-20):** one listener per cache, on the builder, as Caffeine's `removalListener`:
-`withChangeListener(DistributedChangeListener<K, V>)` (named after `DistributedCache` and `DistributedStats`,
-`ChangeListener` being the SPI's), with `onChange(DistributedChange<K, V>)` and `onGap()` (a default doing nothing). A
-`DistributedChange<K, V>` gives:
-- `kind()`: `WRITTEN`, `REMOVED`, `EXPIRED` or `ALL_REMOVED` (`invalidateAll` and the marked forms, from the control
-  row; no key, no hash).
-- `hash()`: the key's hash, always (but for `ALL_REMOVED`), so that a change without a known key is still identifiable.
-- `key()`: the key, or `null` where it is not known (a tombstone where no row existed, a row gone again).
-- `version()`: the version the store applied, increasing per key, for a listener to order or deduplicate what arrives.
-- `value()`: a `CompletableFuture` of the current value, read from the store on the store executor, `null` if the key
-  holds none; a future, so that a listener does not block the delivery thread, and reads only what it needs.
+```java
+public interface DistributedChangeListener<K> {
+    void onChange(DistributedChange<K> change);   // WRITTEN or REMOVED of one key
+    void onResync(ResyncCause cause);             // what was derived from earlier changes may be stale
+}
 
-**Delivery (proposed 2026-11-20):** what the cache's delivery processes (`InternalDelivery`, serially on the store
-executor) is handed to a queue of the listener's own, drained one change at a time on the cache's executor (Caffeine's,
-which runs the removal listener too), so that the changes arrive in the order the cache saw them, per key the store's,
-and a slow listener holds up neither the cache nor other caches. The queue is bounded as the delivery's is
-(`MAXIMUM_PENDING`): a listener too far behind gets what is pending dropped and `onGap()`, rather than a queue growing
-without bound or the cache waiting. A change without a held key waits for its row read in that queue, keeping the order.
-A listener's exception is logged at most once a minute per cache (as unreadable rows are) and the next change delivered;
-it changes nothing in the cache. The changes of this instance arrive through the same messages as everyone's, so every
-change takes one way, in the store's order per key. A build with a listener and `DistributionMode.NONE` (no messages) is
-refused; with polling stores the listener receives what the polls find.
+public interface DistributedChange<K> {
+    enum Kind { WRITTEN, REMOVED }
+    K key();          // never null
+    Kind kind();
+    long version();   // increasing per key: to order and to tell duplicates
+}
 
-**Guarantee, stated in the Javadoc:** every change from every instance, at least once and eventually, possibly coalesced
-per key on polled stores; a gap reported when changes may have been lost, also when the listener falls behind. Partial
-by design; a listener needing every write keeps its own log. Tests: two instances on every store (writes, removals,
-expiry, `invalidateAll`, a key not held, a key whose row is gone, a gap, a slow and a failing listener), the property
-test extended by a listener whose view converges on the store's.
+public enum ResyncCause { EXPLICIT, PARTIAL, MISSED }
+```
 
+- **`onChange`:** a key's value was written or removed by an operation, on any instance, this one's included (through
+  the same messages, after the store's echo, so one path and the store's order per key). A key is taken from this
+  instance's copy, or read once from the row; a removal of a key that never existed changed nothing and is not
+  reported.
+- **`onResync(cause)`:** a point in time, not a duration: what the listener derived from changes reported before it may
+  be stale; changes after it are reported as before. The cache itself needs nothing (its copies are brought up to date
+  by the core); the listener drops or rebuilds what it derived, for instance by re-reading the keys it needs from the
+  cache. Causes: `EXPLICIT` (`invalidateAll()` on any instance: every value written before it is gone), `PARTIAL`
+  (`invalidateAllBeforeMark` or `invalidateAllOlderThan`: values written before a time are gone, which ones is
+  unknown), `MISSED` (changes may not all have been reported: an interrupted feed, a failover, polls failing longer than
+  their grace, the listener's own queue overflowing, a key that could not be resolved). Rare in normal operation:
+  `invalidateAll` is explicit, and the rest happens around incidents, which the log and `distributedStats()` record for
+  operators. Named after the listener's view, not the cache's values: "invalidated" was rejected, as for `MISSED` and
+  `PARTIAL` the cache's values stay valid and served; "resync" as in Kubernetes informers and replication.
+  `ResyncCause` mirrors Caffeine's `RemovalCause`, so a listener can branch on it or log it, and a cause added later
+  is an enum value, not a method.
+
+**Why this shape (2026-11-23):** the 2026-11-20 design carried a caveat per feature (a `value()` future that could be
+newer than the change, a nullable key, a hash for unknown keys, `onGap()` sounding as if incidents were frequent and
+called for reactions). Weighed: a slim form (`onChanged(key)`, `onAllChanged()`; aligned, but no kinds, which a JCache
+provider or a listener telling removals from writes would need) and the full one; the middle keeps the kinds that have
+one reliable meaning and folds every uncertainty into `onResync`. Rejected on the way: `onAllRemoved` and `onAllChanged`
+as two methods (a listener reacts to both the same way: drop what it derived), replaying the core's revalidation as
+`onChange` after a gap (unneeded once the listener drops everything), and a default `onResync` doing nothing (a user who
+never thought about it would keep stale derived state after an incident; it is abstract, one conscious line).
+
+**Operations only, the housekeeping not reported (decided 2026-11-23):** the listener reports changes made by
+operations on any instance; the store's own housekeeping, expiry (the maximum age, for all or per entry) and pruning to
+the maximum size, is not a change of the data and is not reported. A pruned value is still correct, the store only no
+longer keeps it (the instances keep their copies for the same reason); an expired value has passed the validity the
+user configured for the cache, while whether the data is still valid is the source's, which a reload asks. One rule
+instead of two exceptions. This instance's copies leaving for any reason, every expiry included at its exact moment,
+are the `removalListener`'s, so the two listeners split cleanly: time and memory there, operations on the shared data
+here. Changes made directly in the store are not reported either, as the instances do not see them.
+
+- **Why (2026-11-23):** an `EXPIRED` kind, first designed, collided with the removal listener's `RemovalCause.EXPIRED`:
+  the same word for a held key's expiry, reported twice at different moments (the copy at the expiry time, the store's
+  maintenance up to an interval later), while a purely local expiry came once. Documenting the difference left it
+  confusing; it also needed the store-only mode as a special case (the core keeping copies past their store expiry).
+  Announcing pruning was weighed and rejected for its cost: pruning in place (a state `EVICTED`) would cost every cache
+  with a maximum size about expiry's price per pruned row (PostgreSQL 18 per million rows: about 7–9 s against 2 s,
+  batches of 10,000 instead of 100,000, a message per pruned row to every instance).
+- **Aligned, and where it falls short:** the contract is now uniform (operations, never housekeeping) and the
+  listeners do not overlap in meaning; the one overlap left is natural (a write or removal of a key held here changes
+  the data and replaces or drops the copy). It serves well what mirrors the *data*: other cache layers purged on a
+  write or removal (an HTTP cache, a CDN, a search index entry), clients told of changes, an index derived lazily from
+  cache reads (a read after expiry returns nothing, so it corrects itself), metrics of writes and removals. It falls
+  short for what must mirror the *cache's contents* exactly: an eagerly derived view of which keys the store holds
+  (expired and pruned keys stay in it until the listener applies the same rule itself: the fixed age or the per-entry
+  function, which it knows; pruning it cannot predict), a count of live entries, a downstream copy without its own
+  expiry (it needs the same age configured). Those users apply the expiry rule themselves, avoid `withMaximumSize`, or
+  re-read the cache. Should a use need the housekeeping reported, an `EXPIRED` kind can be added later without
+  breaking anyone (an enum value; reported when maintenance runs, with the caveats above), and pruning only with
+  pruning in place.
+
+**Properties the meaning absorbs** (no caveat of their own): at least once (duplicates told by the version); coalesced
+per key on polled stores (MariaDB, MySQL: one report for several writes between polls); no order across keys; no
+created or updated, no old value, no origin instance (not reliably knowable for a `put`, which reads nothing, nor on a
+polled store, where a creation and an update between two polls arrive as one write); a change reported shortly before a failover undoes it
+(PostgreSQL with an asynchronous standby, Redis), followed by `onResync(MISSED)`.
+
+**The distribution mode (decided 2026-11-23):** `INVALIDATE` and `UPDATE` send the same messages (they carry no
+values in either), so the listener reports the same changes in both; `NONE` sends none, so a build with a listener and
+`NONE` is refused. The mode decides only what a listener finds when it reacts by reading the cache, the natural reaction
+as a change carries no value: with `INVALIDATE` the copy here is dropped already, so `cache.get(key)` reads the store
+(a round trip); with `UPDATE` the core has read the new rows of held keys in the same pass (`populate`) and installed
+them, so the read is a local hit. `UPDATE` makes a listener's reactions cheap for the keys this instance holds.
+
+**Reading in `onChange` sees the change (decided 2026-11-23):** when `onChange` is called, this instance's cache
+reflects the change or a later one: each change is handed to the listener after the core has applied it (the copy
+dropped, or replaced and populated). A change of a key with an operation in flight here (a `put` or a load, the key
+reserved), whose copy the core decides when the operation releases it, waits in the listener's queue for that release,
+so the guarantee has no exception.
+
+**The store-only mode:** nothing special: the listener reports operations, and the mode only changes what the
+core does with expiry, which the listener does not report.
+
+**Delivery:** what the cache's delivery processes (`InternalDelivery`, serially on the store executor) is handed to a
+queue of the listener's own, drained one change at a time on Caffeine's executor (which runs the removal listener too),
+so that a slow listener holds up neither the cache nor other caches. Bounded as the core's own delivery is
+(`InternalDelivery.MAXIMUM_PENDING`, 100,000): unbounded would risk the JVM, blocking would leave the cache's copies
+stale behind a slow listener, so overflow drops what is pending and calls `onResync(MISSED)`. A key not held here waits
+for its row read in that queue, keeping the order. A listener's exception is logged at most once a minute per cache
+and the next change delivered; it changes nothing in the cache. (`DistributionMode.NONE`: see above.)
+
+**Extension path, should a JCache provider ever be built** (on demand): its own operations' events come from the
+`compute` deciding each operation, other instances' from `onChange`; created vs. updated and old values stay partial
+there.
+
+**Tests:** two instances on every store (writes, removals, expiry and pruning not reported, every form of
+`invalidateAll` with its cause, a gap,
+a slow listener overflowing, a failing listener, a key not held, a key whose row is gone); the property test with a
+listener-driven derived view that converges on the store's after each phase.
+
+**Parked: the key (2026-11-23).** The messages identify a key by its hash and version, never the key: that keeps them
+small and the stores simple (the core matches messages to its copies by hash, `InternalKey`). A listener handing out
+keys has three sources only: this instance (a copy, or a key it saw), the message, or the row in the store. Each way
+weighed left something not right:
+- **Keys by reading the row** (one batched read per delivery batch for keys not held here): the reads grow with writes
+  times instances (10 instances, 1,000 writes per second: about 10,000 row reads per second only for keys), so the
+  listener would become the store's largest client.
+- **Keys in the messages** (an optional serialized key in `spi.Change`): an SPI change for every adapter; every message
+  grows, for every instance and also for caches without a listener; PostgreSQL's payload is limited to 8,000 bytes
+  (larger keys falling back to a read); MongoDB's change stream carries the key for inserts but not reliably for
+  updates (unset if unchanged), so `fullDocument: updateLookup` (a server-side read per event) or post-images (MongoDB
+  6, the floor being 4.4), unchecked. Bounded by a size cap (keys up to about 256 bytes, larger read) and enabled only
+  on caches built with a listener (a setting every instance shares, as the maximum age), it is workable but a pile of
+  conditions.
+- **Hashes only** (`onChange(hash, kind, version)`, `distributedPolicy().hashOf(key)` for the application to relate its
+  keys): no read, no SPI change, every change reported; matches the core's own model. Unusual for users (they hash
+  their own keys), and it cannot say which key changed where the application does not know it beforehand.
+- **Keys of the keys this instance has seen** (a bounded memory of hash to key, kept past the copies): no read, but not
+  every change, and fuzzy at the memory's bound; with a nullable `keyOf(hash)` beside hashes, the null the design had
+  removed comes back.
+
+**When it is asked for:** the use decides. Subscriptions to known keys, state derived about keys the application knows,
+downstream entries it created, metrics: hashes suffice (the cleanest variant). Reporting arbitrary changed keys (a
+feed of every change to clients that do not subscribe by key): keys in the messages, with the cap and the shared
+setting. The rest of this section (operations only, `onResync` and its causes, delivery, the distribution mode) holds
+for either.
 ### Async variants
 
 `AsyncCache` and `AsyncLoadingCache` are supported from the start, because they shape decisions that would
@@ -3413,9 +3532,9 @@ then a gap). What the polled adapters add is tests.
   schema check at startup); the new default moves it to the clients' model (start, degrade per operation, heal on
   its own), Spring's convention.
 
-**For later** (see "Open work"): installing the row the background pass read instead of dropping a
-mismatched copy; a scan next to a feed for catching up after a gap; a flag forcing polling and the message bus,
-both plugging into the decision of design step 2.
+**For later** (see "Open work"): a flag forcing polling and the message bus, plugging into the decision of design
+step 2. Since 2026-11-24 the check after the connect holds what it read in `UPDATE` mode (see "Catching up after a
+gap"); a scan next to a feed was measured and parked.
 
 ### Adapter ownership: one adapter per cache
 
@@ -3467,12 +3586,17 @@ both report `DEGRADED`, and the reason goes into the log (a state per reason wou
   value is trusted only if its epoch is current and the subscription is up.
 - On a gap the counter is incremented, which makes everything held unconfirmed without touching an entry.
 - An unconfirmed value is checked when read: the store returns the row, under the maximum-age filter. Same version
-  and the same value (compared serialized, as the store holds it) → kept and confirmed; different, too old or missing
-  → a miss (L2, then the loader, as usual). The version alone does not tell: after a failover that lost a write, a
-  store assigning versions can give a later write the lost one's version (found 2026-11-10, see dimension 4 of the
-  in-memory store profiles).
+  and the same value (compared serialized, as the store holds it) → kept and confirmed; another value → the row read
+  is held and answers the read (`InternalCore#confirmOrDrop`, `#replaceWithRead` for batches), as the read through the
+  store that followed did, so a changed copy costs one round trip, not two (built 2026-11-24, see "Catching up after
+  a gap" under Performance); too old or missing → a miss (L2, then the loader, as usual). The version alone does not
+  tell: after a failover that lost a write, a store assigning versions can give a later write the lost one's version
+  (found 2026-11-10, see dimension 4 of the in-memory store profiles). So the single read removes the copy before it
+  holds the row (`readThrough`'s path, the key reserved before the read), and a batch replaces only by the version
+  rule, a row at the copy's version holding other bytes dropping it.
 - A background pass checks all held keys in batches (rows, e.g. 1,000 per query, rate-limited so it does
-  not load a store that has just recovered) and drops what does not match, so `asMap()`, iteration and
+  not load a store that has just recovered) and drops what does not match (in `UPDATE` mode, replaces it by the row
+  read, as the missed messages would have: see "Catching up after a gap"), so `asMap()`, iteration and
   `estimatedSize()` are clean again soon, not only once each key has been read. It covers what never goes through a
   read: views and iteration, sizes, quiet reads (`getIfPresentQuietly`, L1 only), the user's removal listener, and
   memory held by outdated entries. Before dropping, it compares the version again under `compute`, like every other
@@ -3488,7 +3612,7 @@ both report `DEGRADED`, and the reason goes into the log (a state per reason wou
   check applies anyway, since messages are delayed.
 - Costs: one `int` per `InternalValue`; a row read (its value transferred) on the first access per key after a gap,
   and on every access while the subscription is down; one query per 1,000 held keys per gap for the background
-  pass.
+  pass (measured 2026-11-24: 2.4 to 3.7 s at 100,000 held keys of 1 KB, of which 1 s pacing).
 
 **Store guard, as today (measured and tested):** opens after 3 consecutive failures; while open, store calls are
 refused at once; after 1 s the next call is the probe; a successful call, or the maintenance worker's success,
@@ -5424,16 +5548,89 @@ it); `SimpleCacheManager` with hand-built caches as the documented way (no cache
 | Framework                                   | How its caches plug in                                                                                                          | Served by                                                         |
 |---------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------|
 | Spring                                      | its `Cache` abstraction; `CaffeineCacheManager` builds Caffeine caches                                                          | `DistributedCaffeineCacheManager` (after 0.9.0)                   |
-| Micronaut                                   | `micronaut-cache-caffeine` builds caches from `micronaut.caches.<name>.*`; with a JSR-107 implementation present it uses JCache | the JCache provider; nothing Micronaut-specific needed            |
-| Hibernate (second-level cache)              | `hibernate-jcache`, or a `RegionFactory` of its own                                                                             | the JCache provider; a `RegionFactory` only if wanted without it  |
+| Micronaut                                   | `micronaut-cache-caffeine` builds caches from `micronaut.caches.<name>.*`; a backend is a set of `SyncCache` beans              | an integration of its own, once asked for (*on demand*)           |
+| Hibernate (second-level cache)              | `hibernate-jcache`, or a `RegionFactory` of its own                                                                             | a `RegionFactory`, once asked for (*on demand*)                   |
+| Jakarta EE                                  | no cache standard of its own; JCache with the JSR-107 annotations through CDI                                                   | none: only a JCache provider would serve it (*on demand*)         |
 | Quarkus                                     | `quarkus-cache` (Caffeine by default; Redis and Infinispan as extensions of their own)                                          | an extension of its own, an artifact apart (*on demand*)          |
 | Vert.x, Dropwizard, Ktor and the like       | no cache abstraction: the application uses a cache directly                                                                     | the plain API, a Caffeine `Cache`, already a drop-in              |
 
-So the JCache provider comes second: one integration for several frameworks, at the cost of JSR-107's API surface.
-A Micronaut integration of its own would add only configuration through `micronaut.caches.*`; whether Micronaut
-offers a hook to plug in a cache manager directly is unchecked, left until it is asked for.
+**Integrations per framework, not JCache first (decided 2026-11-23).** A JCache provider would serve several
+frameworks with one integration, but JSR-107 describes a cache whose state is the same everywhere, and here every
+instance holds copies of the store: expiry on access (`AccessedExpiryPolicy`, `TouchedExpiryPolicy`) extends only the
+accessing instance's copy, `iterator()` and `removeAll()` reach this instance's copies only (unless a scan of the
+store is built), other instances' events cannot always tell created from updated, and statistics are per instance. The
+TCK runs one instance and would not show any of it: passing it would hide the difference, not remove it, and the
+provider would promise a standard it keeps only in part. The frameworks themselves use little of it: Hibernate's
+second-level cache, Spring and Micronaut call `get`, `put`, `remove` and `clear` with eternal or fixed expiry, and
+neither iterate nor listen. So each gets a thin integration at its own plug-in point when asked for, as Spring has,
+promising what the library keeps; the JCache provider stays designed (below) and on demand, for a user asking for
+JCache itself. The cost: Jakarta EE, whose only cache standard is JCache, has no integration until then.
 
-### JCache provider (designed 2026-11-20, not built)
+**Documentation first, integrations only at runtime plug-in points (decided 2026-11-23).** How heavy an integration
+gets depends on what the framework offers, not on the library. Every framework can already use the library as what
+it is, a Caffeine cache built in code and shared as a bean; annotations such as `@Cacheable` or `@CacheResult` are a
+convenience, not a capability, and calling the cache directly loses none of its guarantees. So: a documented usage
+pattern for every framework (a CDI producer for Quarkus in JVM mode and Jakarta EE, a `@Factory` bean for Micronaut,
+the Spring integration); integrations only through runtime plug-in points, each built on demand; build-time
+integrations (a Quarkus extension, native images) only on explicit demand, their cost stated.
+
+| Framework   | How its caches plug in                                                                                     | Integration effort                                                                                                                                         |
+|-------------|------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Spring      | a runtime interface (`CacheManager`, `Cache`) any bean implements                                          | light: built (`DistributedCaffeineCacheManager`), nothing special in the build                                                                             |
+| Micronaut   | caches are beans: `micronaut-cache-core`'s `SyncCache`/`AsyncCache` per named cache, found by name at runtime | light at runtime; the package compiled with Micronaut's annotation processor (its DI is resolved at compile time), Micronaut an optional dependency, one jar |
+| Hibernate   | a runtime SPI (`RegionFactory`)                                                                            | moderate: Hibernate's region and access-strategy model                                                                                                     |
+| Quarkus     | build-time registration of cache backends                                                                  | an extension: a runtime and a deployment module, following Quarkus's internals                                                                            |
+| Jakarta EE  | JCache only                                                                                                | none: the JCache provider is on demand                                                                                                                     |
+
+**Micronaut (checked from knowledge 2026-11-23, to verify against its sources before building):** caching is
+`micronaut-cache-core` (`SyncCache`, `AsyncCache`, a `CacheManager`, `@Cacheable`, `@CachePut`, `@CacheInvalidate`),
+backends separate modules maintained by the Micronaut team (Caffeine the default, Hazelcast, Infinispan, Ehcache,
+JCache, Coherence; Redis in `micronaut-redis` with Lettuce) or by vendors (Redisson). A backend is a set of beans: each
+named cache a bean implementing `SyncCache`, created from configuration (`<prefix>.caches.<name>.*` through
+`@EachProperty`), looked up by name by the annotations. Ours would be a package about the Spring integration's size: a
+`SyncCache` wrapping a `DistributedCache`, a factory creating one per configured name (for example
+`distributed-caffeine.caches.products.maximum-age`) with the adapter's data source or client injected, and closing on
+shutdown. Unlike Spring, Micronaut's dependency injection is generated at compile time, so the package needs
+Micronaut's annotation processor in this library's build; the generated bean definitions ship in the one jar, inert
+without Micronaut. First step when asked: read the current `SyncCache` and how the Caffeine or Redisson module
+registers its beans.
+
+**Quarkus (checked 2026-11-23):** `quarkus-cache` selects its backend with `quarkus.cache.type` (several backends since
+3.29, quarkusio/quarkus PR 50007), registered at build time: through `CacheManagerInfoBuildItem` in 3.x, through
+Quarkus's build-time services (`CacheManagerInfo`) from 4.0 (PR 57687, merged for 4.0.0.CR1, the build item deprecated
+for removal). A jar on the classpath cannot register a backend; an extension's deployment module must. Backends today:
+Caffeine (default), `quarkus-redis-cache` and `quarkus-infinispan-cache` (both preview), Redisson's own extension (with
+a local cache, its selling point); Hazelcast's client extension offers its own API, not `quarkus-cache`. The lightest
+integration would be a thin extension in JVM mode only: a `CacheManagerInfo` and Quarkus's cache interface over
+`DistributedCache` (blocking store calls kept off the event loop), and one build step registering it; without native
+images, Dev Services or Dev UI, which are most of the weight. Its cost is following Quarkus's internals across major
+versions. Without any extension, the library works in a Quarkus application in JVM mode as a CDI bean produced from
+Agroal's data source or the MongoDB client extension's client (Redis: Lettuce, Jedis or Redisson added by the
+application, Quarkus's own client being Vert.x-based), called directly rather than through `@CacheResult`, from worker
+threads.
+
+**Peers (checked 2026-11-23):** JetCache, the closest comparable two-level cache (Caffeine and Redis, local copies kept
+in step by broadcast), integrates with Spring only (starters, its own annotations); with Micronaut or Quarkus it is used
+through its API, the same position as this library. Broad framework coverage comes from vendors whose product is a data
+platform (Redisson: Spring, Micronaut, Quarkus; Hazelcast: Spring, Micronaut's modules, a Quarkus client extension,
+JCache), each with a team maintaining those modules; matching JetCache needs nothing more, matching them would mean
+taking on a vendor's maintenance.
+
+### JCache provider (designed 2026-11-20, not built; on demand since 2026-11-23)
+
+*Kept as the design for a user asking for JCache itself; the frameworks get integrations of their own first (see
+"Integrations per framework, not JCache first"). Its per-instance parts, marked partial below, would be documented
+as such.*
+
+*Events across instances (noted 2026-11-23, after the change listener was parked):* JCache's listeners need, per event,
+the key, the value, created vs. updated as separate types, optionally the old value, and expired events. Other
+instances' events depend on the change listener's key problem (see "Change listener", "Parked: the key"), in a stricter
+form: values are in the messages even less than keys (a read per event, or values in every message, far larger than
+keys), created vs. updated is not knowable for a `put` nor on polled stores, old values are gone once overwritten, and
+expiry is housekeeping the listener deliberately does not report. Only this instance's own events are clean: the
+`compute` deciding each operation knows key, value, old value and created vs. updated without any message. A provider
+with events for its own operations only is possible, as in-process implementations behave, but in a cluster users
+expect every instance's events, which this design cannot deliver cleanly.
 
 **What:** a JSR-107 provider in `...integration.jcache` (`javax.cache:cache-api` 1.1, optional), for the frameworks that
 plug in caches through JCache: Hibernate's second-level cache (`hibernate-jcache`), Micronaut, and Spring on
@@ -6263,6 +6460,46 @@ million ops/s: the core's own costs are negligible against a store's round trip.
   its socket; a fresh store after the instances closed is fast again. Both drivers set `TCP_NODELAY`. The signature
   of a stall in the forwarding between the host and Docker's VM; to confirm on Linux or a native database.
 
+### Catching up after a gap
+
+*Measured and built 2026-11-24 (`GapBenchmark`).*
+
+**What a check reads, it holds.** A copy that does not match the store was dropped, and the next access read the same
+row again. Now the row read replaces it where that has the same effect as what the copy missed:
+
+- **On a read, in every mode** (`InternalCore#confirmOrDrop`, and `#replaceWithRead` for batched reads): while
+  delivery is interrupted every read checks its copy, and a changed one used to cost two round trips, the check and
+  the read through the store after it. The check's row answers the read, as that read would have.
+- **In the background pass and the late-message check, in `UPDATE` mode only:** catching up after a gap has the
+  effect the missed messages would have had. `UPDATE` replaces a held copy (never inserts one, invariant 8), so the
+  pass replaces too; `INVALIDATE` drops, so the pass drops, even though the row was read: installing there would turn
+  the mode into `UPDATE` (memory kept for copies nobody asks for again, the removal listener reporting `REPLACED`
+  where the mode promises a drop). `NONE` has no gaps and no checks.
+- **The safety rules:** the single read removes the copy before holding the row, under a reservation taken before the
+  read (`readThrough`'s path), so a racing message or removal wins and, after a failover that lost a write, the store's
+  bytes win at the copy's own version; batches replace only by the version rule and never insert (`populate`'s path),
+  so a row at the copy's version holding other bytes drops it. A row without a value drops the copy, as before (the
+  caller then reads through again: a removal while delivery is interrupted still costs two reads, left as rare).
+
+**Measured** (local containers, PostgreSQL 18, Redis 8, MongoDB 9; one instance holding 100,000 keys of 1 KB, 1 to
+50 % of them changed while it missed the messages, then 10 % of all keys read once):
+
+| Scenario                                                | Before                                                | Built                                 |
+|---------------------------------------------------------|-------------------------------------------------------|---------------------------------------|
+| Delivery down, 50 % changed: store calls for the reads  | 14,913 (2.9 s PostgreSQL, 3.0 s Redis, 5.5 s MongoDB) | 9,956, one per read (1.9, 2.0, 3.4 s) |
+| `UPDATE`, after a gap with 50 % changed: reads after it | 4,957 (1.0 to 1.5 s)                                  | none, every changed copy replaced     |
+| `UPDATE`, after a start without the store               | 9,956 (2.0 to 3.8 s)                                  | none                                  |
+| `INVALIDATE`, after a gap or a start                    | one read per changed key accessed                     | the same, by the mode rule            |
+| The background pass                                     | 2.4 to 3.7 s, 100 calls (1 s pacing)                  | the same, within noise                |
+
+The store calls are counted at the store and hold off Docker Desktop; the times are local. A scan next to a feed,
+the other idea for catching up, would save only the background pass: parked (see "Open work").
+
+**Tested:** `InternalRecoveryTest` (a changed copy replaced by its check in one store read, a batched check likewise,
+the `UPDATE` pass replacing what changed and dropping what was removed, nothing inserted), each mutation-checked; the
+version rule refusing a row at the copy's own version makes a separate check there an equivalent mutant, so there is
+none. Every in-memory profile (`redis-hostile` with failovers losing writes included), the property tests.
+
 ## Open design questions
 
 New ones go here as they come up while building; decided ones move to their section. None open at the moment.
@@ -6294,6 +6531,14 @@ New ones go here as they come up while building; decided ones move to their sect
 - PostgreSQL's listener reads pgjdbc's stream through reflection on one internal field (`QueryExecutorBase.pgStream`),
   checked at the first subscription; a pgjdbc release could change it.
 - Every PostgreSQL `NOTIFY` wakes every listening session (about 33 µs of PostgreSQL CPU each).
+- No events across instances, by design (accepted 2026-11-23): changes travel as invalidation messages carrying a key's
+  hash, its version and the kind, over what each database's feed offers (PostgreSQL's notifications, a MongoDB change
+  stream, a Redis stream, polling), not as events carrying keys and values. That keeps copies in step cheaply,
+  correctly and portably across five stores, the library's goal; rich events would need a store that is an event
+  system (a data grid, as Hazelcast's or Infinispan's), which the library deliberately is not. Hence no change listener
+  for now and no cluster-wide JCache events (see "Change listener", "Parked: the key", and the note in "JCache
+  provider"). Apart from that, the two levels limit what any near cache can make cluster-wide (access expiry,
+  iteration over every entry, statistics): those are per instance.
 
 ## Lessons checklist
 
@@ -7035,3 +7280,5 @@ and the client notes, costs entry, README and release notes. Found and fixed on 
   with `INVALIDATE` (`UPDATE`, the atomic methods and the misses within the age read them);
 - **built 2026-11-21** (see "Maximum age per entry"): the store's expiry per entry, in its slimmest form (one age per
   write, `withMaximumAgePerEntry`); an SPI and layout change in 0.10.0;
+- **built 2026-11-24** (see "Catching up after a gap"): installing what a check read (noted 2026-11-12), on every
+  read in every mode and in the background pass in `UPDATE` mode only;

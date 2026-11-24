@@ -1,0 +1,47 @@
+<!--
+
+    Copyright © 2023-2026 Dr. Andreas Oberhoff (All rights reserved)
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+-->
+<!DOCTYPE html>
+<!-- Kept in sync with the opening of README.md, word for word: DocumentationTest checks it -->
+<html lang="en">
+<head>
+    <title>Distributed Caffeine</title>
+</head>
+<body>
+<p>
+    Distributed Caffeine adds distribution and a shared second level to
+    <a href="https://github.com/ben-manes/caffeine">Caffeine</a>, through a store the application may already use:
+    MongoDB, PostgreSQL, Redis (also Valkey, Dragonfly, Kvrocks), MariaDB or MySQL.
+</p>
+<ul>
+    <li><b>Distribution:</b> a change made on one instance reaches the copies held by all other instances.</li>
+    <li><b>Second level:</b> a local miss is answered from the shared store, or else from the source.</li>
+    <li><b>Compatibility:</b> configured and used like any Caffeine cache: the same builder methods, the same
+        interfaces.</li>
+    <li><b>Consistency:</b> all instances end up with the same, latest value of every key, even when writes and loads
+        race.</li>
+    <li><b>Resilience:</b> local copies keep being served when the store or distribution fails; instances recover
+        automatically.</li>
+</ul>
+<p>
+    Start with the builder, {@link io.github.oberhoff.distributedcaffeine.DistributedCaffeine}, which describes how the
+    distribution and the two levels work together.
+    The <a href="https://github.com/oberhoff/distributed-caffeine">README</a> covers usage, configuration and
+    operation in full.
+</p>
+</body>
+</html>
