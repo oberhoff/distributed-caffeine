@@ -7,7 +7,7 @@ name: Nightly Full Matrix Tests
 on:
   schedule:
     # GitHub reads cron in UTC
-    - cron: "42 0 * * *"
+    - cron: "42 20 * * *"
   # by hand: develop unless another branch, tag or commit is given, whichever branch the dialog's "Use workflow from"
   # shows (it preselects main, the last release, and only picks the copy of this file that runs)
   workflow_dispatch:
