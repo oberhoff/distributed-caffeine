@@ -16,9 +16,11 @@ on:
         description: The branch, tag or commit to test
         default: develop
 
-# read only: the marker lives in the Actions cache, and the jobs report through their own tokens
+# read only: the markers live in the Actions cache, and the jobs report through their own tokens; actions to look up
+# the passed marker
 permissions:
   contents: read
+  actions: read
 
 jobs:
   changes:
@@ -27,7 +29,10 @@ jobs:
     timeout-minutes: 5
     outputs:
       sha: ${{ steps.head.outputs.sha }}
-      changed: ${{ github.event_name != 'schedule' || steps.marker.outputs.cache-hit != 'true' }}
+      # a re-run of all jobs tests again: the first attempt saved the marker, so it would skip every group
+      changed: >-
+        ${{ github.event_name != 'schedule' || github.run_attempt > 1
+        || (steps.marker.outputs.cache-hit != 'true' && steps.passed.outputs.passed != 'true') }}
     steps:
       # one commit for the whole run: every group checks it out, so a push meanwhile changes nothing, and the passed
       # marker below names what every group tested; scheduled runs have no inputs, so they test develop
@@ -48,6 +53,23 @@ jobs:
           path: nightly-marker
           key: nightly-tested-${{ steps.head.outputs.sha }}
           lookup-only: true
+      # a commit that passed a run by hand is done as well. Through the API, as a run reads only the caches of its own
+      # branch and the default branch, and a run by hand on develop saves its marker in develop's scope; only markers
+      # from this repository's branches count, as a pull request from a fork could save any marker in its own scope
+      - name: Look up the passed marker
+        id: passed
+        if: github.event_name == 'schedule' && steps.marker.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.head.outputs.sha }}
+        run: |
+          passed=$(gh api "repos/${GITHUB_REPOSITORY}/actions/caches?key=nightly-passed-${SHA}" \
+            --jq "any(.actions_caches[]; .key == \"nightly-passed-${SHA}\" and (.ref | startswith(\"refs/heads/\")))")
+          echo "passed=${passed}" >> "$GITHUB_OUTPUT"
+          if [ "$passed" = true ]; then
+            echo "::notice::Commit ${SHA} already passed: skipping the groups"
+          fi
+      # also for a commit with a passed marker, which the lookups above do not keep from expiring
       - name: Create the marker
         if: github.event_name == 'schedule' && steps.marker.outputs.cache-hit != 'true'
         run: echo "${{ steps.head.outputs.sha }}" > nightly-marker
@@ -259,6 +281,7 @@ jobs:
           # the commit resolved above, not the run's own: a scheduled run starts from the default branch (main), a
           # run by hand from the branch the dialog shows
           ref: ${{ needs.changes.outputs.sha }}
+          persist-credentials: false
       - name: Set up JDK 17
         uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
@@ -271,7 +294,8 @@ jobs:
         # class names ($Mongo_4_*) as variables and every group runs the whole test class
         run: mvn -B -DskipErrorProne test '-Dtest=${{ matrix.tests }}' ${{ matrix.flags }}
       - name: Report failed tests
-        if: failure()
+        # a job that reaches its timeout counts as cancelled, not failed
+        if: failure() || cancelled()
         uses: ./.github/workflows/common/report-failed-tests
         with:
           artifact-name: failed-tests-${{ strategy.job-index }}

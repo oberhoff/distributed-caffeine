@@ -104,22 +104,24 @@ jobs:
           SHA: ${{ steps.commit.outputs.sha }}
         run: |
           runs="repos/${GITHUB_REPOSITORY}/actions/workflows/continuous-integration.yml/runs"
-          conclusion=$(gh api "${runs}?head_sha=${SHA}&event=push" --jq '.workflow_runs[0].conclusion // "none"')
+          conclusion=$(gh api "${runs}?head_sha=${SHA}&branch=develop&event=push" \
+            --jq '.workflow_runs[0].conclusion // "none"')
           if [ "$conclusion" != success ]; then
             echo "::error::CI on ${SHA} is ${conclusion}, not success"
             exit 1
           fi
       # through the API, not actions/cache/restore: a run reads only the caches of its own branch and the default
       # branch, and a nightly run by hand on develop saves its marker in develop's scope, which a run started from main
-      # would not see
+      # would not see. Only markers from this repository's branches count: a pull request from a fork runs its own copy
+      # of the workflows and could save any marker in its own scope
       - name: Require the nightly to have passed
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ steps.commit.outputs.sha }}
         run: |
           found=$(gh api "repos/${GITHUB_REPOSITORY}/actions/caches?key=nightly-passed-${SHA}" \
-            --jq "[.actions_caches[] | select(.key == \"nightly-passed-${SHA}\")] | length")
-          if [ "$found" = 0 ]; then
+            --jq "any(.actions_caches[]; .key == \"nightly-passed-${SHA}\" and (.ref | startswith(\"refs/heads/\")))")
+          if [ "$found" != true ]; then
             echo "::error::No nightly passed on ${SHA}: wait for the next one, or run it by hand on develop"
             exit 1
           fi

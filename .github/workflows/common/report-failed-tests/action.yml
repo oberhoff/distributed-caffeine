@@ -3,7 +3,7 @@ description: >-
   The failures each test JVM recorded (testing.FailureLog), as Surefire's reports keep only the last topology of a
   class: an annotation each, readable through the API (a job's check run), the whole list in the job summary (GitHub
   shows at most 10 error annotations per step), and the files as an artifact. Used by the test workflows after a
-  failed step (if: failure()).
+  failed step or a timeout (if: failure() || cancelled()).
 
 inputs:
   artifact-name:

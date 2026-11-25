@@ -15,12 +15,14 @@ permissions:
   contents: read
   actions: read
 
-# a newer push to a pull request or another branch cancels the run it outdates, so that bursts (Dependabot opens
-# several pull requests at once) do not queue outdated groups for the 20 runners; on main and develop every commit
-# keeps its run and its result
+# a newer push to a pull request cancels the run it outdates, so that bursts (Dependabot opens several pull requests at
+# once) do not queue outdated groups for the 20 runners. On main and develop every commit keeps its run and its result:
+# the group is the commit, not the branch, so a run neither waits for nor replaces that of another commit, while the
+# same commit pushed to both branches runs one after the other, and the second run finds the first one's passed marker
+# (changes below) and skips the groups. Started together, neither would find it and both would test
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/develop' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # a cache entry per tree that passed every group (passed below) marks it as tested: a run on the same content skips
@@ -114,6 +116,8 @@ jobs:
     steps:
       - name: Checkout branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # JDK 25, not the baseline 17: Error Prone and NullAway, which the build runs, need JDK 21 or newer. The
       # compiler's release 17 (pom.xml) still rejects any API newer than Java 17; the tests run on Java 17 in the
       # nightly full matrix (nightly-full-matrix-tests.yml), and the release is built with JDK 17
@@ -130,7 +134,8 @@ jobs:
         # and every group runs the whole test class
         run: mvn -B ${{ matrix.goal }} -DrunsOnGitHub '-Dtest=${{ matrix.tests }}'
       - name: Report failed tests
-        if: failure()
+        # a job that reaches its timeout counts as cancelled, not failed
+        if: failure() || cancelled()
         uses: ./.github/workflows/common/report-failed-tests
         with:
           artifact-name: failed-tests-${{ strategy.job-index }}
