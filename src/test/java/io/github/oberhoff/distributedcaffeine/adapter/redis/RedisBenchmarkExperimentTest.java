@@ -28,9 +28,9 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import java.util.function.Function;
 
 /**
- * The end-to-end benchmark (see {@link EndToEndBenchmark}) on Redis 8, through each client library, and on Valkey 9
- * and Dragonfly 2 (on its defaults and with {@code --lock_on_hashtags}) through Lettuce, each a single server in a
- * local container. Run with {@code -Dexperiments=true}.
+ * The end-to-end benchmark (see {@link EndToEndBenchmark}) on Redis 8, through each client library, and on Valkey 9,
+ * Dragonfly 2 (on its defaults and with {@code --lock_on_hashtags}) and Kvrocks 2 through Lettuce, each a single
+ * server in a local container. Run with {@code -Dexperiments=true}.
  *
  * @author Andreas Oberhoff
  */
@@ -119,6 +119,13 @@ class RedisBenchmarkExperimentTest {
         measure("docker.dragonflydb.io/dragonflydb/dragonfly:v2.0.2",
                 "Dragonfly 2.0.2 with --lock_on_hashtags through Lettuce (single server, local container)",
                 server -> LettuceRedis.of(server.client), "--lock_on_hashtags");
+    }
+
+    // on disk (RocksDB), unlike the in-memory servers above
+    @Test
+    void measures_kvrocks_through_lettuce() throws Exception {
+        measure("apache/kvrocks:2.17.0", "Kvrocks 2.17.0 through Lettuce (single server, local container)",
+                server -> LettuceRedis.of(server.client));
     }
 
     @Test
