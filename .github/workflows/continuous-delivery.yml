@@ -63,10 +63,10 @@ jobs:
           # no Maven cache: CI and the nightly fill it on develop, running every test library and plugin, so a jar
           # manipulated there would reach the build that signs; the release downloads everything from Maven Central
           server-id: central
-          server-username: MAVEN_CENTRAL_USERNAME_TOKEN
-          server-password: MAVEN_CENTRAL_PASSWORD_TOKEN
+          server-username-env-var: MAVEN_CENTRAL_USERNAME_TOKEN
+          server-password-env-var: MAVEN_CENTRAL_PASSWORD_TOKEN
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
-          gpg-passphrase: GPG_PASSPHRASE
+          gpg-passphrase-env-var: GPG_PASSPHRASE
       - name: Resolve the versions
         id: versions
         env:

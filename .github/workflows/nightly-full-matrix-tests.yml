@@ -53,6 +53,13 @@ jobs:
           path: nightly-marker
           key: nightly-tested-${{ steps.head.outputs.sha }}
           lookup-only: true
+      # "tested", not "passed": the marker is saved when a run starts, so the earlier nightly may have failed
+      - name: Report the skip
+        if: steps.marker.outputs.cache-hit == 'true' && github.run_attempt == 1
+        env:
+          SHA: ${{ steps.head.outputs.sha }}
+        run: |
+          echo "::notice::Commit ${SHA} already tested: skipping the groups"
       # a commit that passed a run by hand is done as well. Through the API, as a run reads only the caches of its own
       # branch and the default branch, and a run by hand on develop saves its marker in develop's scope; only markers
       # from this repository's branches count, as a pull request from a fork could save any marker in its own scope
