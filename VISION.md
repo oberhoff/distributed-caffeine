@@ -577,6 +577,14 @@ documentation first, runtime plug-in points; Hibernate's `RegionFactory` the fir
   and 7 only with the module);
 - further stores (DynamoDB, Cassandra, SQL Server, Oracle, ...): what each would need and lack is surveyed under
   "Design study: one number per write" (History), with a fallback for stores without a global counter;
+- further store candidates (noted 2026-11-26, the user's question; from memory where not marked): **MyRocks**
+  (RocksDB as MariaDB's or Percona Server's engine) and **TiDB** (MySQL's protocol over TiKV) as trials of the JDBC
+  adapter as it is, no code; YugabyteDB and TiKV stay on the distributed SQL list after CockroachDB; **SurrealDB**
+  (a change feed read since a versionstamp), **FoundationDB** (versionstamps, watches per key, no feed) and **NATS
+  JetStream KV** (compare-and-set by revision, a watch from a revision; no index by write time, holes in the sequence
+  by its history limit, so a counter of our own as on Redis) only on demand; not a fit: Hazelcast, Ignite,
+  Infinispan (caches themselves), Kafka (no conditional write), ArangoDB (adds nothing over MongoDB). Pika and
+  Tendis: "Redis adapters", item 19; managed services: "Managed services";
 - session tokens: read-your-writes across instances for one's own writes (a token of the highest version written,
   passed along with a request), beyond the delivery delay that bounds it today;
 
@@ -1403,34 +1411,41 @@ Rejected alternatives:
 ### Connection sharing: always per database
 
 Listening connections are shared between caches, always per database: one session per listener `DataSource` on
-PostgreSQL (R2DBC's `ConnectionFactory` until 2026-10-28), one change stream cursor per `MongoClient` and database
-on MongoDB. There is no sharing mode to choose: today's `ListenerSharingMode` / `WatcherSharingMode` (`INSTANCE`,
-`TABLE`/`COLLECTION`, `DATABASE`) are dropped. On PostgreSQL the reason for the narrower levels was the pgjdbc
-limit of about 750 notifications/s per session, which R2DBC did not have (one session carried 30,000/s, below), nor
-has the stream taken over; on MongoDB `DATABASE` was the default already; what remained was "isolation", with no
-concrete case behind it.
+PostgreSQL, one change stream cursor per `MongoClient` and database on MongoDB, one stream reader per Redis driver
+(per keyspace in a cluster). There is no sharing mode to choose. Narrower levels (per cache instance, per table or
+collection) have no case left: on PostgreSQL their reason was pgjdbc's limit of about 750 notifications/s per
+session, which the listener taking over pgjdbc's stream does not have (nor had R2DBC, used until 2026-10-28: one
+session carried 30,000/s, below); on MongoDB per database is what one cursor needs anyway; what remains is
+"isolation", with no concrete case behind it.
 
-- **One shared session / cursor per database**, reference-counted in a registry; every cache has its own subscription
-  with its own worker queue (coalescing hash set, generous overflow limit with drop and `onGap()`). The shared thread
-  never calls into a cache, so it cannot deadlock on a cache's lock (the constraint that shaped today's design).
-- **MongoDB as today:** widening and narrowing reopen with `resumeAfter`; no discriminator filter on shared cursors (the client
-  drops scopes nobody subscribed to); a cache whose collection is already covered registers directly.
-- **A gap reaches every subscriber:** an interrupted shared session or cursor means `onGap()` for every cache on it.
-
-What changes:
-
-- **PostgreSQL's sharing key** is the listener `DataSource` (by identity; the R2DBC `ConnectionFactory` until
-  2026-10-28);
-  MongoDB's is `MongoClient` and database.
-- **As few sessions as possible is also cheapest for PostgreSQL:** every listening session costs it about 33 µs per
-  write.
-- **PostgreSQL channel per cache** (table and discriminator), dispatched by channel name, so the payload stays
+- **Sharing keys, by identity:** PostgreSQL's is the listener `DataSource`; MongoDB's is the `MongoClient` and the
+  database; Redis's is the driver, and in a cluster the keyspace.
+- **One shared session / cursor / reader per key**, reference-counted in a registry; every cache has its own
+  subscription with its own worker queue (coalescing hash set, generous overflow limit with drop and `onGap()`). The
+  shared thread never calls into a cache, so it cannot deadlock on a cache's lock.
+- **PostgreSQL: a channel per cache** (table and discriminator), dispatched by channel name, so the payload stays
   `kind|hash|version`. Channel names are limited to 63 bytes, longer ones are shortened with a hash. No extra
-  PostgreSQL CPU: every `NOTIFY` wakes every listening session anyway.
-- **Joining without a poll on PostgreSQL:** R2DBC pushes notifications, so today's 100 ms poll and its join wake-up
-  are gone; a join is a `LISTEN` on the shared connection.
-- **Failed applies are dropped on both stores:** MongoDB re-queues today because of the old persistence semantics;
-  in this model dropping a key is always safe (as for failed reads).
+  PostgreSQL CPU: every `NOTIFY` wakes every listening session anyway. As few sessions as possible is also cheapest
+  for PostgreSQL: every listening session costs it about 33 µs per write.
+- **PostgreSQL: joining without a poll:** a join is a `LISTEN` sent on the shared session's stream, answered through
+  the listener's thread.
+- **MongoDB: widening and narrowing reopen with `resumeAfter`;** no discriminator filter on shared cursors (the client
+  drops scopes nobody subscribed to); a cache whose collection is already covered registers directly.
+- **Redis: one reader per driver**, each on a connection of its own, reading every stream of the driver's caches with
+  one blocking `XREAD` on a single server or behind Sentinel. One `XREAD` may only read streams of one hash slot,
+  which a keyspace's hash tag is, so in a cluster there is one reader per keyspace; a server that answers as a single
+  one but refuses `CROSSSLOT` (Azure Managed Redis under its Enterprise cluster policy) splits its reader the same way
+  the first time it refuses. A stream subscribed meanwhile is read within the block time (one second), from the
+  position taken when it subscribed, so it misses nothing.
+- **A lost connection reaches every subscriber:** a failed session, cursor or read means `onLost()` for every cache
+  on it; the first cache to ask (`resume()`, "Supervision") re-establishes it, and the core counts the resume as a gap
+  for each cache resuming. Missed history is a gap for every cache it concerns: on MongoDB a stream that can no longer
+  resume (errors 280 and 286), on Redis a skipped entry number (trimmed, or lost with a failover).
+- **A suspected silent connection costs the others only what the store's history forces:** when one cache's
+  heartbeat suspects the shared connection went silent, it is reconnected for everyone. MongoDB reopens from the
+  resume token and Redis reads on from each stream's position, so the other caches miss nothing and are told nothing;
+  PostgreSQL keeps no history, so the others get `onGap()`.
+- **Failed applies are dropped:** dropping a key is always safe, as for failed reads.
 
 Measured (`PostgresR2dbcCeilingExperimentTest`, removed 2026-10-28 with R2DBC; PostgreSQL 18, one R2DBC session
 listening on 20 channels as for 20 caches, writes spread over all channels by 8 or 16 paced writers, each rate twice):
@@ -1851,9 +1866,9 @@ maximum age is the actual bound of staleness.
 - **The configuration kept, the README extended (decided 2026-11-23):** asked how to move a Caffeine cache with
   `expireAfterAccess` over, the answer needed four caveats: Caffeine's names mean the local copies here, the validity
   is configured in `withStore` but caps every copy, and rules span both levels. The fix is documentation: the README's
-  "Important" in the introduction contrasts the two (the store's maximum age decides how long a value is valid,
-  Caffeine's expiry and eviction only how long an instance keeps its copy, each Caffeine setting named), "Settings by
-  goal" maps the goals, and the setters' Javadoc uses the same wording; a section mapping each Caffeine setting would
+  "Important" in the introduction contrasts the two (the store's maximum age ends a value's validity everywhere, its
+  maximum size acts on the store alone, Caffeine's expiry and eviction only on an instance's copies, and the maximum
+  age, not Caffeine's expiry, brings values back from the source), "Settings by goal" maps the goals, and the setters' Javadoc uses the same wording; a section mapping each Caffeine setting would
   only repeat these. Rejected:
   - The configuration of up to 0.7.0 (Caffeine's settings unchanged, evictions distributed): aligned in name only, as
     one instance's idle or size eviction dropped the copies of instances still reading them; and its persistence
@@ -4326,6 +4341,51 @@ needs, not what PostgreSQL still supports. It needs `jsonb` (9.4), `INSERT ... O
 others, with their reasons in their sections: Redis 6.2, Valkey 7.2, Dragonfly 1.4, Kvrocks 2.16 ("Redis adapters"),
 MariaDB 10.2 and MySQL 5.7 ("MariaDB and MySQL"). The README's Requirements list them with the drivers' minimums.
 
+### Managed services
+
+*Read from the providers' documentation 2026-11-26, not run against them; the Redis services first on 2026-11-02
+("Redis adapters", item 16). Points not stated there are marked unverified.*
+
+The adapters run on the managed services of their databases unchanged where these are the database itself; what
+differs is the endpoint, a pooler, a disabled feature or the durability on failover.
+
+| Family     | Unchanged                                                                                     | With a rule                                                                     | Not supported                                                  |
+|------------|-----------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------|----------------------------------------------------------------|
+| PostgreSQL | RDS, Aurora, Cloud SQL, Azure Flexible Server, Crunchy Bridge, Aiven, on the direct endpoint  | Neon, Supabase, Cloud SQL's pooling, Azure's PgBouncer: the listener not pooled | none                                                           |
+| MongoDB    | Atlas, Percona Server for MongoDB                                                             | open: Amazon DocumentDB, Azure DocumentDB (vCore)                               | Cosmos DB for MongoDB (RU)                                     |
+| MariaDB, MySQL | RDS, Aurora, Cloud SQL, Azure MySQL Flexible Server, Aiven, DigitalOcean (little documented) | PlanetScale (the schema beforehand), TiDB Cloud (unverified)                | Azure Database for MariaDB (being retired)                     |
+| Redis      | MemoryDB, Memorystore for Redis and Redis Cluster, Redis Cloud, Aiven and DigitalOcean Valkey, Upstash | Azure Managed Redis (scripts and streams not documented)           | Azure Cache for Redis (retired 2027-03-31 Enterprise, 2028-09-30 the rest) |
+
+- **Poolers in transaction mode are the default endpoint on several PostgreSQL services:** Neon's connection string
+  (pooled unless switched), Supabase's port 6543, Cloud SQL's managed pooling and Azure's PgBouncer (port 6432). The
+  start's probe finds them and names `withListenerDataSource`; the direct or session endpoint per provider belongs in
+  the README (Supabase's direct endpoint is IPv6 only without an add-on, its session pooler on 5432 carries `LISTEN`).
+- **RDS Proxy pins on every write, not only the listener:** `LISTEN` and `nextval` both pin the session to one
+  backend (`pg_advisory_xact_lock` does not), and every write takes its version from a sequence, so the proxy's
+  multiplexing is gone for the cache's connections. It works, but the instance endpoint is the advice.
+- **Scale to zero:** Neon suspends after 5 minutes idle, Aurora Serverless v2 pauses only without connections. The
+  listener and the heartbeat every 10 s likely keep both awake (inferred, not documented): a cost to state.
+- **Failover without loss of commits:** RDS Multi-AZ instance (synchronous standby), Aurora (storage written
+  synchronously to six copies), Cloud SQL HA (synchronous to both zones); RDS Multi-AZ DB cluster semi-synchronous.
+  MemoryDB is the one Redis service that keeps acknowledged writes across a failover (its multi-AZ transaction log).
+- **Cosmos DB for MongoDB (RU)** reports no deletes and no `operationType` in its change streams, and a dropped
+  collection as an error instead of an `invalidate`: the feed cannot work there.
+- **Amazon DocumentDB:** change streams enabled per collection or database by hand, kept 3 hours by default (7 days
+  at most); `$$REMOVE`, which the watcher's pipeline uses, listed as not supported; MongoDB API 5.0 and 8.0 (no 4.4);
+  pipeline updates with `$$NOW` not documented. It would need a pipeline of its own and a run against it.
+- **Azure DocumentDB (vCore):** `$$NOW`, `$$REMOVE` and the operators used listed as supported, the `bulkWrite`
+  command not (the Java driver's bulk write sends `update` commands, unverified); change streams not documented.
+  Its engine is open source with a local image (unverified), so it can be tried without an account.
+- **PlanetScale:** with safe migrations, schema changes only by deploy requests, so the table is created beforehand
+  from the documented DDL. **ProxySQL** (in front of MySQL and Aurora): a query with `@` (the start's `@@server_id`,
+  `@@read_only`) ends multiplexing for that connection for good; small, as only the start asks.
+- **Redis:** Memorystore blocks `CONFIG` (the adapter reads `INFO`); Redis Cloud refuses an `XREAD` across slots (the
+  reader splits on `CROSSSLOT`, item 16); Upstash and Aiven evict nothing by default.
+
+The adapters' READMEs carry these per provider (section "Managed …"). **Open:** local trials of Percona Server for
+MongoDB, FerretDB and Azure's DocumentDB engine (the MongoDB suites on another image); runs against DocumentDB,
+MemoryDB and Neon (accounts needed); whether DocumentDB is worth a second watcher pipeline.
+
 ### MongoDB write concern: majority, journaled
 
 The library writes with majority and `j: true`, always (since 2026-10-23, see ordering rule 7: the store contract
@@ -5070,6 +5130,14 @@ Sketch, to be settled against the thin SPI ("The thin SPI, versions in the core"
     plainly** (`RedisAdapter`): Kvrocks behind Sentinel is tested and green but not documented by Kvrocks either (its
     HA is the cluster with a controller); Dragonfly behind Sentinel is not supported; failover inside a Dragonfly
     cluster is not supported.
+19. Pika and Tendis (2026-11-26, the user's question): neither runs the adapter, and neither is worth a port. Both
+    keep their data in RocksDB, a place Kvrocks fills with the full adapter. **Pika 4.0.2** (probed, native arm64
+    image): no scripts at all (`ERR unknown command "eval"`, `"script"`); streams (`XADD … MINID`, `XREAD BLOCK`) and
+    `WATCH`/`MULTI`/`EXEC` work. A transaction cannot take the place of the scripts: a command inside it cannot use an
+    earlier one's result, so neither the version from `TIME` nor the entry's number from the counter can be written,
+    and watching the counter would serialise a cache's writes across instances. **Tendis 2.8.4** (from its sources;
+    its amd64-only image crashes under emulation here): `EVAL`, `EVALSHA` and `SCRIPT LOAD` exist, streams do not (no
+    stream commands or tests in the repository), so it could only be polled, a second Redis store for one server.
 
 ### MariaDB and MySQL: dialects of one store, an adapter each
 
@@ -6421,32 +6489,63 @@ core's fallback thread on the simulation; replay across JVMs checked.
 
 ### Performance: the baseline
 
-*Measured 2026-10-25.*
+*Measured 2026-11-26, every store in one run.*
 
-`EndToEndBenchmark` (core test package; run per store by `PostgresBenchmarkExperimentTest` and
-`MongoBenchmarkExperimentTest`, `-Dexperiments=true`): two instances on one store in a local container, per operation
-p50/p99, the store calls it costs and the time inside store calls (every instance's), the propagation of a put to a
-holder, and the throughput of 8 threads (80 % gets, 20 % puts). Local containers have almost no network latency: the
-store calls per operation tell what a network adds. After the fix below (PostgreSQL 18, MongoDB 9, µs):
+`EndToEndBenchmark` (core test package; run per store by `PostgresBenchmarkExperimentTest`,
+`MongoBenchmarkExperimentTest`, `JdbcBenchmarkExperimentTest`, `RedisBenchmarkExperimentTest` and
+`InMemoryBenchmarkExperimentTest`, `-Dexperiments=true`): two instances on one store, a single server in a fresh local
+container (Docker Desktop, Apple M3 Pro, JDK 25), the stores back to back on an otherwise idle machine; per operation
+p50/p99, the store calls it costs and the time inside them, the propagation of a put to a holder, the throughput of 8
+threads on 1,000 keys and the contention of 2 instances x 4 threads on hot keys (80 % gets, 20 % puts unless noted).
+Local containers have almost no network latency: the store calls per operation tell what a network adds (one per
+operation, two for a miss and a cold `compute`, on every store).
 
-| Operation                         | PostgreSQL p50      | calls | MongoDB p50         | calls               |
-|-----------------------------------|---------------------|-------|---------------------|---------------------|
-| `get`, held in L1                 | 1                   | 0     | 2                   | 0                   |
-| `getIfPresent`, from the store    | 253                 | 1     | 324                 | 1                   |
-| `get`, loaded (a miss everywhere) | 567                 | 2     | 787                 | 2                   |
-| `getAll` of 100, from the store   | 635                 | 1     | (16,611, see below) | 1                   |
-| `put`                             | 300                 | 1     | 415                 | 1                   |
-| `putAll` of 100                   | (18,049, see below) | 1     | 45,870              | 1 (100 round trips) |
-| `compute`, cold                   | 496                 | 2     | 722                 | 2                   |
-| `compute`, hot                    | 300                 | 1     | 711                 | 2 (no hot path)     |
-| `putIfAbsent`, present            | 183                 | 1     | 266                 | 1                   |
-| `invalidate`                      | 289                 | 1     | 404                 | 1                   |
-| `invalidateAll`                   | 562                 | 1     | 641                 | 1                   |
-| propagation to a holder           | 292                 |       | 412                 |                     |
-| throughput, 8 threads             | 27,377 ops/s        |       | 22,154 ops/s        |                     |
+| ops/s                                     | 8 threads | 1 hot key | 10 hot keys | 1 hot key, 50/50 |
+|-------------------------------------------|-----------|-----------|-------------|------------------|
+| Dragonfly 2.0.2, `--lock_on_hashtags`     | 62,604    | 99,696    | 63,922      | 40,451           |
+| Redis 8, Lettuce                          | 60,455    | 96,500    | 62,032      | 39,517           |
+| Valkey 9, Lettuce                         | 59,250    | 95,504    | 61,495      | 38,560           |
+| MariaDB 13                                | 58,342    | 23,712    | 43,199      | 9,498            |
+| Redis 8, Redisson                         | 44,684    | 73,265    | 45,744      | 29,417           |
+| Redis 8, Jedis                            | 44,446    | 73,065    | 43,970      | 29,624           |
+| Kvrocks 2.17.0, Lettuce                   | 39,579    | 62,472    | 40,009      | 20,877           |
+| PostgreSQL 18                             | 27,776    | 24,777    | 27,555      | 10,179           |
+| MySQL 26                                  | 24,681    | 12,782    | 21,875      | 5,231            |
+| MongoDB 9 (single-node replica set)       | 19,308    | 20,406    | 16,674      | 7,534            |
+| Dragonfly 2.0.2, defaults                 | 15,392    | 15,629    | 14,565      | 2,649            |
+| in memory (the core alone)                | 1,896,873 | 1,597,190 | 1,792,389   | 901,112          |
 
-In memory (the core alone) every single operation is a few µs, a batch of 100 about 0.1 ms, the throughput 2.9
-million ops/s: the core's own costs are negligible against a store's round trip.
+| p50, µs                 | `getIfPresent` | miss | `put` | `compute` hot | `putIfAbsent` | `getAll` 100 | `putAll` 100 | propagation |
+|-------------------------|----------------|------|-------|---------------|---------------|--------------|--------------|-------------|
+| Redis 8, Lettuce        | 192            | 465  | 300   | 292           | 188           | 1,940        | 15,762       | 300         |
+| Redis 8, Jedis          | 193            | 464  | 277   | 253           | 169           | 630          | 14,076       | 283         |
+| Redis 8, Redisson       | 223            | 488  | 301   | 299           | 189           | 1,035        | 16,268       | 332         |
+| Valkey 9                | 198            | 463  | 286   | 284           | 188           | 1,586        | 16,531       | 319         |
+| Dragonfly, hashtags     | 189            | 465  | 305   | 260           | 189           | 1,457        | 16,056       | 322         |
+| Dragonfly, defaults     | 313            | 926  | 597   | 624           | 209           | 3,184        | 25,996       | 629         |
+| Kvrocks                 | 243            | 593  | 343   | 342           | 203           | 1,439        | 19,457       | 378         |
+| PostgreSQL 18           | 235            | 545  | 293   | 285           | 177           | 1,109        | 1,341        | 317         |
+| MariaDB 13              | 189            | 409  | 430   | 258           | 152           | 16,980       | 42,442       | ~1 s (poll) |
+| MySQL 26                | 255            | 707  | 692   | 462           | 205           | 16,895       | 72,563       | ~1 s (poll) |
+| MongoDB 9               | 325            | 836  | 429   | 463           | 259           | 16,594       | 19,009       | 464         |
+| in memory               | 9              | 18   | 5     | 4             | 2             | 150          | 123          | –           |
+
+A `get` held in L1 is 0.1 to 5 µs everywhere, no store call. `invalidateAll` takes 14 to 16 ms on every store: the
+call waits out the store clock's allowance (10 ms by default) before returning, so that no later put pays for it; its
+store call is 1.3 to 4 ms.
+
+- **The Redis family through Lettuce is the fastest**, Redis 8, Valkey 9 and Dragonfly with `--lock_on_hashtags`
+  alike within the noise; Lettuce carries about a third more than Jedis and Redisson on the same server, as it
+  multiplexes one connection. Kvrocks (on disk, RocksDB) reaches two thirds of Redis, at about 70 µs of server time per
+  script against 16. Dragonfly on its defaults is the slowest store: its locking per key across threads ("Redis
+  adapters", item 10); stable this run, unlike the earlier ones.
+- **PostgreSQL leads the databases under contention** and has the fastest batches of every store; MariaDB has the
+  higher throughput on spread keys but loses on a hot key, MySQL's writes take about 1.6 times MariaDB's, MongoDB's
+  p99 is the widest (majority, journaled). The polling stores propagate by their poll interval.
+- **Single reads differ little** (190 to 325 µs): the stores differ in writes, batches and contention. The core's own
+  costs are negligible against a store's round trip.
+- **Batches of 100 at about 15 to 20 ms** on most stores are mostly the Docker Desktop stall below, not the stores;
+  the Linux baseline (see "Open work") tells them apart.
 
 - **Fixed: PostgreSQL's reads by key scanned the whole cache.** With statistics behind a table that grew fast (the
   planner estimated 127 rows of 60,300), it took the discriminator's prefix of the maintenance index and filtered
@@ -6454,11 +6553,11 @@ million ops/s: the core's own costs are negligible against a store's round trip.
   100 at 43.7 ms, growing with the cache. Now each id a lookup of its own (`LATERAL`, kept apart by `LIMIT 1`): 0.64
   ms, independent of the statistics; `read`, `readVersions` and the conflicts' read.
 - **Not the library: a constant ~16 ms stall for requests above a few KB, after heavy traffic, on Docker Desktop
-  (macOS).** PostgreSQL's `putAll` jumps from 0.7 ms (50 rows) to 17 ms (100 rows), MongoDB's `getAll` from 0.5 ms
-  (25 ids) to 16 ms (50, 75 and 100 alike), only after a burst of large writes, and the server is idle meanwhile
-  (every session `ClientRead`, the listener not behind, the notification queue empty) while the client waits on
-  its socket; a fresh store after the instances closed is fast again. Both drivers set `TCP_NODELAY`. The signature
-  of a stall in the forwarding between the host and Docker's VM; to confirm on Linux or a native database.
+  (macOS).** PostgreSQL's `putAll` has jumped from 0.7 ms (50 rows) to 17 ms (100 rows), though not in every run,
+  MongoDB's `getAll` from 0.5 ms (25 ids) to 16 ms (50, 75 and 100 alike), only after a burst of large writes, and the
+  server is idle meanwhile (every session `ClientRead`, the listener not behind, the notification queue empty) while the
+  client waits on its socket; a fresh store after the instances closed is fast again. Both drivers set `TCP_NODELAY`.
+  The signature of a stall in the forwarding between the host and Docker's VM; to confirm on Linux or a native database.
 
 ### Catching up after a gap
 

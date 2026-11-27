@@ -29,12 +29,12 @@
 </p>
 <ul>
     <li><b>Distribution:</b> a change made on one instance reaches the copies held by all other instances.</li>
-    <li><b>Second level:</b> a local miss is answered from the shared store, or else from the source.</li>
-    <li><b>Compatibility:</b> configured and used like any Caffeine cache: the same builder methods, the same
-        interfaces.</li>
-    <li><b>Consistency:</b> all instances end up with the same, latest value of every key, even when writes and loads
+    <li><b>Second level:</b> a miss on the local level is answered from the shared store, or else from the source.</li>
+    <li><b>Compatibility:</b> used like any Caffeine cache, and configured with Caffeine's builder methods for the local
+        level.</li>
+    <li><b>Consistency:</b> all instances end up with the same, latest value for every key, even when writes and loads
         race.</li>
-    <li><b>Resilience:</b> local copies keep being served when the store or distribution fails; instances recover
+    <li><b>Resilience:</b> the local level keeps serving when the store or distribution fails; instances recover
         automatically.</li>
 </ul>
 <p>

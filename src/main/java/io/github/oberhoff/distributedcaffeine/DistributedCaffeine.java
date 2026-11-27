@@ -42,38 +42,35 @@ import static java.util.Objects.requireNonNullElseGet;
  * share a store (second level, L2). Behind both is the source, where values come from: the loader or mapping function,
  * if the cache has one; otherwise values enter only through writes such as {@code put}. The two levels split the work:
  * <ul>
- *     <li><b>The store holds the values.</b> Its maximum age decides how long a value is valid, on every instance;
- *     its maximum size, how many values it keeps.</li>
+ *     <li><b>The store holds the values.</b> Its maximum age decides how long a value is valid; its maximum size, how
+ *     many values it keeps.</li>
  *     <li><b>Each instance holds copies.</b> Caffeine's expiry and eviction decide which copies it keeps and for how
- *     long, never beyond their values' validity.</li>
- *     <li><b>When a copy goes, the instance asks the store,</b> and only if the store has no valid value, the
+ *     long, by default never beyond their values' validity.</li>
+ *     <li><b>Without a copy, an instance asks the store,</b> and only if the store has no valid value, the
  *     source.</li>
- * </ul>
- * <b>IMPORTANT:</b> Expiry and eviction work differently than in a plain Caffeine cache:
- * <ul>
- *     <li><b>The store's maximum age decides how long a value is valid.</b> It counts from the value's write to the
- *     store, so every instance drops its copy at the same moment, no matter when it got the copy and in every
- *     distribution mode, and the next read goes to the source. The same holds for a maximum age per entry; only
- *     {@link StoreConfigurer#withMaximumAgeForStoreOnly()} leaves the copies to their local expiry. Without a maximum
- *     age (the default), a value stays valid until it is written or removed, or the store prunes it to its maximum
- *     size.</li>
- *     <li><b>Caffeine's expiry and eviction decide only how long an instance keeps its copy.</b>
- *     {@code expireAfterWrite}, {@code expireAfterAccess}, {@code expireAfter}, {@code maximumSize} and
- *     {@code maximumWeight} act on this instance's copies alone: a copy that goes leaves the store's value and the
- *     other instances' copies untouched, and the next read on this instance finds the value in the store again, not
- *     in the source.</li>
  * </ul>
  * How the operations use the two levels:
  * <ul>
  *     <li><b>Reads:</b> the local cache first, then the store, then the source. A value loaded from the source is
  *     written to the store for the other instances.</li>
- *     <li><b>Writes:</b> the store first, then the local cache, removals included. A written value the store did not
- *     take is never cached.</li>
+ *     <li><b>Writes:</b> the store first, then the local cache, removals included. A value the store did not take is
+ *     never cached; a removal drops the local copy even then.</li>
  *     <li><b>Changes:</b> a write or invalidation on one instance makes the other instances drop, replace or keep
- *     their copy, depending on the {@linkplain DistributionMode distribution mode}. Local expiry and eviction affect
- *     only that instance.</li>
- *     <li><b>Storage:</b> keys and values are serialized for the store, and keys identified by a hash; the store
- *     keeps them until its maximum age or size, if set (both unbounded by default).</li>
+ *     the copy they hold, depending on the {@linkplain DistributionMode distribution mode}.</li>
+ * </ul>
+ * <b>Important:</b> Expiry and eviction work differently than in a plain Caffeine cache:
+ * <ul>
+ *     <li><b>The store's maximum age ends a value's validity everywhere.</b> It counts from the value's write to the
+ *     store, one for all values or one per entry: the store stops serving the value, every instance drops its copy at
+ *     the same moment, no matter when it got the copy and in every distribution mode, and the next read goes to the
+ *     source. Without a maximum age (the default), a value stays valid until it is overwritten or removed.</li>
+ *     <li><b>The store's maximum size acts on the store alone.</b> The store removes the values written longest ago,
+ *     without telling the instances: their copies stay, and only an instance without a copy loads the value from the
+ *     source again.</li>
+ *     <li><b>Caffeine's expiry and eviction act on this instance's copies alone.</b> They decide only how long this
+ *     instance keeps a copy: a copy that goes leaves the store's value and the other instances' copies untouched, and
+ *     the next read on this instance finds the value in the store again, not in the source. To have values loaded from
+ *     the source again after a while, set the store's maximum age.</li>
  * </ul>
  * <pre>{@code
  * DistributedLoadingCache<Key, Value> cache = DistributedCaffeine.newBuilder(adapter)

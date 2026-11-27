@@ -70,4 +70,7 @@ checks what it holds against the store and goes on, which costs loads, never a w
 MongoDB Atlas and other managed replica sets are replica sets like any other, so the above applies (not tested against
 them). Where an endpoint is switched over by DNS, `networkaddress.cache.ttl` of 60 seconds or less in the JVM lets
 reconnecting reach the new primary in time. Services that only speak MongoDB's protocol need change streams and majority
-reads; where those are missing, building a cache fails.
+reads; where those are missing, building a cache fails. By their documentation (not tested against them), two such
+services fall short: Azure Cosmos DB for MongoDB (RU-based) reports no deletions in its change streams, and Amazon
+DocumentDB has change streams off until enabled and does not support `$$REMOVE`, which the change stream's pipeline
+uses.

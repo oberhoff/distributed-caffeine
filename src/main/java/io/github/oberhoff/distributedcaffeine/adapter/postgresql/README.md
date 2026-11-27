@@ -117,8 +117,9 @@ reach the primary.
   is raised or `prepareThreshold=0` is set on the data source. Neon's pooler supports them.
 * Read replicas: Reader endpoints and read replicas are standbys, which are refused for reading as well as for listening
   (see [Standby servers](#standby-servers)).
-* RDS Proxy: Listening through it works, but pins the session to a server connection for as long as it listens, so the
-  instance or cluster endpoint is the better choice for it.
+* RDS Proxy: Reading, writing and listening through it work, but pin the session to a server connection: listening for
+  as long as it listens, and every write, since a write takes its version from a sequence (`nextval`). The proxy then
+  shares no connections between them, so the instance or cluster endpoint is the better choice for both.
 * Failovers: Where these services offer high availability, they replicate synchronously or at the storage level, so a
   failover loses no confirmed writes (see [Failovers](#failovers)). Several services switch the endpoint over by DNS,
   which the JVM caches: `networkaddress.cache.ttl` of 60 seconds or less lets reconnecting reach the new primary in

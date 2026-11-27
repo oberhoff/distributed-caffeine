@@ -94,7 +94,15 @@ full.
 
 ## Managed services
 
-By their documentation, Amazon ElastiCache (Serverless included), Azure Cache for Redis and Upstash offer what is needed
-(not tested against them yet). Their eviction policy must spare keys without a TTL: Azure's default, `volatile-lru`,
-does; Upstash's eviction, off by default, may not. Where every command is billed (Upstash pay-as-you-go), reading the
-changes costs a blocking read per keyspace and application instance about every second.
+By their documentation, Amazon ElastiCache (Serverless included) and MemoryDB, Google Memorystore for Redis and for
+Redis Cluster, Redis Cloud, Azure Cache for Redis, Aiven for Valkey, DigitalOcean's managed Valkey and Upstash offer
+what is needed (not tested against them yet). Azure Cache for Redis is being retired; its successor, Azure Managed
+Redis, documents neither scripts nor streams. Where `CONFIG` is blocked (as on Memorystore), the eviction policy is
+read from `INFO`.
+
+* Eviction: The eviction policy must spare keys without a TTL. Azure's default, `volatile-lru`, does, as do Aiven's
+  and Upstash's defaults (no eviction); Upstash's eviction, once switched on, may not.
+* Failovers: Where replication is asynchronous, as on Redis itself, a failover can lose confirmed writes; the instances notice and drop what they hold of them, which costs loads, never a wrong answer. MemoryDB
+  writes to a transaction log across availability zones and loses none.
+* Billing: Where every command is billed (Upstash pay-as-you-go), reading the changes costs a blocking read per
+  keyspace and application instance about every second.
